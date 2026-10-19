@@ -11,7 +11,7 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
 
 | Host | Status | What its guard sees |
 |---|---|---|
-| Claude Code | first adapter, in development | session start, before and after every tool, prompts; blocks edits and shell commands; tells subagents apart |
+| Claude Code | supported: `crates/host-claude-code`, the plugin in `integrations/claude-code/` | session start, before each file edit, after every tool; blocks edits; tells subagents apart. Its adapter also reads prompts and shell commands, which its plugin does not send yet |
 | Codex CLI | planned | command hooks from its hook configuration (project hooks only in a trusted project) |
 | OpenCode | planned | an in-process plugin; a small shim calls `dibs hook neutral <event>` |
 
@@ -28,6 +28,9 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
 - **A server that failed is left alone for a minute**, and the person is warned at most once a minute.
 - **Nothing is produced that the host cannot carry**: each adapter declares its capabilities, and the guard
   computes no answer, and fetches nothing, for something the host would drop.
+- **A checkout that governs no repository of the project** — its `.dibs.toml` names no `repo`, an unknown one, or
+  one whose remote is not the checkout's `origin` — lets every edit through and says so at most once a minute per
+  checkout.
 - **`DIBS_OFF=1`** makes every hook, on every host, a silent "no objection" with no network call.
 
 ## Capabilities
@@ -96,11 +99,14 @@ not know. A different `protocol` number is answered with a notice and no decisio
 
 1. Write an adapter: a crate `crates/host-<host>` implementing `HostAdapter` from `dibs-agent-host` — `id`,
    `capabilities`, `parse` (the host's hook input to a neutral event) and `render` (a neutral outcome to the host's
-   reply). An adapter is pure: no file, clock or network. A host that can only run in-process code needs no crate:
-   its shim speaks the `neutral` protocol.
+   reply, given the event name `parse` was given, since some hosts name the event in their reply; a name the host
+   does not send gets a reply every one of its events accepts). An adapter is pure: no file, clock or network. A
+   host that can only run in-process code needs no crate: its shim speaks the `neutral` protocol.
 2. Pass the conformance kit: the adapter's tests call `dibs_agent_host::conformance::check` (feature
    `conformance`) with fixtures of the host's native input and the events they parse to, the replies each outcome
-   must give, and a reader of the host's replies. A host is accepted when its fixtures pass.
+   must give on each event, and a reader of the host's replies. A host is accepted when its fixtures pass. Tests
+   that run `dibs hook <host> …` through the binary are a test target of `crates/cli` whose source lives in
+   `crates/host-<host>/cli-tests/`, so that only the adapter's directory names the host.
 3. Register it: one entry in `crates/cli/src/hosts.rs`. Nothing else in dibs changes — not the domain, the server,
    the store or the client; the server stores a session's `agent` label and never interprets it.
 4. Package it under `integrations/<host>/`: the host's hook and MCP configuration, and a `workflow.toml` naming the

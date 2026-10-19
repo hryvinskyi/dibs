@@ -61,6 +61,7 @@ struct State {
     last_heartbeat: Option<OffsetDateTime>,
     unreachable: Option<OffsetDateTime>,
     last_warning: Option<OffsetDateTime>,
+    last_repo_warning: Option<OffsetDateTime>,
     server_settings: Result<KnownSettings, PortError>,
     server_status: Result<StatusView, PortError>,
     server_inbox: Result<InboxView, PortError>,
@@ -99,6 +100,7 @@ impl State {
             last_heartbeat: Some(at(0)),
             unreachable: None,
             last_warning: None,
+            last_repo_warning: None,
             server_settings: Ok(known),
             server_status: Ok(StatusView::default()),
             server_inbox: Ok(InboxView::default()),
@@ -237,6 +239,14 @@ impl LocalCache for World {
     fn mark_warning(&self, at: OffsetDateTime) {
         self.0.borrow_mut().last_warning = Some(at);
     }
+
+    fn last_repo_warning(&self) -> Option<OffsetDateTime> {
+        self.0.borrow().last_repo_warning
+    }
+
+    fn mark_repo_warning(&self, at: OffsetDateTime) {
+        self.0.borrow_mut().last_repo_warning = Some(at);
+    }
 }
 
 impl CoordinationGateway for World {
@@ -304,8 +314,8 @@ impl HostAdapter for Limited {
         Neutral.parse(event, input)
     }
 
-    fn render(&self, outcome: &GuardOutcome) -> HostReply {
-        Neutral.render(outcome)
+    fn render(&self, event: &str, outcome: &GuardOutcome) -> HostReply {
+        Neutral.render(event, outcome)
     }
 }
 
@@ -760,6 +770,46 @@ fn every_other_failure_is_no_objection_with_its_sentence() {
             );
         }
     }
+}
+
+#[test]
+fn a_checkout_that_governs_no_repository_says_so_at_most_once_a_minute() {
+    let world = World::new().with(|state| {
+        state.repo = Err(PortError::Refused(
+            "the .dibs.toml here names no repo of the project.".to_owned(),
+        ));
+    });
+    let edit_at = |seconds: i64| {
+        world.set(|state| state.now = at(seconds));
+        no_objection(&run(
+            &world,
+            "neutral",
+            "before-tool",
+            &edit(&["src/billing/a.rs"]),
+        ))
+    };
+    let first = edit_at(0);
+    assert!(
+        first["notice"]
+            .as_str()
+            .is_some_and(|notice| notice.contains("names no repo")),
+        "{first}"
+    );
+    for seconds in [1, 30, 59] {
+        assert_eq!(
+            edit_at(seconds),
+            json!({"protocol": 1, "decision": "no_objection"}),
+            "{seconds} s after the notice"
+        );
+    }
+    let after_a_minute = edit_at(60);
+    assert!(after_a_minute["notice"].is_string(), "{after_a_minute}");
+    assert!(world.calls().is_empty(), "no edit check was asked for");
+    assert_eq!(
+        world.0.borrow().last_warning,
+        None,
+        "the warning about an unreachable server keeps its own minute"
+    );
 }
 
 #[test]

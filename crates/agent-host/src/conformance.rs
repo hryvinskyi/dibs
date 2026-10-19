@@ -3,14 +3,15 @@
 //!
 //! An adapter's tests call [`check`] with
 //! - pairs of host-native input and the neutral event it must parse to (or must refuse),
-//! - for a set of outcomes, what the host-native reply must do: block or not, and which text it
-//!   carries,
+//! - for a set of outcomes, each on one of the host's events, what the host-native reply must do:
+//!   block or not, and which text it carries,
 //! - a [`ReplyReader`] that reads the host's reply back, written in the adapter's tests.
 //!
 //! Beyond the fixtures, every adapter is held to rules no host is exempt from: its id is a valid
 //! agent label; an event name it does not know, empty input and input that is not its format are
 //! refused rather than guessed at; no reply exits with status `2`, which hosts read as a block; a
-//! reply carries no text for the agent when the host declares no way to carry it.
+//! reply carries no text for the agent when the host declares no way to carry it; an outcome
+//! rendered for an event the host does not send is still a reply the host can read.
 
 use dibs_domain::session::AgentLabel;
 
@@ -55,6 +56,9 @@ impl EventFixture {
 /// An outcome and what the host's reply must do with it.
 #[derive(Debug, Clone)]
 pub struct ReplyFixture {
+    /// The event the outcome answers, as the hook configuration names it; empty for a host
+    /// whose reply does not depend on its event.
+    pub event: String,
     /// The outcome rendered.
     pub outcome: GuardOutcome,
     /// Whether the reply must stop the tool.
@@ -71,12 +75,20 @@ impl ReplyFixture {
     /// The outcome, its reply expected to let the tool run and carry nothing.
     pub fn outcome(outcome: GuardOutcome) -> Self {
         Self {
+            event: String::new(),
             outcome,
             denies: false,
             reason: None,
             context: None,
             notice: None,
         }
+    }
+
+    /// The outcome answers the event of this name.
+    #[must_use]
+    pub fn on(mut self, event: &str) -> Self {
+        self.event = event.to_owned();
+        self
     }
 
     /// The reply lets the tool run.
@@ -176,8 +188,15 @@ pub fn check(
         || capabilities.context_after_tool
         || capabilities.context_at_prompt;
     for fixture in &fixtures.replies {
-        let reply = adapter.render(&fixture.outcome);
+        let reply = adapter.render(&fixture.event, &fixture.outcome);
         check_reply(fixture, &reply, reader, carries_context, &mut broken);
+        let elsewhere = adapter.render(NO_SUCH_EVENT, &fixture.outcome);
+        if elsewhere.exit == 2 || reader.read(&elsewhere).is_none() {
+            broken.push(format!(
+                "{:?} for an event the host does not send: the reply exits 2 or cannot be read",
+                fixture.outcome
+            ));
+        }
     }
     if broken.is_empty() {
         Ok(())
@@ -214,7 +233,11 @@ fn check_reply(
     carries_context: bool,
     broken: &mut Vec<String>,
 ) {
-    let what = format!("{:?}", fixture.outcome);
+    let what = if fixture.event.is_empty() {
+        format!("{:?}", fixture.outcome)
+    } else {
+        format!("{} {:?}", fixture.event, fixture.outcome)
+    };
     if reply.exit == 2 {
         broken.push(format!(
             "{what}: the reply exits 2, which hosts read as a block"

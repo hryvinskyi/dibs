@@ -1,26 +1,56 @@
 //! What the guard remembers, kept in the client's state directory of the project.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use dibs_agent_host::ports::{Cached, InboxView, KnownSettings, LocalCache, PortError, StatusView};
 use dibs_agent_host::upkeep::STATUS_FRESH;
-use dibs_client::state::StateDir;
+use dibs_client::state::{StateDir, read_json, write_json};
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::settings::ProjectSettings;
 
 use crate::guard::views;
 
-/// The project's state directory, read and written for the guard. A write that fails is logged
-/// and otherwise ignored: what was not remembered is fetched again later.
+/// The project's state directory, read and written for the guard, for the checkout at `root`. A
+/// write that fails is logged and otherwise ignored: what was not remembered is fetched again
+/// later.
 pub struct StateCache {
     state: StateDir,
+    root: PathBuf,
+}
+
+/// The file holding, per checkout root, when the person was last told that the checkout governs
+/// no repository of the project: several checkouts of one project share its state directory.
+const REPO_WARNINGS: &str = "repo-warned.json";
+
+/// When each checkout's repository warning was last given.
+#[derive(Default, Serialize, Deserialize)]
+struct RepoWarnings {
+    #[serde(default)]
+    checkouts: BTreeMap<PathBuf, Moment>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+struct Moment {
+    #[serde(with = "time::serde::rfc3339")]
+    at: OffsetDateTime,
 }
 
 impl StateCache {
-    /// The cache over `state`.
-    pub fn new(state: StateDir) -> Self {
-        Self { state }
+    /// The cache over `state`, for the checkout at `root`.
+    pub fn new(state: StateDir, root: &Path) -> Self {
+        Self {
+            state,
+            root: root.to_path_buf(),
+        }
+    }
+
+    fn repo_warnings(&self) -> RepoWarnings {
+        read_json(&self.state.file(REPO_WARNINGS)).unwrap_or_default()
     }
 }
 
@@ -98,5 +128,21 @@ impl LocalCache for StateCache {
 
     fn mark_warning(&self, at: OffsetDateTime) {
         logged(self.state.remember_warning(at), "the warning mark");
+    }
+
+    fn last_repo_warning(&self) -> Option<OffsetDateTime> {
+        self.repo_warnings()
+            .checkouts
+            .get(&self.root)
+            .map(|moment| moment.at)
+    }
+
+    fn mark_repo_warning(&self, at: OffsetDateTime) {
+        let mut warnings = self.repo_warnings();
+        warnings.checkouts.insert(self.root.clone(), Moment { at });
+        logged(
+            write_json(&self.state.file(REPO_WARNINGS), &warnings),
+            "the repository warning mark",
+        );
     }
 }

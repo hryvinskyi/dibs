@@ -136,7 +136,7 @@ impl HostAdapter for Neutral {
         })
     }
 
-    fn render(&self, outcome: &GuardOutcome) -> HostReply {
+    fn render(&self, _event: &str, outcome: &GuardOutcome) -> HostReply {
         let reply = match outcome {
             GuardOutcome::NoObjection { context, notice } => Reply::NoObjection {
                 protocol: PROTOCOL,

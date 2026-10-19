@@ -66,7 +66,7 @@ pub async fn sync(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
         return Ok(());
     };
     let now = OffsetDateTime::now_utc();
-    let cache = StateCache::new(remote.state.clone());
+    let cache = StateCache::new(remote.state.clone(), checkout.root());
     if circuit_open(cache.unreachable_since(), now) {
         return Err(unreachable(
             "The server could not be reached less than a minute ago; nothing was synced.",

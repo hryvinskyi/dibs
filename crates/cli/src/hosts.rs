@@ -3,10 +3,11 @@
 
 use dibs_agent_host::HostRegistry;
 use dibs_agent_host::neutral::Neutral;
+use dibs_host_claude_code::ClaudeCode;
 
 /// The registry of every linked host.
 pub fn registry() -> HostRegistry {
-    HostRegistry::new(vec![Box::new(Neutral)])
+    HostRegistry::new(vec![Box::new(Neutral), Box::new(ClaudeCode)])
 }
 
 #[cfg(test)]
@@ -23,5 +24,6 @@ mod tests {
             assert!(registry.get(adapter.id().as_str()).is_some());
         }
         assert!(registry.get("neutral").is_some());
+        assert!(registry.get("claude-code").is_some());
     }
 }

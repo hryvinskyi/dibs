@@ -1,0 +1,92 @@
+#!/bin/sh
+# Runs one dibs hook for Claude Code: `dibs-hook <event>` passes the hook's input on standard input
+# to `dibs hook claude-code <event>` and prints its reply.
+#
+# A hook must never stop the person's work because dibs is missing, outdated or broken, and Claude
+# Code reads exit status 2 as a refusal. So this script always exits 0:
+#   - without a dibs on the PATH it gives the install hint: as a line for the person for the
+#     `check-binary` event, on standard error for every other event;
+#   - when dibs ends with any status but 0, its output is dropped and one warning is printed in
+#     its place;
+#   - `check-binary`, an event of this script alone, compares the plugin's `metadata.min_binary`
+#     with `dibs --version` and prints the update hint when the installed dibs is older.
+# dibs runs as a child of this script, never in its place, so the script sees how it ended.
+
+event=${1-}
+install_url='https://github.com/hryvinskyi/dibs#install'
+
+# message <text>: prints the text as the line Claude Code shows the person. The texts are this
+# script's own sentences and version numbers, which hold no character JSON would need escaped.
+message() {
+  printf '{"systemMessage":"%s"}\n' "$1"
+}
+
+# switched_off: whether DIBS_OFF switches dibs off on this machine, as dibs itself reads it.
+switched_off() {
+  case $(printf '%s' "${DIBS_OFF-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]') in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# version_in: the first version number (digits and dots) on standard input.
+version_in() {
+  sed -n 's/^[^0-9]*\([0-9][0-9]*\(\.[0-9][0-9]*\)*\).*/\1/p' | head -n 1
+}
+
+# older <a> <b>: whether version a is older than version b, compared number by number.
+older() {
+  a=$1
+  b=$2
+  while [ -n "$a" ] || [ -n "$b" ]; do
+    x=${a%%.*}
+    y=${b%%.*}
+    x=${x:-0}
+    y=${y:-0}
+    if [ "$x" -lt "$y" ]; then return 0; fi
+    if [ "$x" -gt "$y" ]; then return 1; fi
+    case $a in *.*) a=${a#*.} ;; *) a= ;; esac
+    case $b in *.*) b=${b#*.} ;; *) b= ;; esac
+  done
+  return 1
+}
+
+check_binary() {
+  if switched_off; then
+    return
+  fi
+  manifest="$(dirname -- "$0")/../.claude-plugin/plugin.json"
+  needed=$(sed -n 's/.*"min_binary"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' "$manifest" 2>/dev/null | head -n 1)
+  installed=$(dibs --version 2>/dev/null | version_in)
+  if [ -z "$installed" ]; then
+    message "dibs: dibs --version did not name a version, so this plugin cannot tell whether dibs is recent enough. Run dibs doctor."
+  elif [ -n "$needed" ] && older "$installed" "$needed"; then
+    message "dibs: this plugin needs dibs $needed or newer, and dibs $installed is installed; until it is updated, some of its hooks do nothing. Install the latest release: $install_url"
+  fi
+}
+
+if ! command -v dibs >/dev/null 2>&1; then
+  hint="dibs: the dibs command is not installed or not on the PATH, so this session is not coordinated. Install it: $install_url"
+  if [ "$event" = check-binary ]; then
+    switched_off || message "$hint"
+  else
+    printf '%s\n' "$hint" >&2
+  fi
+  exit 0
+fi
+
+if [ "$event" = check-binary ]; then
+  check_binary
+  exit 0
+fi
+
+reply=$(dibs hook claude-code "$event")
+status=$?
+if [ "$status" -ne 0 ]; then
+  message "dibs: the hook failed (dibs ended with status $status), so this call was not coordinated. Run dibs doctor to see why."
+  exit 0
+fi
+if [ -n "$reply" ]; then
+  printf '%s\n' "$reply"
+fi
+exit 0

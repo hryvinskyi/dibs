@@ -34,14 +34,40 @@ Every agent host reaches dibs through MCP (`dibs mcp`, the same for all of them)
 hook format and the guard's. [docs/hosts.md](docs/hosts.md) has the neutral protocol, the capabilities and how to add
 a host.
 
-| Host | Status | What its guard will see |
+| Host | Status | What its guard sees |
 |---|---|---|
-| Claude Code | the first supported host; its adapter and plugin are in development | session start, every tool call before and after, prompts; edits and shell commands can be refused |
+| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, every tool after it ran; edits another member holds are refused, and subagents are told apart |
 | Codex CLI | planned | its command hooks |
 | OpenCode | planned | its in-process plugins, through a shim over `dibs hook neutral` |
 
 `dibs doctor` shows the hosts this binary supports and what each can carry. `DIBS_OFF=1` switches the guard off on a
 machine: every hook answers without objection and contacts nobody.
+
+### Claude Code
+
+The plugin gives Claude Code the brief at the start of a session, a check before every `Edit`, `Write`,
+`MultiEdit` and `NotebookEdit`, heartbeats after tools run, the `dibs_*` tools of `dibs mcp`, and a skill with the
+workflow. It needs the `dibs` command on the `PATH` and a `dibs login` for the project; without them its hooks say
+so and let everything through.
+
+1. Install `dibs` and sign in: `dibs login --server <url>` inside a checkout that has a `.dibs.toml`.
+2. Add this repository as a plugin marketplace and install the plugin, from a shell:
+
+   ```sh
+   claude plugin marketplace add hryvinskyi/dibs
+   claude plugin install dibs@dibs
+   ```
+
+   or inside a session: `/plugin install dibs --marketplace hryvinskyi/dibs`.
+3. Start a new session in the checkout. `dibs doctor` shows whether the plugin is installed.
+
+The hooks never approve a tool call: a call dibs has no objection to goes through Claude Code's own permission
+settings as it would without the plugin. A refusal names the holder and the way on. When the server cannot be
+reached, the hooks say so once a minute and let edits through.
+
+On Windows, Claude Code runs a plugin's hooks with Git Bash, so the plugin needs
+[Git for Windows](https://git-scm.com/downloads/win). Without it the hooks cannot start, and they are declared so
+that a hook that cannot start never blocks a call; the MCP tools work either way.
 
 ## Command line
 

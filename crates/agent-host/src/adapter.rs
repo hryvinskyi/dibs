@@ -104,8 +104,11 @@ pub trait HostAdapter: Send + Sync {
     /// [`ParseError`] when the event is not one of the host's or the input is not in its format.
     fn parse(&self, event: &str, input: &[u8]) -> Result<HostEvent, ParseError>;
 
-    /// The host's reply carrying `outcome`.
-    fn render(&self, outcome: &GuardOutcome) -> HostReply;
+    /// The host's reply carrying `outcome` for the event named `event`: the same name
+    /// [`parse`](Self::parse) was given, whether or not the input could be read, so a host whose
+    /// reply names its event can still answer an input it could not read. A name the host does
+    /// not send gets a reply every one of its events accepts.
+    fn render(&self, event: &str, outcome: &GuardOutcome) -> HostReply;
 
     /// What shows the host's integration is installed on a machine; nothing by default.
     fn probes(&self) -> Vec<Probe> {

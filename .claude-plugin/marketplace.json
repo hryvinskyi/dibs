@@ -1,0 +1,15 @@
+{
+  "name": "dibs",
+  "description": "The dibs plugin for Claude Code.",
+  "owner": {
+    "name": "The dibs authors",
+    "url": "https://github.com/hryvinskyi/dibs"
+  },
+  "plugins": [
+    {
+      "name": "dibs",
+      "source": "./integrations/claude-code",
+      "description": "Coordinates your edits with your team through dibs: a brief when a session starts, a check before each file edit, heartbeats while you work, and the dibs tools for claims and messages."
+    }
+  ]
+}

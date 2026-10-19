@@ -1,0 +1,48 @@
+{
+  "description": "dibs: the brief at the start of a session, a check before each file edit, heartbeats after tools run.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" session-start",
+            "timeout": 5,
+            "onFailure": "continue"
+          },
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" check-binary",
+            "timeout": 5,
+            "onFailure": "continue"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" pre-tool-use",
+            "timeout": 5,
+            "onFailure": "continue"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" post-tool-use",
+            "timeout": 5,
+            "onFailure": "continue"
+          }
+        ]
+      }
+    ]
+  }
+}

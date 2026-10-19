@@ -41,3 +41,9 @@ tempfile = "3.27.0"
 [[bench]]
 name = "warm_hook"
 harness = false
+
+# The Claude Code hooks and the plugin's hook wrapper, run through this binary against the test
+# server. The source lives beside the adapter, the one crate that may name the host in code.
+[[test]]
+name = "claude-code"
+path = "../host-claude-code/cli-tests/main.rs"

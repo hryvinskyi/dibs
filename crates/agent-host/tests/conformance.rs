@@ -13,7 +13,8 @@ fn the_neutral_host_passes_the_conformance_kit() {
     assert_eq!(result, Ok(()));
 }
 
-/// An adapter that breaks every rule the kit holds adapters to.
+/// An adapter that breaks every rule the kit holds adapters to; its replies to any named event are
+/// unreadable.
 struct Careless;
 
 impl HostAdapter for Careless {
@@ -37,8 +38,14 @@ impl HostAdapter for Careless {
             })
     }
 
-    fn render(&self, outcome: &GuardOutcome) -> HostReply {
-        let mut reply = Neutral.render(outcome);
+    fn render(&self, event: &str, outcome: &GuardOutcome) -> HostReply {
+        if !event.is_empty() {
+            return HostReply {
+                stdout: b"not a reply".to_vec(),
+                exit: 0,
+            };
+        }
+        let mut reply = Neutral.render(event, outcome);
         if outcome.denies() {
             reply.exit = 2;
         }
@@ -47,7 +54,7 @@ impl HostAdapter for Careless {
 }
 
 #[test]
-fn an_adapter_that_guesses_blocks_with_exit_2_or_carries_what_it_cannot_is_refused() {
+fn an_adapter_that_guesses_blocks_with_exit_2_carries_what_it_cannot_or_garbles_is_refused() {
     let mut fixtures = neutral::fixtures();
     fixtures
         .replies
@@ -62,6 +69,7 @@ fn an_adapter_that_guesses_blocks_with_exit_2_or_carries_what_it_cannot_is_refus
         "exits 2",
         "the text for the agent read back",
         "lets through the tool, expected it to stop it",
+        "for an event the host does not send",
     ] {
         assert!(all.contains(expected), "missing '{expected}' in:\n{all}");
     }

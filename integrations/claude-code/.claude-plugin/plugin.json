@@ -1,0 +1,17 @@
+{
+  "name": "dibs",
+  "displayName": "dibs",
+  "version": "0.1.0",
+  "description": "Coordinates your edits with your team through dibs: a brief when a session starts, a check before each file edit, heartbeats while you work, and the dibs tools for claims and messages.",
+  "author": {
+    "name": "The dibs authors",
+    "url": "https://github.com/hryvinskyi/dibs"
+  },
+  "homepage": "https://github.com/hryvinskyi/dibs",
+  "repository": "https://github.com/hryvinskyi/dibs",
+  "license": "MIT",
+  "keywords": ["coordination", "claims", "team", "mcp"],
+  "metadata": {
+    "min_binary": "0.1.0"
+  }
+}

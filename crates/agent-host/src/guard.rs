@@ -11,6 +11,9 @@
 //!   cache cannot answer: a governed path in an area the member is not known to hold.
 //! - **A server that failed is left alone for a minute**, and the person is warned at most once a
 //!   minute meanwhile.
+//! - **A checkout that governs no repository of the project** (its `repo` missing, unknown, or not
+//!   the one its remote is) lets every edit through and says so at most once a minute, not on
+//!   every edit.
 //! - **Nothing is produced that the host cannot carry**, and nothing is fetched only to feed such
 //!   an answer.
 
@@ -68,6 +71,8 @@ pub struct HookAnswer {
 enum Problem {
     /// The server could not be reached, now or within the last minute.
     Unreachable(String),
+    /// The checkout governs no repository of the project's settings.
+    Repository(String),
     /// Anything else, with its sentence.
     Refused(String),
 }
@@ -112,7 +117,7 @@ impl<'a> Guard<'a> {
             Err(error) => GuardOutcome::notice(wording::unreadable(&error.to_string())),
         };
         HookAnswer {
-            reply: adapter.render(&outcome),
+            reply: adapter.render(request.event, &outcome),
             diagnostic: None,
             kind,
         }
@@ -236,7 +241,10 @@ impl Run<'_> {
         }
         let known = self.settings()?;
         let settings = &known.value.settings;
-        let repo = self.workspace.repo(settings)?;
+        let repo = self
+            .workspace
+            .repo(settings)
+            .map_err(|error| Problem::Repository(error.to_string()))?;
         let governed: Vec<RelPath> = inside
             .into_iter()
             .filter(|path| {
@@ -379,9 +387,21 @@ impl Run<'_> {
         }
     }
 
-    /// The notice for a problem; for an unreachable server, only once a minute.
+    /// The notice for a problem; for an unreachable server and for a checkout that governs no
+    /// repository, only once a minute.
     fn problem_notice(&self, problem: Problem) -> Option<Text> {
         match problem {
+            Problem::Repository(sentence) => {
+                let cache = self.workspace.cache();
+                if cache
+                    .last_repo_warning()
+                    .is_some_and(|at| is_fresh(at, self.now, WARN_EVERY))
+                {
+                    return None;
+                }
+                cache.mark_repo_warning(self.now);
+                Some(Text::new(wording::failed(&sentence)))
+            }
             Problem::Unreachable(sentence) => {
                 let cache = self.workspace.cache();
                 if cache

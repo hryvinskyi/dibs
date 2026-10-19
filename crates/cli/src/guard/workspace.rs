@@ -71,7 +71,7 @@ impl ClientWorkspace {
     fn new(checkout: Checkout, remote: Remote) -> Self {
         let state = remote.state.clone();
         Self {
-            cache: StateCache::new(state.clone()),
+            cache: StateCache::new(state.clone(), checkout.root()),
             upkeep: DetachedSync::new(state.clone(), checkout.root()),
             gateway: HookGateway::new(remote, checkout.clone()),
             checkout,

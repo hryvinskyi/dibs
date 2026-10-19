@@ -213,6 +213,12 @@ pub trait LocalCache {
 
     /// Remembers that the person was warned at `at`.
     fn mark_warning(&self, at: OffsetDateTime);
+
+    /// When the person was last told that this checkout governs no repository of the project.
+    fn last_repo_warning(&self) -> Option<OffsetDateTime>;
+
+    /// Remembers that the person was told so at `at`.
+    fn mark_repo_warning(&self, at: OffsetDateTime);
 }
 
 /// The project's server. Every answer it fetches is also remembered, so the next read of
