@@ -1,0 +1,19 @@
+[package]
+name = "dibs-server"
+description = "HTTP server of dibs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dibs-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+dibs-app = { path = "../app" }

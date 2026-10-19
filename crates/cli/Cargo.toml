@@ -1,0 +1,21 @@
+[package]
+name = "dibs"
+description = "Command-line client of dibs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dibs"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+dibs-client = { path = "../client" }
+dibs-agent-host = { path = "../agent-host" }
+dibs-host-claude-code = { path = "../host-claude-code" }

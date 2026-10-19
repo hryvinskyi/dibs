@@ -1,0 +1,15 @@
+[package]
+name = "dibs-store-sqlite"
+description = "SQLite store adapter of dibs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dibs-app = { path = "../app" }

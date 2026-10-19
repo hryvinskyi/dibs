@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: scripts/check-domain-deps.sh
+
+  client:
+    name: client (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test the crates that run on a developer's machine
+        shell: bash
+        run: cargo test -p dibs-domain -p dibs-client -p dibs-agent-host -p 'dibs-host-*' -p dibs
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - run: npm --prefix web run typecheck
+      - run: npm --prefix web test
+
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Test the scripts
+        run: |
+          scripts/tests/check-clean.test.sh
+          scripts/tests/check-host-names.test.sh
+          scripts/tests/check-domain-deps.test.sh
+      - name: No agent host is named outside the adapters
+        run: scripts/check-host-names.sh
+      - name: No listed word appears in the tree or the history
+        env:
+          DIBS_DENYLIST: ${{ secrets.DIBS_DENYLIST }}
+        run: scripts/check-clean.sh

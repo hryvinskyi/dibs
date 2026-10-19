@@ -1,0 +1,13 @@
+{
+  "name": "dibs-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}
