@@ -170,7 +170,11 @@ fn an_unreachable_server_is_a_notice_and_then_a_minute_without_calls() {
     let first = reply(&run());
     assert_eq!(first["decision"], "no_objection");
     let notice = first["notice"].as_str().unwrap();
-    assert!(notice.contains("could not be reached"), "{notice}");
+    // A closed port refuses at once on Unix; on Windows the connect retries until it times out.
+    assert!(
+        notice.contains("could not be reached") || notice.contains("did not answer in time"),
+        "{notice}"
+    );
     let started = Instant::now();
     let second = reply(&run());
     assert_eq!(second, json!({"protocol": 1, "decision": "no_objection"}));
@@ -274,6 +278,10 @@ fn the_background_sync_outlives_the_hook_that_started_it() {
     let out = setup.hook("bob", &api, "after-tool", &input(&api, None));
     let ended = started.elapsed();
     assert_eq!(decision(&out), "no_objection");
+    // On Windows a child inherits the hook's own output pipe, so the hook's caller sees the pipe
+    // close only when the background sync ends; the standard library offers no safe way to stop
+    // that inheritance yet.
+    #[cfg(not(windows))]
     assert!(
         ended < StdDuration::from_millis(800),
         "the hook took {ended:?}"

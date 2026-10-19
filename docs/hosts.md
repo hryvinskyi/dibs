@@ -25,6 +25,9 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
 - **A hook never waits for upkeep.** Heartbeats and refreshed caches run in a detached `dibs sync`; a hook answers
   from the cache and starts one when something is due. The only call a hook waits for is the verdict on a governed
   path in an area the member is not known to hold, bounded to two seconds.
+  On Windows the detached sync still inherits the hook's own output pipe (the standard library has no stable way
+  yet to stop that), so a host that waits for the hook's output to close waits for the sync too: up to a few
+  seconds, at most once per refresh interval.
 - **A server that failed is left alone for a minute**, and the person is warned at most once a minute.
 - **Nothing is produced that the host cannot carry**: each adapter declares its capabilities, and the guard
   computes no answer, and fetches nothing, for something the host would drop.
