@@ -90,13 +90,14 @@ impl EditCheck {
     /// Checks the paths.
     ///
     /// # Errors
-    /// [`AppError::NotFound`] for a session not the caller's; [`AppError::EditCheck`] for a path in a
+    /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for a session not the caller's; [`AppError::EditCheck`] for a path in a
     /// repository the project does not list; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
         input: EditCheckInput,
     ) -> Result<EditVerdicts, AppError> {
+        actor.require_person()?;
         let now = self.clock.now();
         let project = actor.project;
         let mut work = Work::begin(&*self.store, project).await?;

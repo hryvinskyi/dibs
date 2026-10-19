@@ -36,9 +36,10 @@ impl Complete {
     /// Completes the claim, answering the claim that ended with its holder's handle.
     ///
     /// # Errors
-    /// [`AppError::NotFound`] for an unknown item; [`AppError::HolderOnly`] when nobody or another
+    /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for an unknown item; [`AppError::HolderOnly`] when nobody or another
     /// member holds it; [`AppError::Store`] when the store fails.
     pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<NamedClaim, AppError> {
+        actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let item = existing_item(&mut work, item).await?;

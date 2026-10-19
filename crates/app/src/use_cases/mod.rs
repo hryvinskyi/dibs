@@ -10,6 +10,7 @@ mod complete;
 mod create_item;
 mod create_member;
 mod edit_check;
+mod follow_events;
 mod force_release;
 mod get_item;
 mod grant;
@@ -49,6 +50,7 @@ pub use complete::Complete;
 pub use create_item::{CreateItem, CreateItemInput, CreatedItem};
 pub use create_member::{CreateMember, CreateMemberInput, CreatedMember};
 pub use edit_check::{EditCheck, EditCheckInput, EditVerdicts};
+pub use follow_events::{FollowEvents, FollowPage, FollowedEvent};
 pub use force_release::ForceRelease;
 pub use get_item::{GetItem, ItemView};
 pub use grant::{Grant, GrantInput, GrantResult};
@@ -124,6 +126,8 @@ pub struct UseCases {
     pub mark_read: MarkRead,
     /// See [`ListEvents`].
     pub list_events: ListEvents,
+    /// See [`FollowEvents`].
+    pub follow_events: FollowEvents,
     /// See [`InitProject`].
     pub init_project: InitProject,
     /// See [`CreateMember`].
@@ -171,6 +175,7 @@ impl UseCases {
             read_thread: ReadThread::new(deps),
             mark_read: MarkRead::new(deps),
             list_events: ListEvents::new(deps),
+            follow_events: FollowEvents::new(deps),
             init_project: InitProject::new(deps),
             create_member: CreateMember::new(deps),
             rotate_token: RotateToken::new(deps),
@@ -181,5 +186,71 @@ impl UseCases {
             resolve_ui_session: ResolveUiSession::new(deps),
             close_ui_session: CloseUiSession::new(deps),
         }
+    }
+}
+
+#[cfg(test)]
+mod integration_refusals {
+    use dibs_domain::ids::{GrantId, ItemId};
+    use dibs_domain::message::SessionLabel;
+    use dibs_domain::paths::RepoPath;
+    use dibs_domain::session::{AgentLabel, HostName};
+
+    use super::testing::Env;
+    use super::*;
+    use crate::AppError;
+
+    #[tokio::test]
+    async fn an_integration_is_refused_what_only_a_person_does() {
+        let env = Env::new().await;
+        let app = UseCases::new(&env.deps);
+        let bot = &env.importer;
+        let item = env.item("gh:acme/widgets#1").await;
+        let session = env.alice.session;
+        let refusals: Vec<Result<(), AppError>> = vec![
+            app.status.execute(bot).await.map(|_| ()),
+            app.register_session
+                .execute(
+                    bot,
+                    RegisterSessionInput {
+                        host: HostName::parse("worker").unwrap(),
+                        label: SessionLabel::parse("worker/mcp").unwrap(),
+                        agent: AgentLabel::parse("bot").unwrap(),
+                        push: false,
+                    },
+                )
+                .await
+                .map(|_| ()),
+            app.heartbeat.execute(bot, session).await.map(|_| ()),
+            app.edit_check
+                .execute(
+                    bot,
+                    EditCheckInput {
+                        session,
+                        paths: vec![RepoPath::parse("default:packages/billing/a.rs").unwrap()],
+                        reserve: false,
+                    },
+                )
+                .await
+                .map(|_| ()),
+            app.release.execute(bot, item).await.map(|_| ()),
+            app.complete.execute(bot, ItemId(9_999)).await.map(|_| ()),
+            app.revoke_grant
+                .execute(bot, GrantId(9_999))
+                .await
+                .map(|_| ()),
+        ];
+        for (n, refusal) in refusals.into_iter().enumerate() {
+            assert_eq!(refusal.unwrap_err().code(), "forbidden", "case {n}");
+        }
+        assert!(app.me.execute(bot).await.is_ok());
+        assert!(app.list_members.execute(bot).await.is_ok());
+        assert!(
+            app.list_items
+                .execute(bot, ItemQuery::default())
+                .await
+                .is_ok()
+        );
+        assert!(app.get_item.execute(bot, item).await.is_ok());
     }
 }

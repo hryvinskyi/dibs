@@ -14,4 +14,5 @@ pub mod http;
 pub mod rate_limit;
 pub mod routes;
 pub mod serve;
+pub mod stream;
 pub mod views;

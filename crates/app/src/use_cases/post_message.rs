@@ -9,6 +9,7 @@ use dibs_domain::message::{Body, SessionLabel};
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedMessage, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::MessageRecord;
 use crate::use_cases::readable::readable_thread;
@@ -45,7 +46,7 @@ impl PostMessage {
         }
     }
 
-    /// Posts the message.
+    /// Posts the message, answering it with its author's handle.
     ///
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for a thread that does not
@@ -54,7 +55,7 @@ impl PostMessage {
         &self,
         actor: &Actor,
         input: PostMessageInput,
-    ) -> Result<MessageRecord, AppError> {
+    ) -> Result<NamedMessage, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
@@ -77,8 +78,9 @@ impl PostMessage {
             }),
         )
         .await?;
+        let posted = Names::load(&mut work).await?.message(message)?;
         work.commit(&*self.notifier).await?;
-        Ok(message)
+        Ok(posted)
     }
 }
 
@@ -133,7 +135,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 PostMessageInput {
-                    thread: started.thread.id,
+                    thread: started.thread.record.id,
                     label: label(),
                     body: Body::parse("On it.").unwrap(),
                 },
@@ -143,16 +145,17 @@ mod tests {
         assert_eq!(
             env.kinds_after(before).await,
             [EventKind::MessagePosted(MessagePosted {
-                thread: started.thread.id,
-                message: reply.id,
+                thread: started.thread.record.id,
+                message: reply.record.id,
                 author: env.bob.actor.member,
             })]
         );
+        assert_eq!(reply.author.as_str(), "bob");
         let outsider = post
             .execute(
                 &carol,
                 PostMessageInput {
-                    thread: started.thread.id,
+                    thread: started.thread.record.id,
                     label: label(),
                     body: Body::parse("Me too").unwrap(),
                 },
@@ -176,7 +179,7 @@ mod tests {
             .execute(
                 &env.importer,
                 PostMessageInput {
-                    thread: started.thread.id,
+                    thread: started.thread.record.id,
                     label: label(),
                     body: Body::parse("Hello").unwrap(),
                 },

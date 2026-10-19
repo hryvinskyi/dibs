@@ -17,6 +17,7 @@ use crate::adapters::{BroadcastNotifier, OsTokens, Sha256Hasher, SystemClock, Ti
 use crate::client_ip::ClientIpPolicy;
 use crate::config::Config;
 use crate::http::{HttpOptions, router};
+use crate::stream::{EventStreams, Shutdown, StreamOptions};
 
 /// How many wake-ups a slow follower of the event log may fall behind before it misses some.
 const WAKEUP_BACKLOG: usize = 1024;
@@ -50,8 +51,8 @@ pub fn use_cases(store: Arc<SqliteStore>, notifier: Arc<BroadcastNotifier>) -> U
     UseCases::new(&deps)
 }
 
-/// Opens the store, binds the address and serves until `shutdown` resolves; then waits for the
-/// requests in flight and closes the store.
+/// Opens the store, binds the address and serves until `shutdown` resolves; then ends the open
+/// event streams, waits for the requests in flight and closes the store.
 ///
 /// # Errors
 /// [`ServeError`] naming what failed.
@@ -65,7 +66,9 @@ pub async fn serve(
             .map_err(ServeError::Database)?,
     );
     let notifier = Arc::new(BroadcastNotifier::new(WAKEUP_BACKLOG));
-    let app = Arc::new(use_cases(store.clone(), notifier));
+    let app = Arc::new(use_cases(store.clone(), notifier.clone()));
+    let stopping = Shutdown::new();
+    let streams = EventStreams::new(notifier, stopping.signal(), StreamOptions::default());
     let options = HttpOptions {
         client_ip: ClientIpPolicy::new(config.proxy),
         ..HttpOptions::default()
@@ -75,7 +78,11 @@ pub async fn serve(
         .map_err(ServeError::Bind)?;
     let address = listener.local_addr().map_err(ServeError::Bind)?;
     tracing::info!(address = %address, "listening");
-    let service = router(app, options).into_make_service_with_connect_info::<SocketAddr>();
+    let service = router(app, streams, options).into_make_service_with_connect_info::<SocketAddr>();
+    let shutdown = async move {
+        shutdown.await;
+        stopping.stop();
+    };
     let served = axum::serve(listener, service)
         .with_graceful_shutdown(shutdown)
         .await

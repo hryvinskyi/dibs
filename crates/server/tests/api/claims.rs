@@ -279,9 +279,8 @@ async fn an_integration_holds_no_claim() {
         .world
         .member(&team.alice, "carol", Role::Importer)
         .await;
-    let session = team.world.session(&carol, "worker").await;
     let item = team.world.item(&team.alice, None, "x").await;
-    let refused = team.claim(&carol, session, item, json!([])).await;
+    let refused = team.claim(&carol, 1, item, json!([])).await;
     assert_error(&refused, StatusCode::FORBIDDEN, "forbidden");
 }
 

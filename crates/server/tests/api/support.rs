@@ -1,5 +1,6 @@
 //! The real router over the SQLite store on a temporary file. The clock, ids and secrets are the
-//! fakes, so a test can move time; everything else is the production wiring.
+//! fakes, so a test can move time; everything else is the production wiring, the notifier that
+//! wakes the event streams included.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,7 +23,9 @@ use dibs_domain::handle::Handle;
 use dibs_domain::member::{DisplayName, Role};
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::settings::SettingsDocument;
+use dibs_server::adapters::BroadcastNotifier;
 use dibs_server::http::{HttpOptions, router};
+use dibs_server::stream::{EventStreams, Shutdown, StreamOptions};
 use dibs_store_sqlite::SqliteStore;
 
 /// When every test starts.
@@ -50,6 +53,8 @@ pub struct World {
     pub app: Arc<UseCases>,
     /// The router.
     pub router: Router,
+    /// Ends the router's event streams.
+    pub shutdown: Arc<Shutdown>,
     _dir: TempDir,
 }
 
@@ -68,6 +73,11 @@ impl World {
 
     /// A world with these network options.
     pub async fn with_options(options: HttpOptions) -> Self {
+        Self::with(options, StreamOptions::default()).await
+    }
+
+    /// A world with these network and stream options.
+    pub async fn with(options: HttpOptions, stream: StreamOptions) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(
             SqliteStore::open(&dir.path().join("dibs.db"))
@@ -75,17 +85,22 @@ impl World {
                 .unwrap(),
         );
         let fakes = Fakes::new(START);
+        let notifier = Arc::new(BroadcastNotifier::new(64));
         let deps = Dependencies {
             store: store.clone(),
+            notifier: notifier.clone(),
             ..fakes.dependencies()
         };
         let app = Arc::new(UseCases::new(&deps));
-        let router = router(app.clone(), options);
+        let shutdown = Arc::new(Shutdown::new());
+        let streams = EventStreams::new(notifier, shutdown.signal(), stream);
+        let router = router(app.clone(), streams, options);
         Self {
             fakes,
             store,
             app,
             router,
+            shutdown,
             _dir: dir,
         }
     }
@@ -160,6 +175,60 @@ impl World {
     pub async fn post(&self, who: &Person, path: &str, body: Value) -> Answer {
         self.call(Method::POST, path, Some(&who.token), Some(body))
             .await
+    }
+
+    /// `PUT` with a JSON body as `who`.
+    pub async fn put(&self, who: &Person, path: &str, body: Value) -> Answer {
+        self.call(Method::PUT, path, Some(&who.token), Some(body))
+            .await
+    }
+
+    /// `DELETE` as `who`.
+    pub async fn delete(&self, who: &Person, path: &str) -> Answer {
+        self.call(Method::DELETE, path, Some(&who.token), None)
+            .await
+    }
+
+    /// Sends a request from [`PEER`] and answers the response itself, its body unread, for answers
+    /// that stream.
+    pub async fn open(&self, mut request: Request<Body>) -> axum::response::Response {
+        let peer: SocketAddr = PEER.parse().unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer));
+        self.router.clone().oneshot(request).await.unwrap()
+    }
+
+    /// Serves the router on an ephemeral port of the loopback address until the world's shutdown is
+    /// given; answers the address and the task that ends once serving stopped.
+    pub async fn serve(&self) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let service = self
+            .router
+            .clone()
+            .into_make_service_with_connect_info::<SocketAddr>();
+        let mut stop = self.shutdown.signal();
+        let served = tokio::spawn(async move {
+            axum::serve(listener, service)
+                .with_graceful_shutdown(async move { stop.stopped().await })
+                .await
+                .unwrap();
+        });
+        (address, served)
+    }
+
+    /// Starts a thread as `who` and answers its id.
+    pub async fn thread(&self, who: &Person, to: Value, subject: &str, body: &str) -> u64 {
+        let mut request = serde_json::json!({
+            "subject": subject, "label": "laptop/mcp", "body": body,
+        });
+        if to == "project" {
+            request["to_project"] = Value::Bool(true);
+        } else {
+            request["to"] = to;
+        }
+        let answer = self.post(who, "/v1/threads", request).await;
+        assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.body);
+        answer.body["thread"]["id"].as_u64().unwrap()
     }
 
     /// Sends a request built by the test, as if from `peer`.

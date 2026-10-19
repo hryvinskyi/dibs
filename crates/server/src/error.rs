@@ -107,6 +107,24 @@ impl ApiError {
         )
     }
 
+    /// As many event streams are open as the service allows.
+    pub fn too_many_streams() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too_many_streams",
+            "the service has as many event streams open as it allows; try again in a minute",
+        )
+    }
+
+    /// The member holds as many event streams open as one member may.
+    pub fn too_many_member_streams(max: usize) -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too_many_streams",
+            &format!("you already have {max} event streams open; close one before opening another"),
+        )
+    }
+
     /// No route answers this path.
     pub fn no_route() -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", "there is no such route")

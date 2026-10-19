@@ -81,6 +81,64 @@ impl EventKind {
             Self::SettingsChanged(_) => "settings_changed",
         }
     }
+
+    /// Every member the event names.
+    pub fn members(&self) -> BTreeSet<MemberId> {
+        let named: &[MemberId] = match self {
+            Self::ItemCreated(e) => &[e.by],
+            Self::Claimed(e) => &[e.member],
+            Self::Renewed(e) => &[e.member],
+            Self::TakenOver(e) => &[e.member, e.previous],
+            Self::Released(e) => &[e.member],
+            Self::Completed(e) => &[e.member],
+            Self::ForceReleased(e) => &[e.member, e.by],
+            Self::Reserved(e) => &[e.member],
+            Self::Granted(e) => &[e.from, e.to],
+            Self::GrantRevoked(e) => &[e.from, e.to],
+            Self::ThreadStarted(e) => &[e.author],
+            Self::MessagePosted(e) => &[e.author],
+            Self::SettingsChanged(e) => &[e.by],
+        };
+        named.iter().copied().collect()
+    }
+
+    /// The message the event announces, for the kind that announces one.
+    pub const fn message(&self) -> Option<MessageId> {
+        match self {
+            Self::MessagePosted(e) => Some(e.message),
+            Self::ItemCreated(_)
+            | Self::Claimed(_)
+            | Self::Renewed(_)
+            | Self::TakenOver(_)
+            | Self::Released(_)
+            | Self::Completed(_)
+            | Self::ForceReleased(_)
+            | Self::Reserved(_)
+            | Self::Granted(_)
+            | Self::GrantRevoked(_)
+            | Self::ThreadStarted(_)
+            | Self::SettingsChanged(_) => None,
+        }
+    }
+
+    /// The conversation the event is about, for the kinds that are about one.
+    pub const fn thread(&self) -> Option<ThreadId> {
+        match self {
+            Self::ThreadStarted(e) => Some(e.thread),
+            Self::MessagePosted(e) => Some(e.thread),
+            Self::ItemCreated(_)
+            | Self::Claimed(_)
+            | Self::Renewed(_)
+            | Self::TakenOver(_)
+            | Self::Released(_)
+            | Self::Completed(_)
+            | Self::ForceReleased(_)
+            | Self::Reserved(_)
+            | Self::Granted(_)
+            | Self::GrantRevoked(_)
+            | Self::SettingsChanged(_) => None,
+        }
+    }
 }
 
 /// A work item was created.
@@ -390,6 +448,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn each_kind_names_its_members_and_its_thread() {
+        let named: Vec<(BTreeSet<MemberId>, Option<ThreadId>)> = every_kind()
+            .iter()
+            .map(|kind| (kind.members(), kind.thread()))
+            .collect();
+        let messages: Vec<Option<MessageId>> =
+            every_kind().iter().map(EventKind::message).collect();
+        let mut expected = vec![None; 13];
+        expected[11] = Some(MessageId(6));
+        assert_eq!(messages, expected);
+        let alice = BTreeSet::from([ALICE]);
+        let bob = BTreeSet::from([BOB]);
+        let both = BTreeSet::from([ALICE, BOB]);
+        assert_eq!(
+            named,
+            [
+                (alice.clone(), None),
+                (alice.clone(), None),
+                (alice.clone(), None),
+                (both.clone(), None),
+                (bob.clone(), None),
+                (bob.clone(), None),
+                (both.clone(), None),
+                (bob, None),
+                (both.clone(), None),
+                (both, None),
+                (alice.clone(), Some(ThreadId(5))),
+                (alice.clone(), Some(ThreadId(5))),
+                (alice, None),
+            ]
+        );
     }
 
     #[test]

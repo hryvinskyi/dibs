@@ -345,6 +345,7 @@ dependencies = [
  "dibs-app",
  "dibs-domain",
  "dibs-store-sqlite",
+ "futures-util",
  "http-body-util",
  "lru",
  "rand",

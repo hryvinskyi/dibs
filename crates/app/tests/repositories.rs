@@ -317,7 +317,7 @@ mod repositories {
             .events;
         let claimed: Vec<&EventKind> = events
             .iter()
-            .map(|e| &e.kind)
+            .map(|e| &e.event.kind)
             .filter(|k| matches!(k, EventKind::Claimed(_)))
             .collect();
         let json = serde_json::to_string(&claimed).unwrap();

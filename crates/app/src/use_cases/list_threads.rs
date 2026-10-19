@@ -7,8 +7,8 @@ use dibs_domain::ids::ItemId;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedSummary, Names};
 use crate::ports::Store;
-use crate::records::ThreadSummary;
 use crate::use_cases::readable::readable_summaries;
 use crate::work::Work;
 
@@ -33,13 +33,17 @@ impl ListThreads {
         &self,
         actor: &Actor,
         item: Option<ItemId>,
-    ) -> Result<Vec<ThreadSummary>, AppError> {
+    ) -> Result<Vec<NamedSummary>, AppError> {
         actor.require_person()?;
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let summaries = work
             .thread_summaries(actor.project, actor.member, item)
             .await?;
-        Ok(readable_summaries(actor, summaries))
+        let names = Names::load(&mut work).await?;
+        readable_summaries(actor, summaries)
+            .into_iter()
+            .map(|summary| names.summary(summary))
+            .collect()
     }
 }
 
@@ -88,12 +92,16 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|s| s.thread.id)
+            .map(|s| s.thread.record.id)
             .collect();
-        assert_eq!(bobs, [about.thread.id]);
+        assert_eq!(bobs, [about.thread.record.id]);
         let alices = list.execute(&env.alice.actor, Some(item)).await.unwrap();
         assert_eq!(alices.len(), 2);
-        assert!(alices.iter().any(|s| s.thread.id == private.thread.id));
+        assert!(
+            alices
+                .iter()
+                .any(|s| s.thread.record.id == private.thread.record.id)
+        );
         assert_eq!(list.execute(&env.bob.actor, None).await.unwrap().len(), 2);
     }
 }

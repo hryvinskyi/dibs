@@ -17,7 +17,9 @@ use time::OffsetDateTime;
 use dibs_domain::claim::Claim;
 use dibs_domain::event::{Event, EventKind};
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, ProjectId, SessionId, ThreadId};
+use dibs_domain::ids::{
+    EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
+};
 use dibs_domain::item::{ExternalRef, ItemStatus};
 use dibs_domain::message::SessionLabel;
 use dibs_domain::reservation::SharedPath;
@@ -254,6 +256,12 @@ pub trait ThreadRows: Send {
         project: ProjectId,
         message: &MessageRecord,
     ) -> StoreResult<()>;
+    /// The message of this id.
+    async fn message(
+        &mut self,
+        project: ProjectId,
+        id: MessageId,
+    ) -> StoreResult<Option<MessageRecord>>;
     /// The thread's messages, oldest first.
     async fn messages(
         &mut self,
@@ -269,7 +277,8 @@ pub trait ThreadRows: Send {
         reader: MemberId,
         item: Option<ItemId>,
     ) -> StoreResult<Vec<ThreadSummary>>;
-    /// Records every message of the thread as read by `reader`; answers how many were not before.
+    /// Records every message of the thread that `reader` did not write as read by them; answers
+    /// how many were not before. A member's own messages are never unread, so they are never counted.
     async fn mark_read(
         &mut self,
         project: ProjectId,

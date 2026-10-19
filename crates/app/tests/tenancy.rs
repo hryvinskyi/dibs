@@ -97,6 +97,7 @@ mod tenancy {
             .await
             .unwrap()
             .thread
+            .record
             .id;
 
         let not_found = |result: Result<(), AppError>| {

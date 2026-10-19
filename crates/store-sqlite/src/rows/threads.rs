@@ -146,6 +146,24 @@ impl ThreadRows for SqliteTx {
         Ok(())
     }
 
+    async fn message(
+        &mut self,
+        project: ProjectId,
+        id: MessageId,
+    ) -> StoreResult<Option<MessageRecord>> {
+        let statement = sqlx::query(
+            "SELECT id, thread_id, author_id, label, body, created_at FROM messages \
+             WHERE project_id = ?1 AND id = ?2",
+        )
+        .bind(int(project.get())?)
+        .bind(int(id.get())?);
+        self.optional(statement)
+            .await?
+            .as_ref()
+            .map(message)
+            .transpose()
+    }
+
     async fn messages(
         &mut self,
         project: ProjectId,
@@ -197,7 +215,7 @@ impl ThreadRows for SqliteTx {
         let statement = sqlx::query(
             "INSERT INTO reads (project_id, member_id, message_id, read_at) \
              SELECT m.project_id, ?2, m.id, ?4 FROM messages m \
-             WHERE m.project_id = ?1 AND m.thread_id = ?3 \
+             WHERE m.project_id = ?1 AND m.thread_id = ?3 AND m.author_id <> ?2 \
              ON CONFLICT (project_id, member_id, message_id) DO NOTHING",
         )
         .bind(int(project.get())?)

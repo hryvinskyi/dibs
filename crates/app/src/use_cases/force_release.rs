@@ -33,12 +33,15 @@ impl ForceRelease {
         }
     }
 
-    /// Ends the claim, answering the claim that ended with its holder's handle.
+    /// Ends the claim, answering the claim that ended with its holder's handle. A caller who is no
+    /// admin is refused before anything is looked up, so the refusal is the same for every item.
     ///
     /// # Errors
-    /// [`AppError::ForceRelease`] when the caller is no admin or nobody holds the item;
-    /// [`AppError::NotFound`] for an unknown item; [`AppError::Store`] when the store fails.
+    /// [`AppError::Forbidden`] when the caller is no admin; [`AppError::ForceRelease`] when nobody
+    /// holds the item; [`AppError::NotFound`] for an unknown item; [`AppError::Store`] when the
+    /// store fails.
     pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<NamedClaim, AppError> {
+        actor.require_admin()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let item = existing_item(&mut work, item).await?;
@@ -98,6 +101,16 @@ mod tests {
                 .code(),
             "forbidden"
         );
+        for caller in [&env.bob.actor, &env.importer] {
+            assert_eq!(
+                force
+                    .execute(caller, ItemId(9999))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                "forbidden"
+            );
+        }
         let before = env.events().await.len();
         force.execute(&env.alice.actor, item).await.unwrap();
         assert_eq!(

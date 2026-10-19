@@ -11,6 +11,7 @@ use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedMessage, NamedThread, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::{MessageRecord, ThreadRecord};
 use crate::use_cases::common::{existing_item, member_by_handle};
@@ -40,13 +41,13 @@ pub struct StartThreadInput {
     pub body: Body,
 }
 
-/// The new thread and its first message.
+/// The new thread and its first message, their members named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartedThread {
     /// The thread.
-    pub thread: ThreadRecord,
+    pub thread: NamedThread,
     /// Its first message.
-    pub message: MessageRecord,
+    pub message: NamedMessage,
 }
 
 /// Starts a thread with its first message. Only people write, and only people receive: naming an
@@ -137,8 +138,13 @@ impl StartThread {
             }),
         )
         .await?;
+        let names = Names::load(&mut work).await?;
+        let started = StartedThread {
+            thread: names.thread(thread)?,
+            message: names.message(message)?,
+        };
         work.commit(&*self.notifier).await?;
-        Ok(StartedThread { thread, message })
+        Ok(started)
     }
 }
 
@@ -177,21 +183,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            started.thread.recipients,
+            started.thread.record.recipients,
             Recipients::Members([env.bob.actor.member].into())
         );
+        assert_eq!(started.thread.author.as_str(), "alice");
+        assert_eq!(started.thread.recipients, [Handle::parse("bob").unwrap()]);
+        assert_eq!(started.message.author.as_str(), "alice");
         let kinds = env.kinds_after(before).await;
         assert_eq!(
             kinds,
             [
                 EventKind::ThreadStarted(ThreadStarted {
-                    thread: started.thread.id,
+                    thread: started.thread.record.id,
                     author: env.alice.actor.member,
                     item: Some(item),
                 }),
                 EventKind::MessagePosted(MessagePosted {
-                    thread: started.thread.id,
-                    message: started.message.id,
+                    thread: started.thread.record.id,
+                    message: started.message.record.id,
                     author: env.alice.actor.member,
                 }),
             ]

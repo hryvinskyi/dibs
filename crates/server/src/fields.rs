@@ -5,7 +5,8 @@ use std::fmt::Display;
 
 use dibs_app::AppError;
 use dibs_app::error::Missing;
-use dibs_domain::ids::{GrantId, ItemId, SessionId};
+use dibs_app::use_cases::EventCursor;
+use dibs_domain::ids::{EventId, GrantId, ItemId, SessionId, ThreadId};
 
 use crate::error::ApiError;
 
@@ -71,6 +72,58 @@ pub fn grant_in_path(text: &str) -> Result<GrantId, ApiError> {
         .and_then(record_id)
         .map(GrantId)
         .ok_or_else(|| not_found_text(&format!("there is no grant '{text}'")))
+}
+
+/// The thread a path segment names. Text that is not an id names no thread.
+///
+/// # Errors
+/// The not-found refusal for text that is not an id.
+pub fn thread_in_path(text: &str) -> Result<ThreadId, ApiError> {
+    text.parse::<u64>()
+        .ok()
+        .and_then(record_id)
+        .map(ThreadId)
+        .ok_or_else(|| not_found_text(&format!("there is no thread '{text}'")))
+}
+
+/// A record id written in a query string or a header.
+///
+/// # Errors
+/// The rule an id follows, for text that is not one.
+pub fn record_id_text(text: &str) -> Result<u64, &'static str> {
+    text.trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(record_id)
+        .ok_or("an id is a whole number from 1 to 9223372036854775807")
+}
+
+/// A position in the event log as a client writes it: the id of the last event it has, or `0`
+/// for none yet, so reading starts at the first event.
+///
+/// # Errors
+/// The rule a cursor follows, for text that is not one.
+pub fn event_cursor(text: &str) -> Result<EventCursor, &'static str> {
+    const RULE: &str = "a cursor is the id of an event, or 0 for the start of the log";
+    match text.trim().parse::<u64>() {
+        Ok(0) => Ok(EventCursor::Start),
+        Ok(number) => record_id(number)
+            .map(|id| EventCursor::After(EventId(id)))
+            .ok_or(RULE),
+        Err(_) => Err(RULE),
+    }
+}
+
+/// A yes-or-no switch of a query string: `true`/`1` or `false`/`0`.
+///
+/// # Errors
+/// The rule a switch follows, for any other text.
+pub fn switch(text: &str) -> Result<bool, &'static str> {
+    match text {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err("a switch is true, false, 1 or 0"),
+    }
 }
 
 /// The session a body names. A number outside the id range names none of the caller's sessions.
@@ -143,6 +196,33 @@ mod tests {
             item_in_body("item", Some(u64::MAX)).unwrap_err().code(),
             "not_found"
         );
+    }
+
+    #[test]
+    fn a_cursor_is_an_event_id_or_zero() {
+        assert_eq!(event_cursor("0"), Ok(EventCursor::Start));
+        assert_eq!(event_cursor("12"), Ok(EventCursor::After(EventId(12))));
+        assert_eq!(event_cursor(" 12 "), Ok(EventCursor::After(EventId(12))));
+        assert_eq!(
+            event_cursor(&i64::MAX.to_string()),
+            Ok(EventCursor::After(EventId(MAX_RECORD_ID)))
+        );
+        for text in ["", "-1", "abc", "1.5", "9223372036854775808", "0x10"] {
+            assert!(event_cursor(text).is_err(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn switches_and_query_ids_follow_their_rules() {
+        assert_eq!(switch("true"), Ok(true));
+        assert_eq!(switch("1"), Ok(true));
+        assert_eq!(switch("false"), Ok(false));
+        assert_eq!(switch("0"), Ok(false));
+        assert!(switch("yes").is_err());
+        assert_eq!(record_id_text("7"), Ok(7));
+        assert!(record_id_text("0").is_err());
+        assert_eq!(thread_in_path("5").unwrap(), ThreadId(5));
+        assert_eq!(thread_in_path("x").unwrap_err().code(), "not_found");
     }
 
     #[test]

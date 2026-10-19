@@ -7,18 +7,18 @@ use dibs_domain::ids::ThreadId;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedMessage, NamedThread, Names};
 use crate::ports::Store;
-use crate::records::{MessageRecord, ThreadRecord};
 use crate::use_cases::readable::readable_thread;
 use crate::work::Work;
 
-/// A thread and its messages.
+/// A thread and its messages, their members named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadView {
     /// The thread.
-    pub thread: ThreadRecord,
+    pub thread: NamedThread,
     /// Its messages, oldest first.
-    pub messages: Vec<MessageRecord>,
+    pub messages: Vec<NamedMessage>,
 }
 
 /// Shows a thread the caller may read. Reading does not mark it read; that is its own step.
@@ -44,7 +44,14 @@ impl ReadThread {
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let thread = readable_thread(&mut work, actor, thread).await?;
         let messages = work.messages(actor.project, thread.id).await?;
-        Ok(ThreadView { thread, messages })
+        let names = Names::load(&mut work).await?;
+        Ok(ThreadView {
+            thread: names.thread(thread)?,
+            messages: messages
+                .into_iter()
+                .map(|message| names.message(message))
+                .collect::<Result<_, _>>()?,
+        })
     }
 }
 
@@ -81,7 +88,7 @@ mod tests {
             .execute(
                 &env.alice.actor,
                 PostMessageInput {
-                    thread: started.thread.id,
+                    thread: started.thread.record.id,
                     label,
                     body: Body::parse("second").unwrap(),
                 },
@@ -90,20 +97,26 @@ mod tests {
             .unwrap();
         let read = ReadThread::new(&env.deps);
         let view = read
-            .execute(&env.alice.actor, started.thread.id)
+            .execute(&env.alice.actor, started.thread.record.id)
             .await
             .unwrap();
-        let bodies: Vec<&str> = view.messages.iter().map(|m| m.body.as_str()).collect();
+        let bodies: Vec<&str> = view
+            .messages
+            .iter()
+            .map(|m| m.record.body.as_str())
+            .collect();
         assert_eq!(bodies, ["first", "second"]);
+        assert!(view.messages.iter().all(|m| m.author.as_str() == "alice"));
+        assert_eq!(view.thread.recipients, [Handle::parse("alice").unwrap()]);
         assert_eq!(
-            read.execute(&env.bob.actor, started.thread.id)
+            read.execute(&env.bob.actor, started.thread.record.id)
                 .await
                 .unwrap_err()
                 .code(),
             "not_found"
         );
         assert_eq!(
-            read.execute(&env.importer, started.thread.id)
+            read.execute(&env.importer, started.thread.record.id)
                 .await
                 .unwrap_err()
                 .code(),

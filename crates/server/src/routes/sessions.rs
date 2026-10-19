@@ -32,12 +32,14 @@ pub struct RegisterBody {
 /// the session can be woken while idle.
 ///
 /// # Errors
+/// `forbidden` for an integration;
 /// `invalid_request` naming a missing or invalid field; the answer for the use case's failure.
 pub async fn register(
     State(state): State<AppState>,
     Authed(actor): Authed,
     body: Result<Json<RegisterBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let Json(body) = body?;
     let input = RegisterSessionInput {
         host: parse_required("host", body.host.as_deref(), HostName::parse)?,
@@ -63,12 +65,14 @@ struct HeartbeatAnswer {
 /// Records a session's sign of life and answers the claims it kept alive.
 ///
 /// # Errors
+/// `forbidden` for an integration;
 /// `invalid_request` without a session; the answer for the use case's failure.
 pub async fn heartbeat(
     State(state): State<AppState>,
     Authed(actor): Authed,
     body: Result<Json<HeartbeatBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let Json(body) = body?;
     let session = session_in_body("session_id", body.session_id)?;
     let outcome = state.app.heartbeat.execute(&actor, session).await?;

@@ -2,14 +2,17 @@
 //! anything the use cases decide, and none opens a transaction of its own: what an answer shows,
 //! the handles of the members it names included, comes from the use case.
 
+pub mod admin;
 pub mod claims;
 pub mod edit_check;
+pub mod events;
 pub mod grants;
 pub mod items;
 pub mod me;
 pub mod members;
 pub mod sessions;
 pub mod status;
+pub mod threads;
 
 use axum::Json;
 use serde_json::{Value, json};

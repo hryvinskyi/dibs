@@ -785,6 +785,12 @@ mod contract {
             vec![message(94, ThreadId(82), BOB, 65)]
         );
         assert!(tx.messages(B, ThreadId(81)).await.unwrap().is_empty());
+        assert_eq!(
+            tx.message(A, MessageId(94)).await.unwrap(),
+            Some(message(94, ThreadId(82), BOB, 65))
+        );
+        assert_eq!(tx.message(B, MessageId(94)).await.unwrap(), None);
+        assert_eq!(tx.message(A, MessageId(95)).await.unwrap(), None);
 
         assert!(is_duplicate(
             tx.insert_thread(A, &thread(ThreadId(81), BOB, None, 62))
@@ -830,7 +836,7 @@ mod contract {
         assert!(tx.thread_summaries(B, BOB, None).await.unwrap().is_empty());
 
         assert_eq!(tx.mark_read(B, BOB, t, at(64)).await.unwrap(), 0);
-        assert_eq!(tx.mark_read(A, BOB, t, at(64)).await.unwrap(), 3);
+        assert_eq!(tx.mark_read(A, BOB, t, at(64)).await.unwrap(), 2);
         assert_eq!(tx.mark_read(A, BOB, t, at(65)).await.unwrap(), 0);
         tx.commit().await.unwrap();
 
@@ -851,6 +857,15 @@ mod contract {
             (4, 1, Some(at(66)))
         );
         assert_eq!(tx.mark_read(A, BOB, t, at(67)).await.unwrap(), 1);
+        tx.insert_message(A, &message(95, t, BOB, 68))
+            .await
+            .unwrap();
+        assert_eq!(
+            counts(tx.thread_summaries(A, BOB, None).await.unwrap()),
+            (5, 0, Some(at(68)))
+        );
+        assert_eq!(tx.mark_read(A, BOB, t, at(69)).await.unwrap(), 0);
+        assert_eq!(tx.mark_read(A, ALICE, t, at(69)).await.unwrap(), 2);
     }
 
     async fn summaries_put_the_newest_activity_first_and_filter_by_item(store: Arc<dyn Store>) {

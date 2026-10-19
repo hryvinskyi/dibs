@@ -7,14 +7,20 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use time::OffsetDateTime;
+
 use dibs_domain::claim::{Claim, ClaimRefused, HolderOnly, TakeoverRefused};
 use dibs_domain::edit::{PathVerdict, Verdict};
+use dibs_domain::event::Event;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::MemberId;
+use dibs_domain::message::Recipients;
 
 use crate::error::AppError;
 use crate::ports::StoreError;
-use crate::records::{GrantRecord, ItemRecord};
+use crate::records::{
+    GrantRecord, ItemRecord, MessageRecord, ThreadRecord, ThreadSummary, TokenRecord,
+};
 use crate::work::Work;
 
 /// A claim with its holder's handle.
@@ -57,6 +63,58 @@ pub struct NamedVerdict {
     /// For [`Verdict::AllowedWithNote`], the handles of its `touched_by`, in the same order; empty
     /// for every other verdict.
     pub touched_by: Vec<Handle>,
+}
+
+/// A conversation with the handles of its author and recipients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedThread {
+    /// The thread.
+    pub record: ThreadRecord,
+    /// The handle of `record.author`.
+    pub author: Handle,
+    /// The handles of the members `record.recipients` lists, in its order; empty for a thread
+    /// addressed to the whole project.
+    pub recipients: Vec<Handle>,
+}
+
+/// A message with its author's handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedMessage {
+    /// The message.
+    pub record: MessageRecord,
+    /// The handle of `record.author`.
+    pub author: Handle,
+}
+
+/// A thread with its counts as one reader sees them, its members named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedSummary {
+    /// The thread.
+    pub thread: NamedThread,
+    /// How many messages it has.
+    pub messages: u64,
+    /// How many of them the reader has not read and did not write.
+    pub unread: u64,
+    /// When its newest message was written.
+    pub last_message_at: Option<OffsetDateTime>,
+}
+
+/// An event of the log with the handles of the members it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedEvent {
+    /// The event.
+    pub event: Event,
+    /// The handle of every member `event.kind` names, by id.
+    pub members: BTreeMap<MemberId, Handle>,
+}
+
+/// A token with its member's handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedToken {
+    /// The token.
+    pub record: TokenRecord,
+    /// The handle of `record.member`.
+    pub member: Handle,
 }
 
 /// A refusal of the domain with the handle of the member it names.
@@ -171,6 +229,59 @@ impl Names {
         Ok(NamedGrant {
             from: self.handle(record.grant.from)?,
             to: self.handle(record.grant.to)?,
+            record,
+        })
+    }
+
+    /// The thread with the handles of its author and recipients.
+    pub(crate) fn thread(&self, record: ThreadRecord) -> Result<NamedThread, AppError> {
+        let recipients = match &record.recipients {
+            Recipients::Project => Vec::new(),
+            Recipients::Members(members) => members
+                .iter()
+                .map(|member| self.handle(*member))
+                .collect::<Result<_, _>>()?,
+        };
+        Ok(NamedThread {
+            author: self.handle(record.author)?,
+            recipients,
+            record,
+        })
+    }
+
+    /// The message with its author's handle.
+    pub(crate) fn message(&self, record: MessageRecord) -> Result<NamedMessage, AppError> {
+        Ok(NamedMessage {
+            author: self.handle(record.author)?,
+            record,
+        })
+    }
+
+    /// The summary with the handles of its thread's members.
+    pub(crate) fn summary(&self, summary: ThreadSummary) -> Result<NamedSummary, AppError> {
+        Ok(NamedSummary {
+            thread: self.thread(summary.thread)?,
+            messages: summary.messages,
+            unread: summary.unread,
+            last_message_at: summary.last_message_at,
+        })
+    }
+
+    /// The event with the handles of the members it names.
+    pub(crate) fn event(&self, event: Event) -> Result<NamedEvent, AppError> {
+        let members = event
+            .kind
+            .members()
+            .into_iter()
+            .map(|member| Ok((member, self.handle(member)?)))
+            .collect::<Result<_, AppError>>()?;
+        Ok(NamedEvent { event, members })
+    }
+
+    /// The token with its member's handle.
+    pub(crate) fn token(&self, record: TokenRecord) -> Result<NamedToken, AppError> {
+        Ok(NamedToken {
+            member: self.handle(record.member)?,
             record,
         })
     }

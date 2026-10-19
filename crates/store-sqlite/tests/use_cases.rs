@@ -374,6 +374,7 @@ mod use_cases {
             .await
             .unwrap()
             .thread
+            .record
             .id;
 
         let not_found = |result: Result<(), AppError>| {
@@ -433,7 +434,12 @@ mod use_cases {
             .await
             .unwrap();
         assert!(!alices_log.events.is_empty());
-        assert!(alices_log.events.iter().all(|e| e.project == alice.project));
+        assert!(
+            alices_log
+                .events
+                .iter()
+                .all(|e| e.event.project == alice.project)
+        );
     }
 
     #[tokio::test]

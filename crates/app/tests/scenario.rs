@@ -169,7 +169,7 @@ mod scenario {
                 .unwrap()
                 .events
                 .iter()
-                .map(|e| e.kind.name())
+                .map(|e| e.event.kind.name())
                 .collect()
         }
     }
@@ -294,25 +294,25 @@ mod scenario {
             .unwrap();
         let inbox = app.inbox.execute(&team.alice, true).await.unwrap();
         assert_eq!(inbox.len(), 1);
-        assert_eq!(inbox[0].thread.id, started.thread.id);
+        assert_eq!(inbox[0].thread.record.id, started.thread.record.id);
         let thread = app
             .read_thread
-            .execute(&team.alice, started.thread.id)
+            .execute(&team.alice, started.thread.record.id)
             .await
             .unwrap();
         assert_eq!(
-            thread.messages[0].body.as_str(),
+            thread.messages[0].record.body.as_str(),
             "One line in the rounding helper.\nThanks!"
         );
         app.mark_read
-            .execute(&team.alice, started.thread.id)
+            .execute(&team.alice, started.thread.record.id)
             .await
             .unwrap();
         app.post_message
             .execute(
                 &team.alice,
                 PostMessageInput {
-                    thread: started.thread.id,
+                    thread: started.thread.record.id,
                     label: SessionLabel::parse("web").unwrap(),
                     body: Body::parse("Go ahead.").unwrap(),
                 },
@@ -372,7 +372,7 @@ mod scenario {
         assert_eq!(taken.takeover.previous.member, team.alice.member);
         let alices = app.inbox.execute(&team.alice, true).await.unwrap();
         assert_eq!(alices.len(), 1);
-        assert_eq!(alices[0].thread.id, taken.thread);
+        assert_eq!(alices[0].thread.record.id, taken.thread);
         let after_takeover = app
             .revoke_grant
             .execute(&team.alice, grant.grant.record.id)

@@ -35,9 +35,10 @@ impl RevokeGrant {
     /// Withdraws the grant.
     ///
     /// # Errors
-    /// [`AppError::NotFound`] when the project has no such grant; [`AppError::Revoke`] when the
+    /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] when the project has no such grant; [`AppError::Revoke`] when the
     /// caller did not give it; [`AppError::Store`] when the store fails.
     pub async fn execute(&self, actor: &Actor, grant: GrantId) -> Result<NamedGrant, AppError> {
+        actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let record = work

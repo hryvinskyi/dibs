@@ -72,13 +72,13 @@ mod tests {
         let events = env.events().await.len();
         let mark = MarkRead::new(&env.deps);
         assert_eq!(
-            mark.execute(&env.bob.actor, started.thread.id)
+            mark.execute(&env.bob.actor, started.thread.record.id)
                 .await
                 .unwrap(),
             1
         );
         assert_eq!(
-            mark.execute(&env.bob.actor, started.thread.id)
+            mark.execute(&env.bob.actor, started.thread.record.id)
                 .await
                 .unwrap(),
             0

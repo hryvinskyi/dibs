@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::{AppError, Missing};
+use crate::named::{NamedToken, Names};
 use crate::ports::{Clock, Store};
-use crate::records::TokenRecord;
 use crate::token::TokenPrefix;
 use crate::work::Work;
 
@@ -26,7 +26,7 @@ impl RevokeToken {
         }
     }
 
-    /// Revokes the token.
+    /// Revokes the token, answering it with its member's handle.
     ///
     /// # Errors
     /// [`AppError::Forbidden`] unless the caller is an admin; [`AppError::NotFound`] when the
@@ -35,7 +35,7 @@ impl RevokeToken {
         &self,
         actor: &Actor,
         prefix: TokenPrefix,
-    ) -> Result<TokenRecord, AppError> {
+    ) -> Result<NamedToken, AppError> {
         actor.require_admin()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
@@ -47,8 +47,9 @@ impl RevokeToken {
             work.revoke_token(actor.project, &token.hash, now).await?;
             token.revoked_at = Some(now);
         }
+        let revoked = Names::load(&mut work).await?.token(token)?;
         work.commit_quietly().await?;
-        Ok(token)
+        Ok(revoked)
     }
 }
 
@@ -73,13 +74,17 @@ mod tests {
             .execute(&env.alice.actor, bob.prefix.clone())
             .await
             .unwrap();
-        assert_eq!(first.revoked_at, Some(crate::use_cases::testing::START));
+        assert_eq!(
+            first.record.revoked_at,
+            Some(crate::use_cases::testing::START)
+        );
+        assert_eq!(first.member.as_str(), "bob");
         env.advance(time::Duration::minutes(5));
         let again = revoke
             .execute(&env.alice.actor, bob.prefix.clone())
             .await
             .unwrap();
-        assert_eq!(again.revoked_at, first.revoked_at);
+        assert_eq!(again.record.revoked_at, first.record.revoked_at);
     }
 
     #[tokio::test]

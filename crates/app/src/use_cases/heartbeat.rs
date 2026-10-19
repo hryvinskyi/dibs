@@ -41,13 +41,14 @@ impl Heartbeat {
     /// Records the heartbeat.
     ///
     /// # Errors
-    /// [`AppError::NotFound`] when the session is not the caller's; [`AppError::Store`] when the
+    /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] when the session is not the caller's; [`AppError::Store`] when the
     /// store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
         session: SessionId,
     ) -> Result<HeartbeatOutcome, AppError> {
+        actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let mut session = own_session(&mut work, actor, session).await?;

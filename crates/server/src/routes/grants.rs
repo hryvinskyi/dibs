@@ -43,6 +43,7 @@ pub async fn grant(
     Authed(actor): Authed,
     body: Result<Json<GrantBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let Json(body) = body?;
     let input = GrantInput {
         item: item_in_body("item", body.item)?,
@@ -70,12 +71,14 @@ struct RevokedAnswer {
 /// Withdraws a grant the caller gave.
 ///
 /// # Errors
+/// `forbidden` for an integration;
 /// `not_grantor` (`403`); `not_found` for a grant the project does not have.
 pub async fn revoke(
     State(state): State<AppState>,
     Authed(actor): Authed,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let Path(id) = path?;
     let grant = grant_in_path(&id)?;
     let record = state.app.revoke_grant.execute(&actor, grant).await?;

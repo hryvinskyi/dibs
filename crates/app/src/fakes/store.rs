@@ -607,6 +607,14 @@ impl ThreadRows for MemoryTx {
         Ok(())
     }
 
+    async fn message(
+        &mut self,
+        project: ProjectId,
+        id: MessageId,
+    ) -> StoreResult<Option<MessageRecord>> {
+        Ok(self.work.messages.get(&(project, id)).cloned())
+    }
+
     async fn messages(
         &mut self,
         project: ProjectId,
@@ -679,7 +687,7 @@ impl ThreadRows for MemoryTx {
             .work
             .messages
             .iter()
-            .filter(|((p, _), m)| *p == project && m.thread == thread)
+            .filter(|((p, _), m)| *p == project && m.thread == thread && m.author != reader)
             .map(|(_, m)| m.id)
             .collect();
         let mut newly = 0;

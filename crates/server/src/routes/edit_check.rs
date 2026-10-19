@@ -38,6 +38,7 @@ struct CheckAnswer {
 /// (the default) the check writes nothing.
 ///
 /// # Errors
+/// `forbidden` for an integration;
 /// `invalid_request` for a missing repository, session or path list, or an invalid path;
 /// `unknown_repo` for a repository the project does not list; `not_found` for a session not the
 /// caller's.
@@ -46,6 +47,7 @@ pub async fn check(
     Authed(actor): Authed,
     body: Result<Json<CheckBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let Json(body) = body?;
     let session = session_in_body("session_id", body.session_id)?;
     let repo = parse_required("repo", body.repo.as_deref(), RepoId::parse)?;

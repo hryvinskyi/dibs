@@ -2,8 +2,9 @@
 //!
 //! Every answer carries `Cache-Control: no-store` unless its handler set its own, so a cache in
 //! front never keeps one. A request body is read up to [`BODY_LIMIT`]; a request is answered within
-//! the configured timeout or refused with `timeout`. The request log names the method and the path
-//! only, never a header.
+//! the configured timeout or refused with `timeout` — for the event stream, the time until its
+//! answer starts, not the stream that follows. The request log names the method and the path only,
+//! never a header.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,7 @@ use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Request, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use tower::ServiceBuilder;
 use tower::timeout::TimeoutLayer;
 use tower::timeout::error::Elapsed;
@@ -28,6 +29,7 @@ use crate::client_ip::ClientIpPolicy;
 use crate::error::ApiError;
 use crate::rate_limit::{AuthLimiter, LimitPolicy};
 use crate::routes;
+use crate::stream::EventStreams;
 
 /// The largest request body read, in bytes. A message of 16 KiB grows on the wire — JSON escapes a
 /// control character to six bytes, a form percent-encodes a non-ASCII byte to three — and still
@@ -67,14 +69,17 @@ pub struct AppState {
     pub(crate) limiter: Arc<AuthLimiter>,
     /// How the client's address is told.
     pub(crate) client_ip: Arc<ClientIpPolicy>,
+    /// The event streams.
+    pub(crate) streams: EventStreams,
 }
 
-/// The router over these use cases.
-pub fn router(app: Arc<UseCases>, options: HttpOptions) -> Router {
+/// The router over these use cases, its event streams woken and ended through `streams`.
+pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -> Router {
     let state = AppState {
         app,
         limiter: Arc::new(AuthLimiter::new(options.limits)),
         client_ip: Arc::new(options.client_ip),
+        streams,
     };
     let api = Router::new()
         .route("/health", get(routes::health))
@@ -95,6 +100,30 @@ pub fn router(app: Arc<UseCases>, options: HttpOptions) -> Router {
         .route("/v1/edit-check", post(routes::edit_check::check))
         .route("/v1/grants", post(routes::grants::grant))
         .route("/v1/grants/{id}", delete(routes::grants::revoke))
+        .route(
+            "/v1/threads",
+            get(routes::threads::list).post(routes::threads::start),
+        )
+        .route("/v1/threads/{id}", get(routes::threads::read))
+        .route("/v1/threads/{id}/messages", post(routes::threads::post))
+        .route("/v1/threads/{id}/read", post(routes::threads::mark_read))
+        .route("/v1/inbox", get(routes::threads::inbox))
+        .route("/v1/events", get(routes::events::list))
+        .route("/v1/events/stream", get(routes::events::stream))
+        .route("/v1/admin/members", post(routes::admin::add_member))
+        .route(
+            "/v1/admin/members/{handle}/tokens",
+            post(routes::admin::rotate_token),
+        )
+        .route(
+            "/v1/admin/tokens/{prefix}",
+            delete(routes::admin::revoke_token),
+        )
+        .route("/v1/admin/settings", put(routes::admin::apply_settings))
+        .route(
+            "/v1/admin/items/{id}/force-release",
+            post(routes::admin::force_release),
+        )
         .fallback(no_route)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state);

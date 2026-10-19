@@ -54,6 +54,7 @@ pub async fn claim(
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<ClaimBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let Path(id) = path?;
     let item = item_in_path(&id)?;
     let Json(body) = body?;
@@ -111,6 +112,7 @@ pub async fn take_over(
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<TakeOverBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let Path(id) = path?;
     let item = item_in_path(&id)?;
     let Json(body) = body?;
@@ -142,12 +144,14 @@ struct EndedAnswer {
 /// Releases the caller's claim, live or stale; the item is open again.
 ///
 /// # Errors
+/// `forbidden` for an integration;
 /// `not_holder` (`403`, naming the holder), `no_claim` (`409`), `not_found`.
 pub async fn release(
     State(state): State<AppState>,
     Authed(actor): Authed,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let item = path_item(path)?;
     let ended = state.app.release.execute(&actor, item).await?;
     Ok(answer_ended(ended))
@@ -156,12 +160,14 @@ pub async fn release(
 /// Completes the caller's claim; the item is done.
 ///
 /// # Errors
+/// `forbidden` for an integration;
 /// `not_holder` (`403`, naming the holder), `no_claim` (`409`), `not_found`.
 pub async fn done(
     State(state): State<AppState>,
     Authed(actor): Authed,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let item = path_item(path)?;
     let ended = state.app.complete.execute(&actor, item).await?;
     Ok(answer_ended(ended))

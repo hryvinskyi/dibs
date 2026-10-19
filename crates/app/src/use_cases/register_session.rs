@@ -48,12 +48,13 @@ impl RegisterSession {
     /// Registers the session.
     ///
     /// # Errors
-    /// [`AppError::Store`] when the store fails.
+    /// [`AppError::Forbidden`] for an integration; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
         input: RegisterSessionInput,
     ) -> Result<SessionRecord, AppError> {
+        actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let known = work

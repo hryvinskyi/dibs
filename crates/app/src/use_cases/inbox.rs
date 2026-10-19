@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedSummary, Names};
 use crate::ports::Store;
-use crate::records::ThreadSummary;
 use crate::use_cases::readable::readable_summaries;
 use crate::work::Work;
 
@@ -32,16 +32,18 @@ impl Inbox {
         &self,
         actor: &Actor,
         unread_only: bool,
-    ) -> Result<Vec<ThreadSummary>, AppError> {
+    ) -> Result<Vec<NamedSummary>, AppError> {
         actor.require_person()?;
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let summaries = work
             .thread_summaries(actor.project, actor.member, None)
             .await?;
-        Ok(readable_summaries(actor, summaries)
+        let names = Names::load(&mut work).await?;
+        readable_summaries(actor, summaries)
             .into_iter()
             .filter(|summary| !unread_only || summary.unread > 0)
-            .collect())
+            .map(|summary| names.summary(summary))
+            .collect()
     }
 }
 
@@ -96,17 +98,24 @@ mod tests {
             .unwrap();
         let inbox = Inbox::new(&env.deps);
         let bobs = inbox.execute(&env.bob.actor, false).await.unwrap();
-        let subjects: Vec<&str> = bobs.iter().map(|s| s.thread.subject.as_str()).collect();
+        let subjects: Vec<&str> = bobs
+            .iter()
+            .map(|s| s.thread.record.subject.as_str())
+            .collect();
         assert_eq!(subjects, ["Bob writes", "To all", "To bob"]);
         let unread: Vec<u64> = bobs.iter().map(|s| s.unread).collect();
         assert_eq!(unread, [0, 1, 1]);
         MarkRead::new(&env.deps)
-            .execute(&env.bob.actor, to_bob.thread.id)
+            .execute(&env.bob.actor, to_bob.thread.record.id)
             .await
             .unwrap();
         let waiting = inbox.execute(&env.bob.actor, true).await.unwrap();
-        let ids: Vec<_> = waiting.iter().map(|s| s.thread.id).collect();
-        assert_eq!(ids, [to_all.thread.id]);
+        let ids: Vec<_> = waiting.iter().map(|s| s.thread.record.id).collect();
+        assert_eq!(ids, [to_all.thread.record.id]);
+        let authors: Vec<&str> = bobs.iter().map(|s| s.thread.author.as_str()).collect();
+        assert_eq!(authors, ["bob", "alice", "alice"]);
+        assert_eq!(bobs[0].thread.recipients, [Handle::parse("alice").unwrap()]);
+        assert!(bobs[1].thread.recipients.is_empty());
         assert_eq!(
             inbox
                 .execute(&env.importer, false)

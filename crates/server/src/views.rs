@@ -2,24 +2,28 @@
 //! handle the use case read beside each id, ids are numbers, times are RFC 3339 in UTC, areas are
 //! `repo:area`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use dibs_app::named::{NamedClaim, NamedGrant, NamedItem, NamedVerdict};
+use dibs_app::named::{
+    NamedClaim, NamedEvent, NamedGrant, NamedItem, NamedMessage, NamedSummary, NamedThread,
+    NamedToken, NamedVerdict,
+};
 use dibs_app::records::{MemberRecord, SessionRecord};
-use dibs_app::use_cases::HeldItem;
+use dibs_app::use_cases::{FollowedEvent, HeldItem};
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::edit::{HeldReason, Verdict};
+use dibs_domain::event::EventKind;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::{HotRuleKind, Note};
-use dibs_domain::ids::{GrantId, ItemId, SessionId};
+use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemRepository, ItemStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
-use dibs_domain::message::SessionLabel;
+use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::session::{AgentLabel, HostName};
 
@@ -340,6 +344,168 @@ impl PathVerdictView {
     }
 }
 
+/// A conversation.
+#[derive(Debug, Serialize)]
+pub struct ThreadView {
+    /// Its id.
+    pub id: ThreadId,
+    /// Its subject.
+    pub subject: Subject,
+    /// The work item it is about.
+    pub item: Option<ItemId>,
+    /// Who started it.
+    pub author: Handle,
+    /// Whether it is addressed to every person in the project.
+    pub to_project: bool,
+    /// The members it is addressed to; empty when it is addressed to the project.
+    pub to: Vec<Handle>,
+    /// When it started.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub created_at: OffsetDateTime,
+}
+
+impl ThreadView {
+    /// The view of a thread.
+    pub fn of(named: NamedThread) -> Self {
+        let thread = named.record;
+        Self {
+            id: thread.id,
+            subject: thread.subject,
+            item: thread.item,
+            author: named.author,
+            to_project: matches!(thread.recipients, Recipients::Project),
+            to: named.recipients,
+            created_at: thread.created_at,
+        }
+    }
+}
+
+/// A message.
+#[derive(Debug, Serialize)]
+pub struct MessageView {
+    /// Its id.
+    pub id: MessageId,
+    /// Its thread.
+    pub thread: ThreadId,
+    /// Who wrote it.
+    pub author: Handle,
+    /// The label of the session it was written from.
+    pub label: SessionLabel,
+    /// Its text.
+    pub body: Body,
+    /// When it was written.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub created_at: OffsetDateTime,
+}
+
+impl MessageView {
+    /// The view of a message.
+    pub fn of(named: NamedMessage) -> Self {
+        let message = named.record;
+        Self {
+            id: message.id,
+            thread: message.thread,
+            author: named.author,
+            label: message.label,
+            body: message.body,
+            created_at: message.created_at,
+        }
+    }
+}
+
+/// A conversation with its counts as the caller sees them.
+#[derive(Debug, Serialize)]
+pub struct ThreadSummaryView {
+    /// The thread.
+    pub thread: ThreadView,
+    /// How many messages it has.
+    pub messages: u64,
+    /// How many of them the caller has not read and did not write.
+    pub unread: u64,
+    /// When its newest message was written.
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    pub last_message_at: Option<OffsetDateTime>,
+}
+
+impl ThreadSummaryView {
+    /// The view of a summary.
+    pub fn of(named: NamedSummary) -> Self {
+        Self {
+            thread: ThreadView::of(named.thread),
+            messages: named.messages,
+            unread: named.unread,
+            last_message_at: named.last_message_at,
+        }
+    }
+}
+
+/// An event of the log: its id, time, kind and payload, the handles of the members the payload
+/// names, and for a follower who may read it the message a `message_posted` event announces.
+#[derive(Debug, Serialize)]
+pub struct EventView {
+    /// Its position in the log.
+    pub id: EventId,
+    /// When it happened.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub at: OffsetDateTime,
+    /// `kind` and `payload`.
+    #[serde(flatten)]
+    pub kind: EventKind,
+    /// The handle of every member the payload names, keyed by id.
+    pub members: BTreeMap<MemberId, Handle>,
+    /// The message announced, on the event stream only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<MessageView>,
+}
+
+impl EventView {
+    /// The view of an event of the log.
+    pub fn of(named: NamedEvent) -> Self {
+        Self {
+            id: named.event.id,
+            at: named.event.at,
+            kind: named.event.kind,
+            members: named.members,
+            message: None,
+        }
+    }
+
+    /// The view of an event as a follower receives it.
+    pub fn followed(followed: FollowedEvent) -> Self {
+        Self {
+            message: followed.message.map(MessageView::of),
+            ..Self::of(followed.event)
+        }
+    }
+}
+
+/// A token, named by its prefix; never the secret itself.
+#[derive(Debug, Serialize)]
+pub struct TokenView {
+    /// Its prefix.
+    pub prefix: String,
+    /// The member it authenticates.
+    pub member: Handle,
+    /// When it was issued.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub created_at: OffsetDateTime,
+    /// When it was revoked.
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    pub revoked_at: Option<OffsetDateTime>,
+}
+
+impl TokenView {
+    /// The view of a token.
+    pub fn of(named: NamedToken) -> Self {
+        Self {
+            prefix: named.record.prefix.as_str().to_owned(),
+            member: named.member,
+            created_at: named.record.created_at,
+            revoked_at: named.record.revoked_at,
+        }
+    }
+}
+
 fn reason_code(reason: HeldReason) -> &'static str {
     match reason {
         HeldReason::AskHolder => "ask_holder",
@@ -390,6 +556,61 @@ mod tests {
                 "last_seen": "2026-01-02T03:05:00Z"
             })
         );
+    }
+
+    #[test]
+    fn an_event_shows_its_kind_payload_and_the_handles_it_names() {
+        use dibs_app::records::MessageRecord;
+        use dibs_domain::event::{Event, MessagePosted};
+        use dibs_domain::ids::ProjectId;
+
+        let event = Event {
+            id: EventId(12),
+            project: ProjectId(1),
+            at: datetime!(2026-01-02 03:04:05 UTC),
+            kind: EventKind::MessagePosted(MessagePosted {
+                thread: ThreadId(4),
+                message: MessageId(5),
+                author: MemberId(7),
+            }),
+        };
+        let named = NamedEvent {
+            event,
+            members: BTreeMap::from([(MemberId(7), handle("alice"))]),
+        };
+        let feed = serde_json::to_value(EventView::of(named.clone())).unwrap();
+        assert_eq!(
+            feed,
+            json!({
+                "id": 12, "at": "2026-01-02T03:04:05Z", "kind": "message_posted",
+                "payload": {"thread": 4, "message": 5, "author": 7},
+                "members": {"7": "alice"}
+            })
+        );
+        let message = NamedMessage {
+            record: MessageRecord {
+                id: MessageId(5),
+                thread: ThreadId(4),
+                author: MemberId(7),
+                label: SessionLabel::parse("web").unwrap(),
+                body: Body::parse("line one\nline two").unwrap(),
+                created_at: datetime!(2026-01-02 03:04:05 UTC),
+            },
+            author: handle("alice"),
+        };
+        let followed = serde_json::to_value(EventView::followed(FollowedEvent {
+            event: named,
+            message: Some(message),
+        }))
+        .unwrap();
+        assert_eq!(
+            followed["message"],
+            json!({
+                "id": 5, "thread": 4, "author": "alice", "label": "web",
+                "body": "line one\nline two", "created_at": "2026-01-02T03:04:05Z"
+            })
+        );
+        assert!(!serde_json::to_string(&followed).unwrap().contains('\n'));
     }
 
     #[test]

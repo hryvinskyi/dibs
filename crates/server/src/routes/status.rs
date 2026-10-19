@@ -32,11 +32,12 @@ struct HoldView {
 /// ordered as the use case orders it.
 ///
 /// # Errors
-/// The answer for the use case's failure.
+/// `forbidden` for an integration; the answer for the use case's failure.
 pub async fn status(
     State(state): State<AppState>,
     Authed(actor): Authed,
 ) -> Result<Response, ApiError> {
+    actor.require_person()?;
     let view = state.app.status.execute(&actor).await?;
     let answer = StatusAnswer {
         live: view.live.into_iter().map(HeldItemView::of).collect(),
