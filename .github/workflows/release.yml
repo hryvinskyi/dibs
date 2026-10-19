@@ -1,0 +1,159 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: The tag names the version the binaries report
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          built="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "dibs") | .version')"
+          if [ "$version" != "$built" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME names version $version, but the workspace builds $built."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  image:
+    name: image
+    needs: [plan, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.plan.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.plan.outputs.prerelease == 'false' }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  binaries:
+    name: dibs (${{ matrix.target }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: macos-latest, target: aarch64-apple-darwin, runs_here: true }
+          - { os: macos-latest, target: x86_64-apple-darwin, runs_here: false }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, runs_here: true }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, runs_here: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, runs_here: true }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc, runs_here: false }
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p dibs --target "$TARGET"
+        shell: bash
+      - name: The binary reports the version of the tag
+        if: matrix.runs_here
+        shell: bash
+        run: |
+          reported="$(./target/$TARGET/release/dibs --version)"
+          echo "$reported"
+          [ "$reported" = "dibs $VERSION" ]
+      - name: Package a tarball
+        if: runner.os != 'Windows'
+        run: |
+          name="dibs-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/dibs" LICENSE README.md "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+      - name: Package a zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "dibs-$env:VERSION-$env:TARGET"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/$env:TARGET/release/dibs.exe", LICENSE, README.md -Destination "dist/$name"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dibs-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: release
+    needs: [plan, image, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dibs-*
+          path: release
+          merge-multiple: true
+      - name: The install scripts
+        run: cp scripts/install.sh scripts/install.ps1 release/
+      - name: Checksums of the archives
+        working-directory: release
+        run: sha256sum dibs-*.tar.gz dibs-*.zip > SHA256SUMS
+      - name: Publish the release
+        env:
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+        run: |
+          # A draft until every asset is in place, so the install scripts never see part of a release.
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release create "$GITHUB_REF_NAME" --draft --prerelease --verify-tag --title "$GITHUB_REF_NAME" --generate-notes release/*
+          else
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --generate-notes release/*
+          fi
+          gh release edit "$GITHUB_REF_NAME" --draft=false

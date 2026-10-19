@@ -1,0 +1,12 @@
+.git
+.idea
+.github
+target
+web/node_modules
+deploy/.env
+deploy/data
+deploy/snapshots
+deploy/certs
+*.db
+*.db-wal
+*.db-shm

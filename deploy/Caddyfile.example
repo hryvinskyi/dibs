@@ -1,0 +1,19 @@
+# TLS from certificate files: a CDN origin certificate, a corporate CA's certificate, or any pair
+# managed outside Caddy. Mount the pair read-only at /certs (cert.pem and key.pem).
+#
+# No `encode` directive: the event stream must never be compressed or buffered. No access log is
+# configured, so no request header (Cookie, Authorization) is written anywhere.
+{
+	# Nothing here asks a certificate authority for anything, and nothing listens on an admin port.
+	auto_https off
+	admin off
+}
+
+{$DIBS_HOST}:{$DIBS_PORT} {
+	tls /certs/cert.pem /certs/key.pem
+
+	reverse_proxy dibs:8080 {
+		# Send each chunk of the event stream as it is written.
+		flush_interval -1
+	}
+}

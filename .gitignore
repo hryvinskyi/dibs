@@ -1,3 +1,7 @@
 target/
 *.db*
 node_modules/
+.env
+deploy/data/
+deploy/snapshots/
+deploy/certs/

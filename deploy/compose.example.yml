@@ -1,0 +1,65 @@
+# dibs behind Caddy, which terminates TLS from certificate files you mount.
+#
+# Set it up in an empty directory on the server:
+#
+#   cp compose.example.yml compose.yml
+#   cp Caddyfile.example Caddyfile
+#   cp .env.example .env              # then edit .env
+#   mkdir -p data snapshots certs
+#   sudo chown 65532:65532 data snapshots   # the image runs as this unprivileged user
+#   cp /path/to/cert.pem /path/to/key.pem certs/
+#   docker compose up -d
+#
+# For Caddy's own automatic HTTPS instead of certificate files, see docs/operations.md.
+
+name: dibs
+
+services:
+  dibs:
+    image: ghcr.io/hryvinskyi/dibs:${DIBS_VERSION:-latest}
+    restart: unless-stopped
+    env_file: .env
+    # No published port: only Caddy, on the shared network, reaches the server.
+    volumes:
+      - ./data:/data
+      - ./snapshots:/snapshots
+    networks:
+      - edge
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - dibs
+    environment:
+      DIBS_HOST: ${DIBS_HOST:?set DIBS_HOST in .env}
+      DIBS_PORT: ${DIBS_PORT:-443}
+    ports:
+      - "${DIBS_PORT:-443}:${DIBS_PORT:-443}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    read_only: true
+    tmpfs:
+      - /config
+      - /data
+    networks:
+      - edge
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  # A fixed subnet, so that DIBS_TRUSTED_PROXIES can name the proxy's addresses.
+  edge:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24

@@ -1,0 +1,241 @@
+# Running the server
+
+The server is one process on one SQLite file. It speaks plain HTTP on port 8080 and expects a proxy in front of it to
+terminate TLS. This page covers the image, the compose example behind Caddy in both TLS modes, running behind a CDN,
+configuration, snapshots and restore, upgrades, the lock file and the GHCR package.
+
+## The image
+
+Releases publish `ghcr.io/hryvinskyi/dibs:<version>` (and `latest` for a stable release). The image holds one binary,
+`/dibs-server`, which is its entrypoint, so a subcommand is whatever follows the image name:
+
+```sh
+docker run --rm ghcr.io/hryvinskyi/dibs:latest --version
+docker run --rm ghcr.io/hryvinskyi/dibs:latest restore /snapshots/<snapshot> --to /data/dibs.db
+```
+
+- It runs as the unprivileged user `65532`, from a minimal base with no shell.
+- `/data` holds the database and `/snapshots` the snapshots; both are volumes. A named volume starts out writable by the
+  user. A bind-mounted directory is not: hand it over once with `chown 65532:65532 <dir>`.
+- The image sets `DIBS_DATABASE=/data/dibs.db` and `DIBS_SNAPSHOT_DIR=/snapshots`, so snapshots are on by default.
+- It has no shell, so it carries no `HEALTHCHECK`. Probe `GET /health` from your orchestrator or monitor: it answers
+  `{"ok":true}` without a token and reads nothing.
+- To run a command in a running container, give the binary's full path:
+  `docker compose exec dibs /dibs-server admin snapshot`.
+
+Build it yourself from the repository root, which is the build context:
+
+```sh
+docker build -f deploy/Dockerfile -t dibs-server .
+```
+
+## Deploying with the compose example
+
+`deploy/compose.example.yml` runs two services on a private network: `dibs`, with no published port, and `caddy`, which
+terminates TLS and is the only thing the host publishes. The compose project is named `dibs`, so it never depends on
+the directory's name and does not collide with another stack on the host.
+
+```sh
+mkdir dibs && cd dibs
+# the files of deploy/, from a clone of the repository at the tag of the release you run
+cp compose.example.yml compose.yml
+cp Caddyfile.example Caddyfile
+cp .env.example .env              # edit DIBS_HOST at least
+mkdir -p data snapshots certs
+sudo chown 65532:65532 data snapshots
+cp /path/to/cert.pem /path/to/key.pem certs/
+docker compose up -d
+```
+
+Create the first project and its admin. The command prints the admin's token alone on standard output, once:
+
+```sh
+docker compose exec dibs /dibs-server admin init --project widgets --admin alice --name "Alice Example"
+```
+
+Hand the token over through a password manager, never chat or email. Further members:
+`docker compose exec dibs /dibs-server admin member add bob --project widgets --name "Bob Example"`.
+
+The compose file pins the subnet of the `edge` network to `172.31.250.0/24`. `DIBS_TRUSTED_PROXIES` in `.env` names
+that subnet, which is how the server knows that the address Caddy forwards is to be believed. Change both together if
+the subnet collides with one of your own.
+
+Pin `DIBS_VERSION` in `.env` to a release instead of `latest`, and pin the Caddy image by digest in a deployment you
+keep. Caddy runs with a read-only filesystem, no Docker socket and no admin API. Because the admin API is off, a changed
+Caddyfile takes effect with `docker compose restart caddy`.
+
+### TLS from certificate files (the default)
+
+`deploy/Caddyfile.example` serves `{$DIBS_HOST}:{$DIBS_PORT}` with the pair mounted read-only at
+`/certs/cert.pem` and `/certs/key.pem`, and turns Caddy's automatic HTTPS off. It fits a CDN's origin certificate, a
+corporate CA's certificate or any pair managed outside Caddy. Replace the files and restart Caddy when the pair is
+renewed. `DIBS_PORT` is the port Caddy listens on, inside the container and on the host (443 by default).
+
+### Caddy's automatic HTTPS
+
+For a host with a public name that Caddy can prove it owns, `deploy/Caddyfile.auto.example` lets Caddy obtain and renew
+the certificate itself. Use it as `Caddyfile` and change the compose file in three places:
+
+1. Publish ports `80:80` and `443:443` on the `caddy` service (the challenge arrives on 80 or 443).
+2. Replace the `/data` tmpfs of the `caddy` service with a persistent volume (`caddy-data:/data`, declared under
+   `volumes:`). That is where Caddy keeps its certificates and account; on a tmpfs it would ask for new ones at every
+   start and meet the certificate authority's rate limits.
+3. Drop the `./certs:/certs:ro` mount.
+
+No DNS-provider plugin and no provider credentials are involved: this mode needs the host reachable on 80 or 443.
+
+### Behind a CDN
+
+When a CDN sits between the visitors and the server, the address Caddy sees is the CDN's. The server limits failed
+sign-ins per client address, so it needs the visitor's address, and it must take it from a header only when the peer is
+a proxy it trusts.
+
+- `deploy/Caddyfile.cdn.example` makes Caddy believe the CDN's client-address header only from the CDN's own address
+  ranges (`trusted_proxies static …`, `client_ip_headers …`), and writes the address it resolved into a header for the
+  server (`header_up X-Edge-Client-IP {client_ip}`). A peer that reached the port without passing the CDN therefore
+  cannot forge it: Caddy overwrites the header. Put the ranges your CDN publishes in place of the example ones, and the
+  header your CDN uses (a name such as `CF-Connecting-IP` is typical) in place of `X-Edge-Client-IP`.
+- In `.env` set `DIBS_TRUST_PROXY=1`, `DIBS_TRUSTED_PROXIES` to the `edge` subnet and `DIBS_CLIENT_IP_HEADER` to the
+  header the Caddyfile writes.
+- **Firewall.** The published port should admit the CDN's ranges alone. Traffic to a port Docker
+  publishes is forwarded to the container, not delivered to the host, so the rules a host firewall such as `ufw` keeps
+  for incoming traffic never see it and a `ufw deny` does not close the port. Put the restriction in the `DOCKER-USER` chain, which Docker consults before its own
+  rules, or bind the published port to an address a firewall in front of the host controls.
+- **Event stream.** The stream sends a comment line (`: keep-alive`) every 25 seconds and answers with
+  `Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`. The CDN must not buffer, cache or compress
+  `/v1/events/stream` or `/ui/events/stream`, and its idle timeout for a connection must exceed 25 seconds. Caddy is
+  configured with `flush_interval -1` and no `encode` directive for the same reason.
+- **Challenges.** A CDN's bot or WAF challenge answers non-browser clients with an HTML page. The `dibs` command line,
+  its hooks and the MCP server are non-browser clients; exempt `/v1/*` and `/health` from challenges, or the clients
+  report a server that answers nonsense. The pages under `/ui` are for browsers and can stay challenged.
+
+## Configuration
+
+The server reads its configuration from environment variables once, when it starts. An empty value counts as not set.
+A value the server refuses stops it with status 2 and a sentence naming the variable.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DIBS_DATABASE` | none; required | The path of the SQLite database file. Created by `admin init` when it does not exist. |
+| `DIBS_LISTEN` | `0.0.0.0:8080` | The address and port to listen on. |
+| `DIBS_TRUST_PROXY` | `0` | `1` to take the client's address from a proxy; needs `DIBS_TRUSTED_PROXIES`. |
+| `DIBS_TRUSTED_PROXIES` | none | The proxies' addresses, comma-separated, each an IP or a CIDR block (`172.31.250.0/24`). |
+| `DIBS_CLIENT_IP_HEADER` | `X-Forwarded-For` | The header a trusted proxy names the client in. |
+| `DIBS_LOG` | `info` | The most detailed level logged: `error`, `warn`, `info`, `debug`, `trace` or `off`. |
+| `DIBS_SNAPSHOT_DIR` | none (snapshots off) | The directory snapshots are written into. It must exist. |
+| `DIBS_SNAPSHOT_EVERY` | `6h` | The time between snapshots: a whole number and `s`, `m`, `h` or `d`, from `1m` to `30d`. |
+| `DIBS_SNAPSHOT_KEEP` | `28` | How many of the newest snapshots are kept, 1 to 10000. |
+
+`DIBS_SNAPSHOT_EVERY` and `DIBS_SNAPSHOT_KEEP` without `DIBS_SNAPSHOT_DIR` are refused. With `X-Forwarded-For` the
+client is the right-most address outside the trusted set; any other header is read as one address. A malformed header
+from a trusted proxy falls back to the proxy's address and logs a warning.
+
+The server logs JSON lines to standard output. The request log names the method and the path, never a header, so a
+token in `Authorization` or a cookie is not written anywhere. Every command other than `serve` writes its answer to
+standard output and its log to standard error.
+
+## Commands
+
+```text
+dibs-server [serve]                                  serve until SIGTERM or Ctrl-C (the default)
+dibs-server admin init --project <slug> --admin <handle> --name <name> [--login <login>]
+dibs-server admin member add <handle> --project <slug> --name <name> [--login <login>] [--admin]
+dibs-server admin token rotate <project> <handle>
+dibs-server admin snapshot
+dibs-server restore <snapshot> --to <database>
+dibs-server migrate
+```
+
+The commands that issue a token (`admin init`, `admin member add`, `admin token rotate`) print the token alone on
+standard output and a sentence about it on standard error, so `token=$(… 2>/dev/null)` captures exactly the token. The
+token is shown once; the server keeps only a hash. Exit status: 0 done, 1 refused or failed, 2 configuration refused.
+
+Members can also be added, and their tokens rotated, with `dibs admin member add` and `dibs admin token rotate` from a
+client signed in as an admin.
+
+### Rotating a token
+
+Rotate on an event: someone leaves, a token leaks, a laptop is lost. Tokens have no expiry.
+
+```sh
+docker compose exec dibs /dibs-server admin token rotate widgets bob
+```
+
+This revokes every token of the member, ends the browser sessions those tokens opened, and prints one new token. The
+member signs in again with `dibs login`.
+
+## Snapshots
+
+With `DIBS_SNAPSHOT_DIR` set, a background task writes a consistent copy of the database (`VACUUM INTO`) every
+`DIBS_SNAPSHOT_EVERY`, starting as the server starts, and keeps the newest `DIBS_SNAPSHOT_KEEP`. The newest snapshot is
+never deleted.
+
+- A snapshot is named `dibs-<UTC timestamp>.db`, such as `dibs-20261019T215526.072Z.db`, so the names sort by age. It
+  is written under a hidden temporary name, flushed to disk and renamed, so a file with a final name is whole. A crash
+  in the middle can leave a hidden `.partial` file, which is safe to delete.
+- Only files of that name form are counted or deleted; the directory may hold other files.
+- `dibs-server admin snapshot` writes one now (and applies the retention). The server logs each snapshot's size and
+  duration.
+- Snapshots on the same disk as the database protect against a mistake, not against losing the machine. Copy the
+  directory off the host on a schedule. Do not copy the live `dibs.db`: it is in write-ahead-log mode, and a file copied
+  while the server runs may miss what is still in the `-wal` file.
+
+## Restoring
+
+A restore is offline and never replaces a database: it writes a new file. It refuses while a server holds the target
+(see the lock file below), and refuses a target, or a `-wal` or `-shm` file by its name, that exists.
+
+```sh
+docker compose stop dibs
+mkdir -p data/old && mv data/dibs.db* data/old/
+docker compose run --rm dibs restore /snapshots/dibs-20261019T215526.072Z.db --to /data/dibs.db
+docker compose up -d dibs
+```
+
+The snapshot is copied under a hidden name beside the target, opened there and brought up to the current schema, and
+only then renamed to the target, so the target appears whole and migrated or not at all. The snapshot is never written
+to. To keep the old database in place instead, restore to another path and point `DIBS_DATABASE` at it in `.env`.
+
+## Upgrading
+
+1. Read the release's notes.
+2. Take a snapshot: `docker compose exec dibs /dibs-server admin snapshot`.
+3. Set `DIBS_VERSION` in `.env` to the new release, then `docker compose pull && docker compose up -d`.
+
+The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
+Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
+snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
+serving, offline.
+
+Upgrade the server before the clients. A stop is graceful on `SIGTERM`: the server stops accepting connections, ends the
+event streams, gives requests in flight 10 seconds, finishes a snapshot it is writing, checkpoints the write-ahead log
+and closes the database. The compose file allows 20 seconds.
+
+## The lock file
+
+A server holds `<database>.lock` (`/data/dibs.db.lock`) for as long as it runs, as an exclusive advisory lock on that
+file. `restore` and `migrate` take the same lock while they run, so they refuse a database a server is serving, and a
+second server refuses it too: *another process holds the database*. The operating system releases the lock when the
+process ends, however it ends, so a crashed server leaves nothing to clean up. The lock file itself stays and is reused;
+do not delete it while a process runs. The `admin` commands only read and write rows through SQLite and do not take it,
+which is why they work against a running server.
+
+Keep the database on a local disk. Locks and SQLite's write-ahead log are unreliable on network filesystems.
+
+## The GHCR package
+
+The first push creates `ghcr.io/hryvinskyi/dibs` as a **private** package, and it stays private until its visibility is
+set: until then `docker pull` fails for everyone not logged in to `ghcr.io` with a token that may read packages. After
+the first release, open the package on GitHub (the repository's *Packages* section, then *Package settings*) and change
+its visibility to public. The image carries the `org.opencontainers.image.source` label, which connects the package to
+the repository.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| The server exits at start with *the database … could not be opened* | The `/data` directory is not writable by user `65532`. |
+| *another server, a restore or a migration holds the database* | Another process has the database; stop it. |
+| A client reports a `429` with `too_many_attempts` | Ten failed sign-ins from one address within a minute. If every client shares one address, the proxy's, `DIBS_TRUST_PROXY` and `DIBS_TRUSTED_PROXIES` are not set as above. |
+| A client reports `503` with `too_many_streams` | A member holds 8 event streams open, or the server 128. |
+| The web pages cannot sign in | The session cookie is `Secure`: use the pages over HTTPS (or `localhost`). |

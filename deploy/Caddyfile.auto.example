@@ -1,0 +1,21 @@
+# Caddy's own automatic HTTPS, for a host with a public name that Caddy can prove it owns.
+#
+# Use it with the compose file changed in three places:
+#   - publish 80 and 443 on the caddy service: ports "80:80" and "443:443";
+#   - replace the `/data` tmpfs of the caddy service with a persistent volume (`caddy-data:/data`,
+#     declared under `volumes:`), because that is where Caddy keeps its certificates;
+#   - drop the `./certs:/certs:ro` mount, which this mode does not use.
+# Set DIBS_HOST to the public name; DIBS_PORT is not used.
+#
+# No `encode` directive: the event stream must never be compressed or buffered. No access log is
+# configured, so no request header (Cookie, Authorization) is written anywhere.
+{
+	admin off
+}
+
+{$DIBS_HOST} {
+	reverse_proxy dibs:8080 {
+		# Send each chunk of the event stream as it is written.
+		flush_interval -1
+	}
+}
