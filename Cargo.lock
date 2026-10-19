@@ -845,6 +845,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dibs-e2e"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "dibs-host-claude-code"
 version = "0.1.0"
 dependencies = [

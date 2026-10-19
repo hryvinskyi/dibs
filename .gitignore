@@ -5,3 +5,5 @@ node_modules/
 deploy/data/
 deploy/snapshots/
 deploy/certs/
+web/test-results/
+web/playwright-report/

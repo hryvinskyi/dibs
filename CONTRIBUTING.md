@@ -28,6 +28,9 @@ cargo xtask integrations --check
 npm --prefix web ci
 npm --prefix web run typecheck
 npm --prefix web test
+cargo build -p dibs -p dibs-server && cargo test -p dibs-e2e
+npm --prefix web exec playwright install chromium   # once
+npm --prefix web run e2e
 ```
 
 - `scripts/check-domain-deps.sh` keeps the inner layers from importing outer ones.
@@ -37,6 +40,11 @@ npm --prefix web test
   not in the repository, so a contributor cannot run it; CI runs it with the list as a secret.
 - `cargo xtask integrations --check` verifies that the agents' workflow text, rendered from `docs/agent-workflow.md`
   into every integration, matches its source. Change the source and run `cargo xtask integrations`.
+- `tests/e2e/` runs the built `dibs-server` and `dibs` as separate processes on an ephemeral port with a temporary database
+  and a home of their own for each member (races between two claimants, the guard's hooks, a project over two
+  repositories). `web/e2e/` drives the pages in Chromium with Playwright against the same binary (`DIBS_SERVER_BIN`
+  names another build) and fails a test when the page reports a content security policy violation. Both run in CI in
+  the `e2e` job; `cargo test --workspace` also runs the first.
 - The scripts have tests of their own under `scripts/tests/`, run in CI.
 - `deploy/` is validated in CI: every Caddyfile with `caddy validate` in the `caddy:2` image, the compose file with
   `docker compose config`, and the image by building it and starting it. `actionlint` checks the workflows.

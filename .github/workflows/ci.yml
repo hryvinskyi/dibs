@@ -21,7 +21,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude dibs-e2e
       - run: scripts/check-domain-deps.sh
       - name: The agents' workflow text in every integration matches its source
         run: cargo xtask integrations --check
@@ -72,6 +72,30 @@ jobs:
       - run: npm --prefix web ci
       - run: npm --prefix web run typecheck
       - run: npm --prefix web test
+
+  e2e:
+    name: end to end
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the server and the command line
+        run: cargo build -p dibs-server -p dibs
+      - name: The built binaries as separate processes
+        run: cargo test -p dibs-e2e
+      - run: npm --prefix web ci
+      - name: The browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: The pages in a browser
+        working-directory: web
+        run: npx playwright test
 
   clean:
     runs-on: ubuntu-latest
