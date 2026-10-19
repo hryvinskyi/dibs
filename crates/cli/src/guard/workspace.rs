@@ -1,0 +1,141 @@
+//! The governed checkouts the guard works in: the nearest `.dibs.toml` above an event's directory,
+//! the repository it says it is (confirmed against its `origin`), and the project's state, server
+//! and upkeep.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use time::{Duration, OffsetDateTime};
+
+use dibs_agent_host::ports::{
+    CoordinationGateway, LocalCache, PortError, Upkeep, Workspace, Workspaces,
+};
+use dibs_agent_host::upkeep::is_fresh;
+use dibs_client::checkout::Checkout;
+use dibs_client::locations::Locations;
+use dibs_client::state::{StateDir, read_json, write_json};
+use dibs_domain::paths::RelPath;
+use dibs_domain::repo::{RemoteUrl, RepoId};
+use dibs_domain::settings::ProjectSettings;
+
+use crate::failure::sentence;
+use crate::git::Git;
+use crate::guard::cache::StateCache;
+use crate::guard::gateway::HookGateway;
+use crate::guard::remote::{Remote, RemoteError, checkout_of};
+use crate::guard::upkeep::DetachedSync;
+
+/// How long a checkout's `origin`, once read from git, is taken as it was.
+pub const ORIGIN_FRESH: Duration = Duration::minutes(10);
+
+/// Every checkout on this machine, found from the environment the binary received.
+pub struct ClientWorkspaces {
+    env: HashMap<String, String>,
+}
+
+impl ClientWorkspaces {
+    /// The checkouts, with the client's directories taken from `env`.
+    pub fn new(env: HashMap<String, String>) -> Self {
+        Self { env }
+    }
+}
+
+impl Workspaces for ClientWorkspaces {
+    fn open(&self, cwd: &Path) -> Result<Option<Box<dyn Workspace + '_>>, PortError> {
+        let checkout = match checkout_of(cwd) {
+            Ok(Some(checkout)) => checkout,
+            Ok(None) => return Ok(None),
+            Err(RemoteError::Config(text)) => return Err(PortError::Refused(text)),
+            Err(RemoteError::Client(error)) => {
+                return Err(PortError::Refused(sentence(&error.to_string())));
+            }
+        };
+        let locations = Locations::from_env(&|name| self.env.get(name).cloned())
+            .map_err(|error| PortError::Refused(sentence(&error.to_string())))?;
+        let remote = Remote::new(&checkout, &locations, &self.env);
+        Ok(Some(Box::new(ClientWorkspace::new(checkout, remote))))
+    }
+}
+
+/// One checkout, its project and the ports over them.
+pub struct ClientWorkspace {
+    checkout: Checkout,
+    state: StateDir,
+    cache: StateCache,
+    gateway: HookGateway,
+    upkeep: DetachedSync,
+}
+
+impl ClientWorkspace {
+    fn new(checkout: Checkout, remote: Remote) -> Self {
+        let state = remote.state.clone();
+        Self {
+            cache: StateCache::new(state.clone()),
+            upkeep: DetachedSync::new(state.clone(), checkout.root()),
+            gateway: HookGateway::new(remote, checkout.clone()),
+            checkout,
+            state,
+        }
+    }
+
+    /// The checkout's `origin`: as remembered when read from git within [`ORIGIN_FRESH`], read
+    /// from git (and remembered) otherwise. Git is a process start a hook does not repeat on
+    /// every call.
+    fn origin(&self) -> Option<RemoteUrl> {
+        let root = self.checkout.root();
+        let file = self.state.file("origin");
+        let now = OffsetDateTime::now_utc();
+        if let Some(known) = read_json::<OriginFile>(&file)
+            && known.root == root
+            && is_fresh(known.at, now, ORIGIN_FRESH)
+        {
+            return known.origin;
+        }
+        let origin = Git::new(root).origin();
+        let remembered = OriginFile {
+            root: root.to_path_buf(),
+            origin: origin.clone(),
+            at: now,
+        };
+        if let Err(error) = write_json(&file, &remembered) {
+            tracing::debug!(error = %error, "the origin could not be remembered");
+        }
+        origin
+    }
+}
+
+/// A checkout's `origin` as git last named it.
+#[derive(Serialize, Deserialize)]
+struct OriginFile {
+    root: PathBuf,
+    origin: Option<RemoteUrl>,
+    #[serde(with = "time::serde::rfc3339")]
+    at: OffsetDateTime,
+}
+
+impl Workspace for ClientWorkspace {
+    fn relative(&self, cwd: &Path, path: &Path) -> Option<RelPath> {
+        self.checkout.relative_path(cwd, path).ok()
+    }
+
+    fn repo(&self, settings: &ProjectSettings) -> Result<RepoId, PortError> {
+        let origin = self.origin();
+        self.checkout
+            .governing_repo(settings, origin.as_ref())
+            .map(|repo| repo.id.clone())
+            .map_err(|refused| PortError::Refused(sentence(&refused.to_string())))
+    }
+
+    fn cache(&self) -> &dyn LocalCache {
+        &self.cache
+    }
+
+    fn gateway(&self) -> &dyn CoordinationGateway {
+        &self.gateway
+    }
+
+    fn upkeep(&self) -> &dyn Upkeep {
+        &self.upkeep
+    }
+}

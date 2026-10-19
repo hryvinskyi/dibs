@@ -63,6 +63,11 @@ impl Context {
         self.env.get(name).cloned()
     }
 
+    /// The environment.
+    pub fn env(&self) -> &HashMap<String, String> {
+        &self.env
+    }
+
     /// The client's directories.
     ///
     /// # Errors

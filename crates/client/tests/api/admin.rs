@@ -65,12 +65,27 @@ fn settings_are_applied_and_answered_in_normal_form() {
     run(async {
         let document: SettingsDocument = serde_json::from_value(serde_json::json!({
             "stale_after": "2h",
+            "heartbeat_every": "300s",
             "areas": [{"name": "billing", "paths": ["billing/**"]}]
         }))
         .unwrap();
         let applied = alice.apply_settings(&document).await.unwrap();
         assert!(applied.changed);
         assert_eq!(applied.settings.areas.len(), 1);
+        assert_eq!(applied.settings.heartbeat_every.as_deref(), Some("5m"));
+        let me = alice.me().await.unwrap();
+        assert_eq!(
+            me.project_settings().unwrap().heartbeat_every(),
+            time::Duration::minutes(5)
+        );
+        let too_slow = SettingsDocument {
+            heartbeat_every: Some("16m".to_owned()),
+            ..SettingsDocument::default()
+        };
+        assert_eq!(
+            alice.apply_settings(&too_slow).await.unwrap_err().code(),
+            "invalid_settings"
+        );
         assert!(!alice.apply_settings(&document).await.unwrap().changed);
         let invalid = SettingsDocument {
             stale_after: Some("1s".to_owned()),

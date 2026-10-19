@@ -24,6 +24,7 @@ async fn me_answers_the_member_project_repositories_and_settings() {
         json!([{"id": "default", "remote": null}])
     );
     assert_eq!(single.body["settings"]["stale_after"], "1d");
+    assert_eq!(single.body["settings"]["heartbeat_every"], "1m");
     world.settings(&alice, two_repositories()).await;
     let several = world.get(&alice, "/v1/me").await;
     assert_eq!(

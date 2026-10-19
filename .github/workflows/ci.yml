@@ -23,6 +23,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: scripts/check-domain-deps.sh
+      - name: The agents' workflow text in every integration matches its source
+        run: cargo xtask integrations --check
 
   client:
     name: client (${{ matrix.os }})
@@ -38,6 +40,17 @@ jobs:
       - name: Test the crates that run on a developer's machine
         shell: bash
         run: cargo test -p dibs-domain -p dibs-client -p dibs-agent-host -p 'dibs-host-*' -p dibs
+
+  bench:
+    name: hook speed (reported, not gated)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: A hook on a warm cache, process start included
+        run: cargo bench -p dibs --bench warm_hook
 
   deny:
     runs-on: ubuntu-latest

@@ -10,6 +10,7 @@ members = [
     "crates/host-claude-code",
     "crates/cli",
     "crates/test-server",
+    "xtask",
 ]
 
 [workspace.package]

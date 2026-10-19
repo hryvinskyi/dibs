@@ -13,6 +13,8 @@ mod check;
 #[cfg(test)]
 mod failures;
 #[cfg(test)]
+mod hook;
+#[cfg(test)]
 mod login;
 #[cfg(test)]
 mod messages;

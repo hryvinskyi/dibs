@@ -19,10 +19,33 @@ pub struct Cli {
     pub json: bool,
     /// What to do.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Invocation,
 }
 
-/// The commands.
+/// Every command: the ones that run on their own, and the ones that talk to the server.
+#[derive(Debug, Subcommand)]
+pub enum Invocation {
+    /// Answer an agent host's hook: read its input on standard input, print its reply. Always
+    /// succeeds; a problem is a line in the reply, never a refusal.
+    Hook(HookArgs),
+    /// Show the agent hosts this dibs supports, what each can carry, and what this machine has
+    /// for them.
+    Doctor,
+    /// The commands that talk to the server.
+    #[command(flatten)]
+    Service(Command),
+}
+
+/// `dibs hook`.
+#[derive(Debug, Args)]
+pub struct HookArgs {
+    /// The agent host (`neutral`, …).
+    pub host: String,
+    /// The host's event, as its hook configuration names it.
+    pub event: String,
+}
+
+/// The commands that talk to the server.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Sign in: read a token from standard input, check it, and store it for its project.
@@ -55,9 +78,29 @@ pub enum Command {
     Thread(ThreadArgs),
     /// Mark a conversation read.
     Read(ThreadArgs),
+    /// Send a heartbeat and refresh what this machine remembers about the project, as far as
+    /// each is due.
+    Sync(SyncArgs),
     /// Manage the project (admins only).
     #[command(subcommand)]
     Admin(AdminCommand),
+}
+
+/// `dibs sync`.
+#[derive(Debug, Args)]
+pub struct SyncArgs {
+    /// The agent host whose session the heartbeat is for.
+    #[arg(long, requires = "session")]
+    pub host: Option<String>,
+    /// The host's id of that session.
+    #[arg(long, requires = "host")]
+    pub session: Option<String>,
+    /// Refresh everything, due or not.
+    #[arg(long)]
+    pub force: bool,
+    /// Print nothing.
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 /// `dibs login`.
@@ -326,8 +369,26 @@ mod tests {
     }
 
     #[test]
+    fn a_hook_names_its_host_and_event() {
+        let Invocation::Hook(hook) = Cli::try_parse_from(["dibs", "hook", "neutral", "after-tool"])
+            .unwrap()
+            .command
+        else {
+            panic!("not a hook");
+        };
+        assert_eq!(
+            (hook.host.as_str(), hook.event.as_str()),
+            ("neutral", "after-tool")
+        );
+        assert!(Cli::try_parse_from(["dibs", "sync", "--session", "s"]).is_err());
+        assert!(
+            Cli::try_parse_from(["dibs", "sync", "--host", "neutral", "--session", "s"]).is_ok()
+        );
+    }
+
+    #[test]
     fn keys_are_ids_or_references() {
-        let Command::Claim(claim) =
+        let Invocation::Service(Command::Claim(claim)) =
             Cli::try_parse_from(["dibs", "claim", "gh:acme/api#4", "--area", "billing"])
                 .unwrap()
                 .command

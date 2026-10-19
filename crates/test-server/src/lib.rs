@@ -3,14 +3,23 @@
 //! secrets are the fakes, for the use cases and the router alike, so a test can move time;
 //! everything else is the production wiring.
 //!
+//! Every request the router receives is logged by its path before it is answered, so a test can
+//! prove that something made no request, and every answer can be held back by a delay the test
+//! sets, so a test can stand in for a slow server.
+//!
 //! The server runs on a runtime of its own, so a test may drive it from plain synchronous code (a
 //! child process it spawns) or from a runtime of its own. Setting up projects and members goes
 //! through the use cases directly, as no route creates a project.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration as StdDuration;
+
+use axum::extract::{Request, State};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -63,6 +72,31 @@ fn failed<E: std::fmt::Debug>(what: &'static str) -> impl FnOnce(E) -> SetupErro
     move |error| SetupError(format!("{what}: {error:?}"))
 }
 
+/// The requests a server received and how long it holds back each answer.
+#[derive(Default)]
+struct Traffic {
+    paths: Mutex<Vec<String>>,
+    delay_ms: AtomicU64,
+}
+
+impl Traffic {
+    fn paths(&self) -> MutexGuard<'_, Vec<String>> {
+        self.paths
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Logs the request's path, waits the delay, then lets the router answer.
+async fn record(State(traffic): State<Arc<Traffic>>, request: Request, next: Next) -> Response {
+    traffic.paths().push(request.uri().path().to_owned());
+    let delay = traffic.delay_ms.load(Ordering::SeqCst);
+    if delay > 0 {
+        tokio::time::sleep(StdDuration::from_millis(delay)).await;
+    }
+    next.run(request).await
+}
+
 /// A running server.
 pub struct TestServer {
     runtime: Runtime,
@@ -70,6 +104,7 @@ pub struct TestServer {
     app: Arc<UseCases>,
     shutdown: Arc<Shutdown>,
     address: SocketAddr,
+    traffic: Arc<Traffic>,
     _dir: TempDir,
 }
 
@@ -87,6 +122,8 @@ impl TestServer {
         let dir = tempfile::tempdir().map_err(failed("a directory for the database"))?;
         let fakes = Fakes::new(START);
         let path = dir.path().join("dibs.db");
+        let traffic = Arc::new(Traffic::default());
+        let logged = traffic.clone();
         let (app, shutdown, address) = runtime.block_on(async {
             let result: Setup<_> = async {
                 let store = Arc::new(
@@ -116,6 +153,7 @@ impl TestServer {
                     ..HttpOptions::default()
                 };
                 let service = router(app.clone(), streams, options)
+                    .layer(middleware::from_fn_with_state(logged, record))
                     .into_make_service_with_connect_info::<SocketAddr>();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
@@ -138,8 +176,34 @@ impl TestServer {
             app,
             shutdown,
             address,
+            traffic,
             _dir: dir,
         })
+    }
+
+    /// How many requests the server has received.
+    pub fn requests(&self) -> usize {
+        self.traffic.paths().len()
+    }
+
+    /// How many requests the server has received for this path (`/v1/heartbeat`).
+    pub fn requests_to(&self, path: &str) -> usize {
+        self.traffic
+            .paths()
+            .iter()
+            .filter(|seen| *seen == path)
+            .count()
+    }
+
+    /// The paths of every request received, oldest first.
+    pub fn request_paths(&self) -> Vec<String> {
+        self.traffic.paths().clone()
+    }
+
+    /// Holds back every answer from now on by `delay`; zero answers at once again.
+    pub fn delay_answers(&self, delay: StdDuration) {
+        let millis = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self.traffic.delay_ms.store(millis, Ordering::SeqCst);
     }
 
     /// The server's base URL, `http://127.0.0.1:<port>`.
