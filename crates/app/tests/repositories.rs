@@ -147,7 +147,7 @@ mod repositories {
                     },
                 )
                 .await
-                .map(|created| created.item.id)
+                .map(|created| created.item.item.id)
                 .map_err(|error| error.code().to_owned())
         }
 
@@ -169,6 +169,7 @@ mod repositories {
                     },
                 )
                 .await
+                .map(|made| made.outcome)
                 .map_err(|error| error.code().to_owned())
         }
 
@@ -192,7 +193,7 @@ mod repositories {
                 .unwrap()
                 .verdicts
                 .into_iter()
-                .map(|v| v.verdict)
+                .map(|v| v.verdict.verdict)
                 .collect()
         }
     }
@@ -335,7 +336,7 @@ mod repositories {
             .await
             .unwrap();
         assert_eq!(
-            view.item.repository,
+            view.item.item.repository,
             ItemRepository::Listed(RepoId::parse("web").unwrap())
         );
 
@@ -390,7 +391,10 @@ mod repositories {
             .execute(&project.bob, item)
             .await
             .unwrap();
-        assert_eq!(view.claim.unwrap().areas, [area("web:billing")].into());
+        assert_eq!(
+            view.claim.unwrap().claim.areas,
+            [area("web:billing")].into()
+        );
         let alices = project
             .verdicts(
                 &project.alice,

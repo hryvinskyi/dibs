@@ -2,24 +2,23 @@
 
 use std::sync::Arc;
 
-use dibs_domain::claim::Claim;
 use dibs_domain::ids::ItemId;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedClaim, NamedItem, Names};
 use crate::ports::Store;
-use crate::records::ItemRecord;
 use crate::use_cases::common::existing_item;
 use crate::work::Work;
 
-/// A work item with whoever holds it.
+/// A work item with whoever holds it, each member with their handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemView {
     /// The item.
-    pub item: ItemRecord,
+    pub item: NamedItem,
     /// Its claim, live or stale.
-    pub claim: Option<Claim>,
+    pub claim: Option<NamedClaim>,
 }
 
 /// Shows one work item of the caller's project.
@@ -44,7 +43,11 @@ impl GetItem {
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let item = existing_item(&mut work, item).await?;
         let claim = work.claim(actor.project, item.id).await?;
-        Ok(ItemView { item, claim })
+        let names = Names::load(&mut work).await?;
+        Ok(ItemView {
+            item: names.item(item)?,
+            claim: claim.map(|claim| names.claim(claim)).transpose()?,
+        })
     }
 }
 
@@ -74,8 +77,11 @@ mod tests {
             .execute(&env.alice.actor, item)
             .await
             .unwrap();
-        assert_eq!(view.item.id, item);
-        assert_eq!(view.claim.map(|c| c.member), Some(env.bob.actor.member));
+        assert_eq!(view.item.item.id, item);
+        assert_eq!(view.item.created_by.as_str(), "alice");
+        let claim = view.claim.unwrap();
+        assert_eq!(claim.claim.member, env.bob.actor.member);
+        assert_eq!(claim.holder.as_str(), "bob");
     }
 
     #[tokio::test]

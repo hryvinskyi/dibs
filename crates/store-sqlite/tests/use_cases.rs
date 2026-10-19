@@ -10,12 +10,12 @@ mod use_cases {
     use time::{Duration, OffsetDateTime};
 
     use dibs_app::fakes::Fakes;
+    use dibs_app::named::Refusal;
     use dibs_app::ports::Store;
-    use dibs_app::records::ItemFilter;
     use dibs_app::use_cases::{
-        Addressees, ClaimItemInput, CreateItemInput, CreateMemberInput, EventCursor,
-        InitProjectInput, NewMember, RegisterSessionInput, StartThreadInput, TakeOverInput,
-        UseCases,
+        Addressees, ClaimItemInput, ClaimMade, CreateItemInput, CreateMemberInput, EventCursor,
+        InitProjectInput, ItemQuery, NewMember, RegisterSessionInput, StartThreadInput,
+        TakeOverInput, UseCases,
     };
     use dibs_app::{Actor, AppError, Dependencies};
     use dibs_domain::claim::{ClaimOutcome, ClaimRefused, TakeoverRefused};
@@ -126,6 +126,7 @@ mod use_cases {
             .await
             .unwrap()
             .item
+            .item
             .id
     }
 
@@ -180,7 +181,7 @@ mod use_cases {
             self: &Arc<Self>,
             items: &[ItemId],
             areas: &[&str],
-        ) -> Vec<(MemberId, Result<ClaimOutcome, AppError>)> {
+        ) -> Vec<(MemberId, Result<ClaimMade, AppError>)> {
             let mut tasks = Vec::new();
             for (n, item) in items.iter().copied().enumerate() {
                 let race = self.clone();
@@ -212,7 +213,15 @@ mod use_cases {
         let results = race.claim_all(&[item; RACERS], &[]).await;
         let winners: Vec<MemberId> = results
             .iter()
-            .filter(|(_, r)| matches!(r, Ok(ClaimOutcome::New { .. })))
+            .filter(|(_, r)| {
+                matches!(
+                    r,
+                    Ok(ClaimMade {
+                        outcome: ClaimOutcome::New { .. },
+                        ..
+                    })
+                )
+            })
             .map(|(member, _)| *member)
             .collect();
         assert_eq!(winners.len(), 1, "{results:?}");
@@ -220,7 +229,13 @@ mod use_cases {
         for (member, result) in &results {
             if *member != winner {
                 assert!(
-                    matches!(result, Err(AppError::Claim(ClaimRefused::HeldBy { member: holder, .. })) if *holder == winner),
+                    matches!(
+                        result,
+                        Err(AppError::Claim(Refusal {
+                            reason: ClaimRefused::HeldBy { member: holder, .. },
+                            member: Some(_),
+                        })) if *holder == winner
+                    ),
                     "{result:?}"
                 );
             }
@@ -232,7 +247,7 @@ mod use_cases {
             .execute(&race.admin, item)
             .await
             .unwrap();
-        assert_eq!(view.claim.map(|c| c.member), Some(winner));
+        assert_eq!(view.claim.map(|c| c.claim.member), Some(winner));
         let names = race.world.event_names(race.admin.project).await;
         assert_eq!(names.iter().filter(|n| **n == "claimed").count(), 1);
     }
@@ -254,7 +269,13 @@ mod use_cases {
         for (member, result) in &results {
             if *member != winners[0] {
                 assert!(
-                    matches!(result, Err(AppError::Claim(ClaimRefused::AreaHeld { member: holder, .. })) if *holder == winners[0]),
+                    matches!(
+                        result,
+                        Err(AppError::Claim(Refusal {
+                            reason: ClaimRefused::AreaHeld { member: holder, .. },
+                            member: Some(_),
+                        })) if *holder == winners[0]
+                    ),
                     "{result:?}"
                 );
             }
@@ -300,7 +321,13 @@ mod use_cases {
             match task.await.unwrap() {
                 Ok(_) => won += 1,
                 Err(error) => assert!(
-                    matches!(error, AppError::Takeover(TakeoverRefused::NotStale { .. })),
+                    matches!(
+                        error,
+                        AppError::Takeover(Refusal {
+                            reason: TakeoverRefused::NotStale { .. },
+                            ..
+                        })
+                    ),
                     "{error:?}"
                 ),
             }
@@ -377,7 +404,7 @@ mod use_cases {
         );
         assert!(
             app.list_items
-                .execute(&dave, ItemFilter::default())
+                .execute(&dave, ItemQuery::default())
                 .await
                 .unwrap()
                 .is_empty()

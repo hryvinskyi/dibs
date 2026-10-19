@@ -6,10 +6,9 @@ mod tenancy {
     use time::OffsetDateTime;
 
     use dibs_app::fakes::Fakes;
-    use dibs_app::records::ItemFilter;
     use dibs_app::use_cases::{
-        Addressees, CreateItemInput, CreateMemberInput, EventCursor, InitProjectInput, NewMember,
-        RegisterSessionInput, StartThreadInput, UseCases,
+        Addressees, CreateItemInput, CreateMemberInput, EventCursor, InitProjectInput, ItemQuery,
+        NewMember, RegisterSessionInput, StartThreadInput, UseCases,
     };
     use dibs_app::{Actor, AppError};
     use dibs_domain::handle::Handle;
@@ -81,6 +80,7 @@ mod tenancy {
             .await
             .unwrap()
             .item
+            .item
             .id;
         let thread = app
             .start_thread
@@ -114,7 +114,7 @@ mod tenancy {
         );
         assert!(
             app.list_items
-                .execute(&dave, ItemFilter::default())
+                .execute(&dave, ItemQuery::default())
                 .await
                 .unwrap()
                 .is_empty()

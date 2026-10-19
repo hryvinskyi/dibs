@@ -16,4 +16,25 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+axum = "0.8.9"
 dibs-app = { path = "../app" }
+dibs-domain = { path = "../domain" }
+dibs-store-sqlite = { path = "../store-sqlite" }
+lru = "0.19.0"
+rand = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10.9"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tower = { version = "0.5.3", features = ["timeout", "util"] }
+tower-http = { version = "0.7.1", features = ["trace", "set-header", "catch-panic"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "fmt"] }
+
+[dev-dependencies]
+dibs-app = { path = "../app", features = ["fakes"] }
+http-body-util = "0.1.5"
+tempfile = "3.27.0"
+time = { version = "0.3.55", features = ["macros"] }

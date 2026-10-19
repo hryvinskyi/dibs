@@ -10,10 +10,12 @@ use dibs_domain::grant::Grant;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::paths::RepoPath;
+use dibs_domain::reservation::ReservationPlan;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedVerdict, Names};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::common::own_session;
 use crate::work::Work;
@@ -28,6 +30,32 @@ pub struct EditCheckInput {
     /// Whether the edits are being made: then what the check plans is recorded and the claims the
     /// edits were attributed to are refreshed. A check that only asks (`false`) writes nothing.
     pub reserve: bool,
+}
+
+/// The verdicts of a check, each with the handles of the members it names, and what the check
+/// planned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditVerdicts {
+    /// One verdict per path, in the order asked.
+    pub verdicts: Vec<NamedVerdict>,
+    /// What the check planned to record; recorded only when the edits are being made.
+    pub plan: ReservationPlan,
+    /// The caller's claims the edits were attributed to.
+    pub touch: BTreeSet<ItemId>,
+}
+
+impl EditVerdicts {
+    fn named(check: edit::EditCheck, names: &Names) -> Result<Self, AppError> {
+        Ok(Self {
+            verdicts: check
+                .verdicts
+                .into_iter()
+                .map(|verdict| names.verdict(verdict))
+                .collect::<Result<_, _>>()?,
+            plan: check.plan,
+            touch: check.touch,
+        })
+    }
 }
 
 /// Answers a verdict per path. When the edits are being made, it records what the domain planned —
@@ -68,7 +96,7 @@ impl EditCheck {
         &self,
         actor: &Actor,
         input: EditCheckInput,
-    ) -> Result<edit::EditCheck, AppError> {
+    ) -> Result<EditVerdicts, AppError> {
         let now = self.clock.now();
         let project = actor.project;
         let mut work = Work::begin(&*self.store, project).await?;
@@ -93,8 +121,9 @@ impl EditCheck {
                 now,
             },
         )?;
+        let names = Names::load(&mut work).await?;
         if !input.reserve {
-            return Ok(check);
+            return EditVerdicts::named(check, &names);
         }
         let mut gains: BTreeMap<ItemId, Gain> = BTreeMap::new();
         for add in &check.plan.add_areas {
@@ -138,7 +167,7 @@ impl EditCheck {
             .await?;
         }
         work.commit(&*self.notifier).await?;
-        Ok(check)
+        EditVerdicts::named(check, &names)
     }
 }
 
@@ -175,7 +204,7 @@ mod tests {
             .unwrap();
     }
 
-    async fn check(env: &Env, who: &Person, paths: &[&str], reserve: bool) -> edit::EditCheck {
+    async fn check(env: &Env, who: &Person, paths: &[&str], reserve: bool) -> EditVerdicts {
         EditCheck::new(&env.deps)
             .execute(
                 &who.actor,
@@ -189,8 +218,12 @@ mod tests {
             .unwrap()
     }
 
-    fn verdicts(check: &edit::EditCheck) -> Vec<Verdict> {
-        check.verdicts.iter().map(|v| v.verdict.clone()).collect()
+    fn verdicts(check: &EditVerdicts) -> Vec<Verdict> {
+        check
+            .verdicts
+            .iter()
+            .map(|v| v.verdict.verdict.clone())
+            .collect()
     }
 
     #[tokio::test]
@@ -303,6 +336,8 @@ mod tests {
                 reason: HeldReason::AskHolder,
             }]
         );
+        let alice = Some(Handle::parse("alice").unwrap());
+        assert_eq!(held.verdicts[0].member, alice);
         Grant::new(&env.deps)
             .execute(
                 &env.alice.actor,
@@ -322,6 +357,7 @@ mod tests {
                 area: area("default:billing"),
             }]
         );
+        assert_eq!(granted.verdicts[0].member, alice);
     }
 
     #[tokio::test]
@@ -352,6 +388,11 @@ mod tests {
             panic!("expected a note, got {:?}", second.verdicts);
         };
         assert_eq!(touched_by[0].member, env.alice.actor.member);
+        assert_eq!(
+            second.verdicts[0].touched_by,
+            [Handle::parse("alice").unwrap()]
+        );
+        assert_eq!(second.verdicts[0].member, None);
     }
 
     #[tokio::test]

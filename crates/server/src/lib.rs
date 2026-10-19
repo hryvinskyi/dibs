@@ -1,9 +1,17 @@
-//! HTTP API, web UI and composition root of the server.
+//! HTTP API and composition root of the server.
+//!
+//! The routes translate HTTP to the use cases of `dibs-app` and back: they parse what a request
+//! carries into the values the use cases take, call one use case, and write its answer or refusal
+//! as JSON. They decide nothing the use cases decide.
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_identifies_itself() {
-        assert_eq!(env!("CARGO_PKG_NAME"), "dibs-server");
-    }
-}
+pub mod adapters;
+pub mod auth;
+pub mod client_ip;
+pub mod config;
+pub mod error;
+pub mod fields;
+pub mod http;
+pub mod rate_limit;
+pub mod routes;
+pub mod serve;
+pub mod views;

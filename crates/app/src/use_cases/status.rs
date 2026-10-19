@@ -3,24 +3,24 @@
 use std::sync::Arc;
 
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::claim::Claim;
+use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MemberId};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedClaim, NamedItem, Names};
 use crate::ports::{Clock, Store, StoreError};
-use crate::records::ItemRecord;
 use crate::work::Work;
 
-/// A claim with its item.
+/// A claim with its item, each member with their handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldItem {
     /// The claim.
-    pub claim: Claim,
+    pub claim: NamedClaim,
     /// The item.
-    pub item: ItemRecord,
+    pub item: NamedItem,
 }
 
 /// An area and the live claim holding it.
@@ -30,6 +30,8 @@ pub struct AreaHold {
     pub area: QualifiedArea,
     /// Its holder.
     pub member: MemberId,
+    /// The holder's handle.
+    pub holder: Handle,
     /// The item of the holder's claim.
     pub item: ItemId,
 }
@@ -75,6 +77,7 @@ impl Status {
             stale: Vec::new(),
             holds: Vec::new(),
         };
+        let names = Names::load(&mut work).await?;
         for claim in work.claims(actor.project).await? {
             let item =
                 work.item(actor.project, claim.item)
@@ -82,13 +85,18 @@ impl Status {
                     .ok_or_else(|| StoreError::Corrupt {
                         what: format!("claim on item {} that does not exist", claim.item),
                     })?;
-            let held = HeldItem { claim, item };
-            if held.claim.is_live(now, stale_after) {
+            let held = HeldItem {
+                claim: names.claim(claim)?,
+                item: names.item(item)?,
+            };
+            let claim = &held.claim;
+            if claim.claim.is_live(now, stale_after) {
                 view.holds
-                    .extend(held.claim.areas.iter().map(|area| AreaHold {
+                    .extend(claim.claim.areas.iter().map(|area| AreaHold {
                         area: area.clone(),
-                        member: held.claim.member,
-                        item: held.claim.item,
+                        member: claim.claim.member,
+                        holder: claim.holder.clone(),
+                        item: claim.claim.item,
                     }));
                 view.live.push(held);
             } else {
@@ -135,7 +143,7 @@ mod tests {
             .execute(&env.alice.actor)
             .await
             .unwrap();
-        let ids = |held: &[HeldItem]| held.iter().map(|h| h.item.id).collect::<Vec<_>>();
+        let ids = |held: &[HeldItem]| held.iter().map(|h| h.item.item.id).collect::<Vec<_>>();
         assert_eq!(ids(&view.live), [fresh]);
         assert_eq!(ids(&view.stale), [old]);
         let holds: Vec<(String, ItemId)> = view
@@ -151,5 +159,7 @@ mod tests {
             ]
         );
         assert!(view.holds.iter().all(|h| h.member == env.bob.actor.member));
+        assert!(view.holds.iter().all(|h| h.holder.as_str() == "bob"));
+        assert_eq!(view.live[0].claim.holder.as_str(), "bob");
     }
 }

@@ -11,6 +11,7 @@ use dibs_domain::item::ItemStatus;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{Names, refuse};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::common::{existing_item, own_session, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
@@ -26,6 +27,15 @@ pub struct ClaimItemInput {
     /// The areas to declare, as a person names them: `repo:area`, or a bare name exactly one
     /// repository declares.
     pub areas: Vec<String>,
+}
+
+/// What a claim did, with the claiming member's handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimMade {
+    /// The new or renewed claim.
+    pub outcome: ClaimOutcome,
+    /// The handle of the claim's member, the caller.
+    pub holder: dibs_domain::handle::Handle,
 }
 
 /// Claims a work item for the caller, or renews the caller's own claim on it.
@@ -58,12 +68,12 @@ impl ClaimItem {
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for an unknown item or a
     /// session not the caller's; [`AppError::ItemClosed`] for a done or dropped item;
     /// [`AppError::Area`] for an area that does not resolve; [`AppError::Claim`] when another
-    /// member holds the item or a declared area; [`AppError::Store`] when the store fails.
+    /// member holds the item or a declared area, naming that member; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
         input: ClaimItemInput,
-    ) -> Result<ClaimOutcome, AppError> {
+    ) -> Result<ClaimMade, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
         let project = actor.project;
@@ -85,7 +95,10 @@ impl ClaimItem {
         };
         let current = work.claim(project, item.id).await?;
         let others = work.claims(project).await?;
-        let outcome = decide_claim(current.as_ref(), &others, &request, now, &settings)?;
+        let outcome = match decide_claim(current.as_ref(), &others, &request, now, &settings) {
+            Ok(outcome) => outcome,
+            Err(reason) => return Err(refuse(&mut work, reason).await),
+        };
         let claim = outcome.claim();
         work.save_claim(project, claim).await?;
         let event = match &outcome {
@@ -110,8 +123,9 @@ impl ClaimItem {
         };
         work.record(now, event).await?;
         end_orphaned_grants(&mut work, now).await?;
+        let holder = Names::load(&mut work).await?.handle(actor.member)?;
         work.commit(&*self.notifier).await?;
-        Ok(outcome)
+        Ok(ClaimMade { outcome, holder })
     }
 }
 
@@ -125,6 +139,7 @@ mod tests {
     use dibs_domain::handle::Handle;
 
     use super::*;
+    use crate::named::Refusal;
     use crate::use_cases::testing::Env;
     use crate::use_cases::{
         Complete, CreateItem, CreateItemInput, Grant, GrantInput, InitProject, InitProjectInput,
@@ -151,7 +166,8 @@ mod tests {
             .execute(&env.bob.actor, input(item, env.bob.session, &["billing"]))
             .await
             .unwrap();
-        let ClaimOutcome::New { claim } = &outcome else {
+        assert_eq!(outcome.holder.as_str(), "bob");
+        let ClaimOutcome::New { claim } = &outcome.outcome else {
             panic!("expected a new claim, got {outcome:?}");
         };
         assert_eq!(claim.member, env.bob.actor.member);
@@ -195,7 +211,7 @@ mod tests {
             .execute(&env.bob.actor, input(item, env.bob.session, &["search"]))
             .await
             .unwrap();
-        let ClaimOutcome::Renewed { claim, .. } = &outcome else {
+        let ClaimOutcome::Renewed { claim, .. } = &outcome.outcome else {
             panic!("expected a renewal, got {outcome:?}");
         };
         assert_eq!(
@@ -224,10 +240,15 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), "held");
-        assert!(matches!(
-            error,
-            AppError::Claim(ClaimRefused::HeldBy { member, .. }) if member == env.bob.actor.member
-        ));
+        let AppError::Claim(Refusal {
+            reason: ClaimRefused::HeldBy { member, .. },
+            member: Some(handle),
+        }) = &error
+        else {
+            panic!("expected held, naming the holder, got {error:?}");
+        };
+        assert_eq!(*member, env.bob.actor.member);
+        assert_eq!(handle.as_str(), "bob");
         assert_eq!(env.events().await.len(), before);
     }
 
@@ -246,6 +267,10 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), "stale");
+        assert!(matches!(
+            &error,
+            AppError::Claim(Refusal { member: Some(handle), .. }) if handle.as_str() == "bob"
+        ));
     }
 
     #[tokio::test]
@@ -267,8 +292,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), "area_held");
         assert!(matches!(
-            error,
-            AppError::Claim(ClaimRefused::AreaHeld { item, .. }) if item == first
+            &error,
+            AppError::Claim(Refusal {
+                reason: ClaimRefused::AreaHeld { item, .. },
+                member: Some(handle),
+            }) if *item == first && handle.as_str() == "bob"
         ));
         let mut tx = env.deps.store.begin().await.unwrap();
         assert_eq!(tx.claim(env.project, second).await.unwrap(), None);
@@ -369,6 +397,7 @@ mod tests {
             .await
             .unwrap()
             .item
+            .item
             .id;
         let error = ClaimItem::new(&env.deps)
             .execute(&env.bob.actor, input(theirs, env.bob.session, &[]))
@@ -420,7 +449,7 @@ mod tests {
             .execute(&env.alice.actor, input(alices, env.alice.session, &[]))
             .await
             .unwrap();
-        let ClaimOutcome::Renewed { dropped_areas, .. } = &outcome else {
+        let ClaimOutcome::Renewed { dropped_areas, .. } = &outcome.outcome else {
             panic!("expected a renewal, got {outcome:?}");
         };
         assert_eq!(*dropped_areas, [area("default:billing")].into());
@@ -430,7 +459,7 @@ mod tests {
         assert_eq!(
             kinds[1],
             EventKind::GrantRevoked(GrantRevoked {
-                grant: granted.grant.id,
+                grant: granted.grant.record.id,
                 item: bobs,
                 area: area("default:billing"),
                 from: env.alice.actor.member,

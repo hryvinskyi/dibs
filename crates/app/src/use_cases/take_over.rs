@@ -12,6 +12,7 @@ use dibs_domain::message::{Body, Recipients, Subject};
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{Names, refuse};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::{MessageRecord, ThreadRecord};
 use crate::use_cases::common::{existing_item, own_session, remove_claim, resolve_areas};
@@ -41,6 +42,10 @@ pub struct TakenOverClaim {
     pub takeover: Takeover,
     /// The thread that told the previous holder.
     pub thread: ThreadId,
+    /// The handle of the new claim's member, the caller.
+    pub holder: dibs_domain::handle::Handle,
+    /// The handle of the previous claim's member.
+    pub previous_holder: dibs_domain::handle::Handle,
 }
 
 /// Takes over another member's stale claim on an item. In the same transaction the previous claim
@@ -100,7 +105,10 @@ impl TakeOver {
         };
         let current = work.claim(project, item.id).await?;
         let others = work.claims(project).await?;
-        let takeover = decide_takeover(current.as_ref(), &others, &request, now, &settings)?;
+        let takeover = match decide_takeover(current.as_ref(), &others, &request, now, &settings) {
+            Ok(takeover) => takeover,
+            Err(reason) => return Err(refuse(&mut work, reason).await),
+        };
         remove_claim(&mut work, &takeover.previous).await?;
         work.save_claim(project, &takeover.claim).await?;
         work.record(
@@ -152,10 +160,15 @@ impl TakeOver {
         )
         .await?;
         end_orphaned_grants(&mut work, now).await?;
+        let names = Names::load(&mut work).await?;
+        let holder = names.handle(actor.member)?;
+        let previous_holder = names.handle(takeover.previous.member)?;
         work.commit(&*self.notifier).await?;
         Ok(TakenOverClaim {
             takeover,
             thread: thread.id,
+            holder,
+            previous_holder,
         })
     }
 }
@@ -184,6 +197,7 @@ mod tests {
     use dibs_domain::message::may_read;
 
     use super::*;
+    use crate::named::Refusal;
     use crate::use_cases::testing::Env;
     use crate::use_cases::{ClaimItem, ClaimItemInput, Grant, GrantInput, Inbox};
 
@@ -288,8 +302,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), "not_stale");
         assert!(matches!(
-            error,
-            AppError::Takeover(TakeoverRefused::NotStale { .. })
+            &error,
+            AppError::Takeover(Refusal {
+                reason: TakeoverRefused::NotStale { .. },
+                member: Some(handle),
+            }) if handle.as_str() == "bob"
         ));
         assert_eq!(env.events().await.len(), before);
     }
@@ -362,7 +379,7 @@ mod tests {
         assert_eq!(
             kinds.last(),
             Some(&EventKind::GrantRevoked(GrantRevoked {
-                grant: granted.grant.id,
+                grant: granted.grant.record.id,
                 item: alices,
                 area: QualifiedArea::parse("default:billing").unwrap(),
                 from: env.bob.actor.member,

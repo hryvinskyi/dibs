@@ -9,12 +9,13 @@ use dibs_domain::ids::GrantId;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::{AppError, Missing};
+use crate::named::{NamedGrant, Names};
 use crate::ports::{Clock, EventNotifier, Store};
-use crate::records::GrantRecord;
 use crate::use_cases::grant_endings::grant_revoked;
 use crate::work::Work;
 
-/// Withdraws a grant the caller gave; its record is removed.
+/// Withdraws a grant the caller gave; its record is removed and answered with the handles of its
+/// two members.
 pub struct RevokeGrant {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -36,7 +37,7 @@ impl RevokeGrant {
     /// # Errors
     /// [`AppError::NotFound`] when the project has no such grant; [`AppError::Revoke`] when the
     /// caller did not give it; [`AppError::Store`] when the store fails.
-    pub async fn execute(&self, actor: &Actor, grant: GrantId) -> Result<GrantRecord, AppError> {
+    pub async fn execute(&self, actor: &Actor, grant: GrantId) -> Result<NamedGrant, AppError> {
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let record = work
@@ -47,8 +48,9 @@ impl RevokeGrant {
         work.delete_grant(actor.project, record.id).await?;
         work.record(now, grant_revoked(&record, GrantEnd::Revoked))
             .await?;
+        let revoked = Names::load(&mut work).await?.grant(record)?;
         work.commit(&*self.notifier).await?;
-        Ok(record)
+        Ok(revoked)
     }
 }
 
@@ -98,14 +100,17 @@ mod tests {
         let revoke = RevokeGrant::new(&env.deps);
         assert_eq!(
             revoke
-                .execute(&env.bob.actor, given.id)
+                .execute(&env.bob.actor, given.record.id)
                 .await
                 .unwrap_err()
                 .code(),
             "not_grantor"
         );
         let before = env.events().await.len();
-        revoke.execute(&env.alice.actor, given.id).await.unwrap();
+        revoke
+            .execute(&env.alice.actor, given.record.id)
+            .await
+            .unwrap();
         let kinds = env.kinds_after(before).await;
         assert!(matches!(
             kinds.as_slice(),
@@ -119,7 +124,7 @@ mod tests {
         drop(tx);
         assert_eq!(
             revoke
-                .execute(&env.alice.actor, given.id)
+                .execute(&env.alice.actor, given.record.id)
                 .await
                 .unwrap_err()
                 .code(),

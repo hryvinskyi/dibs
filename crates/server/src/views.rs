@@ -1,0 +1,448 @@
+//! What the routes answer: the results of the use cases written as JSON. Members are named by the
+//! handle the use case read beside each id, ids are numbers, times are RFC 3339 in UTC, areas are
+//! `repo:area`.
+
+use std::collections::BTreeSet;
+
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+use time::OffsetDateTime;
+
+use dibs_app::named::{NamedClaim, NamedGrant, NamedItem, NamedVerdict};
+use dibs_app::records::{MemberRecord, SessionRecord};
+use dibs_app::use_cases::HeldItem;
+use dibs_domain::area::QualifiedArea;
+use dibs_domain::edit::{HeldReason, Verdict};
+use dibs_domain::handle::Handle;
+use dibs_domain::hot_rule::{HotRuleKind, Note};
+use dibs_domain::ids::{GrantId, ItemId, SessionId};
+use dibs_domain::item::{ExternalRef, ItemRepository, ItemStatus, Title};
+use dibs_domain::member::{DisplayName, ExternalLogin, Role};
+use dibs_domain::message::SessionLabel;
+use dibs_domain::repo::{RemoteUrl, RepoId};
+use dibs_domain::session::{AgentLabel, HostName};
+
+use crate::error::ApiError;
+
+/// A JSON answer of this status. A value that cannot be written answers the internal error.
+pub fn reply<T: Serialize>(status: StatusCode, value: &T) -> Response {
+    match serde_json::to_string(value) {
+        Ok(body) => (
+            status,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )],
+            body,
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "an answer could not be written");
+            ApiError::internal().into_response()
+        }
+    }
+}
+
+/// A member.
+#[derive(Debug, Serialize)]
+pub struct MemberView {
+    /// The handle.
+    pub handle: Handle,
+    /// The name shown.
+    pub display_name: DisplayName,
+    /// The login elsewhere.
+    pub external_login: Option<ExternalLogin>,
+    /// The role.
+    pub role: Role,
+}
+
+impl MemberView {
+    /// The view of a member.
+    pub fn of(member: &MemberRecord) -> Self {
+        Self {
+            handle: member.handle.clone(),
+            display_name: member.display_name.clone(),
+            external_login: member.external_login.clone(),
+            role: member.role,
+        }
+    }
+}
+
+/// A session.
+#[derive(Debug, Serialize)]
+pub struct SessionView {
+    /// Its id.
+    pub session_id: SessionId,
+    /// Its machine.
+    pub host: HostName,
+    /// Its label.
+    pub label: SessionLabel,
+    /// The kind of agent it runs.
+    pub agent: AgentLabel,
+    /// Whether it can be woken while idle.
+    pub push: bool,
+    /// When it was last seen.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub last_seen: OffsetDateTime,
+}
+
+impl SessionView {
+    /// The view of a session.
+    pub fn of(session: SessionRecord) -> Self {
+        Self {
+            session_id: session.id,
+            host: session.host,
+            label: session.label,
+            agent: session.agent,
+            push: session.push,
+            last_seen: session.last_seen,
+        }
+    }
+}
+
+/// A work item.
+#[derive(Debug, Serialize)]
+pub struct ItemView {
+    /// Its local id.
+    pub id: ItemId,
+    /// Its reference in an outside tracker.
+    #[serde(rename = "ref")]
+    pub external_ref: Option<ExternalRef>,
+    /// Its title.
+    pub title: Title,
+    /// Where it stands.
+    pub status: ItemStatus,
+    /// The project's repository it belongs to, when its reference names a listed one.
+    pub repo: Option<RepoId>,
+    /// The repository its reference names when the project does not list it.
+    pub unlisted_remote: Option<RemoteUrl>,
+    /// Who created it.
+    pub created_by: Handle,
+    /// When.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub created_at: OffsetDateTime,
+}
+
+impl ItemView {
+    /// The view of an item.
+    pub fn of(named: NamedItem) -> Self {
+        let item = named.item;
+        let (repo, unlisted_remote) = match item.repository {
+            ItemRepository::Listed(repo) => (Some(repo), None),
+            ItemRepository::Unlisted(remote) => (None, Some(remote)),
+            ItemRepository::Unnamed => (None, None),
+        };
+        Self {
+            id: item.id,
+            external_ref: item.external_ref,
+            title: item.title,
+            status: item.status,
+            repo,
+            unlisted_remote,
+            created_by: named.created_by,
+            created_at: item.created_at,
+        }
+    }
+}
+
+/// A claim.
+#[derive(Debug, Serialize)]
+pub struct ClaimView {
+    /// The item held.
+    pub item: ItemId,
+    /// The member holding it.
+    pub holder: Handle,
+    /// The session that took or last renewed it.
+    pub session_id: SessionId,
+    /// That session's machine.
+    pub host: HostName,
+    /// The areas it declared.
+    pub areas: BTreeSet<QualifiedArea>,
+    /// When it was first claimed.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub claimed_at: OffsetDateTime,
+    /// When it was last claimed again.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub renewed_at: OffsetDateTime,
+    /// The last sign of life.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub last_seen: OffsetDateTime,
+}
+
+impl ClaimView {
+    /// The view of a claim.
+    pub fn of(named: NamedClaim) -> Self {
+        let claim = named.claim;
+        Self {
+            item: claim.item,
+            holder: named.holder,
+            session_id: claim.session,
+            host: claim.host,
+            areas: claim.areas,
+            claimed_at: claim.claimed_at,
+            renewed_at: claim.renewed_at,
+            last_seen: claim.last_seen,
+        }
+    }
+}
+
+/// An item with its claim.
+#[derive(Debug, Serialize)]
+pub struct HeldItemView {
+    /// The item.
+    pub item: ItemView,
+    /// Its claim.
+    pub claim: ClaimView,
+}
+
+impl HeldItemView {
+    /// The view of a held item.
+    pub fn of(held: HeldItem) -> Self {
+        Self {
+            item: ItemView::of(held.item),
+            claim: ClaimView::of(held.claim),
+        }
+    }
+}
+
+/// A grant.
+#[derive(Debug, Serialize)]
+pub struct GrantView {
+    /// Its id.
+    pub id: GrantId,
+    /// The grantee's work item.
+    pub item: ItemId,
+    /// The area.
+    pub area: QualifiedArea,
+    /// The holder who granted.
+    pub from: Handle,
+    /// The member who may edit.
+    pub to: Handle,
+    /// When.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub created_at: OffsetDateTime,
+}
+
+impl GrantView {
+    /// The view of a grant.
+    pub fn of(named: NamedGrant) -> Self {
+        Self {
+            id: named.record.id,
+            item: named.record.grant.item,
+            area: named.record.grant.area,
+            from: named.from,
+            to: named.to,
+            created_at: named.record.created_at,
+        }
+    }
+}
+
+/// A member's live claim on an item.
+#[derive(Debug, Serialize)]
+pub struct HolderView {
+    /// The member.
+    pub holder: Handle,
+    /// The item.
+    pub item: ItemId,
+}
+
+/// The verdict on one path.
+#[derive(Debug, Serialize)]
+pub struct PathVerdictView {
+    /// The path's repository.
+    pub repo: RepoId,
+    /// The path inside it.
+    pub path: String,
+    /// The verdict.
+    #[serde(flatten)]
+    pub verdict: VerdictView,
+}
+
+/// A verdict, tagged by `verdict`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum VerdictView {
+    /// The member may edit.
+    Allowed,
+    /// The member may edit; a hot-file rule has something to say.
+    AllowedWithNote {
+        /// The rule's kind.
+        rule: HotRuleKind,
+        /// The rule's note.
+        note: Option<Note>,
+        /// Other members' live claims that edited the same file.
+        touched_by: Vec<HolderView>,
+    },
+    /// The path needs a live claim first.
+    NeedsClaim,
+    /// Another member holds the path's area.
+    HeldBy {
+        /// The holder.
+        holder: Option<Handle>,
+        /// The holder's item.
+        item: ItemId,
+        /// The area.
+        area: QualifiedArea,
+        /// The way on: `ask_holder`, message the holder or ask for a grant.
+        reason: &'static str,
+    },
+    /// The holder granted the member edits in the area.
+    Granted {
+        /// The holder who granted.
+        by: Option<Handle>,
+        /// The area.
+        area: QualifiedArea,
+    },
+}
+
+impl PathVerdictView {
+    /// The view of one path's verdict.
+    pub fn of(named: NamedVerdict) -> Self {
+        let path = named.verdict.path;
+        let view = match named.verdict.verdict {
+            Verdict::Allowed => VerdictView::Allowed,
+            Verdict::AllowedWithNote {
+                rule,
+                note,
+                touched_by,
+            } => VerdictView::AllowedWithNote {
+                rule,
+                note,
+                touched_by: touched_by
+                    .into_iter()
+                    .zip(named.touched_by)
+                    .map(|(holder, handle)| HolderView {
+                        holder: handle,
+                        item: holder.item,
+                    })
+                    .collect(),
+            },
+            Verdict::NeedsClaim => VerdictView::NeedsClaim,
+            Verdict::HeldBy {
+                item, area, reason, ..
+            } => VerdictView::HeldBy {
+                holder: named.member,
+                item,
+                area,
+                reason: reason_code(reason),
+            },
+            Verdict::Granted { area, .. } => VerdictView::Granted {
+                by: named.member,
+                area,
+            },
+        };
+        Self {
+            repo: path.repo,
+            path: path.path.as_str().to_owned(),
+            verdict: view,
+        }
+    }
+}
+
+fn reason_code(reason: HeldReason) -> &'static str {
+    match reason {
+        HeldReason::AskHolder => "ask_holder",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    use time::macros::datetime;
+
+    use dibs_domain::claim::{Claim, Holder};
+    use dibs_domain::edit::PathVerdict;
+    use dibs_domain::hot_rule::HotRuleRegistry;
+    use dibs_domain::ids::MemberId;
+    use dibs_domain::paths::RepoPath;
+
+    use super::*;
+
+    fn handle(text: &str) -> Handle {
+        Handle::parse(text).unwrap()
+    }
+
+    #[test]
+    fn a_claim_names_its_holder_and_writes_times_as_rfc3339() {
+        let claim = Claim {
+            item: ItemId(5),
+            member: MemberId(1),
+            session: SessionId(9),
+            host: HostName::parse("laptop").unwrap(),
+            areas: BTreeSet::from([QualifiedArea::parse("api:billing").unwrap()]),
+            claimed_at: datetime!(2026-01-02 03:04:05 UTC),
+            renewed_at: datetime!(2026-01-02 03:04:05 UTC),
+            last_seen: datetime!(2026-01-02 03:05:00 UTC),
+        };
+        let view = serde_json::to_value(ClaimView::of(NamedClaim {
+            claim,
+            holder: handle("alice"),
+        }))
+        .unwrap();
+        assert_eq!(
+            view,
+            json!({
+                "item": 5, "holder": "alice", "session_id": 9, "host": "laptop",
+                "areas": ["api:billing"],
+                "claimed_at": "2026-01-02T03:04:05Z",
+                "renewed_at": "2026-01-02T03:04:05Z",
+                "last_seen": "2026-01-02T03:05:00Z"
+            })
+        );
+    }
+
+    #[test]
+    fn a_verdict_is_tagged_and_flattened() {
+        let named = NamedVerdict {
+            verdict: PathVerdict {
+                path: RepoPath::parse("api:src/billing/a.rs").unwrap(),
+                verdict: Verdict::HeldBy {
+                    member: MemberId(2),
+                    item: ItemId(3),
+                    area: QualifiedArea::parse("api:billing").unwrap(),
+                    reason: HeldReason::AskHolder,
+                },
+            },
+            member: Some(handle("bob")),
+            touched_by: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(PathVerdictView::of(named)).unwrap(),
+            json!({
+                "repo": "api", "path": "src/billing/a.rs", "verdict": "held_by",
+                "holder": "bob", "item": 3, "area": "api:billing", "reason": "ask_holder"
+            })
+        );
+    }
+
+    #[test]
+    fn the_editors_of_a_shared_file_are_named_in_order() {
+        let kind = HotRuleRegistry::standard().kind("warn-shared").unwrap();
+        let named = NamedVerdict {
+            verdict: PathVerdict {
+                path: RepoPath::parse("api:Cargo.lock").unwrap(),
+                verdict: Verdict::AllowedWithNote {
+                    rule: kind,
+                    note: None,
+                    touched_by: vec![
+                        Holder {
+                            member: MemberId(1),
+                            item: ItemId(4),
+                        },
+                        Holder {
+                            member: MemberId(2),
+                            item: ItemId(6),
+                        },
+                    ],
+                },
+            },
+            member: None,
+            touched_by: vec![handle("alice"), handle("bob")],
+        };
+        assert_eq!(
+            serde_json::to_value(PathVerdictView::of(named)).unwrap()["touched_by"],
+            json!([{"holder": "alice", "item": 4}, {"holder": "bob", "item": 6}])
+        );
+    }
+}

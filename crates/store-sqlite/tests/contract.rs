@@ -473,7 +473,7 @@ mod contract {
         let moved = SessionRecord {
             host: HostName::parse("desktop").unwrap(),
             label: SessionLabel::parse("desktop/mcp").unwrap(),
-            agent: AgentLabel::parse("other agent").unwrap(),
+            agent: AgentLabel::parse("other-agent").unwrap(),
             push: true,
             last_seen: at(30),
             ..session(ALICE_LAPTOP, ALICE, "ignored")

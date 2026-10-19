@@ -1,0 +1,145 @@
+//! The HTTP router: every route, the layers around them, and the state the handlers share.
+//!
+//! Every answer carries `Cache-Control: no-store` unless its handler set its own, so a cache in
+//! front never keeps one. A request body is read up to [`BODY_LIMIT`]; a request is answered within
+//! the configured timeout or refused with `timeout`. The request log names the method and the path
+//! only, never a header.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::error_handling::HandleErrorLayer;
+use axum::extract::DefaultBodyLimit;
+use axum::http::{HeaderValue, Request, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use tower::ServiceBuilder;
+use tower::timeout::TimeoutLayer;
+use tower::timeout::error::Elapsed;
+use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
+use tracing::Level;
+
+use dibs_app::use_cases::UseCases;
+
+use crate::client_ip::ClientIpPolicy;
+use crate::error::ApiError;
+use crate::rate_limit::{AuthLimiter, LimitPolicy};
+use crate::routes;
+
+/// The largest request body read, in bytes. A message of 16 KiB grows on the wire — JSON escapes a
+/// control character to six bytes, a form percent-encodes a non-ASCII byte to three — and still
+/// fits with the other fields.
+pub const BODY_LIMIT: usize = 128 * 1024;
+
+/// How long a request may take when nothing else is configured.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How the router treats the network around it.
+#[derive(Debug, Clone)]
+pub struct HttpOptions {
+    /// How the client's address is told.
+    pub client_ip: ClientIpPolicy,
+    /// The limit on failed sign-ins.
+    pub limits: LimitPolicy,
+    /// How long a request may take.
+    pub timeout: Duration,
+}
+
+impl Default for HttpOptions {
+    fn default() -> Self {
+        Self {
+            client_ip: ClientIpPolicy::new(None),
+            limits: LimitPolicy::default(),
+            timeout: REQUEST_TIMEOUT,
+        }
+    }
+}
+
+/// What every handler can reach.
+#[derive(Clone)]
+pub struct AppState {
+    /// The use cases.
+    pub(crate) app: Arc<UseCases>,
+    /// The failed sign-ins per address.
+    pub(crate) limiter: Arc<AuthLimiter>,
+    /// How the client's address is told.
+    pub(crate) client_ip: Arc<ClientIpPolicy>,
+}
+
+/// The router over these use cases.
+pub fn router(app: Arc<UseCases>, options: HttpOptions) -> Router {
+    let state = AppState {
+        app,
+        limiter: Arc::new(AuthLimiter::new(options.limits)),
+        client_ip: Arc::new(options.client_ip),
+    };
+    let api = Router::new()
+        .route("/health", get(routes::health))
+        .route("/v1/me", get(routes::me::me))
+        .route("/v1/members", get(routes::members::list))
+        .route("/v1/sessions", post(routes::sessions::register))
+        .route("/v1/heartbeat", post(routes::sessions::heartbeat))
+        .route(
+            "/v1/items",
+            get(routes::items::list).post(routes::items::create),
+        )
+        .route("/v1/items/{id}", get(routes::items::get))
+        .route("/v1/items/{id}/claim", post(routes::claims::claim))
+        .route("/v1/items/{id}/takeover", post(routes::claims::take_over))
+        .route("/v1/items/{id}/release", post(routes::claims::release))
+        .route("/v1/items/{id}/done", post(routes::claims::done))
+        .route("/v1/status", get(routes::status::status))
+        .route("/v1/edit-check", post(routes::edit_check::check))
+        .route("/v1/grants", post(routes::grants::grant))
+        .route("/v1/grants/{id}", delete(routes::grants::revoke))
+        .fallback(no_route)
+        .method_not_allowed_fallback(method_not_allowed)
+        .with_state(state);
+    api.layer(DefaultBodyLimit::max(BODY_LIMIT))
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(timed_out))
+                .layer(TimeoutLayer::new(options.timeout)),
+        )
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<_>| {
+                    tracing::info_span!(
+                        "request",
+                        method = %request.method(),
+                        path = %request.uri().path(),
+                    )
+                })
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
+        .layer(CatchPanicLayer::custom(panicked))
+}
+
+async fn no_route() -> ApiError {
+    ApiError::no_route()
+}
+
+async fn method_not_allowed() -> ApiError {
+    ApiError::method_not_allowed()
+}
+
+async fn timed_out(error: tower::BoxError) -> ApiError {
+    if error.is::<Elapsed>() {
+        ApiError::timeout()
+    } else {
+        tracing::error!(error = %error, "a request failed in a layer");
+        ApiError::internal()
+    }
+}
+
+fn panicked(_: Box<dyn std::any::Any + Send + 'static>) -> Response {
+    tracing::error!("a request handler panicked");
+    ApiError::internal().into_response()
+}

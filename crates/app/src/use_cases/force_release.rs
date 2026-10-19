@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use dibs_domain::claim::{ForceReleased, decide_force_release};
+use dibs_domain::claim::decide_force_release;
 use dibs_domain::event::{self, EventKind};
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
@@ -10,6 +10,7 @@ use dibs_domain::item::ItemStatus;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedClaim, Names};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
@@ -32,12 +33,12 @@ impl ForceRelease {
         }
     }
 
-    /// Ends the claim.
+    /// Ends the claim, answering the claim that ended with its holder's handle.
     ///
     /// # Errors
     /// [`AppError::ForceRelease`] when the caller is no admin or nobody holds the item;
     /// [`AppError::NotFound`] for an unknown item; [`AppError::Store`] when the store fails.
-    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<ForceReleased, AppError> {
+    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<NamedClaim, AppError> {
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let item = existing_item(&mut work, item).await?;
@@ -52,8 +53,9 @@ impl ForceRelease {
             }),
         };
         end_claim(&mut work, &forced.claim, ending, now).await?;
+        let ended = Names::load(&mut work).await?.claim(forced.claim)?;
         work.commit(&*self.notifier).await?;
-        Ok(forced)
+        Ok(ended)
     }
 }
 

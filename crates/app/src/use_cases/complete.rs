@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use dibs_domain::claim::{Completed, decide_complete};
+use dibs_domain::claim::decide_complete;
 use dibs_domain::event::{self, EventKind};
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
@@ -10,6 +10,7 @@ use dibs_domain::item::ItemStatus;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedClaim, Names, refuse};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
@@ -32,17 +33,20 @@ impl Complete {
         }
     }
 
-    /// Completes the claim.
+    /// Completes the claim, answering the claim that ended with its holder's handle.
     ///
     /// # Errors
     /// [`AppError::NotFound`] for an unknown item; [`AppError::HolderOnly`] when nobody or another
     /// member holds it; [`AppError::Store`] when the store fails.
-    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<Completed, AppError> {
+    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<NamedClaim, AppError> {
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let item = existing_item(&mut work, item).await?;
         let current = work.claim(actor.project, item.id).await?;
-        let completed = decide_complete(current.as_ref(), actor.member)?;
+        let completed = match decide_complete(current.as_ref(), actor.member) {
+            Ok(completed) => completed,
+            Err(reason) => return Err(refuse(&mut work, reason).await),
+        };
         let ending = Ending {
             status: ItemStatus::Done,
             event: EventKind::Completed(event::Completed {
@@ -51,8 +55,9 @@ impl Complete {
             }),
         };
         end_claim(&mut work, &completed.claim, ending, now).await?;
+        let ended = Names::load(&mut work).await?.claim(completed.claim)?;
         work.commit(&*self.notifier).await?;
-        Ok(completed)
+        Ok(ended)
     }
 }
 

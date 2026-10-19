@@ -11,6 +11,7 @@ use dibs_domain::ref_scheme::RefSchemeRegistry;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedItem, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::ItemRecord;
 use crate::work::Work;
@@ -27,8 +28,8 @@ pub struct CreateItemInput {
 /// The item the reference names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedItem {
-    /// The item, with its local id.
-    pub item: ItemRecord,
+    /// The item, with its local id and its creator's handle.
+    pub item: NamedItem,
     /// Whether this call created it, rather than finding it.
     pub created: bool,
 }
@@ -73,6 +74,7 @@ impl CreateItem {
         if let Some(reference) = &input.external_ref
             && let Some(item) = work.item_by_ref(actor.project, reference).await?
         {
+            let item = Names::load(&mut work).await?.item(item)?;
             return Ok(CreatedItem {
                 item,
                 created: false,
@@ -105,6 +107,7 @@ impl CreateItem {
             }),
         )
         .await?;
+        let item = Names::load(&mut work).await?.item(item)?;
         work.commit(&*self.notifier).await?;
         Ok(CreatedItem {
             item,
@@ -146,14 +149,15 @@ mod tests {
             .await
             .unwrap();
         assert!(created.created);
-        assert_eq!(created.item.status, ItemStatus::Open);
-        assert_eq!(created.item.created_by, env.bob.actor.member);
+        assert_eq!(created.item.item.status, ItemStatus::Open);
+        assert_eq!(created.item.item.created_by, env.bob.actor.member);
+        assert_eq!(created.item.created_by.as_str(), "bob");
         assert_eq!(
             env.kinds_after(before).await,
             [EventKind::ItemCreated(ItemCreated {
-                item: created.item.id,
-                external_ref: created.item.external_ref.clone(),
-                title: created.item.title.clone(),
+                item: created.item.item.id,
+                external_ref: created.item.item.external_ref.clone(),
+                title: created.item.item.title.clone(),
                 by: env.bob.actor.member,
             })]
         );
@@ -194,8 +198,8 @@ mod tests {
             .execute(&env.bob.actor, input(None, "A"))
             .await
             .unwrap();
-        assert_ne!(a.item.id, b.item.id);
-        assert_eq!(a.item.repository, ItemRepository::Unnamed);
+        assert_ne!(a.item.item.id, b.item.item.id);
+        assert_eq!(a.item.item.repository, ItemRepository::Unnamed);
     }
 
     #[tokio::test]
@@ -206,7 +210,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            created.item.repository,
+            created.item.item.repository,
             ItemRepository::Listed(RepoId::parse("web").unwrap())
         );
     }
@@ -227,7 +231,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            imported.item.repository,
+            imported.item.item.repository,
             ItemRepository::Unlisted(RemoteUrl::parse("github.com/acme/search").unwrap())
         );
     }

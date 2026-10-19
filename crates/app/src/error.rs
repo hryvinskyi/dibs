@@ -11,6 +11,7 @@ use dibs_domain::item::{CreateRefused, ItemStatus};
 use dibs_domain::message::RecipientsError;
 use dibs_domain::settings::{AreaLookupError, SettingsError};
 
+use crate::named::Refusal;
 use crate::ports::StoreError;
 use crate::token::TokenPrefix;
 use dibs_domain::project::ProjectSlug;
@@ -76,15 +77,15 @@ pub enum AppError {
     /// A recipient is an integration, which receives no message.
     #[error("'{0}' is an integration and receives no messages")]
     NotARecipient(Handle),
-    /// The claim was refused.
+    /// The claim was refused; the refusal carries the handle of the member in the way.
     #[error(transparent)]
-    Claim(#[from] ClaimRefused),
-    /// The takeover was refused.
+    Claim(#[from] Refusal<ClaimRefused>),
+    /// The takeover was refused; the refusal carries the handle of the member in the way.
     #[error(transparent)]
-    Takeover(#[from] TakeoverRefused),
-    /// The release or completion was refused.
+    Takeover(#[from] Refusal<TakeoverRefused>),
+    /// The release or completion was refused; the refusal carries the holder's handle.
     #[error(transparent)]
-    HolderOnly(#[from] HolderOnly),
+    HolderOnly(#[from] Refusal<HolderOnly>),
     /// The forced release was refused.
     #[error(transparent)]
     ForceRelease(#[from] ForceReleaseRefused),
@@ -128,20 +129,20 @@ impl AppError {
             Self::Duplicate(Duplicate::Handle(_)) => "handle_taken",
             Self::ItemClosed { .. } => "item_closed",
             Self::NotARecipient(_) => "not_a_recipient",
-            Self::Claim(refused) => match refused {
+            Self::Claim(refused) => match refused.reason {
                 ClaimRefused::HeldBy { .. } => "held",
                 ClaimRefused::Stale { .. } => "stale",
                 ClaimRefused::AreaHeld { .. } => "area_held",
                 ClaimRefused::UnknownArea { .. } => "unknown_area",
             },
-            Self::Takeover(refused) => match refused {
+            Self::Takeover(refused) => match refused.reason {
                 TakeoverRefused::NothingToTake => "nothing_to_take",
                 TakeoverRefused::OwnClaim => "own_claim",
                 TakeoverRefused::NotStale { .. } => "not_stale",
                 TakeoverRefused::AreaHeld { .. } => "area_held",
                 TakeoverRefused::UnknownArea { .. } => "unknown_area",
             },
-            Self::HolderOnly(refused) => match refused {
+            Self::HolderOnly(refused) => match refused.reason {
                 HolderOnly::NoClaim => "no_claim",
                 HolderOnly::NotHolder { .. } => "not_holder",
             },

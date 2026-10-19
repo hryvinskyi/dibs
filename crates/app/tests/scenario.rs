@@ -9,10 +9,10 @@ mod scenario {
     use time::{Duration, OffsetDateTime};
 
     use dibs_app::fakes::Fakes;
-    use dibs_app::records::ItemFilter;
+    use dibs_app::named::Refusal;
     use dibs_app::use_cases::{
         Addressees, ClaimItemInput, CreateItemInput, CreateMemberInput, EditCheckInput,
-        EventCursor, GrantInput, InitProjectInput, NewMember, PostMessageInput,
+        EventCursor, GrantInput, InitProjectInput, ItemQuery, NewMember, PostMessageInput,
         RegisterSessionInput, StartThreadInput, TakeOverInput, UseCases,
     };
     use dibs_app::{Actor, AppError};
@@ -138,6 +138,7 @@ mod scenario {
                 .await
                 .unwrap()
                 .item
+                .item
                 .id
         }
 
@@ -156,7 +157,7 @@ mod scenario {
                 .unwrap()
                 .verdicts
                 .into_iter()
-                .map(|v| v.verdict)
+                .map(|v| v.verdict.verdict)
                 .collect()
         }
 
@@ -187,14 +188,17 @@ mod scenario {
             .list_items
             .execute(
                 &team.bob,
-                ItemFilter {
+                ItemQuery {
                     external_ref: Some(ExternalRef::parse("gh:acme/widgets#42").unwrap()),
-                    ..ItemFilter::default()
+                    ..ItemQuery::default()
                 },
             )
             .await
             .unwrap();
-        assert_eq!(found.iter().map(|i| i.id).collect::<Vec<_>>(), [invoices]);
+        assert_eq!(
+            found.iter().map(|i| i.item.id).collect::<Vec<_>>(),
+            [invoices]
+        );
 
         // Without a claim, Bob may not touch billing.
         assert_eq!(
@@ -221,7 +225,8 @@ mod scenario {
             )
             .await
             .unwrap();
-        assert!(matches!(outcome, ClaimOutcome::New { .. }));
+        assert!(matches!(outcome.outcome, ClaimOutcome::New { .. }));
+        assert_eq!(outcome.holder.as_str(), "alice");
         let refused = app
             .claim_item
             .execute(
@@ -231,6 +236,10 @@ mod scenario {
             .await
             .unwrap_err();
         assert_eq!(refused.code(), "area_held");
+        assert!(matches!(
+            &refused,
+            AppError::Claim(Refusal { member: Some(handle), .. }) if handle.as_str() == "alice"
+        ));
         app.claim_item
             .execute(&team.bob, claim(ranking, team.bob_session, &["search"]))
             .await
@@ -330,11 +339,19 @@ mod scenario {
         team.fakes.clock.advance(Duration::hours(13));
         let status = app.status.execute(&team.bob).await.unwrap();
         assert_eq!(
-            status.stale.iter().map(|h| h.item.id).collect::<Vec<_>>(),
+            status
+                .stale
+                .iter()
+                .map(|h| h.item.item.id)
+                .collect::<Vec<_>>(),
             [invoices]
         );
         assert_eq!(
-            status.live.iter().map(|h| h.item.id).collect::<Vec<_>>(),
+            status
+                .live
+                .iter()
+                .map(|h| h.item.item.id)
+                .collect::<Vec<_>>(),
             [ranking]
         );
 
@@ -358,7 +375,7 @@ mod scenario {
         assert_eq!(alices[0].thread.id, taken.thread);
         let after_takeover = app
             .revoke_grant
-            .execute(&team.alice, grant.grant.id)
+            .execute(&team.alice, grant.grant.record.id)
             .await
             .unwrap_err();
         assert_eq!(after_takeover.code(), "not_found");
@@ -366,7 +383,7 @@ mod scenario {
         // Bob completes the invoice; nobody may claim it again.
         app.complete.execute(&team.bob, invoices).await.unwrap();
         let item = app.get_item.execute(&team.alice, invoices).await.unwrap();
-        assert_eq!(item.item.status, ItemStatus::Done);
+        assert_eq!(item.item.item.status, ItemStatus::Done);
         assert_eq!(item.claim, None);
         let closed = app
             .claim_item
@@ -426,6 +443,6 @@ mod scenario {
             tokio::spawn(async move { team.app.get_item.execute(&team.bob, item).await })
         };
         let view = task.await.unwrap().unwrap();
-        assert_eq!(view.item.id, item);
+        assert_eq!(view.item.item.id, item);
     }
 }

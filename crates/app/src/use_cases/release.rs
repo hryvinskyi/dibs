@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use dibs_domain::claim::{Released, decide_release};
+use dibs_domain::claim::decide_release;
 use dibs_domain::event::{self, EventKind};
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
@@ -10,6 +10,7 @@ use dibs_domain::item::ItemStatus;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedClaim, Names, refuse};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
@@ -32,17 +33,20 @@ impl Release {
         }
     }
 
-    /// Releases the claim.
+    /// Releases the claim, answering the claim that ended with its holder's handle.
     ///
     /// # Errors
     /// [`AppError::NotFound`] for an unknown item; [`AppError::HolderOnly`] when nobody or another
     /// member holds it; [`AppError::Store`] when the store fails.
-    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<Released, AppError> {
+    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<NamedClaim, AppError> {
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
         let item = existing_item(&mut work, item).await?;
         let current = work.claim(actor.project, item.id).await?;
-        let released = decide_release(current.as_ref(), actor.member)?;
+        let released = match decide_release(current.as_ref(), actor.member) {
+            Ok(released) => released,
+            Err(reason) => return Err(refuse(&mut work, reason).await),
+        };
         let ending = Ending {
             status: ItemStatus::Open,
             event: EventKind::Released(event::Released {
@@ -51,8 +55,9 @@ impl Release {
             }),
         };
         end_claim(&mut work, &released.claim, ending, now).await?;
+        let ended = Names::load(&mut work).await?.claim(released.claim)?;
         work.commit(&*self.notifier).await?;
-        Ok(released)
+        Ok(ended)
     }
 }
 
@@ -66,6 +71,8 @@ mod tests {
     use dibs_domain::paths::RepoPath;
 
     use super::*;
+    use crate::error::AppError;
+    use crate::named::Refusal;
     use crate::use_cases::testing::Env;
     use crate::use_cases::{
         ClaimItem, ClaimItemInput, Complete, EditCheck, EditCheckInput, Grant, GrantInput,
@@ -118,6 +125,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(released.claim.member, env.bob.actor.member);
+        assert_eq!(released.holder.as_str(), "bob");
         assert_eq!(
             env.kinds_after(before).await,
             [EventKind::Released(event::Released {
@@ -155,14 +163,12 @@ mod tests {
                 .code(),
             "not_holder"
         );
-        assert_eq!(
-            complete
-                .execute(&env.alice.actor, item)
-                .await
-                .unwrap_err()
-                .code(),
-            "not_holder"
-        );
+        let refused = complete.execute(&env.alice.actor, item).await.unwrap_err();
+        assert_eq!(refused.code(), "not_holder");
+        assert!(matches!(
+            &refused,
+            AppError::HolderOnly(Refusal { member: Some(handle), .. }) if handle.as_str() == "bob"
+        ));
         assert_eq!(
             release
                 .execute(&env.alice.actor, ItemId(9999))
@@ -202,7 +208,7 @@ mod tests {
         assert_eq!(
             kinds[1],
             EventKind::GrantRevoked(GrantRevoked {
-                grant: granted.grant.id,
+                grant: granted.grant.record.id,
                 item: bobs,
                 area: QualifiedArea::parse("default:billing").unwrap(),
                 from: env.alice.actor.member,

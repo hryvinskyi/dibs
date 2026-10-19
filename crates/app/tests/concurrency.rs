@@ -10,8 +10,9 @@ mod concurrency {
     use time::{Duration, OffsetDateTime};
 
     use dibs_app::fakes::Fakes;
+    use dibs_app::named::Refusal;
     use dibs_app::use_cases::{
-        ClaimItemInput, CreateItemInput, CreateMemberInput, InitProjectInput, NewMember,
+        ClaimItemInput, ClaimMade, CreateItemInput, CreateMemberInput, InitProjectInput, NewMember,
         RegisterSessionInput, TakeOverInput, UseCases,
     };
     use dibs_app::{Actor, AppError};
@@ -115,6 +116,7 @@ mod concurrency {
                 .await
                 .unwrap()
                 .item
+                .item
                 .id
         }
 
@@ -123,7 +125,7 @@ mod concurrency {
             self: &Arc<Self>,
             items: impl Fn(usize) -> ItemId,
             areas: &[&str],
-        ) -> Vec<(MemberId, Result<ClaimOutcome, AppError>)> {
+        ) -> Vec<(MemberId, Result<ClaimMade, AppError>)> {
             let mut tasks = Vec::new();
             for n in 0..RACERS {
                 let race = self.clone();
@@ -155,7 +157,15 @@ mod concurrency {
         let results = race.claim_all(|_| item, &[]).await;
         let winners: Vec<MemberId> = results
             .iter()
-            .filter(|(_, r)| matches!(r, Ok(ClaimOutcome::New { .. })))
+            .filter(|(_, r)| {
+                matches!(
+                    r,
+                    Ok(ClaimMade {
+                        outcome: ClaimOutcome::New { .. },
+                        ..
+                    })
+                )
+            })
             .map(|(member, _)| *member)
             .collect();
         assert_eq!(winners.len(), 1, "{results:?}");
@@ -165,7 +175,13 @@ mod concurrency {
                 continue;
             }
             assert!(
-                matches!(result, Err(AppError::Claim(ClaimRefused::HeldBy { member: holder, .. })) if *holder == winner),
+                matches!(
+                    result,
+                    Err(AppError::Claim(Refusal {
+                        reason: ClaimRefused::HeldBy { member: holder, .. },
+                        member: Some(_),
+                    })) if *holder == winner
+                ),
                 "{result:?}"
             );
         }
@@ -175,7 +191,7 @@ mod concurrency {
             .execute(&race.racers[0].actor, item)
             .await
             .unwrap();
-        assert_eq!(view.claim.map(|c| c.member), Some(winner));
+        assert_eq!(view.claim.map(|c| c.claim.member), Some(winner));
         let claimed = race
             .fakes
             .store
@@ -204,7 +220,13 @@ mod concurrency {
         for (member, result) in &results {
             if *member != winners[0] {
                 assert!(
-                    matches!(result, Err(AppError::Claim(ClaimRefused::AreaHeld { member: holder, .. })) if *holder == winners[0]),
+                    matches!(
+                        result,
+                        Err(AppError::Claim(Refusal {
+                            reason: ClaimRefused::AreaHeld { member: holder, .. },
+                            member: Some(_),
+                        })) if *holder == winners[0]
+                    ),
                     "{result:?}"
                 );
             }
@@ -260,7 +282,13 @@ mod concurrency {
             match task.await.unwrap() {
                 Ok(_) => won += 1,
                 Err(error) => assert!(
-                    matches!(error, AppError::Takeover(TakeoverRefused::NotStale { .. })),
+                    matches!(
+                        error,
+                        AppError::Takeover(Refusal {
+                            reason: TakeoverRefused::NotStale { .. },
+                            ..
+                        })
+                    ),
                     "{error:?}"
                 ),
             }

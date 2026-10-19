@@ -39,8 +39,9 @@ impl HostName {
 
 string_value!(HostName, HostNameError);
 
-/// The kind of agent a session runs, as the session reports it. Nothing is decided by it: 1 to 64
-/// characters after trimming, with no control characters.
+/// The kind of agent a session runs, as the session reports it: 1 to 32 characters of lowercase
+/// ASCII letters, digits and `-`. It is a stable key that sessions are grouped and shown by; nothing
+/// is decided by it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct AgentLabel(String);
@@ -48,19 +49,27 @@ pub struct AgentLabel(String);
 /// Why a text is not an agent label.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AgentLabelError {
-    /// The trimmed text is empty, longer than 64 characters, or has control characters.
-    #[error("an agent label is 1 to 64 characters with no control characters")]
+    /// The text is empty, longer than 32 characters, has a character other than `a-z`, `0-9`
+    /// and `-`, or does not start with a letter or digit.
+    #[error(
+        "an agent label is 1 to 32 characters: lowercase letters, digits and '-', starting with a letter or digit"
+    )]
     Malformed,
 }
 
 impl AgentLabel {
-    /// Parses an agent label, trimming whitespace at both ends.
+    /// The longest label, in characters.
+    pub const MAX_CHARS: usize = 32;
+
+    /// Parses an agent label exactly as given; nothing is trimmed or folded to lower case, so one
+    /// agent always has one label.
     ///
     /// # Errors
-    /// [`AgentLabelError::Malformed`] when the trimmed text breaks the rules above.
+    /// [`AgentLabelError::Malformed`] when the text breaks the rules above.
     pub fn parse(value: &str) -> Result<Self, AgentLabelError> {
-        let value = value.trim();
-        if value.is_empty() || value.chars().count() > 64 || has_control(value) {
+        let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+        let starts_well = value.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit());
+        if !starts_well || value.len() > Self::MAX_CHARS || !value.chars().all(allowed) {
             return Err(AgentLabelError::Malformed);
         }
         Ok(Self(value.to_owned()))
@@ -94,14 +103,30 @@ mod tests {
     }
 
     #[test]
-    fn agent_label_is_trimmed_and_bounded() {
-        assert_eq!(AgentLabel::parse(" agent ").unwrap().as_str(), "agent");
-        assert!(AgentLabel::parse(&"a".repeat(64)).is_ok());
-        assert_eq!(
-            AgentLabel::parse(&"a".repeat(65)),
-            Err(AgentLabelError::Malformed)
-        );
-        assert_eq!(AgentLabel::parse("a\tb"), Err(AgentLabelError::Malformed));
-        assert_eq!(AgentLabel::parse("  "), Err(AgentLabelError::Malformed));
+    fn agent_label_table() {
+        let longest = "a".repeat(32);
+        let too_long = "a".repeat(33);
+        let cases: &[(&str, bool)] = &[
+            ("agent", true),
+            ("code-agent-2", true),
+            ("-", false),
+            ("-agent", false),
+            ("agent-", true),
+            (longest.as_str(), true),
+            (too_long.as_str(), false),
+            ("", false),
+            ("Code Agent", false),
+            ("Agent", false),
+            ("my agent", false),
+            (" agent", false),
+            ("agent_2", false),
+            ("agent.v2", false),
+            ("a\tb", false),
+            ("агент", false),
+        ];
+        for (value, ok) in cases {
+            assert_eq!(AgentLabel::parse(value).is_ok(), *ok, "{value:?}");
+        }
+        assert_eq!(AgentLabel::parse("agent").unwrap().as_str(), "agent");
     }
 }

@@ -10,6 +10,7 @@
 pub mod actor;
 pub mod dependencies;
 pub mod error;
+pub mod named;
 pub mod ports;
 pub mod records;
 pub mod token;

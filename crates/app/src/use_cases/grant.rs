@@ -11,6 +11,7 @@ use dibs_domain::ids::{GrantId, ItemId};
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::{NamedGrant, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::GrantRecord;
 use crate::use_cases::common::{existing_item, member_by_handle};
@@ -30,8 +31,8 @@ pub struct GrantInput {
 /// The grant in force.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantResult {
-    /// The grant.
-    pub grant: GrantRecord,
+    /// The grant, with the handles of its two members.
+    pub grant: NamedGrant,
     /// Whether this call gave it, rather than finding it given.
     pub created: bool,
 }
@@ -91,7 +92,7 @@ impl Grant {
                         what: "a grant the domain found but the store did not return".to_owned(),
                     })?;
                 Ok(GrantResult {
-                    grant,
+                    grant: Names::load(&mut work).await?.grant(grant)?,
                     created: false,
                 })
             }
@@ -113,9 +114,10 @@ impl Grant {
                     }),
                 )
                 .await?;
+                let grant = Names::load(&mut work).await?.grant(record)?;
                 work.commit(&*self.notifier).await?;
                 Ok(GrantResult {
-                    grant: record,
+                    grant,
                     created: true,
                 })
             }
@@ -170,7 +172,7 @@ mod tests {
         assert_eq!(
             env.kinds_after(before).await,
             [EventKind::Granted(Granted {
-                grant: given.grant.id,
+                grant: given.grant.record.id,
                 item: bobs,
                 area: QualifiedArea::parse("default:billing").unwrap(),
                 from: env.alice.actor.member,
