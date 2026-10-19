@@ -9,6 +9,7 @@ members = [
     "crates/agent-host",
     "crates/host-claude-code",
     "crates/cli",
+    "crates/test-server",
 ]
 
 [workspace.package]

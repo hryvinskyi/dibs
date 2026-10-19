@@ -19,3 +19,19 @@ workspace = true
 dibs-client = { path = "../client" }
 dibs-agent-host = { path = "../agent-host" }
 dibs-host-claude-code = { path = "../host-claude-code" }
+dibs-domain = { path = "../domain" }
+clap = { version = "4.6.7", features = ["derive"] }
+tokio = { version = "1.54.0", features = ["rt", "time"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.1.8"
+gethostname = "1.1.0"
+tracing = "0.1.44"
+time = "0.3.55"
+tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
+dibs-test-server = { path = "../test-server" }
+serde_json = "1.0.154"
+tempfile = "3.27.0"

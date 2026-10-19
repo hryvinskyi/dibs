@@ -12,3 +12,33 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+dibs-domain = { path = "../domain" }
+dirs = "7.0.0"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+keyring-core = "1.0.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "query", "stream"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10.9"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }
+tokio = { version = "1.54.0", features = ["time"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+url = "2.5.8"
+
+[target."cfg(windows)".dependencies]
+windows-native-keyring-store = "1.1.0"
+windows-permissions = "0.2.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust", "vendored"] }
+
+[dev-dependencies]
+dibs-test-server = { path = "../test-server" }
+tokio = { version = "1.54.0", features = ["rt"] }
