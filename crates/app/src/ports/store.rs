@@ -15,6 +15,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use dibs_domain::claim::Claim;
+use dibs_domain::dependency::Dependency;
 use dibs_domain::event::{Event, EventKind};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{
@@ -73,6 +74,7 @@ pub trait Tx:
     + SessionRows
     + ItemRows
     + ClaimRows
+    + DependencyRows
     + GrantRows
     + ThreadRows
     + EventRows
@@ -199,6 +201,26 @@ pub trait ItemRows: Send {
         project: ProjectId,
         id: ItemId,
         status: ItemStatus,
+    ) -> StoreResult<()>;
+    /// Replaces the facts of a stored item an importer supplies — title, hint, priority, tracker
+    /// state, whether the tracker closed it, and its source — leaving its reference, status,
+    /// repository and creation as they are.
+    async fn update_item(&mut self, project: ProjectId, item: &ItemRecord) -> StoreResult<()>;
+}
+
+/// The project's work graph: which item is blocked by which.
+#[async_trait]
+pub trait DependencyRows: Send {
+    /// Every edge, ordered by item and then by blocker.
+    async fn dependencies(&mut self, project: ProjectId) -> StoreResult<Vec<Dependency>>;
+    /// Stores an edge, replacing the one of the same pair (and so its source).
+    async fn save_dependency(&mut self, project: ProjectId, edge: &Dependency) -> StoreResult<()>;
+    /// Removes the edge of this pair, if there is one.
+    async fn delete_dependency(
+        &mut self,
+        project: ProjectId,
+        item: ItemId,
+        blocked_by: ItemId,
     ) -> StoreResult<()>;
 }
 

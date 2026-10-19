@@ -29,7 +29,10 @@ pub fn failed(failure: &Failure) -> CallToolResult {
         Kind::Refused | Kind::Config => (failure.code.as_str(), failure.message.as_str()),
     };
     let mut result = CallToolResult::error(vec![ContentBlock::text(message)]);
-    result.structured_content = Some(json!({"error": {"code": code, "message": message}}));
+    result.structured_content = Some(match failure.kind {
+        Kind::Unreachable => json!({"error": {"code": code, "message": message}}),
+        Kind::Refused | Kind::Config => crate::output::failure_json(failure),
+    });
     result
 }
 
@@ -87,6 +90,8 @@ mod tests {
         let structured = result.structured_content.clone().unwrap();
         assert_eq!(structured["error"]["code"], "held");
         assert_eq!(structured["error"]["message"], json!(text(&result)));
+        assert_eq!(structured["error"]["details"]["holder"], "alice");
+        assert_eq!(structured["error"]["details"]["item"], 4);
     }
 
     #[test]

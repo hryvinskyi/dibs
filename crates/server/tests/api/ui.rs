@@ -626,7 +626,19 @@ async fn the_board_puts_each_item_in_its_column_and_filters_them() {
         ready.contains("gh:acme/api#1") && ready.contains("Ready &#60;item&#62;"),
         "{ready}"
     );
-    assert!(!ready.contains("Stale item") && !ready.contains("Live item"));
+    assert!(
+        !ready.contains("Live item"),
+        "a live claim takes an item off the ready list"
+    );
+    assert!(
+        ready.contains("Stale item")
+            && ready.contains("Stale claim by <span class=\"member\">alice</span>"),
+        "a stale claim leaves its item ready, marked: {ready}"
+    );
+    assert!(
+        ready.contains("href=\"https://github.com/acme/api/issues/1\" rel=\"noopener noreferrer\""),
+        "{ready}"
+    );
     let progress = page.column("c-prog");
     assert!(
         progress.contains("Live item") && progress.contains("web:checkout"),
@@ -668,6 +680,89 @@ async fn the_board_puts_each_item_in_its_column_and_filters_them() {
     world.fakes.clock.advance(Duration::hours(3));
     let tomorrow = browser.get(&world, "/ui/board").await;
     assert!(!tomorrow.column("c-done").contains("Done item"));
+}
+
+#[tokio::test]
+async fn the_ready_column_shows_the_imported_ready_list_with_its_reasons() {
+    let (world, alice, bob) = team().await;
+    let bot = world.member(&alice, "board", Role::Importer).await;
+    let imported = world
+        .put(
+            &bot,
+            "/v1/items",
+            json!({"source": "board", "items": [
+                {"ref": "gh:acme/api#1", "title": "Soon <first>", "priority": 0, "areas_hint": ["search"]},
+                {"ref": "gh:acme/api#2", "title": "Waits for the rate table",
+                 "blocked_by": ["gh:acme/api#3"]},
+                {"ref": "gh:acme/api#3", "title": "Rate table", "priority": 3},
+                {"ref": "gh:acme/api#4", "title": "Touches billing", "areas_hint": ["api:billing"]},
+                {"ref": "gh:acme/web#5", "title": "Closed upstream while held"}
+            ]}),
+        )
+        .await;
+    assert_eq!(imported.status, StatusCode::OK, "{}", imported.body);
+    let held = world
+        .item(&alice, Some("gh:acme/api#9"), "Billing rewrite")
+        .await;
+    let closing = imported.body["items"][4]["id"].as_u64().unwrap();
+    let session = world.session(&alice, "laptop").await;
+    claim(&world, &alice, session, held, json!(["api:billing"])).await;
+    claim(&world, &alice, session, closing, json!([])).await;
+    let closed = world
+        .put(
+            &bot,
+            "/v1/items",
+            json!({"items": [{"ref": "gh:acme/web#5", "title": "Closed upstream while held", "closed": true}]}),
+        )
+        .await;
+    assert_eq!(closed.status, StatusCode::OK, "{}", closed.body);
+
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/board").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    let ready = page.column("c-ready");
+    let first = ready.find("Soon &#60;first&#62;").unwrap();
+    let later = ready.find("Rate table").unwrap();
+    assert!(first < later, "soonest first: {ready}");
+    assert!(ready.contains(">P0<") && ready.contains(">P3<"), "{ready}");
+    assert!(
+        ready.contains("<span class=\"chip\">api:search</span>"),
+        "{ready}"
+    );
+    assert!(
+        ready.contains(r#"<a class="ref" href="https://github.com/acme/api/issues/1" rel="noopener noreferrer">gh:acme/api#1</a>"#),
+        "{ready}"
+    );
+    let waiting = &ready[ready.find("Not ready yet").unwrap()..];
+    assert!(
+        waiting
+            .contains("Blocked by <a class=\"ref\" href=\"https://github.com/acme/api/issues/3\""),
+        "{waiting}"
+    );
+    assert!(
+        waiting.contains("api:billing is held by alice for <a class=\"ref\" href=\"https://github.com/acme/api/issues/9\""),
+        "{waiting}"
+    );
+    assert!(
+        !ready.contains("Billing rewrite"),
+        "an item in progress is not in Ready"
+    );
+    assert!(
+        !ready.contains("Closed upstream while held"),
+        "a closed item is not ready"
+    );
+    let progress = page.column("c-prog");
+    assert!(
+        progress.contains("Closed upstream while held")
+            && progress.contains("Closed upstream</span>"),
+        "{progress}"
+    );
+    let search = browser.get(&world, "/ui/board?area=api%3Asearch").await;
+    let filtered = search.column("c-ready");
+    assert!(
+        filtered.contains("Soon &#60;first") && !filtered.contains("Rate table"),
+        "{filtered}"
+    );
 }
 
 #[tokio::test]

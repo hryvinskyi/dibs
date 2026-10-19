@@ -7,7 +7,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ThreadId;
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
-use dibs_domain::member::{DisplayName, ExternalLogin};
+use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::Subject;
 
 /// Claim work, check edits and talk to the people and agents working on the same repositories.
@@ -56,6 +56,11 @@ pub enum Command {
     Status,
     /// List work items.
     Items(ItemsArgs),
+    /// Show the work you can pick up now, soonest first, and why the other open items wait.
+    Ready,
+    /// Record or remove that a work item is blocked by another.
+    #[command(subcommand)]
+    Dep(DepCommand),
     /// Create a work item for a reference, or show the one it already names.
     New(NewArgs),
     /// Claim a work item, or renew your claim, with the areas you will change.
@@ -183,6 +188,26 @@ pub struct ClaimArgs {
     pub areas: Vec<String>,
 }
 
+/// `dibs dep`.
+#[derive(Debug, Subcommand)]
+pub enum DepCommand {
+    /// Record that the item is blocked by another; an import never removes this edge.
+    Add(DepArgs),
+    /// Remove that the item is blocked by another.
+    Rm(DepArgs),
+}
+
+/// `dibs dep add` and `dibs dep rm`.
+#[derive(Debug, Args)]
+pub struct DepArgs {
+    /// The item that waits: its local id or its reference.
+    #[arg(value_parser = ItemKey::parse)]
+    pub key: ItemKey,
+    /// The item it waits for: its local id or its reference.
+    #[arg(long = "blocked-by", value_parser = ItemKey::parse)]
+    pub blocked_by: ItemKey,
+}
+
 /// `dibs takeover`.
 #[derive(Debug, Args)]
 pub struct TakeoverArgs {
@@ -305,9 +330,31 @@ pub struct MemberAddArgs {
     /// Their login in the outside tracker.
     #[arg(long, value_parser = ExternalLogin::parse)]
     pub login: Option<ExternalLogin>,
-    /// Make them an admin.
-    #[arg(long)]
-    pub admin: bool,
+    /// Their role.
+    #[arg(long, value_enum, default_value = "member")]
+    pub role: RoleArg,
+}
+
+/// The role a new member gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RoleArg {
+    /// A person who also manages the project.
+    Admin,
+    /// A person working in the project.
+    Member,
+    /// An integration that feeds the project's items from an outside tracker; it holds no claim
+    /// and reads no conversation.
+    Importer,
+}
+
+impl From<RoleArg> for Role {
+    fn from(value: RoleArg) -> Self {
+        match value {
+            RoleArg::Admin => Self::Admin,
+            RoleArg::Member => Self::Member,
+            RoleArg::Importer => Self::Importer,
+        }
+    }
 }
 
 /// `dibs admin token`.
@@ -387,6 +434,21 @@ mod tests {
         assert!(
             Cli::try_parse_from(["dibs", "sync", "--host", "neutral", "--session", "s"]).is_ok()
         );
+    }
+
+    #[test]
+    fn a_dependency_names_both_items() {
+        let Invocation::Service(Command::Dep(DepCommand::Add(dep))) =
+            Cli::try_parse_from(["dibs", "dep", "add", "gh:Acme/Web#1", "--blocked-by", "12"])
+                .unwrap()
+                .command
+        else {
+            panic!("not a dependency");
+        };
+        assert_eq!(dep.key.to_string(), "gh:acme/web#1");
+        assert_eq!(dep.blocked_by.to_string(), "12");
+        assert!(Cli::try_parse_from(["dibs", "dep", "rm", "1"]).is_err());
+        assert!(Cli::try_parse_from(["dibs", "ready"]).is_ok());
     }
 
     #[test]

@@ -3,8 +3,8 @@
 
 use time::OffsetDateTime;
 
-use dibs_app::named::NamedItem;
-use dibs_app::use_cases::{AreaHold, HeldItem};
+use dibs_app::named::ItemName;
+use dibs_app::use_cases::{AreaHold, ExcludedEntry, HeldItem, NamedNotReady, ReadyEntry};
 use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::item::ExternalRef;
 
@@ -36,6 +36,8 @@ pub struct ClaimRow {
     pub seen: Moment,
     /// Whether the member viewing the page holds it.
     pub mine: bool,
+    /// Whether the outside tracker closed the item while the claim lasts.
+    pub closed_upstream: bool,
 }
 
 impl ClaimRow {
@@ -53,6 +55,7 @@ impl ClaimRow {
             since: moment(claim.claimed_at, now),
             seen: moment(claim.last_seen, now),
             mine: claim.member == viewer,
+            closed_upstream: item.closed,
         }
     }
 }
@@ -83,21 +86,121 @@ impl HoldRow {
     }
 }
 
-/// An item on a card.
+/// An item another card mentions, named and linked to its tracker.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ItemCard {
+pub struct ItemLink {
     /// How the item is named.
     pub reference: String,
     /// Its title.
     pub title: String,
+    /// The tracker's page for it, when its reference has one.
+    pub link: Option<String>,
 }
 
-impl ItemCard {
-    /// The card of an item.
-    pub fn of(named: &NamedItem) -> Self {
+impl ItemLink {
+    /// The link of a mentioned item.
+    pub fn of(name: &ItemName) -> Self {
         Self {
-            reference: reference(named.item.id, named.item.external_ref.as_ref()),
-            title: named.item.title.to_string(),
+            reference: reference(name.id, name.external_ref.as_ref()),
+            title: name.title.to_string(),
+            link: name.link.clone(),
+        }
+    }
+}
+
+/// Why an item on the board is not ready, as the card says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotReadyRow {
+    /// A member's live claim holds it.
+    Claimed {
+        /// The holder's handle.
+        holder: String,
+    },
+    /// Items it waits for still block it.
+    BlockedBy {
+        /// Those items.
+        items: Vec<ItemLink>,
+    },
+    /// Another member holds an area of its hint.
+    AreaHeld {
+        /// The area, as `repo:area`.
+        area: String,
+        /// The holder's handle.
+        holder: String,
+        /// The holder's item.
+        item: ItemLink,
+    },
+}
+
+impl NotReadyRow {
+    fn of(reason: &NamedNotReady) -> Self {
+        match reason {
+            NamedNotReady::Claimed { holder } => Self::Claimed {
+                holder: holder.to_string(),
+            },
+            NamedNotReady::BlockedBy { items } => Self::BlockedBy {
+                items: items.iter().map(ItemLink::of).collect(),
+            },
+            NamedNotReady::AreaHeld { area, holder, item } => Self::AreaHeld {
+                area: area.to_string(),
+                holder: holder.to_string(),
+                item: ItemLink::of(item),
+            },
+        }
+    }
+
+    /// Whether the reason is a live claim, which puts the item in progress rather than out of
+    /// the ready list.
+    pub fn is_claim(&self) -> bool {
+        matches!(self, Self::Claimed { .. })
+    }
+}
+
+/// An item of the ready list, or one left out of it, on a card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyCard {
+    /// How the item is named.
+    pub reference: String,
+    /// Its title.
+    pub title: String,
+    /// The tracker's page for it, when its reference has one.
+    pub link: Option<String>,
+    /// How soon: 0 to 4, lower is sooner.
+    pub priority: u8,
+    /// The areas the work will probably touch, as `repo:area`.
+    pub hints: Vec<String>,
+    /// The member whose claim on it went stale, when one did.
+    pub stale_holder: Option<String>,
+    /// Why it is not ready; empty for an item of the ready list.
+    pub reasons: Vec<NotReadyRow>,
+}
+
+impl ReadyCard {
+    /// The card of an item of the ready list.
+    pub fn ready(entry: &ReadyEntry) -> Self {
+        let item = &entry.item.item;
+        Self {
+            reference: reference(item.id, item.external_ref.as_ref()),
+            title: item.title.to_string(),
+            link: entry.link.clone(),
+            priority: item.priority.get(),
+            hints: item.areas_hint.iter().map(ToString::to_string).collect(),
+            stale_holder: entry.stale_holder.as_ref().map(ToString::to_string),
+            reasons: Vec::new(),
+        }
+    }
+
+    /// The card of an open item left out of the ready list.
+    pub fn excluded(entry: &ExcludedEntry) -> Self {
+        let item = &entry.item.item;
+        Self {
+            reference: reference(item.id, item.external_ref.as_ref()),
+            title: item.title.to_string(),
+            link: entry.link.clone(),
+            priority: item.priority.get(),
+            hints: item.areas_hint.iter().map(ToString::to_string).collect(),
+            stale_holder: None,
+            reasons: entry.reasons.iter().map(NotReadyRow::of).collect(),
         }
     }
 }

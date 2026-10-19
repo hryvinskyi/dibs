@@ -512,6 +512,26 @@ mod tests {
     }
 
     #[test]
+    fn a_blocked_item_is_claimed_and_its_blockers_are_there_to_warn_about() {
+        use crate::dependency::{Dependency, DependencySource, blockers};
+        use crate::item::ItemStatus;
+
+        let settings = two_repo_settings();
+        let graph = [Dependency {
+            item: ItemId(1),
+            blocked_by: ItemId(2),
+            source: DependencySource::Imported,
+        }];
+        let outcome = decide_claim(None, &[], &request(1, ALICE, &[]), at(5), &settings);
+        assert!(
+            matches!(outcome, Ok(ClaimOutcome::New { .. })),
+            "{outcome:?}"
+        );
+        let open = |_: ItemId| Some((ItemStatus::Open, false));
+        assert_eq!(blockers(ItemId(1), &graph, open), [ItemId(2)]);
+    }
+
+    #[test]
     fn a_free_item_is_claimed() {
         let settings = two_repo_settings();
         let req = request(1, ALICE, &["api:billing"]);

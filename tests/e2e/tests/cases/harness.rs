@@ -5,7 +5,8 @@
 //! the developer's own configuration, credentials or git settings reaches a case.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -174,6 +175,12 @@ impl Server {
 
     /// Adds a member with `dibs-server admin member add` and returns their token.
     pub fn add_member(&self, handle: &str) -> String {
+        self.add_member_as(handle, "member")
+    }
+
+    /// Adds a member of `role` (`admin`, `member` or `importer`) with `dibs-server admin member
+    /// add --role` and returns their token.
+    pub fn add_member_as(&self, handle: &str, role: &str) -> String {
         let output = Self::admin_command(self.scratch.path(), &self.database)
             .args([
                 "admin",
@@ -182,6 +189,8 @@ impl Server {
                 handle,
                 "--project",
                 &self.project,
+                "--role",
+                role,
                 "--name",
             ])
             .arg(format!("{handle} Example"))
@@ -194,6 +203,52 @@ impl Server {
         );
         token_of(&output)
     }
+}
+
+/// One HTTP/1.1 request to the server with a bearer token and a JSON body, as an integration
+/// worker sends it; answers the status and the JSON it got back.
+pub fn call(server: &Server, method: &str, path: &str, token: &str, body: &Value) -> (u16, Value) {
+    let address = server.url().trim_start_matches("http://");
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let payload = body.to_string();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        payload.len()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).unwrap();
+    let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    let chunked = head
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case("transfer-encoding: chunked"));
+    let json = if chunked {
+        unchunk(body)
+    } else {
+        body.to_owned()
+    };
+    (status, serde_json::from_str(&json).unwrap_or(Value::Null))
+}
+
+/// The payload of a chunked HTTP/1.1 body.
+fn unchunk(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some((size, after)) = rest.split_once("\r\n") {
+        let size = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        out.push_str(&after[..size]);
+        rest = after[size..].trim_start_matches("\r\n");
+    }
+    out
 }
 
 impl Drop for Server {

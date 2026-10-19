@@ -179,6 +179,7 @@ fn unreachable(message: &str) -> Failure {
         kind: Kind::Unreachable,
         code: "unreachable".to_owned(),
         message: message.to_owned(),
+        details: None,
         answered: false,
     }
 }

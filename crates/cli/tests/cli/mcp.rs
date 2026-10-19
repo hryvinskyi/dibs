@@ -15,7 +15,7 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 13] = [
+const TOOLS: [&str; 14] = [
     "dibs_check",
     "dibs_claim",
     "dibs_done",
@@ -24,6 +24,7 @@ const TOOLS: [&str; 13] = [
     "dibs_items",
     "dibs_new",
     "dibs_read",
+    "dibs_ready",
     "dibs_release",
     "dibs_send",
     "dibs_status",
@@ -308,6 +309,15 @@ fn a_held_claim_is_a_tool_error_naming_the_holder() {
         json!({"key": "gh:acme/api#2", "areas": ["billing"]}),
     );
     assert!(area_held.error().contains("alice"), "{}", area_held.text);
+    assert!(
+        area_held.error().contains("on item gh:acme/api#1"),
+        "the holder's item is named by its reference: {}",
+        area_held.text
+    );
+    let details = &area_held.structured["error"]["details"];
+    assert_eq!(details["holder"], "alice");
+    assert_eq!(details["item_ref"], "gh:acme/api#1");
+    assert_eq!(details["area"], "api:billing");
 
     let not_stale = bob.tool(
         "dibs_takeover",
@@ -321,6 +331,46 @@ fn a_held_claim_is_a_tool_error_naming_the_holder() {
         "{}",
         unknown.text
     );
+}
+
+#[test]
+fn the_ready_list_is_a_tool_and_a_claim_answer_names_its_blockers() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#1", "title": "Waits"}),
+    );
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#2", "title": "Blocks"}),
+    );
+    let added = setup
+        .dibs(&setup.alice, &api)
+        .args([
+            "dep",
+            "add",
+            "gh:acme/api#1",
+            "--blocked-by",
+            "gh:acme/api#2",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&added), 0, "{}", text(&added.stderr));
+
+    let ready = alice.tool("dibs_ready", json!({}));
+    let answer = ready.ok();
+    assert_eq!(answer["ready"][0]["item"]["ref"], "gh:acme/api#2");
+    assert_eq!(
+        answer["ready"][0]["link"],
+        "https://github.com/acme/api/issues/2"
+    );
+    assert_eq!(answer["excluded"][0]["reasons"][0]["reason"], "blocked_by");
+
+    let claimed = alice.tool("dibs_claim", json!({"key": "gh:acme/api#1"}));
+    assert_eq!(claimed.ok()["outcome"], "new");
+    assert_eq!(claimed.ok()["blocked_by"][0]["ref"], "gh:acme/api#2");
 }
 
 #[test]

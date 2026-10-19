@@ -12,7 +12,7 @@ use dibs_domain::event::EventKind;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::{HotRuleRegistry, Note};
 use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId, ThreadId};
-use dibs_domain::item::{ExternalRef, ItemStatus, Title};
+use dibs_domain::item::{ExternalRef, ItemStatus, Priority, SourceId, SourceStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Body, SessionLabel, Subject};
 use dibs_domain::paths::RelPath;
@@ -131,11 +131,130 @@ pub struct Item {
     pub repo: Option<RepoId>,
     /// The repository its reference names when the project does not list it.
     pub unlisted_remote: Option<RemoteUrl>,
+    /// How soon it should be done: 0 to 4, lower is sooner.
+    #[serde(default)]
+    pub priority: Priority,
+    /// The areas the work will probably touch.
+    #[serde(default)]
+    pub areas_hint: BTreeSet<QualifiedArea>,
+    /// The outside tracker's own state of it.
+    #[serde(default)]
+    pub source_status: Option<SourceStatus>,
+    /// Whether the outside tracker closed it.
+    #[serde(default)]
+    pub closed: bool,
+    /// The importer's source that lists it.
+    #[serde(default)]
+    pub source: Option<SourceId>,
     /// Who created it.
     pub created_by: Handle,
     /// When.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+}
+
+/// An item another answer mentions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemName {
+    /// Its local id.
+    pub id: ItemId,
+    /// Its reference in an outside tracker.
+    #[serde(rename = "ref")]
+    pub external_ref: Option<ExternalRef>,
+    /// Its title.
+    pub title: Title,
+    /// The tracker's page for it.
+    #[serde(default)]
+    pub link: Option<String>,
+}
+
+impl ItemName {
+    /// How the item is named to a person: its reference, or `#<id>` for a local item.
+    pub fn label(&self) -> String {
+        self.external_ref
+            .as_ref()
+            .map_or_else(|| format!("#{}", self.id), ToString::to_string)
+    }
+}
+
+/// An item of the ready list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadyItem {
+    /// The item.
+    pub item: Item,
+    /// The tracker's page for it.
+    #[serde(default)]
+    pub link: Option<String>,
+    /// The member whose claim on it went stale.
+    #[serde(default)]
+    pub stale_holder: Option<Handle>,
+}
+
+/// Why an open item is not ready, tagged by `reason`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum NotReady {
+    /// A member's live claim holds it.
+    Claimed {
+        /// The holder.
+        holder: Handle,
+    },
+    /// Items it waits for are neither done nor closed.
+    BlockedBy {
+        /// Those items.
+        items: Vec<ItemName>,
+    },
+    /// An area of its hint is held by another member's live claim.
+    AreaHeld {
+        /// The area.
+        area: QualifiedArea,
+        /// The holder.
+        holder: Handle,
+        /// The holder's item.
+        item: ItemName,
+    },
+    /// A reason this client does not know yet.
+    #[serde(other)]
+    Other,
+}
+
+/// An open item left out of the ready list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludedItem {
+    /// The item.
+    pub item: Item,
+    /// The tracker's page for it.
+    #[serde(default)]
+    pub link: Option<String>,
+    /// Why it is not ready.
+    pub reasons: Vec<NotReady>,
+}
+
+/// `GET /v1/ready`: the ready list and the open items left out of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadyList {
+    /// The items the caller can pick up, soonest first.
+    pub ready: Vec<ReadyItem>,
+    /// The open items that are not ready.
+    pub excluded: Vec<ExcludedItem>,
+}
+
+/// `POST /v1/items/{id}/dependencies`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AddDependency {
+    /// The item it waits for.
+    pub blocked_by: ItemId,
+}
+
+/// The answer of adding or removing a dependency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyChange {
+    /// The item that waits.
+    pub item: Item,
+    /// The item it waits for.
+    pub blocked_by: Item,
+    /// Whether the call changed the work graph.
+    pub changed: bool,
 }
 
 /// The filters of `GET /v1/items`; every one given must match.
@@ -239,6 +358,9 @@ pub struct Claimed {
     pub claim: Claim,
     /// Areas a renewal no longer holds.
     pub dropped_areas: BTreeSet<QualifiedArea>,
+    /// What the claimed item waits for that is neither done nor closed.
+    #[serde(default)]
+    pub blocked_by: Vec<ItemName>,
 }
 
 /// `POST /v1/items/{id}/takeover`.
@@ -301,6 +423,9 @@ pub struct Status {
     pub stale: Vec<HeldItem>,
     /// Areas the live claims hold.
     pub holds: Vec<Hold>,
+    /// The caller's ready list.
+    #[serde(default)]
+    pub ready: ReadyList,
 }
 
 /// `POST /v1/edit-check`.
@@ -383,6 +508,9 @@ pub enum Verdict {
         holder: Option<Handle>,
         /// The holder's item.
         item: ItemId,
+        /// The holder's item's reference, when it has one.
+        #[serde(default)]
+        item_ref: Option<ExternalRef>,
         /// The area.
         area: QualifiedArea,
         /// The way on.

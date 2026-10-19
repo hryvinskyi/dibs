@@ -168,11 +168,7 @@ async fn admin_on(
                             display_name: args.name,
                             external_login: args.login,
                         },
-                        role: if args.admin {
-                            Role::Admin
-                        } else {
-                            Role::Member
-                        },
+                        role: Role::from(args.role),
                     },
                 )
                 .await

@@ -60,6 +60,13 @@ pub enum EventKind {
     MessagePosted(MessagePosted),
     /// The project's settings changed.
     SettingsChanged(SettingsChanged),
+    /// A work item's facts changed: its title, hint, priority, tracker state, source or whether its
+    /// tracker closed it. Appended only when one of them actually changed.
+    ItemUpdated(ItemUpdated),
+    /// A work item became blocked by another.
+    DependencyAdded(DependencyAdded),
+    /// A work item stopped being blocked by another.
+    DependencyRemoved(DependencyRemoved),
 }
 
 impl EventKind {
@@ -79,6 +86,9 @@ impl EventKind {
             Self::ThreadStarted(_) => "thread_started",
             Self::MessagePosted(_) => "message_posted",
             Self::SettingsChanged(_) => "settings_changed",
+            Self::ItemUpdated(_) => "item_updated",
+            Self::DependencyAdded(_) => "dependency_added",
+            Self::DependencyRemoved(_) => "dependency_removed",
         }
     }
 
@@ -98,6 +108,9 @@ impl EventKind {
             Self::ThreadStarted(e) => &[e.author],
             Self::MessagePosted(e) => &[e.author],
             Self::SettingsChanged(e) => &[e.by],
+            Self::ItemUpdated(e) => &[e.by],
+            Self::DependencyAdded(e) => &[e.by],
+            Self::DependencyRemoved(e) => &[e.by],
         };
         named.iter().copied().collect()
     }
@@ -117,7 +130,10 @@ impl EventKind {
             | Self::Granted(_)
             | Self::GrantRevoked(_)
             | Self::ThreadStarted(_)
-            | Self::SettingsChanged(_) => None,
+            | Self::SettingsChanged(_)
+            | Self::ItemUpdated(_)
+            | Self::DependencyAdded(_)
+            | Self::DependencyRemoved(_) => None,
         }
     }
 
@@ -136,7 +152,10 @@ impl EventKind {
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
-            | Self::SettingsChanged(_) => None,
+            | Self::SettingsChanged(_)
+            | Self::ItemUpdated(_)
+            | Self::DependencyAdded(_)
+            | Self::DependencyRemoved(_) => None,
         }
     }
 }
@@ -316,6 +335,37 @@ pub struct SettingsChanged {
     pub by: MemberId,
 }
 
+/// A work item's facts changed. Carries the ids only; the item is read for what it says now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemUpdated {
+    /// The item.
+    pub item: ItemId,
+    /// Who changed it.
+    pub by: MemberId,
+}
+
+/// A work item became blocked by another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyAdded {
+    /// The item that waits.
+    pub item: ItemId,
+    /// The item it waits for.
+    pub blocked_by: ItemId,
+    /// Who recorded it.
+    pub by: MemberId,
+}
+
+/// A work item stopped being blocked by another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencyRemoved {
+    /// The item that waited.
+    pub item: ItemId,
+    /// The item it waited for.
+    pub blocked_by: ItemId,
+    /// Who removed it.
+    pub by: MemberId,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +443,17 @@ mod tests {
                 author: ALICE,
             }),
             EventKind::SettingsChanged(SettingsChanged { by: ALICE }),
+            EventKind::ItemUpdated(ItemUpdated { item, by: BOB }),
+            EventKind::DependencyAdded(DependencyAdded {
+                item,
+                blocked_by: ItemId(5),
+                by: BOB,
+            }),
+            EventKind::DependencyRemoved(DependencyRemoved {
+                item,
+                blocked_by: ItemId(5),
+                by: ALICE,
+            }),
         ]
     }
 
@@ -422,6 +483,33 @@ mod tests {
         );
         let created = serde_json::to_value(&kinds[0]).unwrap();
         assert_eq!(created["payload"]["external_ref"], "gh:acme/web#12");
+    }
+
+    #[test]
+    fn item_and_dependency_changes_carry_ids_and_author_only() {
+        for kind in every_kind() {
+            let allowed: &[&str] = match kind {
+                EventKind::ItemUpdated(_) => &["item", "by"],
+                EventKind::DependencyAdded(_) | EventKind::DependencyRemoved(_) => {
+                    &["item", "blocked_by", "by"]
+                }
+                _ => continue,
+            };
+            let value = serde_json::to_value(&kind).unwrap();
+            let fields: Vec<String> = value["payload"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            for field in &fields {
+                assert!(
+                    allowed.contains(&field.as_str()),
+                    "{} carries {field}",
+                    kind.name()
+                );
+            }
+        }
     }
 
     #[test]
@@ -458,7 +546,7 @@ mod tests {
             .collect();
         let messages: Vec<Option<MessageId>> =
             every_kind().iter().map(EventKind::message).collect();
-        let mut expected = vec![None; 13];
+        let mut expected = vec![None; 16];
         expected[11] = Some(MessageId(6));
         assert_eq!(messages, expected);
         let alice = BTreeSet::from([ALICE]);
@@ -479,6 +567,9 @@ mod tests {
                 (both, None),
                 (alice.clone(), Some(ThreadId(5))),
                 (alice.clone(), Some(ThreadId(5))),
+                (alice.clone(), None),
+                (BTreeSet::from([BOB]), None),
+                (BTreeSet::from([BOB]), None),
                 (alice, None),
             ]
         );

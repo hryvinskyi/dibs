@@ -5,7 +5,7 @@ use std::sync::Arc;
 use dibs_domain::event::{EventKind, ItemCreated};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::ItemId;
-use dibs_domain::item::{ExternalRef, ItemStatus, Title, decide_create_item};
+use dibs_domain::item::{ExternalRef, Title, decide_create_item};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use crate::actor::Actor;
@@ -87,15 +87,14 @@ impl CreateItem {
             &settings,
             &self.ref_schemes,
         )?;
-        let item = ItemRecord {
-            id: ItemId(self.ids.next()),
-            external_ref: input.external_ref,
-            title: input.title,
-            status: ItemStatus::Open,
+        let item = ItemRecord::new(
+            ItemId(self.ids.next()),
+            input.external_ref,
+            input.title,
             repository,
-            created_by: actor.member,
-            created_at: now,
-        };
+            actor.member,
+            now,
+        );
         work.insert_item(actor.project, &item).await?;
         work.record(
             now,
@@ -118,7 +117,7 @@ impl CreateItem {
 
 #[cfg(test)]
 mod tests {
-    use dibs_domain::item::ItemRepository;
+    use dibs_domain::item::{ItemRepository, ItemStatus};
     use dibs_domain::repo::{RemoteUrl, RepoId};
 
     use super::*;

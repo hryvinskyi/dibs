@@ -234,6 +234,7 @@ mod use_cases {
                         Err(AppError::Claim(Refusal {
                             reason: ClaimRefused::HeldBy { member: holder, .. },
                             member: Some(_),
+                            ..
                         })) if *holder == winner
                     ),
                     "{result:?}"
@@ -274,6 +275,7 @@ mod use_cases {
                         Err(AppError::Claim(Refusal {
                             reason: ClaimRefused::AreaHeld { member: holder, .. },
                             member: Some(_),
+                            ..
                         })) if *holder == winners[0]
                     ),
                     "{result:?}"
@@ -489,5 +491,72 @@ mod use_cases {
                 .unwrap_err(),
             AppError::Unauthorized
         ));
+    }
+    #[tokio::test]
+    async fn an_import_repeated_on_the_file_writes_and_appends_nothing_and_feeds_the_ready_list() {
+        use dibs_domain::import::{ImportBatch, Listing, ReportedItem};
+        use dibs_domain::item::{Priority, SourceId};
+
+        let world = World::new().await;
+        let admin = project(&world.app, "widgets", "alice").await;
+        let importer = world
+            .app
+            .create_member
+            .execute(
+                &admin,
+                CreateMemberInput {
+                    member: member("board"),
+                    role: Role::Importer,
+                },
+            )
+            .await
+            .unwrap();
+        let bot = world
+            .app
+            .authenticate
+            .execute(importer.token.expose())
+            .await
+            .unwrap();
+        let reported = |text: &str, blocked_by: &[&str]| ReportedItem {
+            reference: ExternalRef::parse(text).unwrap(),
+            title: Title::parse(&format!("Work on {text}")).unwrap(),
+            closed: false,
+            listing: Some(Listing {
+                areas_hint: Vec::new(),
+                priority: Priority::default(),
+                source_status: None,
+                blocked_by: blocked_by
+                    .iter()
+                    .map(|b| ExternalRef::parse(b).unwrap())
+                    .collect(),
+            }),
+        };
+        let batch = || {
+            ImportBatch::new(
+                Some(SourceId::parse("board").unwrap()),
+                true,
+                vec![
+                    reported("gh:acme/web#1", &["gh:acme/web#2"]),
+                    reported("gh:acme/web#2", &[]),
+                ],
+            )
+            .unwrap()
+        };
+        world.app.upsert_items.execute(&bot, batch()).await.unwrap();
+        let after_first = world.event_names(admin.project).await;
+        assert_eq!(
+            after_first[after_first.len() - 3..],
+            ["item_created", "item_created", "dependency_added"]
+        );
+        world.app.upsert_items.execute(&bot, batch()).await.unwrap();
+        assert_eq!(world.event_names(admin.project).await, after_first);
+        let ready = world.app.ready.execute(&admin).await.unwrap();
+        let refs: Vec<String> = ready
+            .ready
+            .iter()
+            .map(|entry| entry.item.item.external_ref.as_ref().unwrap().to_string())
+            .collect();
+        assert_eq!(refs, ["gh:acme/web#2"]);
+        assert_eq!(ready.excluded.len(), 1);
     }
 }

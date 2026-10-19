@@ -12,13 +12,14 @@ use dibs_domain::ids::ItemId;
 use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::http::AppState;
-use crate::views::{HeldItemView, reply};
+use crate::views::{HeldItemView, ReadyView, reply};
 
 #[derive(Serialize)]
 struct StatusAnswer {
     live: Vec<HeldItemView>,
     stale: Vec<HeldItemView>,
     holds: Vec<HoldView>,
+    ready: ReadyView,
 }
 
 #[derive(Serialize)]
@@ -28,8 +29,8 @@ struct HoldView {
     item: ItemId,
 }
 
-/// The project's live claims, its stale claims, and the areas the live ones hold, each list
-/// ordered as the use case orders it.
+/// The project's live claims, its stale claims, the areas the live ones hold, and the caller's ready
+/// list, each ordered as the use case orders it.
 ///
 /// # Errors
 /// `forbidden` for an integration; the answer for the use case's failure.
@@ -51,6 +52,7 @@ pub async fn status(
                 item: hold.item,
             })
             .collect(),
+        ready: ReadyView::of(view.ready),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

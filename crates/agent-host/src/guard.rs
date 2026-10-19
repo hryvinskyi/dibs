@@ -296,8 +296,18 @@ impl Run<'_> {
                     touched_by,
                 } => notes.push(wording::noted(path, rule, note.as_ref(), touched_by)),
                 PathAnswer::NeedsClaim => refusals.push(wording::needs_claim(path, area.as_ref())),
-                PathAnswer::HeldBy { holder, item, area } => {
-                    refusals.push(wording::held_by(path, holder.as_ref(), *item, area));
+                PathAnswer::HeldBy {
+                    holder,
+                    item,
+                    item_ref,
+                    area,
+                } => {
+                    refusals.push(wording::held_by(
+                        path,
+                        holder.as_ref(),
+                        &wording::item_name(*item, item_ref.as_ref()),
+                        area,
+                    ));
                 }
             }
         }

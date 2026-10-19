@@ -4,8 +4,9 @@
 mod store;
 
 pub use store::{
-    ClaimRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows, SessionRows, SettingsRows,
-    Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx, UiSessionRows,
+    ClaimRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows,
+    SessionRows, SettingsRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
+    UiSessionRows,
 };
 
 use time::OffsetDateTime;

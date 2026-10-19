@@ -1,18 +1,22 @@
 //! Claiming a work item.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dibs_domain::claim::{ClaimOutcome, ClaimRequest, decide_claim};
+use dibs_domain::dependency::blockers;
 use dibs_domain::event::{Claimed, EventKind, Renewed};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::item::ItemStatus;
+use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{Names, refuse};
+use crate::named::{ItemName, Names, refuse};
 use crate::ports::{Clock, EventNotifier, Store};
+use crate::records::ItemRecord;
 use crate::use_cases::common::{existing_item, own_session, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::work::Work;
@@ -36,6 +40,10 @@ pub struct ClaimMade {
     pub outcome: ClaimOutcome,
     /// The handle of the claim's member, the caller.
     pub holder: dibs_domain::handle::Handle,
+    /// The items the claimed item waits for that are neither done nor closed. A claim on a blocked
+    /// item is made all the same — dependent work is often started in parallel — and the caller
+    /// shows these as a warning.
+    pub blocked_by: Vec<ItemName>,
 }
 
 /// Claims a work item for the caller, or renews the caller's own claim on it.
@@ -43,12 +51,14 @@ pub struct ClaimMade {
 /// The item's claim and the project's other claims are loaded and decided on inside one exclusive
 /// transaction, so of two members racing for one item, or for one area, exactly one wins and the
 /// other learns who holds it. A closed item cannot be claimed. A renewal that loses areas to another
-/// member ends the grants the caller gave in them.
+/// member ends the grants the caller gave in them. A blocked item is claimed, and the answer names
+/// what blocks it.
 pub struct ClaimItem {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
+    ref_schemes: Arc<RefSchemeRegistry>,
 }
 
 impl ClaimItem {
@@ -59,6 +69,7 @@ impl ClaimItem {
             clock: deps.clock.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
+            ref_schemes: deps.ref_schemes.clone(),
         }
     }
 
@@ -124,8 +135,35 @@ impl ClaimItem {
         work.record(now, event).await?;
         end_orphaned_grants(&mut work, now).await?;
         let holder = Names::load(&mut work).await?.handle(actor.member)?;
+        let blocked_by = self.blockers_of(&mut work, item.id).await?;
         work.commit(&*self.notifier).await?;
-        Ok(ClaimMade { outcome, holder })
+        Ok(ClaimMade {
+            outcome,
+            holder,
+            blocked_by,
+        })
+    }
+
+    /// The items `item` waits for that still block it, named.
+    async fn blockers_of(&self, work: &mut Work, item: ItemId) -> Result<Vec<ItemName>, AppError> {
+        let project = work.project_id();
+        let graph = work.dependencies(project).await?;
+        let mut waited_for = BTreeMap::new();
+        for edge in graph.iter().filter(|edge| edge.item == item) {
+            if let Some(record) = work.item(project, edge.blocked_by).await? {
+                waited_for.insert(record.id, record);
+            }
+        }
+        let state = |id| {
+            waited_for
+                .get(&id)
+                .map(|record: &ItemRecord| (record.status, record.closed))
+        };
+        Ok(blockers(item, &graph, state)
+            .into_iter()
+            .filter_map(|id| waited_for.get(&id))
+            .map(|record| ItemName::of(record, &self.ref_schemes))
+            .collect())
     }
 }
 
@@ -243,6 +281,7 @@ mod tests {
         let AppError::Claim(Refusal {
             reason: ClaimRefused::HeldBy { member, .. },
             member: Some(handle),
+            ..
         }) = &error
         else {
             panic!("expected held, naming the holder, got {error:?}");
@@ -296,7 +335,9 @@ mod tests {
             AppError::Claim(Refusal {
                 reason: ClaimRefused::AreaHeld { item, .. },
                 member: Some(handle),
+                item_ref: Some(reference),
             }) if *item == first && handle.as_str() == "bob"
+                && reference.to_string() == "gh:acme/widgets#1"
         ));
         let mut tx = env.deps.store.begin().await.unwrap();
         assert_eq!(tx.claim(env.project, second).await.unwrap(), None);

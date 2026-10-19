@@ -371,6 +371,7 @@ fn held_by_alice() -> PathAnswer {
     PathAnswer::HeldBy {
         holder: Some(handle("alice")),
         item: ItemId(4),
+        item_ref: None,
         area: area("api:billing"),
     }
 }
@@ -845,12 +846,74 @@ fn shell_commands_and_other_tools_are_not_checked_yet() {
 }
 
 #[test]
+fn a_session_starts_with_a_brief_that_names_the_ready_work() {
+    let world = World::new().with(|state| {
+        state.status = Some(Cached {
+            value: StatusView {
+                ready: vec![crate::ports::ReadyLine {
+                    item: ItemId(1_739_000_000_007),
+                    reference: Some(
+                        dibs_domain::item::ExternalRef::parse("gh:acme/api#7").unwrap(),
+                    ),
+                    title: "Rate table".parse().unwrap(),
+                    priority: dibs_domain::item::Priority::new(0).unwrap(),
+                    areas_hint: vec![area("api:billing")],
+                    stale_holder: None,
+                }],
+                blocked: 1,
+                ..StatusView::default()
+            },
+            at: at(-5),
+        });
+    });
+    let answer = run(&world, "neutral", "session-started", &input(None));
+    let context = no_objection(&answer)["context"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        context.contains("Ready to pick up, soonest first (1 of 1):\n- gh:acme/api#7 \"Rate table\", priority 0, likely areas api:billing"),
+        "{context}"
+    );
+    assert!(!context.contains("1739000000007"), "{context}");
+    assert!(
+        context.contains("Not ready: 1 wait for unfinished items."),
+        "{context}"
+    );
+    assert!(world.calls().is_empty());
+}
+
+#[test]
+fn a_refusal_names_the_holders_item_by_its_reference() {
+    let world = World::new().with(|state| {
+        state.answers = Ok(vec![PathAnswer::HeldBy {
+            holder: Some(handle("alice")),
+            item: ItemId(1_739_000_000_004),
+            item_ref: Some(dibs_domain::item::ExternalRef::parse("gh:acme/api#4").unwrap()),
+            area: area("api:billing"),
+        }]);
+    });
+    let answer = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    let value = reply(&answer);
+    assert_eq!(value["decision"], "deny");
+    let reason = value["reason"].as_str().unwrap();
+    assert!(reason.contains("work item gh:acme/api#4"), "{reason}");
+    assert!(!reason.contains("1739000000004"), "{reason}");
+}
+
+#[test]
 fn a_session_starts_with_a_brief_from_a_fresh_cache() {
     let world = World::new().with(|state| {
         state.status = Some(Cached {
             value: StatusView {
                 live: vec![crate::ports::ClaimLine {
                     item: ItemId(3),
+                    reference: None,
                     title: "Fix billing".parse().unwrap(),
                     holder: handle("bob"),
                     areas: vec![area("api:billing")],

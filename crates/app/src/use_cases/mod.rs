@@ -1,5 +1,6 @@
 //! The use cases, one per module, and the collection a composition root builds once.
 
+mod add_dependency;
 mod apply_settings;
 mod authenticate;
 mod claim_ending;
@@ -30,8 +31,10 @@ mod operate_project;
 mod post_message;
 mod read_thread;
 mod readable;
+mod ready;
 mod register_session;
 mod release;
+mod remove_dependency;
 mod resolve_ui_session;
 mod revoke_grant;
 mod revoke_token;
@@ -39,10 +42,12 @@ mod rotate_token;
 mod start_thread;
 mod status;
 mod take_over;
+mod upsert_items;
 
 #[cfg(test)]
 pub(crate) mod testing;
 
+pub use add_dependency::{AddDependency, DependencyChange, DependencyInput};
 pub use apply_settings::{AppliedSettings, ApplySettings};
 pub use authenticate::Authenticate;
 pub use claim_item::{ClaimItem, ClaimItemInput, ClaimMade};
@@ -70,8 +75,10 @@ pub use open_ui_session::{OpenUiSession, OpenedUiSession, UI_SESSION_LIFETIME};
 pub use operate_project::OperateProject;
 pub use post_message::{PostMessage, PostMessageInput};
 pub use read_thread::{ReadThread, ThreadView};
+pub use ready::{ExcludedEntry, NamedNotReady, Ready, ReadyEntry, ReadyView};
 pub use register_session::{RegisterSession, RegisterSessionInput};
 pub use release::Release;
+pub use remove_dependency::RemoveDependency;
 pub use resolve_ui_session::ResolveUiSession;
 pub use revoke_grant::RevokeGrant;
 pub use revoke_token::RevokeToken;
@@ -79,6 +86,7 @@ pub use rotate_token::{RotateToken, RotatedToken};
 pub use start_thread::{Addressees, StartThread, StartThreadInput, StartedThread};
 pub use status::{AreaHold, HeldItem, Status, StatusView};
 pub use take_over::{TakeOver, TakeOverInput, TakenOverClaim};
+pub use upsert_items::{UpsertItems, UpsertReport};
 
 use crate::dependencies::Dependencies;
 
@@ -102,6 +110,14 @@ pub struct UseCases {
     pub list_completed: ListCompleted,
     /// See [`GetItem`].
     pub get_item: GetItem,
+    /// See [`UpsertItems`].
+    pub upsert_items: UpsertItems,
+    /// See [`Ready`].
+    pub ready: Ready,
+    /// See [`AddDependency`].
+    pub add_dependency: AddDependency,
+    /// See [`RemoveDependency`].
+    pub remove_dependency: RemoveDependency,
     /// See [`ClaimItem`].
     pub claim_item: ClaimItem,
     /// See [`TakeOver`].
@@ -169,6 +185,10 @@ impl UseCases {
             list_items: ListItems::new(deps),
             list_completed: ListCompleted::new(deps),
             get_item: GetItem::new(deps),
+            upsert_items: UpsertItems::new(deps),
+            ready: Ready::new(deps),
+            add_dependency: AddDependency::new(deps),
+            remove_dependency: RemoveDependency::new(deps),
             claim_item: ClaimItem::new(deps),
             take_over: TakeOver::new(deps),
             release: Release::new(deps),
@@ -249,6 +269,26 @@ mod integration_refusals {
                 .execute(bot, GrantId(9_999))
                 .await
                 .map(|_| ()),
+            app.add_dependency
+                .execute(
+                    bot,
+                    DependencyInput {
+                        item,
+                        blocked_by: ItemId(9_999),
+                    },
+                )
+                .await
+                .map(|_| ()),
+            app.remove_dependency
+                .execute(
+                    bot,
+                    DependencyInput {
+                        item,
+                        blocked_by: ItemId(9_999),
+                    },
+                )
+                .await
+                .map(|_| ()),
         ];
         for (n, refusal) in refusals.into_iter().enumerate() {
             assert_eq!(refusal.unwrap_err().code(), "forbidden", "case {n}");
@@ -262,5 +302,6 @@ mod integration_refusals {
                 .is_ok()
         );
         assert!(app.get_item.execute(bot, item).await.is_ok());
+        assert!(app.ready.execute(bot).await.is_ok());
     }
 }

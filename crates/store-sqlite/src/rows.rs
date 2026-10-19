@@ -2,6 +2,7 @@
 //! run inside the transaction.
 
 mod claims;
+mod dependencies;
 mod events;
 mod grants;
 mod items;

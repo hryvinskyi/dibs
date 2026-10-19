@@ -306,6 +306,7 @@ mod tests {
             AppError::Takeover(Refusal {
                 reason: TakeoverRefused::NotStale { .. },
                 member: Some(handle),
+                ..
             }) if handle.as_str() == "bob"
         ));
         assert_eq!(env.events().await.len(), before);

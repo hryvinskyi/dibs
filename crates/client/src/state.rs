@@ -441,7 +441,14 @@ mod tests {
             live: Vec::new(),
             stale: Vec::new(),
             holds: Vec::new(),
+            ready: crate::api::ReadyList::default(),
         };
+        let earlier: Status =
+            serde_json::from_str(r#"{"live": [], "stale": [], "holds": []}"#).unwrap();
+        assert_eq!(
+            earlier, status,
+            "a status cached before the ready list reads as empty"
+        );
         state.remember_status(&status, at).unwrap();
         assert_eq!(state.status().unwrap().fetched_at, at);
     }

@@ -33,6 +33,19 @@ impl Actor {
         }
     }
 
+    /// Refuses anyone who may not feed the project's items from an outside tracker: only an admin
+    /// and the importer may.
+    ///
+    /// # Errors
+    /// [`AppError::Forbidden`] for a member.
+    pub fn require_import(&self) -> Result<(), AppError> {
+        if self.role.may_import() {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden)
+        }
+    }
+
     /// Refuses anyone but an admin.
     ///
     /// # Errors
@@ -74,6 +87,12 @@ mod tests {
         ));
         assert!(matches!(
             actor(Role::Importer).require_admin(),
+            Err(AppError::Forbidden)
+        ));
+        assert!(actor(Role::Admin).require_import().is_ok());
+        assert!(actor(Role::Importer).require_import().is_ok());
+        assert!(matches!(
+            actor(Role::Member).require_import(),
             Err(AppError::Forbidden)
         ));
     }

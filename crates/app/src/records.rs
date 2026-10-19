@@ -1,14 +1,21 @@
 //! The records the store keeps and the use cases read and write. Each holds validated values only, so
 //! a record read back from the store is as valid as the one written.
 
+use std::collections::BTreeSet;
+
 use time::OffsetDateTime;
 
+use dibs_domain::area::QualifiedArea;
 use dibs_domain::grant::Grant;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
-use dibs_domain::item::{ExternalRef, ItemRepository, ItemStatus, Title};
+use dibs_domain::import::KnownItem;
+use dibs_domain::item::{
+    ExternalRef, ItemMeta, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
+};
 use dibs_domain::member::Role;
 use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
+use dibs_domain::ready::Candidate;
 use dibs_domain::session::HostName;
 
 use crate::token::{TokenHash, TokenPrefix};
@@ -108,6 +115,16 @@ pub struct ItemRecord {
     pub status: ItemStatus,
     /// The repository it belongs to, as its reference said when it was created.
     pub repository: ItemRepository,
+    /// The areas the work will probably touch.
+    pub areas_hint: BTreeSet<QualifiedArea>,
+    /// How soon it should be done.
+    pub priority: Priority,
+    /// The outside tracker's own state of it.
+    pub source_status: Option<SourceStatus>,
+    /// Whether the outside tracker closed it.
+    pub closed: bool,
+    /// The source an importer listed it from.
+    pub source: Option<SourceId>,
     /// Who created it.
     pub created_by: MemberId,
     /// When it was created.
@@ -121,9 +138,79 @@ impl AsRef<Grant> for GrantRecord {
 }
 
 impl ItemRecord {
+    /// A new open item with only a title: no hint, the default priority, no tracker state, listed
+    /// by no source.
+    pub fn new(
+        id: ItemId,
+        external_ref: Option<ExternalRef>,
+        title: Title,
+        repository: ItemRepository,
+        created_by: MemberId,
+        created_at: OffsetDateTime,
+    ) -> Self {
+        Self {
+            id,
+            external_ref,
+            title,
+            status: ItemStatus::Open,
+            repository,
+            areas_hint: BTreeSet::new(),
+            priority: Priority::default(),
+            source_status: None,
+            closed: false,
+            source: None,
+            created_by,
+            created_at,
+        }
+    }
+
     /// Whether the item is done or dropped, so nobody may claim it any more.
     pub fn is_closed(&self) -> bool {
         matches!(self.status, ItemStatus::Done | ItemStatus::Dropped)
+    }
+
+    /// The facts an importer supplies about the item.
+    pub fn meta(&self) -> ItemMeta {
+        ItemMeta {
+            title: self.title.clone(),
+            areas_hint: self.areas_hint.clone(),
+            priority: self.priority,
+            source_status: self.source_status.clone(),
+            closed: self.closed,
+        }
+    }
+
+    /// Replaces the facts an importer supplies about the item.
+    pub fn set_meta(&mut self, meta: ItemMeta) {
+        self.title = meta.title;
+        self.areas_hint = meta.areas_hint;
+        self.priority = meta.priority;
+        self.source_status = meta.source_status;
+        self.closed = meta.closed;
+    }
+
+    /// The item as an import compares it.
+    pub fn known(&self) -> KnownItem {
+        KnownItem {
+            id: self.id,
+            reference: self.external_ref.clone(),
+            status: self.status,
+            repository: self.repository.clone(),
+            meta: self.meta(),
+            source: self.source.clone(),
+        }
+    }
+
+    /// The item as the ready list weighs it.
+    pub fn candidate(&self) -> Candidate<'_> {
+        Candidate {
+            id: self.id,
+            status: self.status,
+            closed: self.closed,
+            priority: self.priority,
+            areas_hint: &self.areas_hint,
+            created_at: self.created_at,
+        }
     }
 }
 

@@ -3,10 +3,10 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use dibs_domain::handle::Handle;
-use dibs_domain::member::{DisplayName, ExternalLogin};
+use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::project::ProjectSlug;
 
 /// `dibs-server`.
@@ -94,9 +94,31 @@ pub struct MemberAddArgs {
     /// Their login in the outside tracker.
     #[arg(long, value_parser = ExternalLogin::parse)]
     pub login: Option<ExternalLogin>,
-    /// Make them an admin.
-    #[arg(long)]
-    pub admin: bool,
+    /// Their role.
+    #[arg(long, value_enum, default_value = "member")]
+    pub role: RoleArg,
+}
+
+/// The role a new member gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RoleArg {
+    /// A person who also manages the project.
+    Admin,
+    /// A person working in the project.
+    Member,
+    /// An integration that feeds the project's items from an outside tracker; it holds no claim
+    /// and reads no conversation.
+    Importer,
+}
+
+impl From<RoleArg> for Role {
+    fn from(value: RoleArg) -> Self {
+        match value {
+            RoleArg::Admin => Self::Admin,
+            RoleArg::Member => Self::Member,
+            RoleArg::Importer => Self::Importer,
+        }
+    }
 }
 
 /// `dibs-server admin token`.
@@ -188,6 +210,38 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_member_is_added_with_a_role_member_by_default() {
+        let add = |extra: &[&str]| {
+            let mut args = vec![
+                "dibs-server",
+                "admin",
+                "member",
+                "add",
+                "board",
+                "--project",
+                "widgets",
+                "--name",
+                "Board",
+            ];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args)
+        };
+        let role = |extra: &[&str]| {
+            let Some(Command::Admin(AdminCommand::Member(MemberCommand::Add(args)))) =
+                add(extra).unwrap().command
+            else {
+                panic!("not a member add");
+            };
+            Role::from(args.role)
+        };
+        assert_eq!(role(&[]), Role::Member);
+        assert_eq!(role(&["--role", "importer"]), Role::Importer);
+        assert_eq!(role(&["--role", "admin"]), Role::Admin);
+        assert!(add(&["--role", "owner"]).is_err());
+        assert!(add(&["--admin"]).is_err());
     }
 
     #[test]

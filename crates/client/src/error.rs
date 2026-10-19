@@ -15,7 +15,7 @@ use time::OffsetDateTime;
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
-use dibs_domain::item::ItemStatus;
+use dibs_domain::item::{ExternalRef, ItemStatus};
 use dibs_domain::repo::{RemoteUrl, RepoId};
 
 /// Why a call did not give its answer.
@@ -126,6 +126,9 @@ pub struct ErrorDetails {
     /// The item they hold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<ItemId>,
+    /// That item's reference, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_ref: Option<ExternalRef>,
     /// The area concerned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub area: Option<QualifiedArea>,

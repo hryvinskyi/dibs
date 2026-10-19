@@ -418,3 +418,58 @@ fn a_stale_claim_is_taken_over_released_and_done() {
         assert!(heartbeat.refreshed.is_empty());
     });
 }
+
+#[test]
+fn the_ready_list_and_the_dependencies_are_read_and_written() {
+    let world = World::new();
+    let bob = world.client(&world.bob);
+    run(async {
+        let waiting = bob
+            .create_item(&new_item("gh:acme/api#3", "Waits"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let blocker = bob
+            .create_item(&new_item("gh:acme/api#4", "Blocks"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let added = bob.add_dependency(waiting, blocker).await.unwrap();
+        assert!(added.changed);
+        assert_eq!(added.blocked_by.id, blocker);
+        let cycle = bob.add_dependency(blocker, waiting).await.unwrap_err();
+        assert_eq!(cycle.code(), "dependency_cycle");
+        assert!(matches!(cycle, ClientError::Conflict { .. }));
+        let ready = bob.ready().await.unwrap();
+        let ready_ids: Vec<ItemId> = ready.ready.iter().map(|entry| entry.item.id).collect();
+        assert_eq!(ready_ids, [blocker]);
+        assert_eq!(
+            ready.ready[0].link.as_deref(),
+            Some("https://github.com/acme/api/issues/4")
+        );
+        let session = session(&bob, "laptop/ready").await.session_id;
+        let claimed = bob
+            .claim(
+                waiting,
+                &ClaimRequest {
+                    session_id: session,
+                    areas: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.blocked_by[0].label(), "gh:acme/api#4");
+        let status = bob.status().await.unwrap();
+        assert_eq!(status.ready.ready.len(), 1);
+        let removed = bob.remove_dependency(waiting, blocker).await.unwrap();
+        assert!(removed.changed);
+        assert!(
+            !bob.remove_dependency(waiting, blocker)
+                .await
+                .unwrap()
+                .changed
+        );
+    });
+}

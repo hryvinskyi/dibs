@@ -2,11 +2,15 @@
 //! a take-over form, and what was done today — filtered by area and by member through the query
 //! string, with a reload banner when the claims or the items change.
 //!
-//! *Ready* lists the open items nobody holds. *Done today* lists the items completed since the
-//! viewer's midnight, newest first: midnight at the offset the page's script recorded, or UTC's
-//! midnight, said on the page, until it has recorded one. A filter keeps what matches it: the area filter keeps
-//! claims that declare that area, the member filter keeps the claims and completions of that
-//! member; an item nobody holds and a completion name no area, so a set filter leaves them out.
+//! *Ready* lists the viewer's ready list, soonest first, each card with its priority, its hinted
+//! areas and its tracker's page, and below it the open items that are not ready with what holds
+//! them back: their blockers, or a hinted area another member holds. An item a live claim holds is
+//! in progress instead. *Done today* lists the items completed since the viewer's midnight, newest
+//! first: midnight at the offset the page's script recorded, or UTC's midnight, said on the page,
+//! until it has recorded one. A filter keeps what matches it: the area filter keeps claims that
+//! declare that area and items that hint it, the member filter keeps the claims and completions of
+//! that member; an item nobody holds names no member and a completion no area, so those filters
+//! leave them out.
 
 use askama::Template;
 use axum::extract::rejection::QueryRejection;
@@ -17,9 +21,7 @@ use serde::Deserialize;
 use time::UtcOffset;
 
 use dibs_app::named::NamedClaim;
-use dibs_app::use_cases::ItemQuery;
 use dibs_domain::handle::Handle;
-use dibs_domain::item::ItemStatus;
 use dibs_domain::settings::ProjectSettings;
 
 use crate::error::ApiError;
@@ -28,7 +30,7 @@ use crate::ui::chrome::{self, Chrome, Section};
 use crate::ui::live::latest_event;
 use crate::ui::moments::{Ago, Moment, moment, start_of_day};
 use crate::ui::render::html;
-use crate::ui::rows::{ClaimRow, ItemCard, reference};
+use crate::ui::rows::{ClaimRow, NotReadyRow, ReadyCard, reference};
 use crate::ui::session::PageSession;
 use crate::ui::signed_page;
 use crate::ui::status::STATUS_CHANGES;
@@ -77,9 +79,14 @@ impl BoardFilter {
         area && self.keeps_member(&claim.holder)
     }
 
-    /// Whether an item nobody holds is kept: only while nothing is filtered.
-    pub fn keeps_unheld(&self) -> bool {
-        self.area.is_none() && self.member.is_none()
+    /// Whether an item nobody holds is kept: no member is filtered, and the area filtered, if any,
+    /// is one of the item's hinted areas.
+    pub fn keeps_unheld(&self, hints: &[String]) -> bool {
+        self.member.is_none()
+            && self
+                .area
+                .as_deref()
+                .is_none_or(|area| hints.iter().any(|hint| hint == area))
     }
 
     /// Whether a completion by this member is kept: no area is filtered, and the member matches.
@@ -112,7 +119,8 @@ struct BoardPage {
     areas: Vec<String>,
     members: Vec<String>,
     repos: Vec<String>,
-    ready: Vec<ItemCard>,
+    ready: Vec<ReadyCard>,
+    waiting: Vec<ReadyCard>,
     in_progress: Vec<ClaimRow>,
     stale: Vec<ClaimRow>,
     done: Vec<DoneCard>,
@@ -138,17 +146,6 @@ pub async fn page(
     let actor = session.actor();
     let after = latest_event(&state, actor).await?;
     let view = state.app.status.execute(actor).await?;
-    let open = state
-        .app
-        .list_items
-        .execute(
-            actor,
-            ItemQuery {
-                status: Some(ItemStatus::Open),
-                ..ItemQuery::default()
-            },
-        )
-        .await?;
     let now = state.clock.now();
     let zone = viewer_offset(&headers);
     let since = start_of_day(now, zone.unwrap_or(UtcOffset::UTC));
@@ -161,11 +158,21 @@ pub async fn page(
             .map(|held| ClaimRow::of(held, actor.member, now))
             .collect::<Vec<_>>()
     };
-    let ready = if filter.keeps_unheld() {
-        open.iter().map(ItemCard::of).collect()
-    } else {
-        Vec::new()
-    };
+    let ready = view
+        .ready
+        .ready
+        .iter()
+        .map(ReadyCard::ready)
+        .filter(|card| filter.keeps_unheld(&card.hints))
+        .collect();
+    let waiting = view
+        .ready
+        .excluded
+        .iter()
+        .map(ReadyCard::excluded)
+        .filter(|card| !card.reasons.iter().any(NotReadyRow::is_claim))
+        .filter(|card| filter.keeps_unheld(&card.hints))
+        .collect();
     let done = completed
         .iter()
         .filter(|done| filter.keeps_completion(&done.member))
@@ -197,13 +204,16 @@ pub async fn page(
             Vec::new()
         },
         ready,
+        waiting,
         in_progress: rows(&view.live),
         stale: rows(&view.stale),
         done,
         day_in_utc: zone.is_none(),
         updated: moment(now, now),
         after,
-        changed_kinds: format!("{STATUS_CHANGES} item_created"),
+        changed_kinds: format!(
+            "{STATUS_CHANGES} item_created item_updated dependency_added dependency_removed"
+        ),
         reload: reload_link(&filter),
     };
     Ok(signed_page(&session, html(StatusCode::OK, &page)))
@@ -292,17 +302,19 @@ mod tests {
         let none = BoardFilter::new(None, Some("  ".to_owned()));
         assert_eq!(none, BoardFilter::default());
         assert!(none.keeps_claim(&claim("alice", &[])));
-        assert!(none.keeps_unheld());
+        assert!(none.keeps_unheld(&[]));
         assert!(none.keeps_completion(&Handle::parse("bob").unwrap()));
     }
 
     #[test]
-    fn an_area_filter_keeps_the_claims_that_declare_it_and_nothing_unheld() {
+    fn an_area_filter_keeps_the_claims_that_declare_it_and_the_items_that_hint_it() {
         let billing = filter("api:billing", "");
         assert!(billing.keeps_claim(&claim("alice", &["api:billing", "api:search"])));
         assert!(!billing.keeps_claim(&claim("alice", &["api:search"])));
         assert!(!billing.keeps_claim(&claim("alice", &[])));
-        assert!(!billing.keeps_unheld());
+        assert!(!billing.keeps_unheld(&[]));
+        assert!(billing.keeps_unheld(&["api:search".to_owned(), "api:billing".to_owned()]));
+        assert!(!billing.keeps_unheld(&["api:search".to_owned()]));
         assert!(!billing.keeps_completion(&Handle::parse("alice").unwrap()));
     }
 
@@ -313,7 +325,8 @@ mod tests {
         assert!(!bob.keeps_claim(&claim("alice", &["api:search"])));
         assert!(bob.keeps_completion(&Handle::parse("bob").unwrap()));
         assert!(!bob.keeps_completion(&Handle::parse("alice").unwrap()));
-        assert!(!bob.keeps_unheld());
+        assert!(!bob.keeps_unheld(&[]));
+        assert!(!bob.keeps_unheld(&["api:search".to_owned()]));
         let both = filter("api:search", "bob");
         assert!(both.keeps_claim(&claim("bob", &["api:search"])));
         assert!(!both.keeps_claim(&claim("bob", &["api:billing"])));

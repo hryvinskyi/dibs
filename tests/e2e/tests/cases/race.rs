@@ -28,7 +28,7 @@ fn two_members_claiming_one_item_never_both_win() {
 
     // A reference holds `/` and `#`, which a path segment cannot carry; each round has its own.
     let refs: Vec<String> = (0..ROUNDS)
-        .map(|round| format!("gh:acme/widgets/race-{round}#{round}"))
+        .map(|round| format!("gh:acme/race-{round}#{round}"))
         .collect();
     for (round, reference) in refs.iter().enumerate() {
         team.alice.ok(

@@ -139,7 +139,7 @@ standard output and its log to standard error.
 ```text
 dibs-server [serve]                                  serve until SIGTERM or Ctrl-C (the default)
 dibs-server admin init --project <slug> --admin <handle> --name <name> [--login <login>]
-dibs-server admin member add <handle> --project <slug> --name <name> [--login <login>] [--admin]
+dibs-server admin member add <handle> --project <slug> --name <name> [--login <login>] [--role admin|member|importer]
 dibs-server admin token rotate <project> <handle>
 dibs-server admin snapshot
 dibs-server restore <snapshot> --to <database>
@@ -151,7 +151,9 @@ standard output and a sentence about it on standard error, so `token=$(… 2>/de
 token is shown once; the server keeps only a hash. Exit status: 0 done, 1 refused or failed, 2 configuration refused.
 
 Members can also be added, and their tokens rotated, with `dibs admin member add` and `dibs admin token rotate` from a
-client signed in as an admin.
+client signed in as an admin. `--role` is `member` by default; `importer` makes the token of an integration worker that
+feeds the project's items from an outside tracker (`PUT /v1/items`): it may read members, items, the event log and the
+ready list, and nothing else — no claim, no conversation.
 
 ### Rotating a token
 
@@ -206,6 +208,36 @@ The schema is migrated by the server when it opens the database, so a start on a
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
 serving, offline.
+
+### Two spellings of one ticket
+
+From the release that keeps `gh` references in lower case, a database whose items include two references that differ
+only in case (`gh:Acme/Web#3` and `gh:acme/web#3`), or a `gh` reference that is not `owner/repo#number`, is refused by
+the migration, which names the references; nothing is changed and the server does not start. The two items are two
+records of one ticket, and only a person can tell which one carries the work. Merge them by hand on the stopped server,
+after a snapshot:
+
+```sh
+sqlite3 dibs.db "SELECT project_id, id, external_ref, status FROM items
+                 WHERE lower(external_ref) = lower('gh:acme/web#3');"
+```
+
+Keep one id (`<keep>`), the one with the claim or the conversations, and move what names the other (`<drop>`) onto it,
+in one transaction:
+
+```sql
+BEGIN;
+UPDATE threads SET item_id = <keep> WHERE project_id = <p> AND item_id = <drop>;
+UPDATE grants SET item_id = <keep> WHERE project_id = <p> AND item_id = <drop>;
+DELETE FROM shared_paths WHERE project_id = <p> AND item_id = <drop>;
+DELETE FROM claims WHERE project_id = <p> AND item_id = <drop>;
+DELETE FROM items WHERE project_id = <p> AND id = <drop>;
+COMMIT;
+```
+
+A reference of another shape is corrected in place (`UPDATE items SET external_ref = 'gh:acme/web#3' WHERE …`) or
+given a scheme of its own (`note:…`). Then start the server again; the migration lowers the remaining `gh` references.
+The event log keeps the dropped id where it already named it.
 
 Upgrade the server before the clients. A stop is graceful on `SIGTERM`: the server stops accepting connections, ends the
 event streams, gives requests in flight 10 seconds, finishes a snapshot it is writing, checkpoints the write-ahead log

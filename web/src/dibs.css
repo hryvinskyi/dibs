@@ -356,6 +356,7 @@ a.chip[aria-current="true"] { background: var(--c-accent); border-color: var(--c
 .column { display: grid; gap: var(--sp-3); min-width: 0; padding: var(--sp-3); border-radius: var(--r-2); background: var(--c-surface-2); }
 .column__head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); padding: 2px var(--sp-1); }
 .column__head h2 { font-size: var(--fs-md); }
+.column__sub { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); padding: var(--sp-2) var(--sp-1) 0; font-size: var(--fs-sm); color: var(--c-text-muted); }
 .column__count { min-width: 1.6em; padding: 0 7px; border-radius: var(--r-pill); background: var(--c-surface); border: var(--bw) solid var(--c-border); text-align: center; font-size: var(--fs-xs); font-weight: var(--fw-bold); color: var(--c-text-muted); font-variant-numeric: tabular-nums; }
 .cards { display: grid; gap: var(--sp-3); margin: 0; padding: 0; list-style: none; }
 .card { display: grid; gap: var(--sp-2); min-width: 0; padding: var(--sp-4); border: var(--bw) solid var(--c-border); border-radius: var(--r-2); background: var(--c-surface); box-shadow: var(--shadow-card); }

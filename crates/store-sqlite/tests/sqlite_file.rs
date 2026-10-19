@@ -84,8 +84,28 @@ mod sqlite_file {
             "SELECT group_concat(version || ':' || success) FROM _sqlx_migrations",
         )
         .await;
-        assert_eq!(applied, "1:1");
+        assert_eq!(applied, "1:1,2:1");
         assert_eq!(scalar(&path, "PRAGMA journal_mode").await, "wal");
+    }
+
+    #[tokio::test]
+    async fn what_an_item_unblocks_is_read_through_its_index() {
+        let (_dir, path) = file();
+        SqliteStore::open(&path).await.unwrap().close().await;
+        let mut connection = raw(&path).await;
+        let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT item_id, source FROM dependencies \
+             WHERE project_id = 1 AND blocked_by_id = 7",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        let plan = steps
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(plan.contains("dependencies_by_blocker"), "{plan}");
     }
 
     #[tokio::test]

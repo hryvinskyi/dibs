@@ -10,18 +10,22 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 use dibs_app::named::{
-    NamedClaim, NamedEvent, NamedGrant, NamedItem, NamedMessage, NamedSummary, NamedThread,
-    NamedToken, NamedVerdict,
+    ItemName, NamedClaim, NamedEvent, NamedGrant, NamedItem, NamedMessage, NamedSummary,
+    NamedThread, NamedToken, NamedVerdict,
 };
 use dibs_app::records::{MemberRecord, SessionRecord};
-use dibs_app::use_cases::{FollowedEvent, HeldItem};
+use dibs_app::use_cases::{
+    ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady, ReadyEntry, ReadyView as ReadyList,
+};
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::edit::{HeldReason, Verdict};
 use dibs_domain::event::EventKind;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::{HotRuleKind, Note};
 use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId, ThreadId};
-use dibs_domain::item::{ExternalRef, ItemRepository, ItemStatus, Title};
+use dibs_domain::item::{
+    ExternalRef, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
+};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
 use dibs_domain::repo::{RemoteUrl, RepoId};
@@ -121,6 +125,16 @@ pub struct ItemView {
     pub repo: Option<RepoId>,
     /// The repository its reference names when the project does not list it.
     pub unlisted_remote: Option<RemoteUrl>,
+    /// How soon it should be done: 0 to 4, lower is sooner.
+    pub priority: Priority,
+    /// The areas the work will probably touch.
+    pub areas_hint: BTreeSet<QualifiedArea>,
+    /// The outside tracker's own state of it.
+    pub source_status: Option<SourceStatus>,
+    /// Whether the outside tracker closed it.
+    pub closed: bool,
+    /// The importer's source that lists it.
+    pub source: Option<SourceId>,
     /// Who created it.
     pub created_by: Handle,
     /// When.
@@ -144,8 +158,138 @@ impl ItemView {
             status: item.status,
             repo,
             unlisted_remote,
+            priority: item.priority,
+            areas_hint: item.areas_hint,
+            source_status: item.source_status,
+            closed: item.closed,
+            source: item.source,
             created_by: named.created_by,
             created_at: item.created_at,
+        }
+    }
+}
+
+/// An item another answer mentions: its id, reference, title and tracker page.
+#[derive(Debug, Serialize)]
+pub struct ItemNameView {
+    /// Its local id.
+    pub id: ItemId,
+    /// Its reference in an outside tracker.
+    #[serde(rename = "ref")]
+    pub external_ref: Option<ExternalRef>,
+    /// Its title.
+    pub title: Title,
+    /// The tracker's page for it.
+    pub link: Option<String>,
+}
+
+impl ItemNameView {
+    /// The view of a mentioned item.
+    pub fn of(name: ItemName) -> Self {
+        Self {
+            id: name.id,
+            external_ref: name.external_ref,
+            title: name.title,
+            link: name.link,
+        }
+    }
+}
+
+/// An item of the ready list.
+#[derive(Debug, Serialize)]
+pub struct ReadyItemView {
+    /// The item.
+    pub item: ItemView,
+    /// The tracker's page for it.
+    pub link: Option<String>,
+    /// The member whose claim on it went stale, when one did.
+    pub stale_holder: Option<Handle>,
+}
+
+/// Why an open item is not ready, tagged by `reason`.
+#[derive(Debug, Serialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum NotReadyView {
+    /// A member's live claim holds it.
+    Claimed {
+        /// The holder.
+        holder: Handle,
+    },
+    /// Items it waits for are neither done nor closed.
+    BlockedBy {
+        /// Those items.
+        items: Vec<ItemNameView>,
+    },
+    /// An area of its hint is held by another member's live claim.
+    AreaHeld {
+        /// The area.
+        area: QualifiedArea,
+        /// The holder.
+        holder: Handle,
+        /// The holder's item.
+        item: ItemNameView,
+    },
+}
+
+impl NotReadyView {
+    /// The view of a reason.
+    pub fn of(reason: NamedNotReady) -> Self {
+        match reason {
+            NamedNotReady::Claimed { holder } => Self::Claimed { holder },
+            NamedNotReady::BlockedBy { items } => Self::BlockedBy {
+                items: items.into_iter().map(ItemNameView::of).collect(),
+            },
+            NamedNotReady::AreaHeld { area, holder, item } => Self::AreaHeld {
+                area,
+                holder,
+                item: ItemNameView::of(item),
+            },
+        }
+    }
+}
+
+/// An open item left out of the ready list.
+#[derive(Debug, Serialize)]
+pub struct ExcludedItemView {
+    /// The item.
+    pub item: ItemView,
+    /// The tracker's page for it.
+    pub link: Option<String>,
+    /// Every reason why it is not ready.
+    pub reasons: Vec<NotReadyView>,
+}
+
+/// The ready list and the open items left out of it.
+#[derive(Debug, Serialize)]
+pub struct ReadyView {
+    /// The items the caller can pick up, soonest first.
+    pub ready: Vec<ReadyItemView>,
+    /// The open items that are not ready, in the same order.
+    pub excluded: Vec<ExcludedItemView>,
+}
+
+impl ReadyView {
+    /// The view of a ready list.
+    pub fn of(list: ReadyList) -> Self {
+        Self {
+            ready: list
+                .ready
+                .into_iter()
+                .map(|entry: ReadyEntry| ReadyItemView {
+                    item: ItemView::of(entry.item),
+                    link: entry.link,
+                    stale_holder: entry.stale_holder,
+                })
+                .collect(),
+            excluded: list
+                .excluded
+                .into_iter()
+                .map(|entry: ExcludedEntry| ExcludedItemView {
+                    item: ItemView::of(entry.item),
+                    link: entry.link,
+                    reasons: entry.reasons.into_iter().map(NotReadyView::of).collect(),
+                })
+                .collect(),
         }
     }
 }
@@ -286,6 +430,8 @@ pub enum VerdictView {
         holder: Option<Handle>,
         /// The holder's item.
         item: ItemId,
+        /// The holder's item's reference, when it has one.
+        item_ref: Option<ExternalRef>,
         /// The area.
         area: QualifiedArea,
         /// The way on: `ask_holder`, message the holder or ask for a grant.
@@ -328,6 +474,7 @@ impl PathVerdictView {
             } => VerdictView::HeldBy {
                 holder: named.member,
                 item,
+                item_ref: named.item_ref,
                 area,
                 reason: reason_code(reason),
             },
@@ -626,13 +773,15 @@ mod tests {
                 },
             },
             member: Some(handle("bob")),
+            item_ref: Some(ExternalRef::parse("gh:acme/api#3").unwrap()),
             touched_by: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(PathVerdictView::of(named)).unwrap(),
             json!({
                 "repo": "api", "path": "src/billing/a.rs", "verdict": "held_by",
-                "holder": "bob", "item": 3, "area": "api:billing", "reason": "ask_holder"
+                "holder": "bob", "item": 3, "item_ref": "gh:acme/api#3",
+                "area": "api:billing", "reason": "ask_holder"
             })
         );
     }
@@ -659,6 +808,7 @@ mod tests {
                 },
             },
             member: None,
+            item_ref: None,
             touched_by: vec![handle("alice"), handle("bob")],
         };
         assert_eq!(

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::edit::{self, EditCheckInput as DomainInput, edit_verdicts};
+use dibs_domain::edit::{self, EditCheckInput as DomainInput, Verdict, edit_verdicts};
 use dibs_domain::event::{EventKind, Reserved};
 use dibs_domain::grant::Grant;
 use dibs_domain::hot_rule::HotRuleRegistry;
@@ -15,7 +15,7 @@ use dibs_domain::reservation::ReservationPlan;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{NamedVerdict, Names};
+use crate::named::{NamedVerdict, Names, item_ref};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::common::own_session;
 use crate::work::Work;
@@ -45,13 +45,23 @@ pub struct EditVerdicts {
 }
 
 impl EditVerdicts {
-    fn named(check: edit::EditCheck, names: &Names) -> Result<Self, AppError> {
+    /// The verdicts with the members they name by handle and the holders' items by reference.
+    async fn named(
+        check: edit::EditCheck,
+        names: &Names,
+        work: &mut Work,
+    ) -> Result<Self, AppError> {
+        let mut verdicts = Vec::with_capacity(check.verdicts.len());
+        for verdict in check.verdicts {
+            let reference = if let Verdict::HeldBy { item, .. } = &verdict.verdict {
+                item_ref(work, *item).await?
+            } else {
+                None
+            };
+            verdicts.push(names.verdict(verdict, reference)?);
+        }
         Ok(Self {
-            verdicts: check
-                .verdicts
-                .into_iter()
-                .map(|verdict| names.verdict(verdict))
-                .collect::<Result<_, _>>()?,
+            verdicts,
             plan: check.plan,
             touch: check.touch,
         })
@@ -124,7 +134,7 @@ impl EditCheck {
         )?;
         let names = Names::load(&mut work).await?;
         if !input.reserve {
-            return EditVerdicts::named(check, &names);
+            return EditVerdicts::named(check, &names, &mut work).await;
         }
         let mut gains: BTreeMap<ItemId, Gain> = BTreeMap::new();
         for add in &check.plan.add_areas {
@@ -167,8 +177,9 @@ impl EditCheck {
             )
             .await?;
         }
+        let verdicts = EditVerdicts::named(check, &names, &mut work).await?;
         work.commit(&*self.notifier).await?;
-        EditVerdicts::named(check, &names)
+        Ok(verdicts)
     }
 }
 

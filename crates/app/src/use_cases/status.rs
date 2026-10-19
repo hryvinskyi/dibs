@@ -6,12 +6,14 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MemberId};
+use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{NamedClaim, NamedItem, Names};
 use crate::ports::{Clock, Store, StoreError};
+use crate::use_cases::ready::{ReadyScope, ReadyView};
 use crate::work::Work;
 
 /// A claim with its item, each member with their handle.
@@ -45,13 +47,16 @@ pub struct StatusView {
     pub stale: Vec<HeldItem>,
     /// The areas live claims hold, ordered by area.
     pub holds: Vec<AreaHold>,
+    /// The work the caller can pick up now, and the open items that are not ready.
+    pub ready: ReadyView,
 }
 
-/// Shows the project's live and stale claims and the areas held.
+/// Shows the project's live and stale claims, the areas held, and the caller's ready list.
 pub struct Status {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     hot_rules: Arc<HotRuleRegistry>,
+    ref_schemes: Arc<RefSchemeRegistry>,
 }
 
 impl Status {
@@ -61,6 +66,7 @@ impl Status {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             hot_rules: deps.hot_rules.clone(),
+            ref_schemes: deps.ref_schemes.clone(),
         }
     }
 
@@ -72,13 +78,23 @@ impl Status {
         actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
-        let stale_after = work.project_settings(&self.hot_rules).await?.stale_after();
+        let settings = work.project_settings(&self.hot_rules).await?;
+        let stale_after = settings.stale_after();
+        let names = Names::load(&mut work).await?;
+        let ready = ReadyScope {
+            me: actor.member,
+            now,
+            settings: &settings,
+            schemes: &self.ref_schemes,
+        }
+        .view(&mut work, &names)
+        .await?;
         let mut view = StatusView {
             live: Vec::new(),
             stale: Vec::new(),
             holds: Vec::new(),
+            ready,
         };
-        let names = Names::load(&mut work).await?;
         for claim in work.claims(actor.project).await? {
             let item =
                 work.item(actor.project, claim.item)

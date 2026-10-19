@@ -140,6 +140,14 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
             ClaimOutcome::Renewed => "Renewed your claim on",
         };
         let mut text = format!("{verb} #{} ({}).", item, claim_text(&claimed.claim));
+        if !claimed.blocked_by.is_empty() {
+            let blockers: Vec<String> = claimed.blocked_by.iter().map(|b| b.label()).collect();
+            let _ = write!(
+                text,
+                " It is blocked by {}, which is not done yet; check with whoever works on it.",
+                blockers.join(", ")
+            );
+        }
         if !claimed.dropped_areas.is_empty() {
             let dropped: Vec<String> = claimed
                 .dropped_areas

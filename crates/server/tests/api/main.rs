@@ -18,6 +18,8 @@ mod events;
 #[cfg(test)]
 mod items;
 #[cfg(test)]
+mod ready;
+#[cfg(test)]
 mod roles;
 #[cfg(test)]
 mod sessions;

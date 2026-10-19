@@ -4,6 +4,7 @@
 pub mod admin;
 pub mod check;
 pub mod doctor;
+pub mod graph;
 pub mod hook;
 pub mod login;
 pub mod messages;
@@ -24,6 +25,8 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Whoami => login::whoami(ctx).await,
         Command::Status => work::status(ctx).await,
         Command::Items(args) => work::items(args, ctx).await,
+        Command::Ready => graph::ready(ctx).await,
+        Command::Dep(command) => graph::dep(command, ctx).await,
         Command::New(args) => work::new(args, ctx).await,
         Command::Claim(args) => work::claim(args, ctx).await,
         Command::Takeover(args) => work::take_over(args, ctx).await,

@@ -6,17 +6,20 @@
 
 pub mod area;
 pub mod claim;
+pub mod dependency;
 pub mod edit;
 pub mod event;
 pub mod grant;
 pub mod handle;
 pub mod hot_rule;
 pub mod ids;
+pub mod import;
 pub mod item;
 pub mod member;
 pub mod message;
 pub mod paths;
 pub mod project;
+pub mod ready;
 pub mod ref_scheme;
 pub mod repo;
 pub mod reservation;

@@ -1,8 +1,10 @@
 //! The client's answers as the guard reads them.
 
-use dibs_agent_host::ports::{ClaimLine, HoldLine, InboxView, PathAnswer, PortError, StatusView};
+use dibs_agent_host::ports::{
+    ClaimLine, HoldLine, InboxView, PathAnswer, PortError, ReadyLine, StatusView,
+};
 use dibs_client::ClientError;
-use dibs_client::api::{HeldItem, Status, Threads, Verdict};
+use dibs_client::api::{HeldItem, NotReady, Status, Threads, Verdict};
 
 use crate::failure::sentence;
 
@@ -10,6 +12,7 @@ use crate::failure::sentence;
 pub fn status(status: &Status) -> StatusView {
     let line = |held: &HeldItem| ClaimLine {
         item: held.item.id,
+        reference: held.item.external_ref.clone(),
         title: held.item.title.clone(),
         holder: held.claim.holder.clone(),
         areas: held.claim.areas.iter().cloned().collect(),
@@ -26,7 +29,40 @@ pub fn status(status: &Status) -> StatusView {
                 item: hold.item,
             })
             .collect(),
+        ready: status
+            .ready
+            .ready
+            .iter()
+            .map(|entry| ReadyLine {
+                item: entry.item.id,
+                reference: entry.item.external_ref.clone(),
+                title: entry.item.title.clone(),
+                priority: entry.item.priority,
+                areas_hint: entry.item.areas_hint.iter().cloned().collect(),
+                stale_holder: entry.stale_holder.clone(),
+            })
+            .collect(),
+        blocked: count(status, |reason| {
+            matches!(reason, NotReady::BlockedBy { .. })
+        }),
+        area_held: count(status, |reason| matches!(reason, NotReady::AreaHeld { .. })),
     }
+}
+
+/// How many open items nobody holds live are left out of the ready list for a reason `of` picks.
+fn count(status: &Status, of: impl Fn(&NotReady) -> bool) -> u64 {
+    let unheld = |reasons: &[NotReady]| {
+        !reasons
+            .iter()
+            .any(|reason| matches!(reason, NotReady::Claimed { .. }))
+    };
+    let counted = status
+        .ready
+        .excluded
+        .iter()
+        .filter(|entry| unheld(&entry.reasons) && entry.reasons.iter().any(&of))
+        .count();
+    u64::try_from(counted).unwrap_or(u64::MAX)
 }
 
 /// The conversations with unread messages as the guard reads them.
@@ -63,10 +99,15 @@ pub fn answer(verdict: &Verdict) -> PathAnswer {
         },
         Verdict::NeedsClaim => PathAnswer::NeedsClaim,
         Verdict::HeldBy {
-            holder, item, area, ..
+            holder,
+            item,
+            item_ref,
+            area,
+            ..
         } => PathAnswer::HeldBy {
             holder: holder.clone(),
             item: *item,
+            item_ref: item_ref.clone(),
             area: area.clone(),
         },
         Verdict::Granted { by, area } => PathAnswer::Granted {

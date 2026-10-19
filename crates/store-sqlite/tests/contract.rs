@@ -19,6 +19,7 @@ mod contract {
     use dibs_app::token::{TokenHash, TokenPrefix};
     use dibs_domain::area::QualifiedArea;
     use dibs_domain::claim::Claim;
+    use dibs_domain::dependency::{Dependency, DependencySource};
     use dibs_domain::event::{
         Claimed, Completed, Event, EventKind, GrantEnd, GrantRevoked, ItemCreated, MessagePosted,
         Reserved, SettingsChanged,
@@ -28,7 +29,9 @@ mod contract {
     use dibs_domain::ids::{
         EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
     };
-    use dibs_domain::item::{ExternalRef, ItemRepository, ItemStatus, Title};
+    use dibs_domain::item::{
+        ExternalRef, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
+    };
     use dibs_domain::member::{DisplayName, ExternalLogin, Role};
     use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
     use dibs_domain::paths::RepoPath;
@@ -98,6 +101,8 @@ mod contract {
         sessions_are_replaced_by_id_and_unique_by_label_per_member,
         items_are_unique_by_reference_and_filtered,
         items_keep_the_repository_they_belong_to,
+        items_keep_what_an_importer_reports_and_change_only_that,
+        dependencies_are_one_per_pair_scoped_and_removed,
         claims_are_kept_live_or_stale_and_replaced_per_item,
         shared_paths_are_kept_once_and_removed_explicitly,
         grants_are_listed_by_id,
@@ -173,15 +178,14 @@ mod contract {
     }
 
     fn item(id: ItemId, reference: Option<&str>, by: MemberId) -> ItemRecord {
-        ItemRecord {
+        ItemRecord::new(
             id,
-            external_ref: reference.map(|r| ExternalRef::parse(r).unwrap()),
-            title: Title::parse("Fix the invoice totals").unwrap(),
-            status: ItemStatus::Open,
-            repository: ItemRepository::Unnamed,
-            created_by: by,
-            created_at: at(3),
-        }
+            reference.map(|r| ExternalRef::parse(r).unwrap()),
+            Title::parse("Fix the invoice totals").unwrap(),
+            ItemRepository::Unnamed,
+            by,
+            at(3),
+        )
     }
 
     fn areas(names: &[&str]) -> BTreeSet<QualifiedArea> {
@@ -604,6 +608,105 @@ mod contract {
         assert_eq!(
             tx.item(A, SECOND).await.unwrap().map(|i| i.repository),
             Some(ItemRepository::Unnamed)
+        );
+    }
+
+    async fn items_keep_what_an_importer_reports_and_change_only_that(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let reported = ItemRecord {
+            areas_hint: areas(&["api:billing", "web:checkout"]),
+            priority: Priority::new(0).unwrap(),
+            source_status: Some(SourceStatus::parse("In Review").unwrap()),
+            closed: true,
+            source: Some(SourceId::parse("board").unwrap()),
+            ..item(ItemId(58), Some("gh:acme/api#8"), ALICE)
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_item(A, &reported).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.item(A, ItemId(58)).await.unwrap(),
+            Some(reported.clone())
+        );
+        let defaults = tx.item(A, FIRST).await.unwrap().unwrap();
+        assert_eq!(
+            (
+                defaults.priority,
+                defaults.areas_hint.is_empty(),
+                defaults.source_status,
+                defaults.closed,
+                defaults.source,
+            ),
+            (Priority::default(), true, None, false, None)
+        );
+
+        let mut changed = ItemRecord {
+            title: Title::parse("Renamed upstream").unwrap(),
+            areas_hint: BTreeSet::new(),
+            priority: Priority::new(4).unwrap(),
+            source_status: None,
+            closed: false,
+            source: None,
+            status: ItemStatus::Done,
+            created_by: BOB,
+            created_at: at(99),
+            ..reported.clone()
+        };
+        tx.update_item(A, &changed).await.unwrap();
+        tx.update_item(B, &changed).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        changed.status = reported.status;
+        changed.created_by = reported.created_by;
+        changed.created_at = reported.created_at;
+        assert_eq!(
+            tx.item(A, ItemId(58)).await.unwrap(),
+            Some(changed),
+            "only the reported facts change"
+        );
+        assert_eq!(tx.item(B, ItemId(58)).await.unwrap(), None);
+    }
+
+    async fn dependencies_are_one_per_pair_scoped_and_removed(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let edge = |item: ItemId, blocked_by: ItemId, source: DependencySource| Dependency {
+            item,
+            blocked_by,
+            source,
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.save_dependency(A, &edge(THIRD, FIRST, DependencySource::Imported))
+            .await
+            .unwrap();
+        tx.save_dependency(A, &edge(FIRST, SECOND, DependencySource::Imported))
+            .await
+            .unwrap();
+        tx.save_dependency(A, &edge(FIRST, SECOND, DependencySource::Manual))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.dependencies(A).await.unwrap(),
+            [
+                edge(FIRST, SECOND, DependencySource::Manual),
+                edge(THIRD, FIRST, DependencySource::Imported),
+            ]
+        );
+        assert!(tx.dependencies(B).await.unwrap().is_empty());
+        tx.delete_dependency(B, THIRD, FIRST).await.unwrap();
+        tx.delete_dependency(A, THIRD, FIRST).await.unwrap();
+        tx.delete_dependency(A, THIRD, SECOND).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.dependencies(A).await.unwrap(),
+            [edge(FIRST, SECOND, DependencySource::Manual)]
         );
     }
 
@@ -1279,12 +1382,27 @@ mod contract {
         refused("a browser session opened by another project's token")(tx.commit().await);
 
         let mut tx = store.begin().await.unwrap();
+        tx.insert_project(&fresh).await.unwrap();
+        tx.save_dependency(
+            A,
+            &Dependency {
+                item: FIRST,
+                blocked_by: GADGET,
+                source: DependencySource::Manual,
+            },
+        )
+        .await
+        .unwrap();
+        refused("a dependency on another project's item")(tx.commit().await);
+
+        let mut tx = store.begin().await.unwrap();
         assert_eq!(tx.project(ProjectId(3)).await.unwrap(), None);
         assert_eq!(tx.claim(A, ItemId(99)).await.unwrap(), None);
         assert_eq!(tx.claim(A, GADGET).await.unwrap(), None);
         assert!(tx.messages(A, ThreadId(99)).await.unwrap().is_empty());
         assert!(tx.members(ProjectId(9)).await.unwrap().is_empty());
         assert!(tx.grants(A).await.unwrap().is_empty());
+        assert!(tx.dependencies(A).await.unwrap().is_empty());
         assert_eq!(
             tx.ui_session(&TokenHash::new("ui:borrowed".to_owned()))
                 .await

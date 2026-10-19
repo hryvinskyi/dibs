@@ -74,7 +74,8 @@ async fn each_path_gets_its_verdict_in_order() {
         answer.body["verdicts"],
         json!([
             {"repo": "api", "path": "src/billing/invoice.rs", "verdict": "held_by",
-             "holder": "alice", "item": team.alice_item, "area": "api:billing", "reason": "ask_holder"},
+             "holder": "alice", "item": team.alice_item, "item_ref": null, "area": "api:billing",
+             "reason": "ask_holder"},
             {"repo": "api", "path": "src/search/index.rs", "verdict": "allowed"},
             {"repo": "api", "path": "README.md", "verdict": "allowed"},
             {"repo": "api", "path": "Cargo.lock", "verdict": "allowed"}

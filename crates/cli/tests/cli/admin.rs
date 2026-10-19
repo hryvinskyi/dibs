@@ -28,6 +28,24 @@ fn an_admin_adds_a_member_whose_printed_token_signs_in() {
     assert_eq!(status(&stale), 2);
     assert!(text(&stale.stderr).contains("dibs login"));
 
+    let bot = setup
+        .dibs(&setup.alice, &dir)
+        .args([
+            "admin", "member", "add", "board", "--name", "Board", "--role", "importer", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&bot), 0, "{}", text(&bot.stderr));
+    assert_eq!(json(&bot)["member"]["role"], "importer");
+    let unknown_role = setup
+        .dibs(&setup.alice, &dir)
+        .args([
+            "admin", "member", "add", "erin", "--name", "Erin", "--role", "owner",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&unknown_role), 2);
+
     let forbidden = setup
         .dibs(&setup.bob, &dir)
         .args(["admin", "member", "add", "dave", "--name", "Dave"])

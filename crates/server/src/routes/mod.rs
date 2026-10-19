@@ -4,12 +4,14 @@
 
 pub mod admin;
 pub mod claims;
+pub mod dependencies;
 pub mod edit_check;
 pub mod events;
 pub mod grants;
 pub mod items;
 pub mod me;
 pub mod members;
+pub mod ready;
 pub mod sessions;
 pub mod status;
 pub mod threads;

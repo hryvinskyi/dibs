@@ -64,6 +64,27 @@ fn members_are_added_and_tokens_rotated_while_the_server_runs() {
     assert_eq!(status, 200, "{answer}");
     assert_eq!(body_of(&answer)["member"]["role"], "member", "{answer}");
 
+    let bot = run(
+        &place.database(),
+        &[
+            "admin",
+            "member",
+            "add",
+            "--project",
+            "widgets",
+            "board",
+            "--name",
+            "Board",
+            "--role",
+            "importer",
+        ],
+        &[],
+    );
+    assert_eq!(bot.code, Some(0), "{bot:?}");
+    let (status, answer) = request(server.address, "GET", "/v1/me", &token_of(&bot), None);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(body_of(&answer)["member"]["role"], "importer", "{answer}");
+
     let rotated = run(
         &place.database(),
         &["admin", "token", "rotate", "widgets", "alice"],

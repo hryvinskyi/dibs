@@ -14,8 +14,20 @@ areas without asking you. Everything below is done with the `dibs_*` tools of th
 ## At the start of a session
 
 Read the brief dibs gives you: your live claims and their areas, other members' live claims, stale claims, unread
-conversations and the project's edit policy. If you were already working on something, your claim is still there;
-carry on under it.
+conversations, the project's edit policy, and the top of your ready list. If you were already working on something,
+your claim is still there; carry on under it.
+
+## Choosing what to do next
+
+When you need new work, take it from the ready list (`dibs_ready`, or `dibs ready`), soonest first: open items nobody
+holds, that nothing unfinished blocks, and whose likely areas no other member holds. Every other open item is listed
+with why it waits — blocked by which items, or which area is held by whom — so you can tell your person what is in the
+way rather than starting it anyway. An item whose claim went stale is ready too; taking it is a takeover with a reason.
+
+A claim on an item that waits for unfinished work is made all the same, and dibs names what it waits for: say so to
+your person, and check with whoever works on those items before you build on them. When you find that an item really
+depends on another, record it (`dibs dep add <item> --blocked-by <other>`), and remove it when it no longer holds
+(`dibs dep rm`). dibs refuses a dependency that would make two items wait for each other.
 
 ## Claim before the first edit
 
@@ -33,7 +45,8 @@ When dibs refuses an edit, the area belongs to another member's live claim. Do n
 - pick other work, or
 - message the holder (`dibs_send`) to agree on the change, or ask them for a grant (`dibs grant` is theirs to give).
 
-A claim that is refused because the item or an area is held names the holder. Ask them; do not claim around them.
+A claim that is refused because the item or an area is held names the holder and the item they hold it for. Ask them;
+do not claim around them.
 
 ## Release and done
 

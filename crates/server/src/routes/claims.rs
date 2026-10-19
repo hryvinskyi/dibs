@@ -22,7 +22,7 @@ use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::fields::{item_in_path, parse_required, session_in_body};
 use crate::http::AppState;
-use crate::views::{ClaimView, reply};
+use crate::views::{ClaimView, ItemNameView, reply};
 
 /// The body of `POST /v1/items/{id}/claim`.
 #[derive(Deserialize)]
@@ -39,10 +39,14 @@ struct ClaimAnswer {
     /// Areas a renewal no longer holds: another member holds them now, or the settings dropped
     /// them.
     dropped_areas: BTreeSet<QualifiedArea>,
+    /// The items the claimed item waits for that are neither done nor closed: the claim is made,
+    /// and the caller is warned.
+    blocked_by: Vec<ItemNameView>,
 }
 
 /// Claims the item for the caller, or renews the caller's own claim. `areas` are named as a person
-/// names them: `repo:area`, or a bare name exactly one repository declares.
+/// names them: `repo:area`, or a bare name exactly one repository declares. A blocked item is
+/// claimed all the same; `blocked_by` names what it waits for.
 ///
 /// # Errors
 /// `held`, `stale` or `area_held` (`409`, naming the holder) when another member is in the way;
@@ -78,6 +82,7 @@ pub async fn claim(
             holder: made.holder,
         }),
         dropped_areas,
+        blocked_by: made.blocked_by.into_iter().map(ItemNameView::of).collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

@@ -41,6 +41,10 @@ use crate::ui;
 /// fits with the other fields.
 pub const BODY_LIMIT: usize = 128 * 1024;
 
+/// The largest body of an importer's batch, in bytes: room for the most items a batch may report,
+/// each with a long title, its hints and its blockers.
+pub const IMPORT_BODY_LIMIT: usize = 2 * 1024 * 1024;
+
 /// How long a request may take when nothing else is configured.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -116,9 +120,16 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/heartbeat", post(routes::sessions::heartbeat))
         .route(
             "/v1/items",
-            get(routes::items::list).post(routes::items::create),
+            get(routes::items::list)
+                .post(routes::items::create)
+                .merge(put(routes::items::upsert).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT))),
         )
+        .route("/v1/ready", get(routes::ready::list))
         .route("/v1/items/{id}", get(routes::items::get))
+        .route(
+            "/v1/items/{id}/dependencies",
+            post(routes::dependencies::add).delete(routes::dependencies::remove),
+        )
         .route("/v1/items/{id}/claim", post(routes::claims::claim))
         .route("/v1/items/{id}/takeover", post(routes::claims::take_over))
         .route("/v1/items/{id}/release", post(routes::claims::release))

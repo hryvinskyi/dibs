@@ -23,11 +23,11 @@ use dibs_domain::item::{ExternalRef, ItemKey};
 use dibs_domain::settings::SettingsDocument;
 
 use crate::api::{
-    ClaimRequest, Claimed, CreatedItem, EditCheck, EditCheckRequest, Ended, Enrolled, Event,
-    EventPage, GrantRequest, Granted, Heartbeat, Item, ItemDetail, ItemFilter, Items, MarkedRead,
-    Me, Member, NewItem, NewMember, PostMessage, Posted, RegisterSession, Revoked, Session,
-    SettingsApplied, StartThread, StartThreadBody, Started, Status, TakeOverRequest, TakenOver,
-    ThreadDetail, Threads, TokenRevoked,
+    AddDependency, ClaimRequest, Claimed, CreatedItem, DependencyChange, EditCheck,
+    EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest, Granted, Heartbeat, Item,
+    ItemDetail, ItemFilter, Items, MarkedRead, Me, Member, NewItem, NewMember, PostMessage, Posted,
+    ReadyList, RegisterSession, Revoked, Session, SettingsApplied, StartThread, StartThreadBody,
+    Started, Status, TakeOverRequest, TakenOver, ThreadDetail, Threads, TokenRevoked,
 };
 use crate::error::{ClientError, Response, decode};
 use crate::server_url::ServerUrl;
@@ -295,6 +295,46 @@ impl Client {
     pub async fn done(&self, id: ItemId) -> Result<Ended, ClientError> {
         self.send(self.request(Method::POST, &format!("/v1/items/{id}/done")))
             .await
+    }
+
+    /// `GET /v1/ready`: the caller's ready list and the open items left out of it.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn ready(&self) -> Result<ReadyList, ClientError> {
+        self.send(self.request(Method::GET, "/v1/ready")).await
+    }
+
+    /// `POST /v1/items/{id}/dependencies`: records that the item is blocked by another.
+    ///
+    /// # Errors
+    /// [`ClientError::Conflict`] for an edge that would close a cycle; [`ClientError`].
+    pub async fn add_dependency(
+        &self,
+        id: ItemId,
+        blocked_by: ItemId,
+    ) -> Result<DependencyChange, ClientError> {
+        self.send(
+            self.request(Method::POST, &format!("/v1/items/{id}/dependencies"))
+                .json(&AddDependency { blocked_by }),
+        )
+        .await
+    }
+
+    /// `DELETE /v1/items/{id}/dependencies`: removes that the item is blocked by another.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn remove_dependency(
+        &self,
+        id: ItemId,
+        blocked_by: ItemId,
+    ) -> Result<DependencyChange, ClientError> {
+        self.send(
+            self.request(Method::DELETE, &format!("/v1/items/{id}/dependencies"))
+                .query(&[("blocked_by", blocked_by.get())]),
+        )
+        .await
     }
 
     /// `GET /v1/status`: live claims, stale claims and held areas.

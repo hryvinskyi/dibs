@@ -3,10 +3,12 @@
 use thiserror::Error;
 
 use dibs_domain::claim::{ClaimRefused, ForceReleaseRefused, HolderOnly, TakeoverRefused};
+use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
 use dibs_domain::grant::{GrantRefused, RevokeRefused};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{GrantId, ItemId, SessionId, ThreadId};
+use dibs_domain::import::BatchRefused;
 use dibs_domain::item::{CreateRefused, ItemStatus};
 use dibs_domain::message::RecipientsError;
 use dibs_domain::settings::{AreaLookupError, SettingsError};
@@ -101,6 +103,12 @@ pub enum AppError {
     /// The item may not be created.
     #[error(transparent)]
     Create(#[from] CreateRefused),
+    /// The dependency may not be added.
+    #[error(transparent)]
+    Dependency(#[from] DependencyRefused),
+    /// The import batch is refused as a whole.
+    #[error(transparent)]
+    Batch(#[from] BatchRefused),
     /// An area named in the request does not resolve.
     #[error(transparent)]
     Area(#[from] AreaLookupError),
@@ -161,6 +169,15 @@ impl AppError {
             },
             Self::Revoke(RevokeRefused::NotGrantor) => "not_grantor",
             Self::Create(CreateRefused::UnlistedRepository { .. }) => "unlisted_repository",
+            Self::Dependency(refused) => match refused {
+                DependencyRefused::SelfDependency => "self_dependency",
+                DependencyRefused::Cycle => "dependency_cycle",
+            },
+            Self::Batch(refused) => match refused {
+                BatchRefused::TooMany { .. } => "batch_too_large",
+                BatchRefused::CompleteWithoutSource => "invalid_batch",
+                BatchRefused::Duplicate { .. } => "duplicate_ref",
+            },
             Self::Area(refused) => match refused {
                 AreaLookupError::Malformed { .. } => "invalid_area",
                 AreaLookupError::NotFound { .. } => "unknown_area",

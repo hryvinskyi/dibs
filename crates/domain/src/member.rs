@@ -28,6 +28,12 @@ impl Role {
     pub const fn is_admin(self) -> bool {
         matches!(self, Self::Admin)
     }
+
+    /// Whether the role may feed the project's items from an outside tracker: an admin, or the
+    /// integration that imports them.
+    pub const fn may_import(self) -> bool {
+        matches!(self, Self::Admin | Self::Importer)
+    }
 }
 
 /// The name a member is shown by: 1 to 100 characters after trimming, with no control characters.
@@ -105,6 +111,9 @@ mod tests {
         assert!(Role::Admin.is_admin());
         assert!(!Role::Member.is_admin());
         assert!(!Role::Importer.is_admin());
+        assert!(Role::Admin.may_import());
+        assert!(Role::Importer.may_import());
+        assert!(!Role::Member.may_import());
     }
 
     #[test]

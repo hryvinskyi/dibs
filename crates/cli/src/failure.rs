@@ -4,7 +4,7 @@
 
 use std::process::ExitCode;
 
-use dibs_client::ClientError;
+use dibs_client::{ClientError, ErrorDetails};
 
 /// The class of a failure, which decides the exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +27,9 @@ pub struct Failure {
     pub code: String,
     /// The sentence.
     pub message: String,
+    /// What the server's refusal names — the holder, their item, the area — for a caller that
+    /// reads them as data; `None` for a failure the server did not refuse.
+    pub details: Option<Box<ErrorDetails>>,
     /// Whether the command already printed its answer, so only the sentence is left to print.
     pub answered: bool,
 }
@@ -38,6 +41,7 @@ impl Failure {
             kind: Kind::Config,
             code: code.to_owned(),
             message: message.into(),
+            details: None,
             answered: false,
         }
     }
@@ -48,6 +52,7 @@ impl Failure {
             kind: Kind::Refused,
             code: code.to_owned(),
             message: message.into(),
+            details: None,
             answered: false,
         }
     }
@@ -80,12 +85,17 @@ impl From<ClientError> for Failure {
             Kind::Refused
         };
         let mut message = sentence(&error.to_string());
-        if let Some(holder) = error.details().and_then(|details| details.holder.as_ref())
+        let details = error.details();
+        if let Some(holder) = details.and_then(|details| details.holder.as_ref())
             && !message.contains(holder.as_str())
         {
             message.push_str(&format!(" It is held by {holder}"));
-            if let Some(item) = error.details().and_then(|details| details.item) {
-                message.push_str(&format!(" on item {item}"));
+            if let Some(details) = details {
+                match (&details.item_ref, details.item) {
+                    (Some(reference), _) => message.push_str(&format!(" on item {reference}")),
+                    (None, Some(item)) => message.push_str(&format!(" on item {item}")),
+                    (None, None) => {}
+                }
             }
             message.push('.');
         }
@@ -96,6 +106,9 @@ impl From<ClientError> for Failure {
             kind,
             code,
             message,
+            details: details
+                .filter(|details| **details != ErrorDetails::default())
+                .map(|details| Box::new(details.clone())),
             answered: false,
         }
     }
@@ -192,6 +205,33 @@ mod tests {
             failure.message,
             "Another member holds this item. It is held by alice on item 4."
         );
+        assert_eq!(
+            failure
+                .details
+                .as_ref()
+                .and_then(|d| d.holder.as_ref())
+                .map(|h| h.as_str()),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn a_held_area_names_the_holders_item_by_its_reference() {
+        let failure = Failure::from(ClientError::Conflict {
+            code: "area_held".to_owned(),
+            message: "The area api:billing is held by another member.".to_owned(),
+            details: Box::new(ErrorDetails {
+                holder: Some("alice".parse().unwrap()),
+                item: Some(dibs_domain::ids::ItemId(1_739_000_000_012)),
+                item_ref: Some(dibs_domain::item::ExternalRef::parse("gh:acme/web#12").unwrap()),
+                ..ErrorDetails::default()
+            }),
+        });
+        assert_eq!(
+            failure.message,
+            "The area api:billing is held by another member. It is held by alice on item gh:acme/web#12."
+        );
+        assert!(Failure::config("x", "Y.").details.is_none());
     }
 
     #[test]

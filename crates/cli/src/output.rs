@@ -42,14 +42,12 @@ impl Printer {
     }
 
     /// Prints a failure: the sentence on standard error, and with `--json`, unless the command
-    /// already printed its answer, its code and sentence on standard output.
+    /// already printed its answer, its code, its sentence and what the refusal names on standard
+    /// output.
     pub fn failure(self, failure: &Failure) {
         eprintln!("dibs: {}", failure.message);
         if self.json && !failure.answered {
-            let body = serde_json::json!({
-                "error": {"code": failure.code, "message": failure.message}
-            });
-            println!("{body}");
+            println!("{}", failure_json(failure));
         }
     }
 
@@ -57,6 +55,20 @@ impl Printer {
     pub fn warn(self, text: &str) {
         eprintln!("warning: {text}");
     }
+}
+
+/// A failure as `--json` prints it: `{"error": {"code", "message", "details"?}}`, `details` being
+/// what the server's refusal names.
+pub fn failure_json(failure: &Failure) -> serde_json::Value {
+    let mut error = serde_json::Map::new();
+    error.insert("code".to_owned(), failure.code.clone().into());
+    error.insert("message".to_owned(), failure.message.clone().into());
+    if let Some(details) = &failure.details
+        && let Ok(value) = serde_json::to_value(details)
+    {
+        error.insert("details".to_owned(), value);
+    }
+    serde_json::json!({ "error": error })
 }
 
 /// One line for an item: `#12 gh:acme/api#4 Fix billing [claimed]`.
@@ -107,11 +119,18 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
         }
         Verdict::NeedsClaim => "needs a claim first; claim an item with dibs claim".to_owned(),
         Verdict::HeldBy {
-            holder, item, area, ..
+            holder,
+            item,
+            item_ref,
+            area,
+            ..
         } => {
             let who = holder
                 .as_ref()
                 .map_or_else(|| "another member".to_owned(), ToString::to_string);
+            let item = item_ref
+                .as_ref()
+                .map_or_else(|| item.to_string(), ToString::to_string);
             format!("held by {who} (item {item}, area {area}); message them or ask for a grant")
         }
         Verdict::Granted { by, area } => {

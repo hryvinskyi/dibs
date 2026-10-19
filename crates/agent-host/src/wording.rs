@@ -9,19 +9,30 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::Note;
 use dibs_domain::ids::ItemId;
+use dibs_domain::item::ExternalRef;
 use dibs_domain::paths::RelPath;
 use dibs_domain::settings::EditPolicy;
 
-use crate::ports::{ClaimLine, InboxView, StatusView};
+use crate::ports::{ClaimLine, InboxView, ReadyLine, StatusView};
 
 /// How many unread subjects the brief names.
 const BRIEF_SUBJECTS: usize = 3;
 
-/// The reason an edit of `path` is refused: another member holds its area.
+/// How many items of the ready list the brief names.
+const BRIEF_READY: usize = 5;
+
+/// How a sentence names an item: by its reference in an outside tracker when it has one, which is
+/// what people know it by, else by its local id.
+pub fn item_name(item: ItemId, reference: Option<&ExternalRef>) -> String {
+    reference.map_or_else(|| item.to_string(), ToString::to_string)
+}
+
+/// The reason an edit of `path` is refused: another member holds its area for `item`, named as
+/// [`item_name`] names it.
 pub fn held_by(
     path: &RelPath,
     holder: Option<&Handle>,
-    item: ItemId,
+    item: &str,
     area: &QualifiedArea,
 ) -> String {
     match holder {
@@ -137,6 +148,9 @@ impl Brief<'_> {
         if let Some(inbox) = self.inbox {
             inbox_lines(inbox, &mut text);
         }
+        if let Some(status) = self.status {
+            ready_lines(status, &mut text);
+        }
         text
     }
 
@@ -175,12 +189,67 @@ fn claim_lines(heading: &str, claims: &[&ClaimLine], text: &mut String) {
         let _ = write!(
             text,
             "\n- item {} \"{}\", {}",
-            claim.item, claim.title, claim.holder
+            item_name(claim.item, claim.reference.as_ref()),
+            claim.title,
+            claim.holder
         );
         if !claim.areas.is_empty() {
             let areas: Vec<String> = claim.areas.iter().map(ToString::to_string).collect();
             let _ = write!(text, ", areas {}", areas.join(", "));
         }
+    }
+}
+
+fn ready_lines(status: &StatusView, text: &mut String) {
+    if status.ready.is_empty() {
+        text.push_str("\nReady to pick up: nothing.");
+    } else {
+        let shown = status.ready.len().min(BRIEF_READY);
+        let _ = write!(
+            text,
+            "\nReady to pick up, soonest first ({shown} of {}):",
+            status.ready.len()
+        );
+        for line in status.ready.iter().take(BRIEF_READY) {
+            ready_line(line, text);
+        }
+    }
+    let mut waiting = Vec::new();
+    if status.blocked > 0 {
+        waiting.push(format!("{} wait for unfinished items", status.blocked));
+    }
+    if status.area_held > 0 {
+        waiting.push(format!(
+            "{} touch an area another member holds",
+            status.area_held
+        ));
+    }
+    if !waiting.is_empty() {
+        let _ = write!(
+            text,
+            "\nNot ready: {}. dibs_ready or dibs ready says why, item by item.",
+            waiting.join("; ")
+        );
+    }
+}
+
+fn ready_line(line: &ReadyLine, text: &mut String) {
+    let _ = write!(
+        text,
+        "\n- {} \"{}\", priority {}",
+        item_name(line.item, line.reference.as_ref()),
+        line.title,
+        line.priority
+    );
+    if !line.areas_hint.is_empty() {
+        let areas: Vec<String> = line.areas_hint.iter().map(ToString::to_string).collect();
+        let _ = write!(text, ", likely areas {}", areas.join(", "));
+    }
+    if let Some(holder) = &line.stale_holder {
+        let _ = write!(
+            text,
+            "; {holder}'s claim on it went stale (dibs takeover with a reason)"
+        );
     }
 }
 
@@ -228,6 +297,7 @@ mod tests {
     fn claim(item: u64, holder: &str, areas: &[&str]) -> ClaimLine {
         ClaimLine {
             item: ItemId(item),
+            reference: None,
             title: Title::parse("Fix billing").unwrap(),
             holder: handle(holder),
             areas: areas
@@ -241,11 +311,20 @@ mod tests {
     fn a_held_path_names_the_holder_the_item_and_the_way_on() {
         let path = RelPath::parse("src/billing/a.rs").unwrap();
         let area = QualifiedArea::parse("api:billing").unwrap();
-        let text = held_by(&path, Some(&handle("alice")), ItemId(4), &area);
-        assert!(text.contains("alice holds for work item 4"), "{text}");
+        let reference = ExternalRef::parse("gh:acme/web#12").unwrap();
+        let named = item_name(ItemId(1_739_000_000_123), Some(&reference));
+        let text = held_by(&path, Some(&handle("alice")), &named, &area);
+        assert!(
+            text.contains("alice holds for work item gh:acme/web#12"),
+            "{text}"
+        );
+        assert!(!text.contains("1739000000123"), "{text}");
         assert!(text.contains("dibs send --to alice"), "{text}");
-        let anonymous = held_by(&path, None, ItemId(4), &area);
-        assert!(anonymous.contains("another member"), "{anonymous}");
+        let local = held_by(&path, None, &item_name(ItemId(4), None), &area);
+        assert!(
+            local.contains("another member holds for work item 4"),
+            "{local}"
+        );
     }
 
     #[test]
@@ -257,7 +336,7 @@ mod tests {
                 claim(4, "alice", &["api:search"]),
             ],
             stale: vec![claim(5, "carol", &[])],
-            holds: Vec::new(),
+            ..StatusView::default()
         };
         let inbox = InboxView {
             unread: 4,
@@ -288,6 +367,71 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Four"), "{text}");
+    }
+
+    fn ready(item: u64, reference: &str, priority: u8, stale: Option<&str>) -> ReadyLine {
+        ReadyLine {
+            item: ItemId(item),
+            reference: Some(ExternalRef::parse(reference).unwrap()),
+            title: Title::parse("Ready work").unwrap(),
+            priority: dibs_domain::item::Priority::new(priority).unwrap(),
+            areas_hint: vec![QualifiedArea::parse("api:search").unwrap()],
+            stale_holder: stale.map(handle),
+        }
+    }
+
+    #[test]
+    fn the_brief_names_the_top_five_of_the_ready_list_and_why_the_rest_waits() {
+        let me = handle("bob");
+        let status = StatusView {
+            ready: (1..=7)
+                .map(|n| {
+                    ready(
+                        n,
+                        &format!("gh:acme/web#{n}"),
+                        1,
+                        (n == 2).then_some("carol"),
+                    )
+                })
+                .collect(),
+            blocked: 2,
+            area_held: 1,
+            ..StatusView::default()
+        };
+        let text = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: Some(&status),
+            inbox: None,
+            status_age: None,
+        }
+        .text();
+        assert!(
+            text.contains("Ready to pick up, soonest first (5 of 7):\n- gh:acme/web#1 \"Ready work\", priority 1, likely areas api:search"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- gh:acme/web#2 \"Ready work\", priority 1, likely areas api:search; carol's claim on it went stale"),
+            "{text}"
+        );
+        assert!(text.contains("gh:acme/web#5"), "{text}");
+        assert!(!text.contains("gh:acme/web#6"), "{text}");
+        assert!(
+            text.contains(
+                "Not ready: 2 wait for unfinished items; 1 touch an area another member holds."
+            ),
+            "{text}"
+        );
+        let nothing = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: Some(&StatusView::default()),
+            inbox: None,
+            status_age: None,
+        }
+        .text();
+        assert!(nothing.contains("Ready to pick up: nothing."), "{nothing}");
+        assert!(!nothing.contains("Not ready"), "{nothing}");
     }
 
     #[test]

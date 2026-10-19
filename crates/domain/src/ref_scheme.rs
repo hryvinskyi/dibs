@@ -1,20 +1,55 @@
-//! Reference schemes: what the value of an external reference means, per scheme.
+//! Reference schemes: what the value of an external reference means, per scheme — its one written
+//! form, the page of the tracker that shows it, and the repository it names.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
+use thiserror::Error;
+
 use crate::item::ExternalRef;
 use crate::repo::RemoteUrl;
 
+/// Why a scheme refuses a value: it does not have the scheme's shape.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("its value is written {shape}")]
+pub struct RefRefused {
+    /// The shape a value of the scheme has, as a person reads it (`owner/repo#number`).
+    pub shape: &'static str,
+}
+
 /// What one scheme of external references knows about its values.
 pub trait RefScheme: Send + Sync + fmt::Debug {
+    /// The one form a value of this scheme is written in, so two spellings of one reference
+    /// compare equal.
+    ///
+    /// # Errors
+    /// [`RefRefused`] when the value does not have the scheme's shape.
+    fn canonical(&self, value: &str) -> Result<String, RefRefused>;
+
+    /// The address of the tracker's page for a value in its canonical form, when the scheme has
+    /// pages.
+    fn link(&self, value: &str) -> Option<String>;
+
     /// The repository a value of this scheme names, or `None` when the value names none or does
     /// not have the scheme's shape.
     fn repository(&self, value: &str) -> Option<RemoteUrl>;
 }
 
+/// The schemes this crate ships, by name. [`ExternalRef::parse`] writes every reference of these
+/// schemes in its canonical form, so every reference compares in one form wherever it was typed.
+const SHIPPED: &[(&str, &dyn RefScheme)] = &[("gh", &GitHubIssues)];
+
+/// The canonical form of `value` under the shipped scheme `scheme`; a scheme this crate does not
+/// ship keeps the value as it is.
+pub(crate) fn shipped_canonical(scheme: &str, value: &str) -> Result<String, RefRefused> {
+    SHIPPED
+        .iter()
+        .find(|(name, _)| *name == scheme)
+        .map_or_else(|| Ok(value.to_owned()), |(_, known)| known.canonical(value))
+}
+
 /// The reference schemes a deployment knows, by scheme name. A scheme it does not know names no
-/// repository.
+/// repository and has no page.
 #[derive(Debug, Default)]
 pub struct RefSchemeRegistry {
     schemes: BTreeMap<String, Box<dyn RefScheme>>,
@@ -44,15 +79,27 @@ impl RefSchemeRegistry {
             .get(reference.scheme())
             .and_then(|scheme| scheme.repository(reference.value()))
     }
+
+    /// The address of the tracker's page for a reference, through its scheme.
+    pub fn link(&self, reference: &ExternalRef) -> Option<String> {
+        self.schemes
+            .get(reference.scheme())
+            .and_then(|scheme| scheme.link(reference.value()))
+    }
 }
 
 /// The `gh` scheme: `owner/name#number`, an issue or pull request on github.com, naming the
-/// repository `github.com/owner/name`.
+/// repository `github.com/owner/name`. GitHub's names are case-insensitive, so the canonical form
+/// is the value in lower case.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GitHubIssues;
 
-impl RefScheme for GitHubIssues {
-    fn repository(&self, value: &str) -> Option<RemoteUrl> {
+/// The shape of a `gh` value.
+const GH_SHAPE: &str = "owner/repo#number";
+
+impl GitHubIssues {
+    /// The owner, the name and the number of a value of the `gh` shape.
+    fn parts(value: &str) -> Option<(&str, &str, &str)> {
         let (repo, number) = value.split_once('#')?;
         let (owner, name) = repo.split_once('/')?;
         let number_ok = !number.is_empty() && number.chars().all(|c| c.is_ascii_digit());
@@ -62,9 +109,25 @@ impl RefScheme for GitHubIssues {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
         };
-        if !(number_ok && part_ok(owner) && part_ok(name)) {
-            return None;
-        }
+        (number_ok && part_ok(owner) && part_ok(name)).then_some((owner, name, number))
+    }
+}
+
+impl RefScheme for GitHubIssues {
+    fn canonical(&self, value: &str) -> Result<String, RefRefused> {
+        Self::parts(value)
+            .map(|_| value.to_ascii_lowercase())
+            .ok_or(RefRefused { shape: GH_SHAPE })
+    }
+
+    fn link(&self, value: &str) -> Option<String> {
+        Self::parts(value).map(|(owner, name, number)| {
+            format!("https://github.com/{owner}/{name}/issues/{number}")
+        })
+    }
+
+    fn repository(&self, value: &str) -> Option<RemoteUrl> {
+        let (owner, name, _) = Self::parts(value)?;
         RemoteUrl::parse(&format!("github.com/{owner}/{name}")).ok()
     }
 }
@@ -87,33 +150,76 @@ mod tests {
     }
 
     #[test]
-    fn a_value_without_the_gh_shape_names_no_repository() {
-        let registry = RefSchemeRegistry::standard();
-        for text in [
-            "gh:acme#12",
-            "gh:acme/web",
-            "gh:acme/web#",
-            "gh:acme/web#x",
-            "gh:/web#1",
+    fn gh_writes_one_form_whatever_the_case() {
+        assert_eq!(
+            GitHubIssues.canonical("Acme/Widgets#42"),
+            Ok("acme/widgets#42".to_owned())
+        );
+        assert_eq!(
+            reference("gh:Acme/Widgets#42"),
+            reference("gh:acme/widgets#42")
+        );
+        assert_eq!(
+            reference("gh:Acme/Widgets#42").to_string(),
+            "gh:acme/widgets#42"
+        );
+    }
+
+    #[test]
+    fn gh_refuses_a_value_without_its_shape() {
+        for value in [
+            "acme#12",
+            "acme/web",
+            "acme/web#",
+            "acme/web#x",
+            "/web#1",
+            "acme/#1",
+            "acme/web/more#1",
+            "acme/we b#1",
         ] {
-            assert_eq!(registry.repository_of(&reference(text)), None, "{text}");
+            assert_eq!(
+                GitHubIssues.canonical(value),
+                Err(RefRefused { shape: GH_SHAPE }),
+                "{value}"
+            );
+            assert_eq!(GitHubIssues.repository(value), None, "{value}");
+            assert_eq!(GitHubIssues.link(value), None, "{value}");
         }
     }
 
     #[test]
-    fn an_unknown_scheme_names_no_repository() {
+    fn gh_links_to_the_issue_page() {
         let registry = RefSchemeRegistry::standard();
-        assert_eq!(registry.repository_of(&reference("jira:ACME-12")), None);
         assert_eq!(
-            RefSchemeRegistry::empty().repository_of(&reference("gh:acme/web#1")),
-            None
+            registry.link(&reference("gh:Acme/Web#12")).as_deref(),
+            Some("https://github.com/acme/web/issues/12")
         );
+    }
+
+    #[test]
+    fn an_unknown_scheme_passes_through_with_no_link_and_no_repository() {
+        let registry = RefSchemeRegistry::standard();
+        let jira = reference("jira:ACME-12");
+        assert_eq!(jira.value(), "ACME-12");
+        assert_eq!(registry.repository_of(&jira), None);
+        assert_eq!(registry.link(&jira), None);
+        let empty = RefSchemeRegistry::empty();
+        assert_eq!(empty.repository_of(&reference("gh:acme/web#1")), None);
+        assert_eq!(empty.link(&reference("gh:acme/web#1")), None);
     }
 
     #[derive(Debug)]
     struct Fixed;
 
     impl RefScheme for Fixed {
+        fn canonical(&self, value: &str) -> Result<String, RefRefused> {
+            Ok(value.to_owned())
+        }
+
+        fn link(&self, value: &str) -> Option<String> {
+            Some(format!("https://tracker.example.com/{value}"))
+        }
+
         fn repository(&self, _value: &str) -> Option<RemoteUrl> {
             RemoteUrl::parse("example.com/acme/search").ok()
         }
@@ -122,9 +228,12 @@ mod tests {
     #[test]
     fn a_registered_scheme_is_consulted() {
         let registry = RefSchemeRegistry::empty().with("tracker", Box::new(Fixed));
-        let remote = registry
-            .repository_of(&reference("tracker:anything"))
-            .unwrap();
+        let reference = reference("tracker:anything");
+        let remote = registry.repository_of(&reference).unwrap();
         assert_eq!(remote.as_str(), "example.com/acme/search");
+        assert_eq!(
+            registry.link(&reference).as_deref(),
+            Some("https://tracker.example.com/anything")
+        );
     }
 }

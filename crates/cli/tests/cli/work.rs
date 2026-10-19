@@ -83,7 +83,18 @@ fn a_claim_in_the_way_is_refused_naming_the_holder() {
         &["claim", "gh:acme/api#2", "--area", "billing", "--json"],
     );
     assert_eq!(status(&area), 1);
-    assert_eq!(json(&area)["error"]["code"], "area_held");
+    let refusal = json(&area);
+    assert_eq!(refusal["error"]["code"], "area_held");
+    assert_eq!(refusal["error"]["details"]["holder"], "alice");
+    assert_eq!(refusal["error"]["details"]["area"], "api:billing");
+    assert_eq!(refusal["error"]["details"]["item_ref"], "gh:acme/api#1");
+    assert!(
+        refusal["error"]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("It is held by alice on item gh:acme/api#1."),
+        "{refusal}"
+    );
 
     let missing = run(&setup.bob, &["claim", "gh:acme/api#404"]);
     assert_eq!(status(&missing), 1);
@@ -91,6 +102,73 @@ fn a_claim_in_the_way_is_refused_naming_the_holder() {
 
     let not_mine = run(&setup.bob, &["release", "gh:acme/api#1"]);
     assert_eq!(status(&not_mine), 1);
+}
+
+#[test]
+fn ready_work_and_dependencies_from_the_command_line() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let alice = |args: &[&str]| setup.dibs(&setup.alice, &api).args(args).output().unwrap();
+    alice(&["new", "gh:acme/api#1", "--title", "Waits"]);
+    alice(&["new", "gh:acme/api#2", "--title", "Blocks"]);
+
+    let added = alice(&[
+        "dep",
+        "add",
+        "gh:Acme/Api#1",
+        "--blocked-by",
+        "gh:acme/api#2",
+    ]);
+    assert_eq!(status(&added), 0, "{}", text(&added.stderr));
+    assert_eq!(
+        text(&added.stdout).trim(),
+        "gh:acme/api#1 is now blocked by gh:acme/api#2."
+    );
+    let cycle = alice(&[
+        "dep",
+        "add",
+        "gh:acme/api#2",
+        "--blocked-by",
+        "gh:acme/api#1",
+        "--json",
+    ]);
+    assert_eq!(status(&cycle), 1);
+    assert_eq!(json(&cycle)["error"]["code"], "dependency_cycle");
+
+    let ready = alice(&["ready"]);
+    assert_eq!(status(&ready), 0);
+    let shown = text(&ready.stdout);
+    assert!(
+        shown.contains("Ready to pick up, soonest first:\n  P2 gh:acme/api#2 Blocks"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Not ready:\n  P2 gh:acme/api#1 Waits — blocked by gh:acme/api#2"),
+        "{shown}"
+    );
+    let as_json = json(&alice(&["ready", "--json"]));
+    assert_eq!(as_json["ready"][0]["item"]["ref"], "gh:acme/api#2");
+
+    let claimed = alice(&["claim", "gh:acme/api#1"]);
+    assert_eq!(status(&claimed), 0);
+    assert!(
+        text(&claimed.stdout).contains("It is blocked by gh:acme/api#2, which is not done yet"),
+        "{}",
+        text(&claimed.stdout)
+    );
+
+    let removed = alice(&[
+        "dep",
+        "rm",
+        "gh:acme/api#1",
+        "--blocked-by",
+        "gh:acme/api#2",
+    ]);
+    assert_eq!(status(&removed), 0);
+    assert_eq!(
+        text(&removed.stdout).trim(),
+        "gh:acme/api#1 is no longer blocked by gh:acme/api#2."
+    );
 }
 
 #[test]

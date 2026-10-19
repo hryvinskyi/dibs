@@ -15,9 +15,11 @@ use dibs_app::AppError;
 use dibs_app::error::Duplicate;
 use dibs_app::named::Refusal;
 use dibs_domain::claim::{ClaimRefused, ForceReleaseRefused, HolderOnly, TakeoverRefused};
+use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
 use dibs_domain::grant::{GrantRefused, RevokeRefused};
 use dibs_domain::handle::Handle;
+use dibs_domain::import::BatchRefused;
 use dibs_domain::item::CreateRefused;
 use dibs_domain::message::RecipientsError;
 use dibs_domain::settings::AreaLookupError;
@@ -253,7 +255,7 @@ impl IntoResponse for ApiError {
 }
 
 /// The text with its first letter in upper case and a full stop at its end.
-fn sentence(text: &str) -> String {
+pub(crate) fn sentence(text: &str) -> String {
     let mut chars = text.trim().chars();
     let mut out: String = match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -298,7 +300,8 @@ fn status_of(error: &AppError) -> StatusCode {
             ..
         })
         | AppError::ForceRelease(ForceReleaseRefused::NoClaim)
-        | AppError::Grant(GrantRefused::GranteeHasNoClaim) => StatusCode::CONFLICT,
+        | AppError::Grant(GrantRefused::GranteeHasNoClaim)
+        | AppError::Dependency(DependencyRefused::Cycle) => StatusCode::CONFLICT,
         AppError::NotARecipient(_)
         | AppError::Claim(Refusal {
             reason: ClaimRefused::UnknownArea { .. },
@@ -316,6 +319,12 @@ fn status_of(error: &AppError) -> StatusCode {
             | AreaLookupError::Ambiguous { .. },
         )
         | AppError::Settings(_)
+        | AppError::Dependency(DependencyRefused::SelfDependency)
+        | AppError::Batch(
+            BatchRefused::TooMany { .. }
+            | BatchRefused::CompleteWithoutSource
+            | BatchRefused::Duplicate { .. },
+        )
         | AppError::EditCheck(EditCheckRefused::UnknownRepo { .. })
         | AppError::Recipients(RecipientsError::Empty) => StatusCode::UNPROCESSABLE_ENTITY,
         AppError::StoredSettings(_) | AppError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -331,6 +340,7 @@ fn details_of(error: &AppError) -> Map<String, Value> {
                 since, last_seen, ..
             },
             member,
+            ..
         }) => {
             details.holder(member.as_ref());
             details.time("since", *since);
@@ -339,10 +349,12 @@ fn details_of(error: &AppError) -> Map<String, Value> {
         AppError::Claim(Refusal {
             reason: ClaimRefused::Stale { last_seen, .. },
             member,
+            ..
         })
         | AppError::Takeover(Refusal {
             reason: TakeoverRefused::NotStale { last_seen, .. },
             member,
+            ..
         }) => {
             details.holder(member.as_ref());
             details.time("last_seen", *last_seen);
@@ -350,18 +362,26 @@ fn details_of(error: &AppError) -> Map<String, Value> {
         AppError::Claim(Refusal {
             reason: ClaimRefused::AreaHeld { area, item, .. },
             member,
+            item_ref,
         })
         | AppError::Takeover(Refusal {
             reason: TakeoverRefused::AreaHeld { area, item, .. },
             member,
+            item_ref,
         }) => {
             details.put("area", area);
             details.holder(member.as_ref());
             details.put("item", item);
+            if let Some(reference) = item_ref {
+                details.put("item_ref", reference);
+            }
         }
+        AppError::Batch(BatchRefused::Duplicate { reference }) => details.put("ref", reference),
+        AppError::Batch(BatchRefused::TooMany { max }) => details.put("max", max),
         AppError::HolderOnly(Refusal {
             reason: HolderOnly::NotHolder { .. },
             member,
+            ..
         }) => details.holder(member.as_ref()),
         AppError::Claim(Refusal {
             reason: ClaimRefused::UnknownArea { area },
@@ -428,6 +448,7 @@ mod tests {
         Refusal {
             reason,
             member: None,
+            item_ref: None,
         }
     }
 
@@ -530,6 +551,21 @@ mod tests {
                 StatusCode::NOT_FOUND,
                 "not_found",
             ),
+            (
+                AppError::Dependency(DependencyRefused::Cycle),
+                StatusCode::CONFLICT,
+                "dependency_cycle",
+            ),
+            (
+                AppError::Dependency(DependencyRefused::SelfDependency),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "self_dependency",
+            ),
+            (
+                AppError::Batch(BatchRefused::TooMany { max: 500 }),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "batch_too_large",
+            ),
         ];
         for (error, status, code) in cases {
             let answer = ApiError::from(error);
@@ -546,12 +582,15 @@ mod tests {
                 item: ItemId(9),
             },
             member: Some(Handle::parse("alice").unwrap()),
+            item_ref: Some(Box::new(
+                dibs_domain::item::ExternalRef::parse("gh:acme/web#12").unwrap(),
+            )),
         });
         let answer = ApiError::from(error);
         assert_eq!(answer.code(), "area_held");
         assert_eq!(
             Value::Object(answer.details().clone()),
-            json!({"area": "api:billing", "holder": "alice", "item": 9})
+            json!({"area": "api:billing", "holder": "alice", "item": 9, "item_ref": "gh:acme/web#12"})
         );
     }
 

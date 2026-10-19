@@ -11,7 +11,7 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::Note;
 use dibs_domain::ids::ItemId;
-use dibs_domain::item::Title;
+use dibs_domain::item::{ExternalRef, Priority, Title};
 use dibs_domain::message::Subject;
 use dibs_domain::paths::RelPath;
 use dibs_domain::repo::RepoId;
@@ -56,6 +56,8 @@ pub struct KnownSettings {
 pub struct ClaimLine {
     /// The item.
     pub item: ItemId,
+    /// Its reference in an outside tracker, when it has one.
+    pub reference: Option<ExternalRef>,
     /// Its title.
     pub title: Title,
     /// The member holding it.
@@ -75,7 +77,24 @@ pub struct HoldLine {
     pub item: ItemId,
 }
 
-/// The project's claims and holds.
+/// An item the member can pick up now, as the brief shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyLine {
+    /// The item.
+    pub item: ItemId,
+    /// Its reference in an outside tracker, when it has one.
+    pub reference: Option<ExternalRef>,
+    /// Its title.
+    pub title: Title,
+    /// How soon: 0 to 4, lower is sooner.
+    pub priority: Priority,
+    /// The areas the work will probably touch.
+    pub areas_hint: Vec<QualifiedArea>,
+    /// The member whose claim on it went stale, when one did.
+    pub stale_holder: Option<Handle>,
+}
+
+/// The project's claims and holds, and the member's ready list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatusView {
     /// Live claims.
@@ -84,6 +103,12 @@ pub struct StatusView {
     pub stale: Vec<ClaimLine>,
     /// Areas held by live claims.
     pub holds: Vec<HoldLine>,
+    /// The items the member can pick up now, soonest first.
+    pub ready: Vec<ReadyLine>,
+    /// How many open items nobody holds wait for items that are neither done nor closed.
+    pub blocked: u64,
+    /// How many open items nobody holds touch an area another member holds.
+    pub area_held: u64,
 }
 
 /// The conversations waiting for the member.
@@ -117,6 +142,8 @@ pub enum PathAnswer {
         holder: Option<Handle>,
         /// The holder's item.
         item: ItemId,
+        /// That item's reference, when it has one.
+        item_ref: Option<ExternalRef>,
         /// The area.
         area: QualifiedArea,
     },

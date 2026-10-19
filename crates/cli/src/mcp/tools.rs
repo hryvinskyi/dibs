@@ -78,6 +78,14 @@ impl Tools {
     }
 
     #[tool(
+        description = "Show the work you can pick up now, soonest first (priority 0 is soonest): open items nobody holds, that nothing unfinished blocks, and whose likely areas no other member holds. Beside it, every other open item with why it waits: blocked_by (the items it waits for), area_held (who holds which area) or claimed. Use it when you start and whenever you look for the next thing to do; a stale_holder means the item can be taken over with dibs_takeover and a reason.",
+        annotations(read_only_hint = true)
+    )]
+    async fn dibs_ready(&self) -> CallToolResult {
+        self.perform(|link| async move { link.ready().await }).await
+    }
+
+    #[tool(
         description = "List work items, optionally only those in one state (open, claimed, done, dropped) or only the ones you hold. Use it to find open work, or to see what you hold.",
         annotations(read_only_hint = true)
     )]
@@ -95,7 +103,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Claim a work item, with the areas of the code you will change, before you edit its files. Claiming an item you already hold renews the claim and replaces its areas. If another member holds the item or an area, the answer is a refusal that names the holder: pick other work, or message the holder with dibs_send. Do not edit the files anyway."
+        description = "Claim a work item, with the areas of the code you will change, before you edit its files. Claiming an item you already hold renews the claim and replaces its areas. If another member holds the item or an area, the answer is a refusal that names the holder: pick other work, or message the holder with dibs_send. Do not edit the files anyway. A claim on an item that waits for unfinished work is made all the same, and blocked_by in the answer names what it waits for: tell your person, and check with whoever works on those items."
     )]
     async fn dibs_claim(&self, Parameters(input): Parameters<ClaimInput>) -> CallToolResult {
         self.perform(|link| async move { link.claim(input).await })
@@ -212,6 +220,7 @@ mod tests {
                 "dibs_items",
                 "dibs_new",
                 "dibs_read",
+                "dibs_ready",
                 "dibs_release",
                 "dibs_send",
                 "dibs_status",
@@ -242,7 +251,10 @@ mod tests {
     #[test]
     fn a_misspelt_field_is_refused_by_the_schema_of_every_tool_that_takes_fields() {
         let tools = Tools::tool_router().list_all();
-        for tool in tools.iter().filter(|tool| tool.name != "dibs_status") {
+        for tool in tools
+            .iter()
+            .filter(|tool| !["dibs_status", "dibs_ready"].contains(&&*tool.name))
+        {
             assert_eq!(
                 tool.input_schema.get("additionalProperties"),
                 Some(&false.into()),
@@ -271,6 +283,7 @@ mod tests {
                 "dibs_check",
                 "dibs_inbox",
                 "dibs_items",
+                "dibs_ready",
                 "dibs_status",
                 "dibs_thread"
             ])

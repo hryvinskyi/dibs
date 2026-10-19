@@ -22,11 +22,7 @@ pub async fn run(command: AdminCommand, ctx: &Context) -> Result<(), Failure> {
                 handle: args.handle,
                 display_name: args.name,
                 external_login: args.login,
-                role: if args.admin {
-                    Role::Admin
-                } else {
-                    Role::Member
-                },
+                role: Role::from(args.role),
             };
             let enrolled = client
                 .add_member(&member)

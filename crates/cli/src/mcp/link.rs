@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use dibs_client::api::{
     ClaimRequest, Claimed, CreatedItem, EditCheck, Ended, Granted, Items, MarkedRead, PostMessage,
-    Posted, StartThread, Started, Status, TakeOverRequest, TakenOver, ThreadDetail, Threads,
+    Posted, ReadyList, StartThread, Started, Status, TakeOverRequest, TakenOver, ThreadDetail,
+    Threads,
 };
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::message::SessionLabel;
@@ -63,6 +64,14 @@ impl Link {
     /// The [`Failure`] of the call.
     pub async fn status(&self) -> Result<Status, Failure> {
         self.call(self.connection.client.status()).await
+    }
+
+    /// The work the caller can pick up now, and why the other open items wait.
+    ///
+    /// # Errors
+    /// The [`Failure`] of the call.
+    pub async fn ready(&self) -> Result<ReadyList, Failure> {
+        self.call(self.connection.client.ready()).await
     }
 
     /// The work items that match the filter.

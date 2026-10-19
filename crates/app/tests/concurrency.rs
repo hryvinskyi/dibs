@@ -180,6 +180,7 @@ mod concurrency {
                     Err(AppError::Claim(Refusal {
                         reason: ClaimRefused::HeldBy { member: holder, .. },
                         member: Some(_),
+                        ..
                     })) if *holder == winner
                 ),
                 "{result:?}"
@@ -225,6 +226,7 @@ mod concurrency {
                         Err(AppError::Claim(Refusal {
                             reason: ClaimRefused::AreaHeld { member: holder, .. },
                             member: Some(_),
+                            ..
                         })) if *holder == winners[0]
                     ),
                     "{result:?}"

@@ -105,7 +105,14 @@ through a password manager. With the Claude Code plugin, step 5 happens by itsel
 - **Member.** A person with a handle (`alice`) and a role: `admin` (also manages members, tokens and settings),
   `member`, or `importer`, a bot that feeds items in from an outside tracker and takes part in nothing else.
 - **Work item.** A unit of work, usually named by a reference into an outside tracker, written `scheme:value`
-  (`gh:acme/widgets#42`), with a title and a status: `open`, `claimed`, `done` or `dropped`.
+  (`gh:acme/widgets#42`), with a title and a status: `open`, `claimed`, `done` or `dropped`. A `gh` reference is kept in
+  lower case, so every spelling of one ticket names one item. An importer also reports a priority (0 is soonest, 4
+  latest), the areas the work will probably touch, the tracker's own state, and whether the tracker closed it.
+- **Dependency.** "This item is blocked by that one", recorded by a person (`dibs dep add`) or reported by the importer.
+  An item is *blocked* while one of its blockers is neither done nor closed. A cycle is refused. An import replaces only
+  the edges it reported, never a person's.
+- **Ready work.** The open items you can pick up now: nobody holds them live, nothing unfinished blocks them, and no
+  other member holds an area they will probably touch. Soonest first; every other open item comes with why it waits.
 - **Area.** A named set of paths in a repository (`billing`: `packages/billing/**`), written `repo:area` when a project
   has several repositories. Areas, not individual files, are what members hold.
 - **Claim.** A member's hold on a work item and on the areas they will change. A claim is *live* while its session is
@@ -272,6 +279,8 @@ dibs login [--server <url>] [--keychain]          # sign in; the token comes fro
 dibs whoami                                       # who the stored token signs in as, and where
 dibs status                                       # live and stale claims and the areas held
 dibs items [--mine] [--status open|claimed|done|dropped]
+dibs ready                                        # what you can pick up now, soonest first, and why the rest waits
+dibs dep add gh:acme/widgets#42 --blocked-by gh:acme/widgets#40   # record a dependency; dep rm removes it
 dibs new gh:acme/widgets#42 --title "Refund rounding"      # create an item, or show the one that exists
 dibs claim gh:acme/widgets#42 --area billing --area search # claim, or renew your claim
 dibs takeover 12 --reason "alice is out; I am picking this up" --area billing
@@ -288,7 +297,7 @@ dibs sync [--force] [--quiet]                     # heartbeat and refresh what t
 dibs mcp                                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook
 dibs doctor                                       # the agent hosts this build supports
-dibs admin member add bob --name "Bob Example" [--login bob-gh] [--admin]
+dibs admin member add bob --name "Bob Example" [--login bob-gh] [--role admin|member|importer]
 dibs admin token rotate bob                       # revoke bob's tokens and print a new one
 dibs admin settings apply settings.toml
 dibs admin force-release 12                       # end anyone's claim on item 12
@@ -300,15 +309,18 @@ An item is named by its local id (`12`) or its reference (`gh:acme/widgets#42`).
 
 Every route, request, response and error code is in [docs/api.md](docs/api.md). In short: JSON under `/v1`, a bearer
 token in the `Authorization` header, errors as `{ "error": { "code", "message" } }` with a stable `code`, and the
-project's event log as a page (`GET /v1/events`) or as server-sent events (`GET /v1/events/stream`).
+project's event log as a page (`GET /v1/events`) or as server-sent events (`GET /v1/events/stream`). An integration
+worker feeds the project from an outside tracker with an `importer` token: it sends its whole view to `PUT /v1/items` as
+often as it likes, and a view equal to what is stored changes nothing.
 
 ## Web UI
 
 The server also serves pages for people at `/ui`, where you sign in with your token:
 
 - **Status** (`/ui/`): live claims, stale claims with a take-over form, and the areas held.
-- **Board** (`/ui/board`): what is ready to pick up, what is in progress, what went stale and what was done today,
-  filterable by area and member, with a banner when something changes.
+- **Board** (`/ui/board`): your ready list with priorities, likely areas and links to the tracker, the open items that
+  wait with their blockers, what is in progress, what went stale and what was done today, filterable by area and member,
+  with a banner when something changes.
 - **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply.
 
 The pages are rendered on the server and enhanced by a few scripts of its own; they follow the event log live. The

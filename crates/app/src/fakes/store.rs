@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 
 use dibs_domain::claim::Claim;
+use dibs_domain::dependency::Dependency;
 use dibs_domain::event::{Event, EventKind};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{
@@ -23,8 +24,9 @@ use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
 
 use crate::ports::{
-    ClaimRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows, SessionRows, SettingsRows,
-    Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx, UiSessionRows,
+    ClaimRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows,
+    SessionRows, SettingsRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
+    UiSessionRows,
 };
 use crate::records::{
     CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
@@ -42,6 +44,7 @@ struct State {
     sessions: BTreeMap<(ProjectId, SessionId), SessionRecord>,
     items: BTreeMap<(ProjectId, ItemId), ItemRecord>,
     claims: BTreeMap<(ProjectId, ItemId), Claim>,
+    dependencies: BTreeMap<(ProjectId, ItemId, ItemId), Dependency>,
     shared: BTreeSet<(ProjectId, SharedPath)>,
     grants: BTreeMap<(ProjectId, GrantId), GrantRecord>,
     threads: BTreeMap<(ProjectId, ThreadId), ThreadRecord>,
@@ -111,7 +114,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 14] = [
+        let checks: [(&'static str, bool); 15] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -136,6 +139,12 @@ impl State {
                         && member(*p, c.member)
                         && self.sessions.contains_key(&(*p, c.session))
                 }),
+            ),
+            (
+                "a dependency",
+                self.dependencies
+                    .keys()
+                    .all(|(p, waiting, blocker)| item(*p, *waiting) && item(*p, *blocker)),
             ),
             (
                 "a shared path",
@@ -480,6 +489,44 @@ impl ItemRows for MemoryTx {
         if let Some(item) = self.work.items.get_mut(&(project, id)) {
             item.status = status;
         }
+        Ok(())
+    }
+
+    async fn update_item(&mut self, project: ProjectId, item: &ItemRecord) -> StoreResult<()> {
+        if let Some(stored) = self.work.items.get_mut(&(project, item.id)) {
+            stored.set_meta(item.meta());
+            stored.source = item.source.clone();
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DependencyRows for MemoryTx {
+    async fn dependencies(&mut self, project: ProjectId) -> StoreResult<Vec<Dependency>> {
+        Ok(self
+            .work
+            .dependencies
+            .iter()
+            .filter(|((p, _, _), _)| *p == project)
+            .map(|(_, edge)| *edge)
+            .collect())
+    }
+
+    async fn save_dependency(&mut self, project: ProjectId, edge: &Dependency) -> StoreResult<()> {
+        self.work
+            .dependencies
+            .insert((project, edge.item, edge.blocked_by), *edge);
+        Ok(())
+    }
+
+    async fn delete_dependency(
+        &mut self,
+        project: ProjectId,
+        item: ItemId,
+        blocked_by: ItemId,
+    ) -> StoreResult<()> {
+        self.work.dependencies.remove(&(project, item, blocked_by));
         Ok(())
     }
 }

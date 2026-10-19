@@ -1,6 +1,7 @@
-//! What an integration may call: who it is, the event feed, and reading and creating work items.
-//! Every other route of the router answers it `forbidden`, and each refusal comes before the
-//! request is read, so a body that would be refused for its content still answers `forbidden`.
+//! What an integration may call: who it is, the members, the event feed, reading, creating and
+//! importing work items, and the ready list. Every other route of the router answers it
+//! `forbidden`, and each refusal comes before the request is read, so a body that would be refused
+//! for its content still answers `forbidden`.
 
 use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -37,6 +38,15 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             StatusCode::CREATED,
         ),
         (Method::GET, "/v1/members".into(), None, StatusCode::OK),
+        (
+            Method::PUT,
+            "/v1/items".into(),
+            Some(
+                json!({"source": "board", "items": [{"ref": "gh:acme/widgets#10", "title": "Imported"}]}),
+            ),
+            StatusCode::OK,
+        ),
+        (Method::GET, "/v1/ready".into(), None, StatusCode::OK),
     ];
     for (method, path, body, status) in allowed {
         let answer = world
@@ -70,6 +80,22 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
         ),
         (Method::POST, format!("/v1/items/{item}/release"), None),
         (Method::POST, format!("/v1/items/{item}/done"), None),
+        (
+            Method::POST,
+            format!("/v1/items/{item}/dependencies"),
+            Some(json!({"blocked_by": item})),
+        ),
+        (
+            Method::POST,
+            format!("/v1/items/{item}/dependencies"),
+            Some(json!({})),
+        ),
+        (
+            Method::DELETE,
+            format!("/v1/items/{item}/dependencies?blocked_by={item}"),
+            None,
+        ),
+        (Method::DELETE, "/v1/items/999/dependencies".into(), None),
         (Method::POST, "/v1/items/999/release".into(), None),
         (Method::GET, "/v1/status".into(), None),
         (
