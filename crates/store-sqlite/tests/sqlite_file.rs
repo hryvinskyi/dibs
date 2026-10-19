@@ -84,8 +84,29 @@ mod sqlite_file {
             "SELECT group_concat(version || ':' || success) FROM _sqlx_migrations",
         )
         .await;
-        assert_eq!(applied, "1:1,2:1");
+        assert_eq!(applied, "1:1,2:1,3:1");
         assert_eq!(scalar(&path, "PRAGMA journal_mode").await, "wal");
+    }
+
+    #[tokio::test]
+    async fn the_messages_that_ask_for_an_ack_are_read_through_their_index() {
+        let (_dir, path) = file();
+        SqliteStore::open(&path).await.unwrap().close().await;
+        let mut connection = raw(&path).await;
+        let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT id FROM messages m \
+             WHERE m.project_id = 1 AND m.ack_required = 1 AND m.author_id <> 2 \
+             ORDER BY m.created_at DESC, m.id DESC",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        let plan = steps
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(plan.contains("messages_asking_ack"), "{plan}");
     }
 
     #[tokio::test]

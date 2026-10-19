@@ -15,6 +15,8 @@ const posted = {
     author: 'bob',
     label: 'web',
     body: '<b>hi</b>\nthere',
+    importance: 'urgent',
+    ack_required: true,
     created_at: '2026-03-02T09:00:00Z',
   },
 };
@@ -29,6 +31,8 @@ test('a posted message parses with its text as written', () => {
     author: 'bob',
     label: 'web',
     body: '<b>hi</b>\nthere',
+    importance: 'urgent',
+    ackRequired: true,
     createdAt: '2026-03-02T09:00:00Z',
   });
 });
@@ -52,6 +56,9 @@ test('data of another shape is a contract error naming where it broke', () => {
     [JSON.stringify({ ...posted, message: 'text' }), '$.message'],
     [JSON.stringify({ ...posted, message: { ...posted.message, body: 5 } }), '$.message.body'],
     [JSON.stringify({ ...posted, message: { ...posted.message, thread: -4 } }), '$.message.thread'],
+    [JSON.stringify({ ...posted, message: { ...posted.message, importance: 'loud' } }), '$.message.importance'],
+    [JSON.stringify({ ...posted, message: { ...posted.message, importance: undefined } }), '$.message.importance'],
+    [JSON.stringify({ ...posted, message: { ...posted.message, ack_required: 'yes' } }), '$.message.ack_required'],
   ];
   for (const [data, path] of cases) {
     assert.throws(

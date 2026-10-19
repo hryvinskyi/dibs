@@ -8,7 +8,9 @@ use time::{Duration, OffsetDateTime};
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::ItemId;
+use dibs_domain::ids::{ItemId, MessageId};
+use dibs_domain::item::ExternalRef;
+use dibs_domain::message::Importance;
 use dibs_domain::paths::RelPath;
 use dibs_domain::repo::RepoId;
 use dibs_domain::settings::{ProjectSettings, SettingsDocument};
@@ -16,7 +18,10 @@ use dibs_domain::settings::{ProjectSettings, SettingsDocument};
 use super::*;
 use crate::adapter::{HostAdapter, HostId, ParseError};
 use crate::neutral::Neutral;
-use crate::ports::{CoordinationGateway, HoldLine, InboxView, LocalCache, StatusView, Upkeep};
+use crate::ports::{
+    CoordinationGateway, HoldLine, InboxView, LocalCache, StatusView, TouchedBy, UnackedLine,
+    Upkeep,
+};
 
 const START: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
 
@@ -604,7 +609,11 @@ fn a_fresh_status_answers_for_my_own_holds_but_not_for_hot_files() {
         state.answers = Ok(vec![PathAnswer::Noted {
             rule: "warn-shared".to_owned(),
             note: None,
-            touched_by: vec![(handle("alice"), ItemId(4))],
+            touched_by: vec![TouchedBy {
+                holder: handle("alice"),
+                item: ItemId(4),
+                item_ref: Some(ExternalRef::parse("gh:acme/api#4").unwrap()),
+            }],
         }]);
     });
     let held = run(
@@ -623,7 +632,7 @@ fn a_fresh_status_answers_for_my_own_holds_but_not_for_hot_files() {
     );
     let context = no_objection(&hot)["context"].as_str().unwrap().to_owned();
     assert!(context.contains("warn-shared rule"), "{context}");
-    assert!(context.contains("alice (item 4)"), "{context}");
+    assert!(context.contains("alice (item gh:acme/api#4)"), "{context}");
     assert_eq!(world.calls().len(), 1);
 }
 
@@ -941,6 +950,12 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
         state.server_inbox = Ok(InboxView {
             unread: 1,
             subjects: vec!["Rates".parse().unwrap()],
+            unacked: vec![UnackedLine {
+                message: MessageId(9),
+                sender: handle("alice"),
+                subject: "Freeze main".parse().unwrap(),
+                importance: Importance::Urgent,
+            }],
         });
     });
     let answer = run(&world, "neutral", "session-started", &input(None));
@@ -949,6 +964,10 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
         .unwrap()
         .to_owned();
     assert!(context.contains("Unread conversations: 1"), "{context}");
+    assert!(
+        context.contains("- urgent from alice: \"Freeze main\" (message 9)"),
+        "{context}"
+    );
     assert_eq!(world.calls(), ["status", "inbox"]);
 }
 

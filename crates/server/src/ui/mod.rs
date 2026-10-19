@@ -52,6 +52,10 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/threads", get(threads::list))
         .route("/ui/threads/{id}", get(threads::page))
         .route("/ui/threads/{id}/messages", post(threads::reply))
+        .route(
+            "/ui/threads/{id}/messages/{message}/ack",
+            post(threads::ack),
+        )
         .route("/ui/items/{id}/takeover", post(takeover::take_over))
         .route("/ui/events/stream", get(live::stream))
         .route("/ui/session", get(live::session))

@@ -9,10 +9,12 @@ use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{NamedSummary, Names};
 use crate::ports::Store;
+use crate::use_cases::acks::{awaiting, awaiting_per_thread};
 use crate::use_cases::readable::readable_summaries;
 use crate::work::Work;
 
-/// Lists the threads the caller may read — about `item` only, when given — newest activity first.
+/// Lists the threads the caller may read — about `item` only, when given — newest activity first,
+/// each with how many of its messages await the caller's acknowledgement.
 pub struct ListThreads {
     store: Arc<dyn Store>,
 }
@@ -39,10 +41,14 @@ impl ListThreads {
         let summaries = work
             .thread_summaries(actor.project, actor.member, item)
             .await?;
+        let waiting = awaiting_per_thread(&awaiting(&mut work, actor).await?);
         let names = Names::load(&mut work).await?;
         readable_summaries(actor, summaries)
             .into_iter()
-            .map(|summary| names.summary(summary))
+            .map(|summary| {
+                let count = waiting.get(&summary.thread.id).copied().unwrap_or(0);
+                names.summary(summary, count)
+            })
             .collect()
     }
 }
@@ -67,6 +73,8 @@ mod tests {
             item,
             label: SessionLabel::parse("web").unwrap(),
             body: Body::parse("hello").unwrap(),
+            importance: dibs_domain::message::Importance::Normal,
+            ack_required: false,
         };
         let about = start
             .execute(&env.alice.actor, thread(Addressees::Project, Some(item)))

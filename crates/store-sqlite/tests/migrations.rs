@@ -11,8 +11,9 @@ mod migrations {
 
     use dibs_app::ports::Store;
     use dibs_app::records::ItemFilter;
-    use dibs_domain::ids::{ItemId, ProjectId};
+    use dibs_domain::ids::{ItemId, MemberId, MessageId, ProjectId, ThreadId};
     use dibs_domain::item::{ExternalRef, ItemStatus, Priority};
+    use dibs_domain::message::{Ack, Importance};
     use dibs_store_sqlite::{OpenError, SqliteStore};
 
     static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -153,5 +154,81 @@ mod migrations {
         let text = refusal(&open(&path).await.unwrap_err());
         assert!(text.contains("gh:not-an-issue"), "{text}");
         assert!(text.contains("owner/repo#number"), "{text}");
+    }
+
+    /// A thread of two messages, one of them read, under the schema `0002` left.
+    const CONVERSATION_AT_READY: &str = "\
+        INSERT INTO projects (id, slug, created_at) VALUES (1, 'widgets', 0);
+        INSERT INTO members (project_id, id, handle, display_name, external_login, role, created_at)
+            VALUES (1, 11, 'alice', 'Alice', NULL, 'admin', 0),
+                   (1, 12, 'bob', 'Bob', NULL, 'member', 0);
+        INSERT INTO threads (project_id, id, subject, item_id, author_id, to_project, created_at)
+            VALUES (1, 81, 'Invoice totals', NULL, 11, 1, 10);
+        INSERT INTO messages (project_id, id, thread_id, author_id, label, body, created_at)
+            VALUES (1, 91, 81, 11, 'web', 'Can I take billing?', 20),
+                   (1, 92, 81, 12, 'web', 'Yes.', 30);
+        INSERT INTO reads (project_id, member_id, message_id, read_at) VALUES (1, 12, 91, 25);
+    ";
+
+    #[tokio::test]
+    async fn acks_carry_every_message_over_as_normal_and_asking_for_nothing() {
+        let (_dir, path) = database_at(2, CONVERSATION_AT_READY).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let messages = tx.messages(ProjectId(1), ThreadId(81)).await.unwrap();
+        let carried: Vec<(u64, &str, Importance, bool)> = messages
+            .iter()
+            .map(|m| (m.id.get(), m.body.as_str(), m.importance, m.ack_required))
+            .collect();
+        assert_eq!(
+            carried,
+            [
+                (91, "Can I take billing?", Importance::Normal, false),
+                (92, "Yes.", Importance::Normal, false),
+            ]
+        );
+        let reads = tx.reads_of(ProjectId(1), MessageId(91)).await.unwrap();
+        assert_eq!(reads.len(), 1, "the read marks are kept");
+        assert!(
+            tx.ack_requests(ProjectId(1), MemberId(12))
+                .await
+                .unwrap()
+                .is_empty(),
+            "nothing written before asks for an acknowledgement"
+        );
+        let summary = tx
+            .thread_summaries(ProjectId(1), MemberId(12), None)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(summary.importance, Importance::Normal);
+        let ack = Ack {
+            message: MessageId(91),
+            member: MemberId(12),
+            at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        tx.insert_ack(ProjectId(1), &ack).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.acks(ProjectId(1), MessageId(91)).await.unwrap(), [ack]);
+    }
+
+    #[tokio::test]
+    async fn acks_refuse_an_importance_it_does_not_know() {
+        let (_dir, path) = database_at(2, CONVERSATION_AT_READY).await;
+        drop(open(&path).await.unwrap());
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        let refused = sqlx::query("UPDATE messages SET importance = 'loud' WHERE id = 91")
+            .execute(&pool)
+            .await;
+        assert!(refused.is_err(), "the column keeps to the three names");
+        let (version,): (i64,) = sqlx::query_as("SELECT max(version) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 3);
     }
 }

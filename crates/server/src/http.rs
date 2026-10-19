@@ -146,6 +146,8 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/threads/{id}/messages", post(routes::threads::post))
         .route("/v1/threads/{id}/read", post(routes::threads::mark_read))
         .route("/v1/inbox", get(routes::threads::inbox))
+        .route("/v1/messages/{id}/ack", post(routes::messages::ack))
+        .route("/v1/messages/{id}/status", get(routes::messages::status))
         .route("/v1/events", get(routes::events::list))
         .route("/v1/events/stream", get(routes::events::stream))
         .route("/v1/admin/members", post(routes::admin::add_member))

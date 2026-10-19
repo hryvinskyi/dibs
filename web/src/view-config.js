@@ -25,6 +25,7 @@ import { ContractError } from './events.js';
  *   me: string,
  *   newMessageLabel: string,
  *   newMessagesLabel: string,
+ *   ackAction: string,
  * }} ThreadConfig
  */
 
@@ -83,7 +84,23 @@ export function parseThreadConfig(data) {
     me: required(data, 'me'),
     newMessageLabel: required(data, 'newMessageLabel'),
     newMessagesLabel: required(data, 'newMessagesLabel'),
+    ackAction: placeholder(data, 'ackAction', '{message}'),
   };
+}
+
+/**
+ * A required attribute that holds `mark` where a value is to be put in.
+ * @param {DataAttributes} data
+ * @param {string} name
+ * @param {string} mark
+ * @returns {string}
+ */
+function placeholder(data, name, mark) {
+  const value = required(data, name);
+  if (!value.includes(mark)) {
+    throw new ContractError(`dataset.${name}`, `a value holding ${mark}`);
+  }
+  return value;
 }
 
 /**

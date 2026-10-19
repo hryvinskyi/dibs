@@ -2,6 +2,7 @@
 //! messages wait unread, the page's place in the navigation, and the form token of the sign-out
 //! form.
 
+use dibs_app::use_cases::InboxQuery;
 use dibs_domain::settings::ProjectSettings;
 
 use crate::error::ApiError;
@@ -74,8 +75,15 @@ pub async fn load(
     let unread = state
         .app
         .inbox
-        .execute(actor, true)
+        .execute(
+            actor,
+            InboxQuery {
+                unread_only: true,
+                unacked: false,
+            },
+        )
         .await?
+        .threads
         .iter()
         .map(|summary| summary.unread)
         .sum();

@@ -5,9 +5,9 @@
 use std::path::PathBuf;
 
 use dibs_client::api::{
-    ClaimRequest, Claimed, CreatedItem, EditCheck, Ended, Granted, Items, MarkedRead, PostMessage,
-    Posted, ReadyList, StartThread, Started, Status, TakeOverRequest, TakenOver, ThreadDetail,
-    Threads,
+    Acked, ClaimRequest, Claimed, CreatedItem, EditCheck, Ended, Granted, Inbox, InboxRequest,
+    Items, MarkedRead, PostMessage, Posted, ReadyList, StartThread, Started, Status,
+    TakeOverRequest, TakenOver, ThreadDetail,
 };
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::message::SessionLabel;
@@ -16,8 +16,8 @@ use crate::commands::check::Governed;
 use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::mcp::inputs::{
-    CheckInput, ClaimInput, GrantInput, InboxInput, ItemsInput, KeyInput, NewInput, SendInput,
-    Sending, TakeoverInput, ThreadInput,
+    AckInput, CheckInput, ClaimInput, GrantInput, InboxInput, ItemsInput, KeyInput, NewInput,
+    SendInput, Sending, TakeoverInput, ThreadInput,
 };
 
 /// The kind of agent the sessions of the tool server report.
@@ -178,10 +178,17 @@ impl Link {
     /// A [`Failure`] for an invalid input, or of the call.
     pub async fn send(&self, input: SendInput) -> Result<Sent, Failure> {
         match input.sending()? {
-            Sending::Reply { thread, body } => {
+            Sending::Reply {
+                thread,
+                body,
+                importance,
+                ack_required,
+            } => {
                 let message = PostMessage {
                     label: self.label.clone(),
                     body,
+                    importance,
+                    ack_required,
                 };
                 let posted = self
                     .call(self.connection.client.post_message(thread, &message))
@@ -193,6 +200,8 @@ impl Link {
                 subject,
                 item,
                 body,
+                importance,
+                ack_required,
             } => {
                 let item = match item {
                     Some(key) => Some(self.resolve(&key).await?),
@@ -204,6 +213,8 @@ impl Link {
                     item,
                     label: self.label.clone(),
                     body,
+                    importance,
+                    ack_required,
                 };
                 let started = self
                     .call(self.connection.client.start_thread(&start))
@@ -213,13 +224,26 @@ impl Link {
         }
     }
 
-    /// The conversations waiting for the caller.
+    /// The conversations waiting for the caller, and when asked the messages awaiting their
+    /// acknowledgement.
     ///
     /// # Errors
     /// The [`Failure`] of the call.
-    pub async fn inbox(&self, input: InboxInput) -> Result<Threads, Failure> {
-        self.call(self.connection.client.inbox(input.unread.unwrap_or(false)))
-            .await
+    pub async fn inbox(&self, input: InboxInput) -> Result<Inbox, Failure> {
+        let asked = InboxRequest {
+            unread: input.unread.unwrap_or(false),
+            unacked: input.unacked.unwrap_or(false),
+        };
+        self.call(self.connection.client.inbox(asked)).await
+    }
+
+    /// Acknowledges a message the caller was sent.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, or of the call.
+    pub async fn ack(&self, input: AckInput) -> Result<Acked, Failure> {
+        let message = input.id()?;
+        self.call(self.connection.client.ack(message)).await
     }
 
     /// A conversation and its messages. Showing it does not mark it read.

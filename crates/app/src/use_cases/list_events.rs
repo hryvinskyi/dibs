@@ -248,6 +248,8 @@ mod tests {
                     item: Some(item),
                     label: SessionLabel::parse("web").unwrap(),
                     body: Body::parse("just me").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await

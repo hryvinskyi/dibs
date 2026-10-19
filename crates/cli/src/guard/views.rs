@@ -1,10 +1,11 @@
 //! The client's answers as the guard reads them.
 
 use dibs_agent_host::ports::{
-    ClaimLine, HoldLine, InboxView, PathAnswer, PortError, ReadyLine, StatusView,
+    ClaimLine, HoldLine, InboxView, PathAnswer, PortError, ReadyLine, StatusView, TouchedBy,
+    UnackedLine,
 };
 use dibs_client::ClientError;
-use dibs_client::api::{HeldItem, NotReady, Status, Threads, Verdict};
+use dibs_client::api::{HeldItem, Inbox, InboxRequest, NotReady, Status, Verdict};
 
 use crate::failure::sentence;
 
@@ -65,9 +66,17 @@ fn count(status: &Status, of: impl Fn(&NotReady) -> bool) -> u64 {
     u64::try_from(counted).unwrap_or(u64::MAX)
 }
 
-/// The conversations with unread messages as the guard reads them.
-pub fn inbox(threads: &Threads) -> InboxView {
-    let unread: Vec<_> = threads
+/// What the guard asks the inbox for, and keeps on this machine: the conversations with unread
+/// messages and the messages awaiting the member's acknowledgement.
+pub const GUARD_INBOX: InboxRequest = InboxRequest {
+    unread: true,
+    unacked: true,
+};
+
+/// The conversations with unread messages, and the messages awaiting an acknowledgement, as the
+/// guard reads them.
+pub fn inbox(inbox: &Inbox) -> InboxView {
+    let unread: Vec<_> = inbox
         .threads
         .iter()
         .filter(|summary| summary.unread > 0)
@@ -77,6 +86,16 @@ pub fn inbox(threads: &Threads) -> InboxView {
         subjects: unread
             .iter()
             .map(|summary| summary.thread.subject.clone())
+            .collect(),
+        unacked: inbox
+            .unacked
+            .iter()
+            .map(|unacked| UnackedLine {
+                message: unacked.message.id,
+                sender: unacked.message.author.clone(),
+                subject: unacked.thread.subject.clone(),
+                importance: unacked.message.importance,
+            })
             .collect(),
     }
 }
@@ -94,7 +113,11 @@ pub fn answer(verdict: &Verdict) -> PathAnswer {
             note: note.clone(),
             touched_by: touched_by
                 .iter()
-                .map(|other| (other.holder.clone(), other.item))
+                .map(|other| TouchedBy {
+                    holder: other.holder.clone(),
+                    item: other.item,
+                    item_ref: other.item_ref.clone(),
+                })
                 .collect(),
         },
         Verdict::NeedsClaim => PathAnswer::NeedsClaim,

@@ -10,9 +10,9 @@ use time::OffsetDateTime;
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::Note;
-use dibs_domain::ids::ItemId;
+use dibs_domain::ids::{ItemId, MessageId};
 use dibs_domain::item::{ExternalRef, Priority, Title};
-use dibs_domain::message::Subject;
+use dibs_domain::message::{Importance, Subject};
 use dibs_domain::paths::RelPath;
 use dibs_domain::repo::RepoId;
 use dibs_domain::settings::ProjectSettings;
@@ -111,6 +111,20 @@ pub struct StatusView {
     pub area_held: u64,
 }
 
+/// A message that asks the member for an acknowledgement they have not given, as the brief shows
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnackedLine {
+    /// The message.
+    pub message: MessageId,
+    /// Who wrote it.
+    pub sender: Handle,
+    /// The subject of its conversation.
+    pub subject: Subject,
+    /// How much it asks for the member's attention.
+    pub importance: Importance,
+}
+
 /// The conversations waiting for the member.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InboxView {
@@ -118,6 +132,19 @@ pub struct InboxView {
     pub unread: u64,
     /// The subjects of those conversations, newest activity first.
     pub subjects: Vec<Subject>,
+    /// The messages that ask the member for an acknowledgement they have not given, newest first.
+    pub unacked: Vec<UnackedLine>,
+}
+
+/// Another member who edited a shared file under a live claim, and the item they hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TouchedBy {
+    /// The member.
+    pub holder: Handle,
+    /// Their item.
+    pub item: ItemId,
+    /// That item's reference, when it has one.
+    pub item_ref: Option<ExternalRef>,
 }
 
 /// The server's answer for one path the member is about to change.
@@ -132,7 +159,7 @@ pub enum PathAnswer {
         /// The rule's note.
         note: Option<Note>,
         /// Other members who edited the same file under a live claim, with their items.
-        touched_by: Vec<(Handle, ItemId)>,
+        touched_by: Vec<TouchedBy>,
     },
     /// The path needs a live claim first.
     NeedsClaim,

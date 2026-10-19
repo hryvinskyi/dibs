@@ -6,13 +6,21 @@ use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 use time::OffsetDateTime;
 
-use dibs_app::ports::{StoreResult, ThreadRows};
-use dibs_app::records::{MessageRecord, ThreadRecord, ThreadSummary};
+use dibs_app::ports::{AckRows, StoreResult, ThreadRows};
+use dibs_app::records::{MessageRecord, ReadMark, ThreadRecord, ThreadSummary};
 use dibs_domain::ids::{ItemId, MemberId, MessageId, ProjectId, ThreadId};
-use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
+use dibs_domain::message::{Ack, Body, Importance, Recipients, SessionLabel, Subject};
 
 use crate::SqliteTx;
-use crate::codec::{Fields, int, nanos};
+use crate::codec::{Fields, int, name, nanos};
+
+/// The columns of `messages m` a message is read from by [`message`].
+macro_rules! message_columns {
+    () => {
+        "m.id, m.thread_id, m.author_id, m.label, m.body, m.importance, m.ack_required, \
+         m.created_at"
+    };
+}
 
 /// The recipients as the thread row's flag and the members listed beside it.
 fn recipient_rows(recipients: &Recipients) -> (bool, Vec<MemberId>) {
@@ -59,7 +67,18 @@ fn message(row: &SqliteRow) -> StoreResult<MessageRecord> {
         author: MemberId(f.number("author_id")?),
         label: f.parse("label", SessionLabel::parse)?,
         body: f.parse("body", Body::parse)?,
+        importance: f.named("importance")?,
+        ack_required: f.flag("ack_required")?,
         created_at: f.time("created_at")?,
+    })
+}
+
+fn ack(row: &SqliteRow) -> StoreResult<Ack> {
+    let f = Fields::of(row, "acks");
+    Ok(Ack {
+        message: MessageId(f.number("message_id")?),
+        member: MemberId(f.number("member_id")?),
+        at: f.time("at")?,
     })
 }
 
@@ -70,6 +89,11 @@ fn summary(row: &SqliteRow) -> StoreResult<ThreadSummary> {
         messages: f.number("messages")?,
         unread: f.number("unread")?,
         last_message_at: f.opt_time("last_message_at")?,
+        importance: f
+            .json::<Vec<Importance>>("importances")?
+            .into_iter()
+            .max()
+            .unwrap_or_default(),
     })
 }
 
@@ -132,8 +156,8 @@ impl ThreadRows for SqliteTx {
         record: &MessageRecord,
     ) -> StoreResult<()> {
         let statement = sqlx::query(
-            "INSERT INTO messages (project_id, id, thread_id, author_id, label, body, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO messages (project_id, id, thread_id, author_id, label, body, importance, \
+             ack_required, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
         .bind(int(project.get())?)
         .bind(int(record.id.get())?)
@@ -141,6 +165,8 @@ impl ThreadRows for SqliteTx {
         .bind(int(record.author.get())?)
         .bind(record.label.as_str().to_owned())
         .bind(record.body.as_str().to_owned())
+        .bind(name(&record.importance)?)
+        .bind(record.ack_required)
         .bind(nanos(record.created_at)?);
         self.run(statement).await?;
         Ok(())
@@ -151,10 +177,11 @@ impl ThreadRows for SqliteTx {
         project: ProjectId,
         id: MessageId,
     ) -> StoreResult<Option<MessageRecord>> {
-        let statement = sqlx::query(
-            "SELECT id, thread_id, author_id, label, body, created_at FROM messages \
-             WHERE project_id = ?1 AND id = ?2",
-        )
+        let statement = sqlx::query(concat!(
+            "SELECT ",
+            message_columns!(),
+            " FROM messages m WHERE m.project_id = ?1 AND m.id = ?2"
+        ))
         .bind(int(project.get())?)
         .bind(int(id.get())?);
         self.optional(statement)
@@ -169,10 +196,12 @@ impl ThreadRows for SqliteTx {
         project: ProjectId,
         thread: ThreadId,
     ) -> StoreResult<Vec<MessageRecord>> {
-        let statement = sqlx::query(
-            "SELECT id, thread_id, author_id, label, body, created_at FROM messages \
-             WHERE project_id = ?1 AND thread_id = ?2 ORDER BY created_at, id",
-        )
+        let statement = sqlx::query(concat!(
+            "SELECT ",
+            message_columns!(),
+            " FROM messages m WHERE m.project_id = ?1 AND m.thread_id = ?2 \
+             ORDER BY m.created_at, m.id"
+        ))
         .bind(int(project.get())?)
         .bind(int(thread.get())?);
         self.all(statement).await?.iter().map(message).collect()
@@ -195,7 +224,9 @@ impl ThreadRows for SqliteTx {
               AND NOT EXISTS (SELECT 1 FROM reads d WHERE d.project_id = m.project_id \
                   AND d.member_id = ?2 AND d.message_id = m.id)) AS unread, \
              (SELECT MAX(m.created_at) FROM messages m \
-              WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS last_message_at \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS last_message_at, \
+             (SELECT json_group_array(DISTINCT m.importance) FROM messages m \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS importances \
              FROM threads t WHERE t.project_id = ?1 AND (?3 IS NULL OR t.item_id = ?3) \
              ORDER BY COALESCE(last_message_at, t.created_at) DESC, t.id DESC",
         )
@@ -223,5 +254,85 @@ impl ThreadRows for SqliteTx {
         .bind(int(thread.get())?)
         .bind(nanos(at)?);
         self.run(statement).await
+    }
+}
+
+#[async_trait]
+impl AckRows for SqliteTx {
+    async fn insert_ack(&mut self, project: ProjectId, record: &Ack) -> StoreResult<()> {
+        let statement = sqlx::query(
+            "INSERT INTO acks (project_id, message_id, member_id, at) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(int(project.get())?)
+        .bind(int(record.message.get())?)
+        .bind(int(record.member.get())?)
+        .bind(nanos(record.at)?);
+        self.run(statement).await?;
+        Ok(())
+    }
+
+    async fn acks(&mut self, project: ProjectId, message: MessageId) -> StoreResult<Vec<Ack>> {
+        let statement = sqlx::query(
+            "SELECT message_id, member_id, at FROM acks \
+             WHERE project_id = ?1 AND message_id = ?2 ORDER BY at, member_id",
+        )
+        .bind(int(project.get())?)
+        .bind(int(message.get())?);
+        self.all(statement).await?.iter().map(ack).collect()
+    }
+
+    async fn thread_acks(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<Vec<Ack>> {
+        let statement = sqlx::query(
+            "SELECT a.message_id, a.member_id, a.at FROM acks a \
+             JOIN messages m ON m.project_id = a.project_id AND m.id = a.message_id \
+             WHERE a.project_id = ?1 AND m.thread_id = ?2 \
+             ORDER BY a.at, a.message_id, a.member_id",
+        )
+        .bind(int(project.get())?)
+        .bind(int(thread.get())?);
+        self.all(statement).await?.iter().map(ack).collect()
+    }
+
+    async fn ack_requests(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<Vec<MessageRecord>> {
+        let statement = sqlx::query(concat!(
+            "SELECT ",
+            message_columns!(),
+            " FROM messages m \
+             WHERE m.project_id = ?1 AND m.ack_required = 1 AND m.author_id <> ?2 \
+             AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.project_id = m.project_id \
+                 AND a.message_id = m.id AND a.member_id = ?2) \
+             ORDER BY m.created_at DESC, m.id DESC"
+        ))
+        .bind(int(project.get())?)
+        .bind(int(member.get())?);
+        self.all(statement).await?.iter().map(message).collect()
+    }
+
+    async fn reads_of(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<Vec<ReadMark>> {
+        let statement = sqlx::query(
+            "SELECT member_id, read_at FROM reads \
+             WHERE project_id = ?1 AND message_id = ?2 ORDER BY member_id",
+        )
+        .bind(int(project.get())?)
+        .bind(int(message.get())?);
+        self.all(statement)
+            .await?
+            .iter()
+            .map(|row| {
+                let f = Fields::of(row, "reads");
+                Ok(ReadMark {
+                    member: MemberId(f.number("member_id")?),
+                    at: f.time("read_at")?,
+                })
+            })
+            .collect()
     }
 }

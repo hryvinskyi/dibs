@@ -1,14 +1,17 @@
 // @ts-check
 /**
  * The live thread page: messages posted to the open thread are appended as they arrive, cloned
- * from the page's `<template>` and filled with `textContent`; a pill counts them and links to the
- * first; a notice shows while the connection is restored, and the page's session-ended banner when
- * the session is gone. Every wording comes from the template.
+ * from the page's `<template>` and filled with `textContent`, a raised importance shown with the
+ * template's badge for it and, for a message that asks the person to acknowledge it, the
+ * template's acknowledge form; a pill counts them and links to the first; a notice shows while the
+ * connection is restored, and the page's session-ended banner when the session is gone. Every
+ * wording comes from the template.
  */
 
 import { messageOf } from './events.js';
 import { follow } from './live-stream.js';
 import { localizeTime } from './local-times.js';
+import { ackAction, offersAck, showsImportance } from './message-marks.js';
 import { countLabel, parseThreadConfig } from './view-config.js';
 
 /** @type {WeakSet<HTMLElement>} */
@@ -78,6 +81,18 @@ export function mount(root) {
     fill('author', message.author);
     fill('session', message.label);
     fill('body', message.body);
+    if (showsImportance(message.importance)) {
+      const badge = item.querySelector(`[data-importance="${message.importance}"]`);
+      if (badge instanceof HTMLElement) {
+        badge.hidden = false;
+      }
+    }
+    const ack = item.querySelector('[data-ack]');
+    const ackForm = item.querySelector('form[data-ack-form]');
+    if (offersAck(message, config.me) && ack instanceof HTMLElement && ackForm instanceof HTMLFormElement) {
+      ackForm.action = ackAction(config.ackAction, message.id);
+      ack.hidden = false;
+    }
     const time = item.querySelector('time[data-field="time"]');
     if (time !== null) {
       time.setAttribute('datetime', message.createdAt);

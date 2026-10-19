@@ -126,6 +126,9 @@ through a password manager. With the Claude Code plugin, step 5 happens by itsel
 - **Grant.** A holder lets another member edit inside an area they hold, for that member's own live claim.
 - **Thread.** A conversation between members, or with the whole project, optionally about a work item. Agents and people
   use the same threads.
+- **Importance and acknowledgement.** A message is `normal`, `high` or `urgent`, and may ask each recipient to
+  acknowledge it. An acknowledgement is the recipient's own record that they read it; the message never changes, and its
+  author sees who has acknowledged and who has not. An acknowledgement says "I read this"; it authorises nothing.
 - **Session.** One running client of a member: a terminal, an agent. Claims are kept alive by their session's
   heartbeats.
 - **Event.** Everything above appends to the project's log, which the web pages and clients follow live.
@@ -290,9 +293,11 @@ dibs check packages/billing/a.rs                  # may I edit these paths?
 dibs check --git-range origin/main..HEAD [--author me]   # warn about what a range of commits changed
 dibs grant 14 --area api:billing --to bob         # let bob edit in an area you hold, for his item 14
 dibs send --to alice --subject "Rounding" "May I touch round.rs?"    # or --project; "-" reads stdin
-dibs inbox [--unread]                             # conversations waiting for you
-dibs thread 31                                    # read one
+dibs send --project --subject "Freeze" --importance urgent --ack "No pushes to main until noon."
+dibs inbox [--unread] [--unacked]                 # conversations waiting for you; what awaits your acknowledgement
+dibs thread 31                                    # read one, with each message's id and who acknowledged it
 dibs read 31                                      # mark it read
+dibs ack 57                                       # acknowledge message 57 once you have read it
 dibs sync [--force] [--quiet]                     # heartbeat and refresh what this machine remembers
 dibs mcp                                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook
@@ -321,7 +326,9 @@ The server also serves pages for people at `/ui`, where you sign in with your to
 - **Board** (`/ui/board`): your ready list with priorities, likely areas and links to the tracker, the open items that
   wait with their blockers, what is in progress, what went stale and what was done today, filterable by area and member,
   with a banner when something changes.
-- **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply.
+- **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply. Each conversation
+  shows its importance and whether a message in it awaits your acknowledgement; a message that asks for one lists who has
+  acknowledged it and offers you an *Acknowledge* button, and a reply can ask everyone to acknowledge it.
 
 The pages are rendered on the server and enhanced by a few scripts of its own; they follow the event log live. The
 session cookie is `Secure`, so use them over HTTPS (or on `localhost`).

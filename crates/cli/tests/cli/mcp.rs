@@ -15,7 +15,8 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 14] = [
+const TOOLS: [&str; 15] = [
+    "dibs_ack",
     "dibs_check",
     "dibs_claim",
     "dibs_done",
@@ -480,6 +481,69 @@ fn messages_are_sent_read_and_answered_under_the_sessions_label() {
         json!({"project": true, "subject": "Freeze", "body": "Merge freeze on Friday."}),
     );
     assert_eq!(everyone.ok()["thread"]["to_project"], true);
+    assert_eq!(everyone.ok()["message"]["importance"], "normal");
+    assert_eq!(everyone.ok()["message"]["ack_required"], false);
+}
+
+#[test]
+fn an_urgent_message_is_acked_through_the_tools_once() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    let sent = alice.tool(
+        "dibs_send",
+        json!({
+            "to": ["bob"], "subject": "Staging is down", "body": "Do not deploy.",
+            "importance": "urgent", "ack_required": true
+        }),
+    );
+    assert_eq!(sent.ok()["message"]["importance"], "urgent");
+    assert_eq!(sent.ok()["message"]["ack_required"], true);
+    let thread = sent.ok()["thread"]["id"].as_u64().unwrap();
+    let message = sent.ok()["message"]["id"].as_u64().unwrap();
+
+    let reply = bob.tool("dibs_send", json!({"thread": thread, "body": "Holding."}));
+    assert_eq!(
+        reply.ok()["message"]["importance"],
+        "normal",
+        "a reply is normal"
+    );
+    assert_eq!(reply.ok()["message"]["ack_required"], false);
+
+    let inbox = bob.tool("dibs_inbox", json!({"unacked": true}));
+    assert_eq!(inbox.ok()["unacked"][0]["message"]["id"], message);
+    assert_eq!(inbox.ok()["threads"][0]["awaiting_ack"], 1);
+    let shown = bob.tool("dibs_thread", json!({"thread": thread}));
+    assert_eq!(
+        shown.ok()["messages"][0]["acks"],
+        json!([{"member": "bob", "acked_at": null}])
+    );
+
+    let acked = bob.tool("dibs_ack", json!({"message": message}));
+    assert_eq!(acked.ok()["ack"]["member"], "bob");
+    assert_eq!(acked.ok()["ack"]["thread"], thread);
+    assert_eq!(acked.ok()["created"], true);
+    let again = bob.tool("dibs_ack", json!({"message": message}));
+    assert_eq!(again.ok()["created"], false, "a retry is no tool error");
+    assert_eq!(again.ok()["ack"]["at"], acked.ok()["ack"]["at"]);
+    let by_author = alice.tool("dibs_ack", json!({"message": message}));
+    assert!(
+        by_author
+            .error()
+            .starts_with("Only a member this message was sent to"),
+        "{}",
+        by_author.error()
+    );
+    let zero = bob.tool("dibs_ack", json!({"message": 0}));
+    assert!(zero.error().starts_with("`message`: "), "{}", zero.error());
+    let loud = alice.tool(
+        "dibs_send",
+        json!({"thread": thread, "body": "x", "importance": "loud"}),
+    );
+    assert!(loud.is_error);
+    let left = bob.tool("dibs_inbox", json!({"unacked": true}));
+    assert_eq!(left.ok()["unacked"], json!([]));
 }
 
 #[test]

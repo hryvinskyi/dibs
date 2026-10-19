@@ -1,6 +1,7 @@
 // @ts-check
 /**
- * The server's JSON API as the cases use it: start a conversation and post a message as a member.
+ * The server's JSON API as the cases use it: start a conversation and post a message as a member,
+ * each optionally raised in importance or asking to be acknowledged.
  * Answers are parsed into the few values a case needs; a body of another shape is an error.
  */
 
@@ -51,10 +52,15 @@ async function post(baseUrl, token, path, payload) {
 }
 
 /**
+ * What a message asks of the people it reaches; an ordinary message when left out.
+ * @typedef {{ importance?: 'normal' | 'high' | 'urgent', ack_required?: boolean }} Asking
+ */
+
+/**
  * Starts a conversation with the members `to`.
  * @param {string} baseUrl
  * @param {string} token the author's token
- * @param {{ subject: string, to: string[], body: string }} thread
+ * @param {{ subject: string, to: string[], body: string } & Asking} thread
  * @returns {Promise<number>} the conversation's id
  */
 export async function startThread(baseUrl, token, thread) {
@@ -68,10 +74,12 @@ export async function startThread(baseUrl, token, thread) {
  * @param {string} token the author's token
  * @param {number} threadId
  * @param {string} text
+ * @param {Asking} [asking]
  * @returns {Promise<number>} the message's id
  */
-export async function postMessage(baseUrl, token, threadId, text) {
+export async function postMessage(baseUrl, token, threadId, text, asking = {}) {
   const body = await post(baseUrl, token, `/v1/threads/${threadId}/messages`, {
+    ...asking,
     label: 'e2e/api',
     body: text,
   });

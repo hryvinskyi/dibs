@@ -3,7 +3,7 @@
 {% block title %}Threads{% endblock %}
 {% block main %}
 <main id="main" class="page">
-<div class="page-head"><h1>Threads</h1><p class="page-head__meta">Newest first{% if chrome.unread > 0 %} · {{ chrome.unread }} unread{% endif %}</p></div>
+<div class="page-head"><h1>Threads</h1><p class="page-head__meta">Newest first{% if chrome.unread > 0 %} · {{ chrome.unread }} unread{% endif %}{% if awaiting == 1 %} · 1 needs your ack{% else if awaiting > 1 %} · {{ awaiting }} need your ack{% endif %}</p></div>
 {% if rows.is_empty() %}<div class="empty"><p class="empty__title">No threads yet</p><p>When someone or an agent writes to you or to the project, the conversation shows up here.</p></div>{% else %}
 <ul class="threads">
 {% for row in rows %}<li class="thread-row{% if row.unread > 0 %} thread-row--unread{% endif %}">
@@ -13,7 +13,7 @@
   </div>
   <div class="thread-row__side">
     {% if let Some(last) = row.last %}{% call ui::time(last) %}{% endcall %}{% endif %}
-    {% if row.unread > 0 %}<div class="badges"><span class="badge badge--unread">{{ row.unread }} unread</span></div>{% endif %}
+    <div class="badges">{% call ui::importance(row.importance) %}{% endcall %}{% if row.awaiting_ack > 0 %}<span class="badge badge--info"><span class="badge__icon badge__icon--diamond" aria-hidden="true"></span>Needs your ack</span>{% endif %}{% if row.unread > 0 %}<span class="badge badge--unread">{{ row.unread }} unread</span>{% endif %}</div>
   </div>
 </li>
 {% endfor %}</ul>{% endif %}

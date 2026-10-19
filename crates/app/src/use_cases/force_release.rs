@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use dibs_domain::ref_scheme::RefSchemeRegistry;
+
 use dibs_domain::claim::decide_force_release;
 use dibs_domain::event::{self, EventKind};
 use dibs_domain::ids::ItemId;
@@ -10,7 +12,7 @@ use dibs_domain::item::ItemStatus;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{NamedClaim, Names};
+use crate::named::{EndedClaim, ItemName, Names};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
@@ -18,6 +20,7 @@ use crate::work::Work;
 
 /// Ends any member's claim on an item at an admin's word; the item is open again.
 pub struct ForceRelease {
+    ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn EventNotifier>,
@@ -27,6 +30,7 @@ impl ForceRelease {
     /// Builds the use case.
     pub fn new(deps: &Dependencies) -> Self {
         Self {
+            ref_schemes: deps.ref_schemes.clone(),
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             notifier: deps.notifier.clone(),
@@ -40,7 +44,7 @@ impl ForceRelease {
     /// [`AppError::Forbidden`] when the caller is no admin; [`AppError::ForceRelease`] when nobody
     /// holds the item; [`AppError::NotFound`] for an unknown item; [`AppError::Store`] when the
     /// store fails.
-    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<NamedClaim, AppError> {
+    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<EndedClaim, AppError> {
         actor.require_admin()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
@@ -56,7 +60,10 @@ impl ForceRelease {
             }),
         };
         end_claim(&mut work, &forced.claim, ending, now).await?;
-        let ended = Names::load(&mut work).await?.claim(forced.claim)?;
+        let ended = EndedClaim {
+            claim: Names::load(&mut work).await?.claim(forced.claim)?,
+            item: ItemName::of(&item, &self.ref_schemes),
+        };
         work.commit(&*self.notifier).await?;
         Ok(ended)
     }

@@ -2,6 +2,9 @@
 //! `POST /v1/threads/{id}/read` and `GET /v1/inbox`: conversations between the people of a
 //! project. A thread the caller may not read is answered as missing, the same as one that does not
 //! exist. Integrations take no part: every route refuses them before reading the request.
+//!
+//! A message is written with an `importance` (`normal` when left out) and may ask each recipient to
+//! acknowledge it (`ack_required`, false when left out).
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
@@ -10,16 +13,16 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use dibs_app::use_cases::{Addressees, PostMessageInput, StartThreadInput};
+use dibs_app::use_cases::{Addressees, InboxQuery, PostMessageInput, StartThreadInput};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, ThreadId};
-use dibs_domain::message::{Body, SessionLabel, Subject};
+use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
 
 use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::fields::{item_in_body, parse, parse_required, record_id_text, switch, thread_in_path};
 use crate::http::AppState;
-use crate::views::{MessageView, ThreadSummaryView, ThreadView, reply};
+use crate::views::{MessageView, ThreadSummaryView, ThreadView, UnackedView, reply};
 
 /// The body of `POST /v1/threads`.
 #[derive(Deserialize)]
@@ -30,6 +33,8 @@ pub struct StartBody {
     item: Option<u64>,
     label: Option<String>,
     body: Option<String>,
+    importance: Option<String>,
+    ack_required: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -40,7 +45,8 @@ struct StartedAnswer {
 
 /// Starts a thread with its first message, addressed either to the members `to` names by handle
 /// or, with `to_project: true`, to every person in the project; `item` is the work item it is
-/// about, `label` the session label it is signed with. Answers `201` with both.
+/// about, `label` the session label it is signed with, `importance` and `ack_required` what the
+/// first message asks of its recipients. Answers `201` with both.
 ///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for an unknown recipient or item;
@@ -62,6 +68,8 @@ pub async fn start(
             .transpose()?,
         label: parse_required("label", body.label.as_deref(), SessionLabel::parse)?,
         body: parse_required("body", body.body.as_deref(), Body::parse)?,
+        importance: importance(body.importance.as_deref())?,
+        ack_required: body.ack_required.unwrap_or(false),
     };
     let started = state.app.start_thread.execute(&actor, input).await?;
     let answer = StartedAnswer {
@@ -69,6 +77,13 @@ pub async fn start(
         message: MessageView::of(started.message),
     };
     Ok(reply(StatusCode::CREATED, &answer))
+}
+
+/// The importance a body names; `normal` when it names none.
+fn importance(text: Option<&str>) -> Result<Importance, ApiError> {
+    text.map_or(Ok(Importance::Normal), |text| {
+        parse("importance", text, Importance::parse)
+    })
 }
 
 /// Whom a new thread goes to: the handles of `to`, or the project when `to_project` is true.
@@ -93,6 +108,8 @@ fn addressees(to: Option<Vec<String>>, to_project: Option<bool>) -> Result<Addre
 pub struct PostBody {
     label: Option<String>,
     body: Option<String>,
+    importance: Option<String>,
+    ack_required: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -100,8 +117,8 @@ struct PostedAnswer {
     message: MessageView,
 }
 
-/// Posts a message to a thread the caller may read, signed with the session label `label`.
-/// Answers `201` with the message.
+/// Posts a message to a thread the caller may read, signed with the session label `label`, asking
+/// what `importance` and `ack_required` say of its recipients. Answers `201` with the message.
 ///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for a thread the caller may not read;
@@ -119,6 +136,8 @@ pub async fn post(
         thread,
         label: parse_required("label", body.label.as_deref(), SessionLabel::parse)?,
         body: parse_required("body", body.body.as_deref(), Body::parse)?,
+        importance: importance(body.importance.as_deref())?,
+        ack_required: body.ack_required.unwrap_or(false),
     };
     let message = state.app.post_message.execute(&actor, input).await?;
     Ok(reply(
@@ -164,31 +183,54 @@ pub async fn list(
 
 /// The query of `GET /v1/inbox`.
 #[derive(Deserialize)]
-pub struct InboxQuery {
+pub struct InboxParams {
     unread: Option<String>,
+    unacked: Option<String>,
+}
+
+#[derive(Serialize)]
+struct InboxAnswer {
+    threads: Vec<ThreadSummaryView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unacked: Option<Vec<UnackedView>>,
 }
 
 /// Lists the threads waiting for the caller, newest activity first, each with how many of its
-/// messages they have not read; with `unread=true`, only the threads that have such messages.
+/// messages they have not read and how many await their acknowledgement; with `unread=true`, only
+/// the threads that have unread messages. With `unacked=1` the answer also lists, under
+/// `unacked`, every message awaiting the caller's acknowledgement, newest first, with its thread.
 ///
 /// # Errors
-/// `forbidden` for an integration; `invalid_request` for an `unread` that is not a switch;
-/// `invalid_query` for a malformed query string.
+/// `forbidden` for an integration; `invalid_request` for an `unread` or `unacked` that is not a
+/// switch; `invalid_query` for a malformed query string.
 pub async fn inbox(
     State(state): State<AppState>,
     Authed(actor): Authed,
-    query: Result<Query<InboxQuery>, QueryRejection>,
+    query: Result<Query<InboxParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     actor.require_person()?;
     let Query(query) = query?;
-    let unread_only = query
-        .unread
-        .as_deref()
-        .map(|text| parse("unread", text, switch))
-        .transpose()?
-        .unwrap_or(false);
-    let threads = state.app.inbox.execute(&actor, unread_only).await?;
-    Ok(reply(StatusCode::OK, &threads_answer(threads)))
+    let flag = |field: &str, text: Option<&str>| {
+        text.map(|text| parse(field, text, switch))
+            .transpose()
+            .map(|value| value.unwrap_or(false))
+    };
+    let asked = InboxQuery {
+        unread_only: flag("unread", query.unread.as_deref())?,
+        unacked: flag("unacked", query.unacked.as_deref())?,
+    };
+    let inbox = state.app.inbox.execute(&actor, asked).await?;
+    let answer = InboxAnswer {
+        threads: inbox
+            .threads
+            .into_iter()
+            .map(ThreadSummaryView::of)
+            .collect(),
+        unacked: inbox
+            .unacked
+            .map(|messages| messages.into_iter().map(UnackedView::of).collect()),
+    };
+    Ok(reply(StatusCode::OK, &answer))
 }
 
 fn threads_answer(threads: Vec<dibs_app::named::NamedSummary>) -> ThreadsAnswer {
@@ -203,8 +245,9 @@ struct ThreadAnswer {
     messages: Vec<MessageView>,
 }
 
-/// Shows a thread the caller may read with its messages, oldest first. Reading does not mark it
-/// read.
+/// Shows a thread the caller may read with its messages, oldest first; a message that asks to be
+/// acknowledged carries `acks`, each recipient with when they acknowledged it. Reading does not
+/// mark it read.
 ///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for a thread the caller may not read.
@@ -215,10 +258,17 @@ pub async fn read(
 ) -> Result<Response, ApiError> {
     actor.require_person()?;
     let thread = path_thread(path)?;
-    let view = state.app.read_thread.execute(&actor, thread).await?;
+    let mut view = state.app.read_thread.execute(&actor, thread).await?;
     let answer = ThreadAnswer {
         thread: ThreadView::of(view.thread),
-        messages: view.messages.into_iter().map(MessageView::of).collect(),
+        messages: view
+            .messages
+            .into_iter()
+            .map(|message| {
+                let acks = view.acks.remove(&message.record.id);
+                MessageView::in_thread(message, acks)
+            })
+            .collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }
@@ -252,6 +302,15 @@ fn path_thread(path: Result<Path<String>, PathRejection>) -> Result<ThreadId, Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_is_normal_unless_its_importance_is_named() {
+        assert_eq!(importance(None).unwrap(), Importance::Normal);
+        assert_eq!(importance(Some("urgent")).unwrap(), Importance::Urgent);
+        let refused = importance(Some("loud")).unwrap_err();
+        assert_eq!(refused.code(), "invalid_request");
+        assert_eq!(refused.details()["field"], "importance");
+    }
 
     #[test]
     fn a_thread_goes_to_members_or_to_the_project() {

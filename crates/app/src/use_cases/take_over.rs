@@ -2,17 +2,19 @@
 
 use std::sync::Arc;
 
+use dibs_domain::ref_scheme::RefSchemeRegistry;
+
 use dibs_domain::claim::{ClaimRequest, Takeover, decide_takeover};
 use dibs_domain::event::{EventKind, MessagePosted, TakenOver, ThreadStarted};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::Title;
-use dibs_domain::message::{Body, Recipients, Subject};
+use dibs_domain::message::{Body, Importance, Recipients, Subject};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{Names, refuse};
+use crate::named::{ItemName, Names, refuse};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::{MessageRecord, ThreadRecord};
 use crate::use_cases::common::{existing_item, own_session, remove_claim, resolve_areas};
@@ -46,12 +48,16 @@ pub struct TakenOverClaim {
     pub holder: dibs_domain::handle::Handle,
     /// The handle of the previous claim's member.
     pub previous_holder: dibs_domain::handle::Handle,
+    /// The item.
+    pub item: ItemName,
 }
 
 /// Takes over another member's stale claim on an item. In the same transaction the previous claim
 /// ends, with the paths recorded under it and the grants resting on it, and the previous holder is
-/// sent the reason in a thread about the item. A live claim is never taken over.
+/// sent the reason in a thread about the item, as a `high` message that asks for no
+/// acknowledgement, so it reaches them while they work. A live claim is never taken over.
 pub struct TakeOver {
+    ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
@@ -63,6 +69,7 @@ impl TakeOver {
     /// Builds the use case.
     pub fn new(deps: &Dependencies) -> Self {
         Self {
+            ref_schemes: deps.ref_schemes.clone(),
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             ids: deps.ids.clone(),
@@ -137,6 +144,8 @@ impl TakeOver {
             author: actor.member,
             label: session.label,
             body: input.reason,
+            importance: Importance::High,
+            ack_required: false,
             created_at: now,
         };
         work.insert_thread(project, &thread).await?;
@@ -165,6 +174,7 @@ impl TakeOver {
         let previous_holder = names.handle(takeover.previous.member)?;
         work.commit(&*self.notifier).await?;
         Ok(TakenOverClaim {
+            item: ItemName::of(&item, &self.ref_schemes),
             takeover,
             thread: thread.id,
             holder,
@@ -279,13 +289,25 @@ mod tests {
         let messages = tx.messages(env.project, taken.thread).await.unwrap();
         assert_eq!(messages[0].body, reason());
         assert_eq!(messages[0].label.as_str(), "laptop/4f2a91c0");
+        assert_eq!(
+            (messages[0].importance, messages[0].ack_required),
+            (Importance::High, false),
+            "the previous holder hears it soon and is asked for nothing"
+        );
         let stored = tx.claim(env.project, item).await.unwrap().unwrap();
         assert_eq!(stored, taken.takeover.claim);
         drop(tx);
         let inbox = Inbox::new(&env.deps)
-            .execute(&env.bob.actor, true)
+            .execute(
+                &env.bob.actor,
+                crate::use_cases::InboxQuery {
+                    unread_only: true,
+                    unacked: false,
+                },
+            )
             .await
-            .unwrap();
+            .unwrap()
+            .threads;
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].unread, 1);
     }

@@ -1,6 +1,7 @@
 //! The browser pages through the real router: signing in and out, the form tokens, the security
 //! headers, escaping, the event stream over the session cookie, sessions that end, cookies the
-//! server did not set, the static bundle, the board's columns and the take-over form.
+//! server did not set, the static bundle, the board's columns, the take-over form, and a thread's
+//! importance and acknowledgements.
 
 use std::time::Duration as StdDuration;
 
@@ -432,6 +433,147 @@ async fn a_thread_shows_a_script_as_text_and_a_reply_is_signed_from_the_web() {
     let missing = browser.get(&world, "/ui/threads/999999").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
     assert!(missing.text.contains("There is no such page"));
+}
+
+#[tokio::test]
+async fn a_thread_shows_importance_and_acks_and_a_recipient_acks_through_the_form() {
+    let (world, alice, bob) = team().await;
+    let started = world
+        .post(
+            &alice,
+            "/v1/threads",
+            json!({"subject": "Staging is down", "to": ["bob"], "label": "laptop/mcp",
+                   "body": "Do not deploy.", "importance": "urgent", "ack_required": true}),
+        )
+        .await;
+    let thread = started.body["thread"]["id"].as_u64().unwrap();
+    let message = started.body["message"]["id"].as_u64().unwrap();
+    let status = || {
+        let path = format!("/v1/messages/{message}/status");
+        let (world, alice) = (&world, &alice);
+        async move { world.get(alice, &path).await.body["recipients"][0]["acked_at"].clone() }
+    };
+    let browser = sign_in(&world, &bob).await;
+    let list = browser.get(&world, "/ui/threads").await;
+    assert!(list.text.contains("· 1 needs your ack"), "{}", list.text);
+    assert!(list.text.contains("badge__icon--stop"), "{}", list.text);
+    assert!(list.text.contains("Needs your ack"), "{}", list.text);
+
+    let page = browser.get(&world, &format!("/ui/threads/{thread}")).await;
+    assert!(page.text.contains("Urgent</span>"), "{}", page.text);
+    assert!(page.text.contains("Acknowledgement requested"));
+    assert!(
+        page.text
+            .contains(r#"<span class="ack__name">bob (you)</span> waiting"#),
+        "{}",
+        page.text
+    );
+    let action = format!(r#"action="/ui/threads/{thread}/messages/{message}/ack""#);
+    assert!(page.text.contains(&action), "{}", page.text);
+    let path = format!("/ui/threads/{thread}/messages/{message}/ack");
+    for pairs in [vec![], vec![("csrf", "0".repeat(64))]] {
+        let pairs: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let refused = browser.post(&world, &path, &pairs).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert!(refused.text.contains("This form expired"));
+    }
+    assert_eq!(status().await, Value::Null, "nothing was recorded");
+
+    world.fakes.clock.advance(Duration::minutes(2));
+    let acked = browser
+        .post(&world, &path, &[("csrf", &browser.token)])
+        .await;
+    assert_eq!(acked.status, StatusCode::SEE_OTHER, "{}", acked.text);
+    assert_eq!(
+        acked.location(),
+        format!("/ui/threads/{thread}#m-{message}")
+    );
+    assert_eq!(status().await, "2026-03-02T09:02:00Z");
+    let after = browser.get(&world, &format!("/ui/threads/{thread}")).await;
+    assert!(
+        after
+            .text
+            .contains(r#"<span class="ack__name">bob (you)</span> acked"#),
+        "{}",
+        after.text
+    );
+    assert!(!after.text.contains(&action), "no button once acknowledged");
+    let twice = browser
+        .post(&world, &path, &[("csrf", &browser.token)])
+        .await;
+    assert_eq!(
+        twice.status,
+        StatusCode::SEE_OTHER,
+        "a second click shows the thread"
+    );
+    assert_eq!(
+        twice.location(),
+        format!("/ui/threads/{thread}#m-{message}")
+    );
+    assert_eq!(
+        status().await,
+        "2026-03-02T09:02:00Z",
+        "the first acknowledgement stands"
+    );
+    let listed = browser.get(&world, "/ui/threads").await;
+    assert!(!listed.text.contains("Needs your ack"));
+
+    let author = sign_in(&world, &alice).await;
+    let authors = author.get(&world, &format!("/ui/threads/{thread}")).await;
+    assert!(
+        authors
+            .text
+            .contains(r#"<span class="ack__name">bob</span> acked"#),
+        "{}",
+        authors.text
+    );
+    assert!(
+        !authors.text.contains(&action),
+        "its author has nothing to ack"
+    );
+    assert_eq!(
+        author
+            .post(&world, &path, &[("csrf", &author.token)])
+            .await
+            .status,
+        StatusCode::FORBIDDEN,
+        "the author is not a recipient"
+    );
+    let asked = author
+        .post(
+            &world,
+            &format!("/ui/threads/{thread}/messages"),
+            &[
+                ("csrf", &author.token),
+                ("body", "Deploy is back."),
+                ("require_ack", "1"),
+            ],
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::SEE_OTHER, "{}", asked.text);
+    let api = world.get(&alice, &format!("/v1/threads/{thread}")).await;
+    let last = api.body["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["ack_required"], true);
+    assert_eq!(last["importance"], "normal");
+    let blank = author
+        .post(
+            &world,
+            &format!("/ui/threads/{thread}/messages"),
+            &[("csrf", &author.token), ("body", " "), ("require_ack", "1")],
+        )
+        .await;
+    assert_eq!(blank.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        blank
+            .text
+            .contains(r#"name="require_ack" value="1" checked"#),
+        "the draft keeps its choice"
+    );
 }
 
 #[tokio::test]

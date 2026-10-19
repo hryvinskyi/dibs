@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 
-use dibs_client::api::{PostMessage, Recipients, StartThread};
+use dibs_client::api::{InboxRequest, PostMessage, Recipients, StartThread};
 use dibs_domain::event::EventKind;
+use dibs_domain::message::Importance;
 
 use crate::support::{World, run};
 
@@ -16,8 +17,15 @@ fn start(to: Recipients, body: &str) -> StartThread {
         item: None,
         label: "laptop/cli".parse().unwrap(),
         body: body.parse().unwrap(),
+        importance: Importance::Normal,
+        ack_required: false,
     }
 }
+
+const UNREAD: InboxRequest = InboxRequest {
+    unread: true,
+    unacked: false,
+};
 
 #[test]
 fn a_thread_is_started_answered_read_and_marked() {
@@ -34,7 +42,7 @@ fn a_thread_is_started_answered_read_and_marked() {
             .unwrap();
         assert_eq!(started.thread.to.len(), 1);
         assert!(!started.thread.to_project);
-        let inbox = bob.inbox(true).await.unwrap();
+        let inbox = bob.inbox(UNREAD).await.unwrap();
         assert_eq!(inbox.threads.len(), 1);
         assert_eq!(inbox.threads[0].unread, 1);
         let posted = bob
@@ -43,6 +51,8 @@ fn a_thread_is_started_answered_read_and_marked() {
                 &PostMessage {
                     label: "desktop/cli".parse().unwrap(),
                     body: "On it.".parse().unwrap(),
+                    importance: Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -58,7 +68,7 @@ fn a_thread_is_started_answered_read_and_marked() {
             bob.mark_read(started.thread.id).await.unwrap().newly_read,
             1
         );
-        assert!(bob.inbox(true).await.unwrap().threads.is_empty());
+        assert!(bob.inbox(UNREAD).await.unwrap().threads.is_empty());
         assert_eq!(bob.threads(None).await.unwrap().threads.len(), 1);
 
         let project = alice
@@ -72,6 +82,66 @@ fn a_thread_is_started_answered_read_and_marked() {
             .await
             .unwrap_err();
         assert_eq!(empty.code(), "no_recipients");
+    });
+}
+
+#[test]
+fn a_message_that_asks_is_acked_once_and_its_author_sees_it() {
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    run(async {
+        let started = alice
+            .start_thread(&StartThread {
+                importance: Importance::Urgent,
+                ack_required: true,
+                ..start(
+                    Recipients::Members(vec!["bob".parse().unwrap()]),
+                    "Do not deploy.",
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(started.message.importance, Importance::Urgent);
+        assert!(started.message.ack_required);
+        let asked = InboxRequest {
+            unread: false,
+            unacked: true,
+        };
+        let inbox = bob.inbox(asked).await.unwrap();
+        assert_eq!(inbox.unacked.len(), 1);
+        assert_eq!(inbox.unacked[0].message.id, started.message.id);
+        assert_eq!(inbox.threads[0].awaiting_ack, 1);
+        assert_eq!(inbox.threads[0].importance, Importance::Urgent);
+        assert!(
+            bob.inbox(UNREAD).await.unwrap().unacked.is_empty(),
+            "not listed unless asked for"
+        );
+        let detail = bob.thread(started.thread.id).await.unwrap();
+        let acks = detail.messages[0].acks.as_ref().unwrap();
+        assert_eq!((acks[0].member.as_str(), acks[0].acked_at), ("bob", None));
+        let acked = bob.ack(started.message.id).await.unwrap();
+        assert_eq!(acked.ack.member.as_str(), "bob");
+        assert_eq!(acked.ack.thread, started.thread.id);
+        assert!(acked.created);
+        let again = bob.ack(started.message.id).await.unwrap();
+        assert!(!again.created);
+        assert_eq!(again.ack, acked.ack);
+        assert_eq!(
+            alice.ack(started.message.id).await.unwrap_err().code(),
+            "not_a_recipient"
+        );
+        let status = alice.message_status(started.message.id).await.unwrap();
+        assert_eq!(status.recipients.len(), 1);
+        assert_eq!(status.recipients[0].acked_at, Some(acked.ack.at));
+        assert_eq!(
+            bob.message_status(started.message.id)
+                .await
+                .unwrap_err()
+                .code(),
+            "not_author"
+        );
+        assert!(bob.inbox(asked).await.unwrap().unacked.is_empty());
     });
 }
 

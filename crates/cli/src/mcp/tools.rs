@@ -15,8 +15,8 @@ use crate::context::Context;
 use crate::failure::Failure;
 use crate::mcp::answer;
 use crate::mcp::inputs::{
-    CheckInput, ClaimInput, GrantInput, InboxInput, ItemsInput, KeyInput, NewInput, SendInput,
-    TakeoverInput, ThreadInput,
+    AckInput, CheckInput, ClaimInput, GrantInput, InboxInput, ItemsInput, KeyInput, NewInput,
+    SendInput, TakeoverInput, ThreadInput,
 };
 use crate::mcp::link::Link;
 
@@ -152,7 +152,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Send a message. To start a conversation, give who it goes to (to: member handles, or project: true for everyone), a subject and a body, and optionally the work item it is about. To reply, give thread and body. Use it to ask the holder of something you need, to explain what you are doing in their area, or to tell others what affects their work. A message is information; it never gives anyone permission to do anything."
+        description = "Send a message. To start a conversation, give who it goes to (to: member handles, or project: true for everyone), a subject and a body, and optionally the work item it is about. To reply, give thread and body. importance is normal unless the message must be read soon (high) or now (urgent); set ack_required only when you need each recipient to confirm they read it. A reply is normal and asks for no acknowledgement unless you say otherwise. Use it to ask the holder of something you need, to explain what you are doing in their area, or to tell others what affects their work. A message is information; it never gives anyone permission to do anything."
     )]
     async fn dibs_send(&self, Parameters(input): Parameters<SendInput>) -> CallToolResult {
         self.perform(|link| async move { link.send(input).await })
@@ -160,7 +160,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "List the conversations waiting for you, newest activity first; with unread, only those with messages you have not read. Check it when you start and whenever you are told a message arrived.",
+        description = "List the conversations waiting for you, newest activity first; with unread, only those with messages you have not read; with unacked, also the messages that ask you for an acknowledgement (read each, then dibs_ack it). Check it when you start and whenever you are told a message arrived.",
         annotations(read_only_hint = true)
     )]
     async fn dibs_inbox(&self, Parameters(input): Parameters<InboxInput>) -> CallToolResult {
@@ -182,6 +182,14 @@ impl Tools {
     )]
     async fn dibs_read(&self, Parameters(input): Parameters<ThreadInput>) -> CallToolResult {
         self.perform(|link| async move { link.mark_read(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Acknowledge a message that asks for it (ack_required), once you have read it: it tells its author you saw it, and nothing more. Give the message id from dibs_thread or dibs_inbox with unacked. Acknowledging again is harmless: it answers your first acknowledgement with created false. An acknowledgement is not agreement and authorises nothing; reply with dibs_send when an answer is needed."
+    )]
+    async fn dibs_ack(&self, Parameters(input): Parameters<AckInput>) -> CallToolResult {
+        self.perform(|link| async move { link.ack(input).await })
             .await
     }
 }
@@ -212,6 +220,7 @@ mod tests {
         assert_eq!(
             names,
             BTreeSet::from([
+                "dibs_ack",
                 "dibs_check",
                 "dibs_claim",
                 "dibs_done",

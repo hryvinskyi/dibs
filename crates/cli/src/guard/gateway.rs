@@ -103,7 +103,7 @@ impl CoordinationGateway for HookGateway {
         let client = self.client()?;
         let inbox = self
             .runtime()?
-            .block_on(client.inbox(true))
+            .block_on(client.inbox(views::GUARD_INBOX))
             .map_err(|error| views::port_error(&error))?;
         if let Err(error) = self.remote.state.remember_inbox(&inbox, Self::now()) {
             tracing::debug!(error = %error, "the inbox could not be cached");

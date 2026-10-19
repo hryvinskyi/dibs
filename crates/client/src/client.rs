@@ -18,16 +18,17 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{EventId, GrantId, ItemId, SessionId, ThreadId};
+use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey};
 use dibs_domain::settings::SettingsDocument;
 
 use crate::api::{
-    AddDependency, ClaimRequest, Claimed, CreatedItem, DependencyChange, EditCheck,
-    EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest, Granted, Heartbeat, Item,
-    ItemDetail, ItemFilter, Items, MarkedRead, Me, Member, NewItem, NewMember, PostMessage, Posted,
-    ReadyList, RegisterSession, Revoked, Session, SettingsApplied, StartThread, StartThreadBody,
-    Started, Status, TakeOverRequest, TakenOver, ThreadDetail, Threads, TokenRevoked,
+    Acked, AddDependency, ClaimRequest, Claimed, CreatedItem, DependencyChange, EditCheck,
+    EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest, Granted, Heartbeat, Inbox,
+    InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me, Member, MessageStatus,
+    NewItem, NewMember, PostMessage, Posted, ReadyList, RegisterSession, Revoked, Session,
+    SettingsApplied, StartThread, StartThreadBody, Started, Status, TakeOverRequest, TakenOver,
+    ThreadDetail, Threads, TokenRevoked,
 };
 use crate::error::{ClientError, Response, decode};
 use crate::server_url::ServerUrl;
@@ -86,11 +87,6 @@ struct MembersAnswer {
 #[derive(Serialize)]
 struct HeartbeatBody {
     session_id: SessionId,
-}
-
-#[derive(Serialize)]
-struct InboxQuery {
-    unread: bool,
 }
 
 #[derive(Serialize)]
@@ -413,16 +409,35 @@ impl Client {
         .await
     }
 
-    /// `GET /v1/inbox`: the threads waiting for the caller; with `unread_only`, those with unread
-    /// messages.
+    /// `GET /v1/inbox`: the threads waiting for the caller — only those with unread messages when
+    /// asked — and, when asked, the messages awaiting their acknowledgement.
     ///
     /// # Errors
     /// [`ClientError`].
-    pub async fn inbox(&self, unread_only: bool) -> Result<Threads, ClientError> {
-        self.send(self.request(Method::GET, "/v1/inbox").query(&InboxQuery {
-            unread: unread_only,
-        }))
+    pub async fn inbox(&self, asked: InboxRequest) -> Result<Inbox, ClientError> {
+        self.send(self.request(Method::GET, "/v1/inbox").query(&asked))
+            .await
+    }
+
+    /// `POST /v1/messages/{id}/ack`: acknowledges a message the caller was sent.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn ack(&self, message: MessageId) -> Result<Acked, ClientError> {
+        self.send(
+            self.request(Method::POST, &format!("/v1/messages/{message}/ack"))
+                .json(&Empty {}),
+        )
         .await
+    }
+
+    /// `GET /v1/messages/{id}/status`: who read and acknowledged a message the caller wrote.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn message_status(&self, message: MessageId) -> Result<MessageStatus, ClientError> {
+        self.send(self.request(Method::GET, &format!("/v1/messages/{message}/status")))
+            .await
     }
 
     /// `GET /v1/threads/{id}`: a thread with its messages. Reading does not mark it read.

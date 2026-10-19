@@ -5,7 +5,10 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 
-use dibs_client::api::{Claim, Item, PathVerdict, ThreadSummary, Verdict};
+use dibs_client::api::{
+    Claim, Item, ItemName, Message, PathVerdict, ThreadSummary, Unacked, Verdict,
+};
+use dibs_domain::ids::ItemId;
 
 use crate::failure::Failure;
 
@@ -85,6 +88,12 @@ pub fn item_line(item: &Item) -> String {
     line
 }
 
+/// How a line names an item an answer mentions: by its reference when it has one, else `#<id>`.
+/// An answer from a server that does not name the item falls back to the id.
+pub fn item_label(named: Option<&ItemName>, id: ItemId) -> String {
+    named.map_or_else(|| format!("#{id}"), ItemName::label)
+}
+
 /// What a claim holds: `alice on laptop, areas api:billing`.
 pub fn claim_text(claim: &Claim) -> String {
     let mut text = format!("{} on {}", claim.holder, claim.host);
@@ -111,7 +120,7 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
             if !touched_by.is_empty() {
                 let others: Vec<String> = touched_by
                     .iter()
-                    .map(|other| format!("{} on item {}", other.holder, other.item))
+                    .map(|other| format!("{} on item {}", other.holder, other.item_label()))
                     .collect();
                 let _ = write!(text, " (also edited by {})", others.join(", "));
             }
@@ -143,13 +152,48 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
     format!("{}: {what}", verdict.path)
 }
 
-/// One line for a conversation: `#4 Billing rates (from alice, 2 unread)`.
+/// One line for a conversation: `#4 Billing rates (from alice, urgent, 2 unread, 1 to ack)`.
 pub fn thread_line(summary: &ThreadSummary) -> String {
     let thread = &summary.thread;
     let mut line = format!("#{} {} (from {}", thread.id, thread.subject, thread.author);
+    if summary.importance.is_raised() {
+        let _ = write!(line, ", {}", summary.importance);
+    }
     if summary.unread > 0 {
         let _ = write!(line, ", {} unread", summary.unread);
     }
+    if summary.awaiting_ack > 0 {
+        let _ = write!(line, ", {} to ack", summary.awaiting_ack);
+    }
     line.push(')');
     line
+}
+
+/// One line for a message awaiting the caller's acknowledgement:
+/// `- message 12 from alice in #4 Staging is down [urgent]; dibs ack 12`.
+pub fn unacked_line(unacked: &Unacked) -> String {
+    let message = &unacked.message;
+    let mut line = format!(
+        "- message {} from {} in #{} {}",
+        message.id, message.author, unacked.thread.id, unacked.thread.subject
+    );
+    if message.importance.is_raised() {
+        let _ = write!(line, " [{}]", message.importance);
+    }
+    let _ = write!(line, "; dibs ack {}", message.id);
+    line
+}
+
+/// What a sent message asks of its recipients, as a sentence to follow the line that sent it;
+/// empty for an ordinary message.
+pub fn asking_text(message: &Message) -> String {
+    match (message.importance.is_raised(), message.ack_required) {
+        (false, false) => String::new(),
+        (true, false) => format!(" It is marked {}.", message.importance),
+        (false, true) => " Each recipient is asked to acknowledge it.".to_owned(),
+        (true, true) => format!(
+            " It is marked {}, and each recipient is asked to acknowledge it.",
+            message.importance
+        ),
+    }
 }

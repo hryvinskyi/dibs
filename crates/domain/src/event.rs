@@ -67,6 +67,8 @@ pub enum EventKind {
     DependencyAdded(DependencyAdded),
     /// A work item stopped being blocked by another.
     DependencyRemoved(DependencyRemoved),
+    /// A recipient acknowledged a message.
+    Acked(Acked),
 }
 
 impl EventKind {
@@ -89,6 +91,7 @@ impl EventKind {
             Self::ItemUpdated(_) => "item_updated",
             Self::DependencyAdded(_) => "dependency_added",
             Self::DependencyRemoved(_) => "dependency_removed",
+            Self::Acked(_) => "acked",
         }
     }
 
@@ -111,6 +114,7 @@ impl EventKind {
             Self::ItemUpdated(e) => &[e.by],
             Self::DependencyAdded(e) => &[e.by],
             Self::DependencyRemoved(e) => &[e.by],
+            Self::Acked(e) => &[e.by],
         };
         named.iter().copied().collect()
     }
@@ -133,7 +137,8 @@ impl EventKind {
             | Self::SettingsChanged(_)
             | Self::ItemUpdated(_)
             | Self::DependencyAdded(_)
-            | Self::DependencyRemoved(_) => None,
+            | Self::DependencyRemoved(_)
+            | Self::Acked(_) => None,
         }
     }
 
@@ -142,6 +147,7 @@ impl EventKind {
         match self {
             Self::ThreadStarted(e) => Some(e.thread),
             Self::MessagePosted(e) => Some(e.thread),
+            Self::Acked(e) => Some(e.thread),
             Self::ItemCreated(_)
             | Self::Claimed(_)
             | Self::Renewed(_)
@@ -366,6 +372,18 @@ pub struct DependencyRemoved {
     pub by: MemberId,
 }
 
+/// A recipient acknowledged a message. Carries the ids and the member only, like the message
+/// events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acked {
+    /// The thread of the message.
+    pub thread: ThreadId,
+    /// The message.
+    pub message: MessageId,
+    /// The recipient who acknowledged it.
+    pub by: MemberId,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +472,11 @@ mod tests {
                 blocked_by: ItemId(5),
                 by: ALICE,
             }),
+            EventKind::Acked(Acked {
+                thread: ThreadId(5),
+                message: MessageId(6),
+                by: BOB,
+            }),
         ]
     }
 
@@ -517,7 +540,7 @@ mod tests {
         for kind in every_kind() {
             if !matches!(
                 kind,
-                EventKind::ThreadStarted(_) | EventKind::MessagePosted(_)
+                EventKind::ThreadStarted(_) | EventKind::MessagePosted(_) | EventKind::Acked(_)
             ) {
                 continue;
             }
@@ -530,7 +553,7 @@ mod tests {
                 .collect();
             for field in &fields {
                 assert!(
-                    ["thread", "message", "author", "item"].contains(&field.as_str()),
+                    ["thread", "message", "author", "item", "by"].contains(&field.as_str()),
                     "{} carries {field}",
                     kind.name()
                 );
@@ -546,7 +569,7 @@ mod tests {
             .collect();
         let messages: Vec<Option<MessageId>> =
             every_kind().iter().map(EventKind::message).collect();
-        let mut expected = vec![None; 16];
+        let mut expected = vec![None; 17];
         expected[11] = Some(MessageId(6));
         assert_eq!(messages, expected);
         let alice = BTreeSet::from([ALICE]);
@@ -571,6 +594,7 @@ mod tests {
                 (BTreeSet::from([BOB]), None),
                 (BTreeSet::from([BOB]), None),
                 (alice, None),
+                (BTreeSet::from([BOB]), Some(ThreadId(5))),
             ]
         );
     }

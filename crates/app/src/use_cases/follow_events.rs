@@ -127,6 +127,8 @@ mod tests {
             item: None,
             label: SessionLabel::parse("laptop/mcp").unwrap(),
             body: Body::parse(body).unwrap(),
+            importance: dibs_domain::message::Importance::Normal,
+            ack_required: false,
         }
     }
 
@@ -155,6 +157,8 @@ mod tests {
                     thread: open.thread.record.id,
                     label: SessionLabel::parse("web").unwrap(),
                     body: Body::parse("Seen.").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await

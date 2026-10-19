@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use dibs_domain::ref_scheme::RefSchemeRegistry;
+
 use dibs_domain::claim::decide_complete;
 use dibs_domain::event::{self, EventKind};
 use dibs_domain::ids::ItemId;
@@ -10,7 +12,7 @@ use dibs_domain::item::ItemStatus;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{NamedClaim, Names, refuse};
+use crate::named::{EndedClaim, ItemName, Names, refuse};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
@@ -18,6 +20,7 @@ use crate::work::Work;
 
 /// Completes the caller's claim on an item; the item is done.
 pub struct Complete {
+    ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn EventNotifier>,
@@ -27,6 +30,7 @@ impl Complete {
     /// Builds the use case.
     pub fn new(deps: &Dependencies) -> Self {
         Self {
+            ref_schemes: deps.ref_schemes.clone(),
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             notifier: deps.notifier.clone(),
@@ -38,7 +42,7 @@ impl Complete {
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for an unknown item; [`AppError::HolderOnly`] when nobody or another
     /// member holds it; [`AppError::Store`] when the store fails.
-    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<NamedClaim, AppError> {
+    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<EndedClaim, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
@@ -56,7 +60,10 @@ impl Complete {
             }),
         };
         end_claim(&mut work, &completed.claim, ending, now).await?;
-        let ended = Names::load(&mut work).await?.claim(completed.claim)?;
+        let ended = EndedClaim {
+            claim: Names::load(&mut work).await?.claim(completed.claim)?,
+            item: ItemName::of(&item, &self.ref_schemes),
+        };
         work.commit(&*self.notifier).await?;
         Ok(ended)
     }

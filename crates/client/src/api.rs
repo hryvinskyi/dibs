@@ -14,7 +14,7 @@ use dibs_domain::hot_rule::{HotRuleRegistry, Note};
 use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemStatus, Priority, SourceId, SourceStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
-use dibs_domain::message::{Body, SessionLabel, Subject};
+use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
 use dibs_domain::paths::RelPath;
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::repo::{RemoteUrl, RepoId};
@@ -361,6 +361,9 @@ pub struct Claimed {
     /// What the claimed item waits for that is neither done nor closed.
     #[serde(default)]
     pub blocked_by: Vec<ItemName>,
+    /// The item claimed.
+    #[serde(default)]
+    pub item: Option<ItemName>,
 }
 
 /// `POST /v1/items/{id}/takeover`.
@@ -385,6 +388,9 @@ pub struct TakenOver {
     pub dropped_areas: BTreeSet<QualifiedArea>,
     /// The thread that told the previous holder the reason.
     pub thread_id: ThreadId,
+    /// The item taken over.
+    #[serde(default)]
+    pub item: Option<ItemName>,
 }
 
 /// The answer of a release, a completion or a forced release: the claim that ended.
@@ -392,6 +398,9 @@ pub struct TakenOver {
 pub struct Ended {
     /// The claim.
     pub claim: Claim,
+    /// The item it was on.
+    #[serde(default)]
+    pub item: Option<ItemName>,
 }
 
 /// An item with its claim.
@@ -472,6 +481,18 @@ pub struct Toucher {
     pub holder: Handle,
     /// The claim's item.
     pub item: ItemId,
+    /// That item's reference, when it has one.
+    #[serde(default)]
+    pub item_ref: Option<ExternalRef>,
+}
+
+impl Toucher {
+    /// How the item is named to a person: its reference, or `#<id>` for a local item.
+    pub fn item_label(&self) -> String {
+        self.item_ref
+            .as_ref()
+            .map_or_else(|| format!("#{}", self.item), ToString::to_string)
+    }
 }
 
 /// The way on from a held path.
@@ -571,6 +592,9 @@ pub struct Granted {
     pub grant: Grant,
     /// `false` when the same grant existed.
     pub created: bool,
+    /// The grantee's item.
+    #[serde(default)]
+    pub item: Option<ItemName>,
 }
 
 /// `DELETE /v1/grants/{id}`'s answer.
@@ -613,9 +637,29 @@ pub struct Message {
     pub label: SessionLabel,
     /// Its text.
     pub body: Body,
+    /// How much it asks for its recipients' attention.
+    #[serde(default)]
+    pub importance: Importance,
+    /// Whether each recipient is asked to acknowledge it.
+    #[serde(default)]
+    pub ack_required: bool,
     /// When.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// In a thread read, for a message that asks to be acknowledged: each recipient and when they
+    /// acknowledged it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acks: Option<Vec<RecipientAck>>,
+}
+
+/// One recipient of a message that asks to be acknowledged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipientAck {
+    /// The recipient.
+    pub member: Handle,
+    /// When they acknowledged it; `None` while they have not.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub acked_at: Option<OffsetDateTime>,
 }
 
 /// Whom a new thread goes to.
@@ -640,6 +684,10 @@ pub struct StartThread {
     pub label: SessionLabel,
     /// The first message.
     pub body: Body,
+    /// How much the first message asks for its recipients' attention.
+    pub importance: Importance,
+    /// Whether each recipient is asked to acknowledge the first message.
+    pub ack_required: bool,
 }
 
 /// The JSON body of [`StartThread`].
@@ -654,6 +702,9 @@ pub(crate) struct StartThreadBody<'a> {
     item: Option<ItemId>,
     label: &'a SessionLabel,
     body: &'a Body,
+    importance: Importance,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    ack_required: bool,
 }
 
 impl<'a> StartThreadBody<'a> {
@@ -669,6 +720,8 @@ impl<'a> StartThreadBody<'a> {
             item: start.item,
             label: &start.label,
             body: &start.body,
+            importance: start.importance,
+            ack_required: start.ack_required,
         }
     }
 }
@@ -689,6 +742,11 @@ pub struct PostMessage {
     pub label: SessionLabel,
     /// The text.
     pub body: Body,
+    /// How much it asks for its recipients' attention.
+    pub importance: Importance,
+    /// Whether each recipient is asked to acknowledge it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ack_required: bool,
 }
 
 /// `POST /v1/threads/{id}/messages`'s answer.
@@ -710,13 +768,94 @@ pub struct ThreadSummary {
     /// When its newest message was written.
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_message_at: Option<OffsetDateTime>,
+    /// The highest importance among its messages.
+    #[serde(default)]
+    pub importance: Importance,
+    /// How many of its messages ask the caller for an acknowledgement they have not given.
+    #[serde(default)]
+    pub awaiting_ack: u64,
 }
 
-/// `GET /v1/threads` and `GET /v1/inbox`.
+/// `GET /v1/threads`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Threads {
     /// Newest activity first.
     pub threads: Vec<ThreadSummary>,
+}
+
+/// What `GET /v1/inbox` is asked for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct InboxRequest {
+    /// Only the threads with unread messages.
+    pub unread: bool,
+    /// The messages awaiting the caller's acknowledgement too.
+    pub unacked: bool,
+}
+
+/// A message awaiting the caller's acknowledgement, with its thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unacked {
+    /// The thread.
+    pub thread: Thread,
+    /// The message.
+    pub message: Message,
+}
+
+/// `GET /v1/inbox`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inbox {
+    /// Newest activity first.
+    pub threads: Vec<ThreadSummary>,
+    /// The messages awaiting the caller's acknowledgement, newest first; empty unless asked for.
+    #[serde(default)]
+    pub unacked: Vec<Unacked>,
+}
+
+/// An acknowledgement recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AckRecord {
+    /// The message.
+    pub message: MessageId,
+    /// Its thread.
+    pub thread: ThreadId,
+    /// The recipient who acknowledged it.
+    pub member: Handle,
+    /// When.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+}
+
+/// `POST /v1/messages/{id}/ack`'s answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acked {
+    /// The acknowledgement that stands: the new one, or the caller's first.
+    pub ack: AckRecord,
+    /// `false` when the caller had acknowledged the message before.
+    pub created: bool,
+}
+
+/// One recipient of a message the caller sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecipientStatus {
+    /// The recipient.
+    pub member: Handle,
+    /// When they read it.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub read_at: Option<OffsetDateTime>,
+    /// When they acknowledged it.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub acked_at: Option<OffsetDateTime>,
+}
+
+/// `GET /v1/messages/{id}/status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageStatus {
+    /// The thread.
+    pub thread: Thread,
+    /// The message.
+    pub message: Message,
+    /// Its recipients, ordered by handle.
+    pub recipients: Vec<RecipientStatus>,
 }
 
 /// `GET /v1/threads/{id}`.
@@ -887,19 +1026,25 @@ mod tests {
             item: None,
             label: SessionLabel::parse("laptop/cli").unwrap(),
             body: Body::parse("hi").unwrap(),
+            importance: Importance::Normal,
+            ack_required: false,
         };
         assert_eq!(
             serde_json::to_value(StartThreadBody::of(&start)).unwrap(),
-            json!({"subject": "hello", "to": ["bob"], "label": "laptop/cli", "body": "hi"})
+            json!({"subject": "hello", "to": ["bob"], "label": "laptop/cli", "body": "hi",
+                   "importance": "normal"})
         );
         let project = StartThread {
             to: Recipients::Project,
             item: Some(ItemId(3)),
+            importance: Importance::Urgent,
+            ack_required: true,
             ..start
         };
         assert_eq!(
             serde_json::to_value(StartThreadBody::of(&project)).unwrap(),
-            json!({"subject": "hello", "to_project": true, "item": 3, "label": "laptop/cli", "body": "hi"})
+            json!({"subject": "hello", "to_project": true, "item": 3, "label": "laptop/cli",
+                   "body": "hi", "importance": "urgent", "ack_required": true})
         );
     }
 }

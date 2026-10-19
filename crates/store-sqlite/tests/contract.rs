@@ -14,7 +14,8 @@ mod contract {
     use dibs_app::ports::{Store, StoreError};
     use dibs_app::records::{
         CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord,
-        MessageRecord, ProjectRecord, SessionRecord, ThreadRecord, TokenRecord, UiSessionRecord,
+        MessageRecord, ProjectRecord, ReadMark, SessionRecord, ThreadRecord, TokenRecord,
+        UiSessionRecord,
     };
     use dibs_app::token::{TokenHash, TokenPrefix};
     use dibs_domain::area::QualifiedArea;
@@ -33,7 +34,7 @@ mod contract {
         ExternalRef, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
     };
     use dibs_domain::member::{DisplayName, ExternalLogin, Role};
-    use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
+    use dibs_domain::message::{Ack, Body, Importance, Recipients, SessionLabel, Subject};
     use dibs_domain::paths::RepoPath;
     use dibs_domain::project::ProjectSlug;
     use dibs_domain::repo::{RemoteUrl, RepoId};
@@ -109,6 +110,10 @@ mod contract {
         threads_keep_their_recipients_and_messages_their_order,
         summaries_count_what_the_reader_has_not_read,
         summaries_put_the_newest_activity_first_and_filter_by_item,
+        messages_keep_their_importance_and_summaries_the_highest,
+        acks_are_one_per_member_and_message_and_scoped,
+        ack_requests_leave_out_my_own_and_the_acknowledged,
+        read_times_are_kept_per_member,
         events_only_increase_and_page_by_cursor,
         events_keep_every_field,
         completions_are_read_from_a_time_newest_first,
@@ -233,7 +238,26 @@ mod contract {
             author,
             label: SessionLabel::parse("laptop/mcp").unwrap(),
             body: Body::parse("Can I take billing for an hour?\nThanks.").unwrap(),
+            importance: Importance::Normal,
+            ack_required: false,
             created_at: at(created),
+        }
+    }
+
+    /// A message that asks each recipient to acknowledge it.
+    fn asking(id: u64, thread: ThreadId, author: MemberId, created: i64) -> MessageRecord {
+        MessageRecord {
+            importance: Importance::Urgent,
+            ack_required: true,
+            ..message(id, thread, author, created)
+        }
+    }
+
+    fn ack(message: u64, member: MemberId, minutes: i64) -> Ack {
+        Ack {
+            message: MessageId(message),
+            member,
+            at: at(minutes),
         }
     }
 
@@ -1308,6 +1332,171 @@ mod contract {
         assert!(tx.ui_session(&hash("ui:now")).await.unwrap().is_none());
         assert_eq!(tx.delete_expired_ui_sessions(at(251)).await.unwrap(), 1);
         assert_eq!(tx.delete_expired_ui_sessions(at(999)).await.unwrap(), 0);
+    }
+
+    async fn messages_keep_their_importance_and_summaries_the_highest(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, None, 60))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(82), ALICE, None, 61))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(83), ALICE, None, 62))
+            .await
+            .unwrap();
+        let high = MessageRecord {
+            importance: Importance::High,
+            ..message(92, ThreadId(81), BOB, 64)
+        };
+        for record in [
+            message(91, ThreadId(81), ALICE, 63),
+            high.clone(),
+            asking(93, ThreadId(82), ALICE, 65),
+            message(94, ThreadId(82), BOB, 66),
+        ] {
+            tx.insert_message(A, &record).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.message(A, MessageId(92)).await.unwrap(), Some(high));
+        assert_eq!(
+            tx.messages(A, ThreadId(82)).await.unwrap()[0],
+            asking(93, ThreadId(82), ALICE, 65)
+        );
+        let highest: Vec<(u64, Importance)> = tx
+            .thread_summaries(A, ALICE, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| (s.thread.id.get(), s.importance))
+            .collect();
+        assert_eq!(
+            highest,
+            [
+                (82, Importance::Urgent),
+                (81, Importance::High),
+                (83, Importance::Normal)
+            ],
+            "an empty thread is normal"
+        );
+    }
+
+    async fn acks_are_one_per_member_and_message_and_scoped(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, None, 60))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(82), ALICE, None, 60))
+            .await
+            .unwrap();
+        tx.insert_message(A, &asking(91, ThreadId(81), ALICE, 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &asking(92, ThreadId(81), BOB, 62))
+            .await
+            .unwrap();
+        tx.insert_message(A, &asking(93, ThreadId(82), ALICE, 63))
+            .await
+            .unwrap();
+        tx.insert_ack(A, &ack(91, BOB, 70)).await.unwrap();
+        tx.insert_ack(A, &ack(92, ALICE, 68)).await.unwrap();
+        tx.insert_ack(A, &ack(93, BOB, 69)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.acks(A, MessageId(91)).await.unwrap(), [ack(91, BOB, 70)]);
+        assert!(tx.acks(B, MessageId(91)).await.unwrap().is_empty());
+        assert_eq!(
+            tx.thread_acks(A, ThreadId(81)).await.unwrap(),
+            [ack(92, ALICE, 68), ack(91, BOB, 70)],
+            "oldest first, this thread's only"
+        );
+        assert!(tx.thread_acks(B, ThreadId(81)).await.unwrap().is_empty());
+        assert!(is_duplicate(tx.insert_ack(A, &ack(91, BOB, 75)).await));
+        assert_eq!(
+            tx.acks(A, MessageId(91)).await.unwrap(),
+            [ack(91, BOB, 70)],
+            "the first acknowledgement stands"
+        );
+        drop(tx);
+
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_ack(B, &ack(91, DAVE, 80)).await.unwrap();
+        assert!(
+            matches!(tx.commit().await, Err(StoreError::Backend(_))),
+            "an acknowledgement of a message of another project"
+        );
+    }
+
+    async fn ack_requests_leave_out_my_own_and_the_acknowledged(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, None, 60))
+            .await
+            .unwrap();
+        for record in [
+            asking(91, ThreadId(81), ALICE, 61),
+            message(92, ThreadId(81), ALICE, 62),
+            asking(93, ThreadId(81), ALICE, 63),
+            asking(94, ThreadId(81), BOB, 64),
+            asking(95, ThreadId(81), ALICE, 63),
+        ] {
+            tx.insert_message(A, &record).await.unwrap();
+        }
+        tx.insert_ack(A, &ack(93, BOB, 65)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let ids =
+            |records: Vec<MessageRecord>| records.iter().map(|m| m.id.get()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(tx.ack_requests(A, BOB).await.unwrap()),
+            [95, 91],
+            "newest first; not the plain one, not his own, not the one he acknowledged"
+        );
+        assert_eq!(ids(tx.ack_requests(A, ALICE).await.unwrap()), [94]);
+        assert!(tx.ack_requests(B, BOB).await.unwrap().is_empty());
+    }
+
+    async fn read_times_are_kept_per_member(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let t = ThreadId(81);
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(t, ALICE, None, 60))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(91, t, ALICE, 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(92, t, BOB, 62))
+            .await
+            .unwrap();
+        tx.mark_read(A, BOB, t, at(70)).await.unwrap();
+        tx.mark_read(A, BOB, t, at(75)).await.unwrap();
+        tx.mark_read(A, ALICE, t, at(72)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.reads_of(A, MessageId(91)).await.unwrap(),
+            [ReadMark {
+                member: BOB,
+                at: at(70)
+            }],
+            "the first read stands, and the author never reads their own"
+        );
+        assert_eq!(
+            tx.reads_of(A, MessageId(92)).await.unwrap(),
+            [ReadMark {
+                member: ALICE,
+                at: at(72)
+            }]
+        );
+        assert!(tx.reads_of(B, MessageId(91)).await.unwrap().is_empty());
     }
 
     async fn a_reference_to_a_missing_record_fails_the_commit_and_writes_nothing(

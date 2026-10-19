@@ -15,7 +15,7 @@ use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::fields::{grant_in_path, item_in_body, parse_required, required};
 use crate::http::AppState;
-use crate::views::{GrantView, reply};
+use crate::views::{GrantView, ItemNameView, reply};
 
 /// The body of `POST /v1/grants`.
 #[derive(Deserialize)]
@@ -29,6 +29,8 @@ pub struct GrantBody {
 struct GrantAnswer {
     grant: GrantView,
     created: bool,
+    /// The grantee's item.
+    item: ItemNameView,
 }
 
 /// Grants the member `to` edits inside `area`, which the caller holds, for `to`'s live claim on
@@ -59,6 +61,7 @@ pub async fn grant(
     let answer = GrantAnswer {
         grant: GrantView::of(result.grant),
         created: result.created,
+        item: ItemNameView::of(result.item),
     };
     Ok(reply(status, &answer))
 }

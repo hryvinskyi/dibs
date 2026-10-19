@@ -6,7 +6,7 @@ use std::fmt::Display;
 use dibs_app::AppError;
 use dibs_app::error::Missing;
 use dibs_app::use_cases::EventCursor;
-use dibs_domain::ids::{EventId, GrantId, ItemId, SessionId, ThreadId};
+use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId};
 
 use crate::error::ApiError;
 
@@ -84,6 +84,18 @@ pub fn thread_in_path(text: &str) -> Result<ThreadId, ApiError> {
         .and_then(record_id)
         .map(ThreadId)
         .ok_or_else(|| not_found_text(&format!("there is no thread '{text}'")))
+}
+
+/// The message a path names; text that is not an id names no message.
+///
+/// # Errors
+/// The not-found refusal for text that is not an id.
+pub fn message_in_path(text: &str) -> Result<MessageId, ApiError> {
+    text.parse::<u64>()
+        .ok()
+        .and_then(record_id)
+        .map(MessageId)
+        .ok_or_else(|| not_found_text(&format!("there is no message '{text}'")))
 }
 
 /// A record id written in a query string or a header.
@@ -223,6 +235,8 @@ mod tests {
         assert!(record_id_text("0").is_err());
         assert_eq!(thread_in_path("5").unwrap(), ThreadId(5));
         assert_eq!(thread_in_path("x").unwrap_err().code(), "not_found");
+        assert_eq!(message_in_path("9").unwrap(), MessageId(9));
+        assert_eq!(message_in_path("0").unwrap_err().code(), "not_found");
     }
 
     #[test]

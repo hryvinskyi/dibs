@@ -66,10 +66,10 @@ cause of an internal failure and answers `internal`.
 |---|---|
 | `400` | `invalid_json` (the body is not JSON of the shape the route expects), `invalid_query` |
 | `401` | `unauthorized` |
-| `403` | `forbidden`, `not_holder` (details: `holder`), `not_grantor` |
+| `403` | `forbidden`, `not_holder` (details: `holder`), `not_grantor`, `not_a_recipient` (an acknowledgement by somebody a message did not reach), `not_author` |
 | `404` | `not_found` (also: a record of another project, and a conversation the caller may not read) |
 | `405` | `method_not_allowed` |
-| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle` |
+| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required` |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
 | `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`) |
@@ -108,7 +108,9 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/threads/{id}` | people | A conversation with its messages. |
 | `POST /v1/threads/{id}/messages` | people | Post a message. |
 | `POST /v1/threads/{id}/read` | people | Mark a conversation read. |
-| `GET /v1/inbox` | people | Conversations waiting for you. |
+| `GET /v1/inbox` | people | Conversations waiting for you, and the messages awaiting your acknowledgement. |
+| `POST /v1/messages/{id}/ack` | people | Acknowledge a message you were sent. |
+| `GET /v1/messages/{id}/status` | people | Who read and acknowledged a message you wrote. |
 | `GET /v1/events` | any | A page of the project's event log. |
 | `GET /v1/events/stream` | people | The event log as server-sent events. |
 | `POST /v1/admin/members` | admin | Add a member. |
@@ -132,8 +134,9 @@ item ref { id, ref | null, title, link | null }
 claim    { item, holder, session_id, host, areas: ["repo:area", …], claimed_at, renewed_at, last_seen }
 grant    { id, item, area, from, to, created_at }
 thread   { id, subject, item | null, author, to_project, to: [handle, …], created_at }
-message  { id, thread, author, label, body, created_at }
-summary  { thread, messages, unread, last_message_at | null }
+message  { id, thread, author, label, body, importance: "normal" | "high" | "urgent", ack_required, created_at,
+           acks?: [{ member, acked_at | null }, …] }
+summary  { thread, messages, unread, last_message_at | null, importance, awaiting_ack }
 ```
 
 `repo` of an item is the project's repository that its reference names, when the project lists it; `unlisted_remote` is
@@ -143,6 +146,10 @@ said otherwise), `areas_hint` (the areas the work will probably touch; advisory,
 stays) and `source` (the importer's source that lists it) are what an importer reports. An *item ref* is how an answer
 mentions another item: `link` is the tracker's page for its reference (a `gh` reference links to its GitHub issue), or
 `null`.
+
+A message's `importance` says how much it asks for its recipients' attention, and `ack_required` whether it asks each of
+them to acknowledge it; `acks` is in a thread read only, for a message that asks. A summary's `importance` is the highest
+among its messages and `awaiting_ack` how many of them ask the caller for an acknowledgement not given yet.
 
 ### Me and members
 
@@ -280,7 +287,7 @@ it: `repo:area`, or a bare name that exactly one repository declares. Answers
 
 ```json
 { "outcome": "new", "claim": { "item": 12, "holder": "alice", "areas": ["default:billing"], "…": "…" }, "dropped_areas": [],
-  "blocked_by": [] }
+  "blocked_by": [], "item": { "id": 12, "ref": "gh:acme/widgets#7", "title": "…", "link": "…" } }
 ```
 
 `outcome` is `new` for a first claim and `renewed` when the caller already held the item (a stale claim of the caller's
@@ -289,15 +296,17 @@ because another member holds them now or the settings dropped them. Refusals: `h
 the item), `stale` (their claim is stale: only a takeover may take it), `area_held` (another member's live claim holds
 an area), `unknown_area`, `invalid_area`, `ambiguous_area`, `item_closed`. An area belongs to one member at a time. A
 claim on a blocked item is made all the same — dependent work is often started in parallel — and `blocked_by` lists, as
-item refs, the items it waits for that are neither done nor closed, for the client to warn about.
+item refs, the items it waits for that are neither done nor closed, for the client to warn about. `item` is the claimed
+item as an item ref, so a client names it by its reference.
 
 `POST /v1/items/{id}/takeover`, body `{ "session_id": 7, "reason": "…", "areas": [] }`, takes over another member's
-stale claim and tells them the reason in a conversation about the item. Answers
-`{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31 }`. Refusals: `not_stale` (the claim is
+stale claim and tells them the reason in a conversation about the item, as a `high` message that asks for no
+acknowledgement. Answers
+`{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31, "item": item ref }`. Refusals: `not_stale` (the claim is
 live), `own_claim`, `nothing_to_take`, `area_held`.
 
-`POST /v1/items/{id}/release` and `POST /v1/items/{id}/done` take no body and answer `{ "claim": claim }`, the claim that
-ended; the item is open again, or done. Refusals: `not_holder` (`403`), `no_claim` (`409`).
+`POST /v1/items/{id}/release` and `POST /v1/items/{id}/done` take no body and answer
+`{ "claim": claim, "item": item ref }`, the claim that ended and its item; the item is open again, or done. Refusals: `not_holder` (`403`), `no_claim` (`409`).
 
 `GET /v1/status` answers
 
@@ -331,7 +340,7 @@ check writes nothing. Answers a verdict per path, in the order asked:
 | `verdict` | Meaning | Extra fields |
 |---|---|---|
 | `allowed` | The caller may edit. | |
-| `allowed_with_note` | The caller may edit; a hot-file rule has something to say. | `rule`, `note`, `touched_by: [{ holder, item }]` |
+| `allowed_with_note` | The caller may edit; a hot-file rule has something to say. | `rule`, `note`, `touched_by: [{ holder, item, item_ref }]` |
 | `needs_claim` | The path is governed, the policy requires a claim, and the caller holds none that covers it. | |
 | `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason` (`ask_holder`: message them or ask for a grant) |
 | `granted` | The holder granted the caller edits in the area. | `by`, `area` |
@@ -342,8 +351,8 @@ field or a path that is not a relative path, `not_found` for a session that is n
 ### Grants
 
 `POST /v1/grants`, body `{ "item": 14, "area": "default:billing", "to": "bob" }`: the caller, who holds the area, lets
-`to` edit in it, for `to`'s live claim on `item`. Answers `201 { "grant": grant, "created": true }`, or `200` with
-`"created": false` when the same grant exists. Refusals: `not_holder` (`403`), `self_grant`, `grantee_has_no_claim`,
+`to` edit in it, for `to`'s live claim on `item`. Answers `201 { "grant": grant, "created": true, "item": item ref }`,
+or `200` with `"created": false` when the same grant exists. Refusals: `not_holder` (`403`), `self_grant`, `grantee_has_no_claim`,
 `unknown_area`, `not_found`. A grant ends when it is revoked, when its grantor no longer holds the area, or when the
 grantee's claim ends.
 
@@ -354,22 +363,53 @@ grantee's claim ends.
 `POST /v1/threads`, body
 
 ```json
-{ "subject": "Billing rounding", "to": ["alice"], "item": 12, "label": "laptop/cli", "body": "May I touch round.rs?" }
+{ "subject": "Billing rounding", "to": ["alice"], "item": 12, "label": "laptop/cli", "body": "May I touch round.rs?",
+  "importance": "high", "ack_required": true }
 ```
 
 `to` names members by handle; with `"to_project": true` instead the conversation goes to every person in the project;
 naming both, or neither, is `invalid_request`. `item` (optional) is the work item it is about, `label` the session
-label it is signed with. Answers `201 { "thread": thread, "message": message }`. Refusals: `not_found` for an unknown
-recipient or item, `not_a_recipient` for an integration, `no_recipients` for an empty `to`.
+label it is signed with. `importance` is `normal` (the default), `high` or `urgent`; `ack_required` (default `false`)
+asks each recipient to acknowledge the message. Answers `201 { "thread": thread, "message": message }`. Refusals:
+`not_found` for an unknown recipient or item, `not_a_recipient` for an integration, `no_recipients` for an empty `to`,
+`invalid_request` for an importance that is none of the three.
 
 `GET /v1/threads?item=12` answers `{ "threads": [summary, …] }`, the conversations the caller may read, newest activity
-first. `GET /v1/inbox?unread=true` answers the same shape for the conversations waiting for the caller; with
-`unread=true` (or `1`) only those with messages they have not read. A conversation the caller may not read is
-reported as missing, the same as one that does not exist.
+first. `GET /v1/inbox` answers the same shape for the conversations waiting for the caller; with `unread=true` (or `1`)
+only those with messages they have not read. With `unacked=1` (or `true`) the answer also carries
+`"unacked": [{ "thread": thread, "message": message }, …]`, newest first: every message that asks the caller for an
+acknowledgement they have not given. A conversation the caller may not read is reported as missing, the same as one that
+does not exist.
 
-`GET /v1/threads/{id}` answers `{ "thread": thread, "messages": [message, …] }`, oldest first; reading does not mark it
-read. `POST /v1/threads/{id}/messages`, body `{ "label": "laptop/cli", "body": "…" }`, answers `201 { "message": message }`.
-`POST /v1/threads/{id}/read` answers `{ "newly_read": 2 }`.
+`GET /v1/threads/{id}` answers `{ "thread": thread, "messages": [message, …] }`, oldest first; a message that asks to be
+acknowledged carries `acks`, each recipient ordered by handle with when they acknowledged it (`null` while they have
+not). Reading does not mark it read. `POST /v1/threads/{id}/messages`, body
+`{ "label": "laptop/cli", "body": "…", "importance": "normal", "ack_required": false }` (the last two optional, as when
+starting a thread), answers `201 { "message": message }`. `POST /v1/threads/{id}/read` answers `{ "newly_read": 2 }`.
+
+### Acknowledgements
+
+A message reaches everyone who may read its thread but its author: the thread's author and the members it names, or, for
+a thread addressed to the project, every person who was in the project when the message was written. An integration is
+never a recipient. A message never changes; an acknowledgement is a record of its own, one per recipient.
+
+`POST /v1/messages/{id}/ack` takes no body and records the caller's acknowledgement. Answers
+`201 { "ack": { "message", "thread", "member", "at" }, "created": true }` and appends `acked`. Acknowledging again is
+harmless, so a client may retry after a lost answer: it answers `200` with the first acknowledgement (its original
+`at`) and `"created": false`, and records and appends nothing. Refusals: `not_a_recipient` (`403`: the message did not
+reach the caller, or the caller wrote it), `ack_not_required` (`409`: the message asks for none), `not_found` for a
+message in a conversation the caller may not read.
+
+`GET /v1/messages/{id}/status` shows the author of a message where each recipient stands:
+
+```json
+{ "thread": thread, "message": message,
+  "recipients": [{ "member": "bob", "read_at": "2026-03-02T09:02:00Z", "acked_at": "2026-03-02T09:03:00Z" },
+                 { "member": "carol", "read_at": null, "acked_at": null }] }
+```
+
+Recipients are ordered by handle. Refusals: `not_author` (`403`) for a message somebody else wrote, `not_found` for one
+in a conversation the caller may not read.
 
 ### Events
 
@@ -405,8 +445,11 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `settings_changed` | `by` |
 | `item_updated` | `item`, `by` |
 | `dependency_added`, `dependency_removed` | `item`, `blocked_by`, `by` |
+| `acked` | `thread`, `message`, `by` |
 
 `item_updated` is appended when one of an item's reported facts actually changed; read the item for what it says now.
+`acked` is about a conversation, like `thread_started` and `message_posted`: a caller who may not read the conversation
+does not see it.
 
 ### The event stream
 
@@ -474,8 +517,8 @@ opened, then answers `201 { "member": member, "token": "dibs_…" }`.
 without the marker), and answers `{ "token": { "prefix", "member", "created_at", "revoked_at" } }`; revoking a revoked
 token changes nothing.
 
-`POST /v1/admin/items/{id}/force-release` ends any member's claim on the item and answers `{ "claim": claim }`
-(`no_claim`, `409`, when nobody holds it).
+`POST /v1/admin/items/{id}/force-release` ends any member's claim on the item and answers
+`{ "claim": claim, "item": item ref }` (`no_claim`, `409`, when nobody holds it).
 
 ## The web pages
 
@@ -483,6 +526,10 @@ The pages under `/ui` are for people in a browser: `/ui/login` (sign in with a t
 `/ui/threads` and `/ui/threads/{id}`, with `/ui/events/stream` feeding the open page. They are rendered on the server and
 are not part of the API. The board's *Ready* column is the viewer's ready list, each card with its priority, likely
 areas and a link to its tracker, and below it the open items that are not ready with their blockers or the held area;
-an item its tracker closed while a claim holds it is marked *Closed upstream*. Their forms post a token of the session they were rendered for, and the session cookie
+an item its tracker closed while a claim holds it is marked *Closed upstream*. The threads list marks each conversation's
+highest importance and whether it holds a message awaiting the viewer's acknowledgement; a thread page marks a raised
+importance on the messages that carry it and, under a message that asks to be acknowledged, lists its recipients with who
+has acknowledged, and offers a recipient who has not an *Acknowledge* button (`POST /ui/threads/{id}/messages/{message}/ack`).
+A reply from the page may ask everyone to acknowledge it. Their forms post a token of the session they were rendered for, and the session cookie
 (`dibs_ui`) is `HttpOnly`, `Secure`, `SameSite=Strict` and scoped to `/ui`. A session ends 12 hours after the page last used it. Every page answer
 carries a content security policy that allows only the server's own scripts, styles and connections.

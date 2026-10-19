@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::ThreadId;
+use dibs_domain::ids::{MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
-use dibs_domain::message::Subject;
+use dibs_domain::message::{Importance, Subject};
 
 /// Claim work, check edits and talk to the people and agents working on the same repositories.
 #[derive(Debug, Parser)]
@@ -83,6 +83,8 @@ pub enum Command {
     Thread(ThreadArgs),
     /// Mark a conversation read.
     Read(ThreadArgs),
+    /// Acknowledge a message that asks for it, once you have read it.
+    Ack(AckArgs),
     /// Send a heartbeat and refresh what this machine remembers about the project, as far as
     /// each is due.
     Sync(SyncArgs),
@@ -267,6 +269,12 @@ pub struct SendArgs {
     /// The work item it is about: its local id or its reference.
     #[arg(long, value_parser = ItemKey::parse)]
     pub item: Option<ItemKey>,
+    /// How much it asks for its recipients' attention: normal, high or urgent.
+    #[arg(long, value_parser = Importance::parse, default_value = "normal")]
+    pub importance: Importance,
+    /// Ask each recipient to acknowledge it.
+    #[arg(long)]
+    pub ack: bool,
     /// The message; `-` reads it from standard input.
     pub body: String,
 }
@@ -277,6 +285,25 @@ pub struct InboxArgs {
     /// Only the conversations with messages you have not read.
     #[arg(long)]
     pub unread: bool,
+    /// Also list the messages that ask you for an acknowledgement you have not given.
+    #[arg(long)]
+    pub unacked: bool,
+}
+
+/// `dibs ack`.
+#[derive(Debug, Args)]
+pub struct AckArgs {
+    /// The message's id, as `dibs thread` and `dibs inbox --unacked` show it.
+    #[arg(value_parser = parse_message)]
+    pub id: MessageId,
+}
+
+fn parse_message(text: &str) -> Result<MessageId, String> {
+    text.parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0)
+        .map(MessageId)
+        .ok_or_else(|| format!("'{text}' is not a message id; ids are whole numbers"))
 }
 
 /// A conversation named by its id.

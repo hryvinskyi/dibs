@@ -21,6 +21,13 @@ mod tenancy {
     use dibs_domain::session::AgentLabel;
     use dibs_domain::session::HostName;
 
+    fn unread_only(unread_only: bool) -> dibs_app::use_cases::InboxQuery {
+        dibs_app::use_cases::InboxQuery {
+            unread_only,
+            unacked: false,
+        }
+    }
+
     fn member(handle: &str) -> NewMember {
         NewMember {
             handle: Handle::parse(handle).unwrap(),
@@ -92,6 +99,8 @@ mod tenancy {
                     item: None,
                     label: SessionLabel::parse("web").unwrap(),
                     body: Body::parse("hello widgets").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -120,7 +129,14 @@ mod tenancy {
                 .unwrap()
                 .is_empty()
         );
-        assert!(app.inbox.execute(&dave, false).await.unwrap().is_empty());
+        assert!(
+            app.inbox
+                .execute(&dave, unread_only(false))
+                .await
+                .unwrap()
+                .threads
+                .is_empty()
+        );
         let daves_log = app
             .list_events
             .execute(&dave, EventCursor::Start, 500)

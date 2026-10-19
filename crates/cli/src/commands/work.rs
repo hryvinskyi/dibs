@@ -14,7 +14,7 @@ use dibs_domain::message::Body;
 use crate::cli::{ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NewArgs, TakeoverArgs};
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
-use crate::output::{claim_text, item_line};
+use crate::output::{claim_text, item_label, item_line};
 
 /// Shows the live and stale claims and the areas they hold.
 ///
@@ -139,7 +139,11 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
             ClaimOutcome::New => "Claimed",
             ClaimOutcome::Renewed => "Renewed your claim on",
         };
-        let mut text = format!("{verb} #{} ({}).", item, claim_text(&claimed.claim));
+        let mut text = format!(
+            "{verb} {} ({}).",
+            item_label(claimed.item.as_ref(), item),
+            claim_text(&claimed.claim)
+        );
         if !claimed.blocked_by.is_empty() {
             let blockers: Vec<String> = claimed.blocked_by.iter().map(|b| b.label()).collect();
             let _ = write!(
@@ -189,8 +193,10 @@ pub async fn take_over(args: TakeoverArgs, ctx: &Context) -> Result<(), Failure>
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&taken, || {
         format!(
-            "Took over #{item} from {}; they were told why in conversation #{}.",
-            taken.previous_holder, taken.thread_id
+            "Took over {} from {}; they were told why in conversation #{}.",
+            item_label(taken.item.as_ref(), item),
+            taken.previous_holder,
+            taken.thread_id
         )
     });
     Ok(())
@@ -232,8 +238,8 @@ pub async fn done(args: KeyArgs, ctx: &Context) -> Result<(), Failure> {
 pub fn show_ended(ctx: &Context, ended: &Ended, verb: &str) {
     ctx.printer.show(ended, || {
         format!(
-            "{verb} #{} ({}).",
-            ended.claim.item,
+            "{verb} {} ({}).",
+            item_label(ended.item.as_ref(), ended.claim.item),
             claim_text(&ended.claim)
         )
     });
@@ -257,8 +263,10 @@ pub async fn grant(args: GrantArgs, ctx: &Context) -> Result<(), Failure> {
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&granted, || {
         format!(
-            "{} may edit in {} for #{}.",
-            granted.grant.to, granted.grant.area, granted.grant.item
+            "{} may edit in {} for {}.",
+            granted.grant.to,
+            granted.grant.area,
+            item_label(granted.item.as_ref(), granted.grant.item)
         )
     });
     Ok(())

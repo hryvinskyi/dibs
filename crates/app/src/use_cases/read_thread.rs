@@ -1,16 +1,33 @@
 //! One conversation with its messages.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use dibs_domain::ids::ThreadId;
+use time::OffsetDateTime;
+
+use dibs_domain::handle::Handle;
+use dibs_domain::ids::{MemberId, MessageId, ThreadId};
+use dibs_domain::message::{Ack, AckState};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{NamedMessage, NamedThread, Names};
 use crate::ports::Store;
+use crate::use_cases::acks::{people, reached};
 use crate::use_cases::readable::readable_thread;
 use crate::work::Work;
+
+/// One recipient of a message that asks to be acknowledged, and when they acknowledged it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecipientAck {
+    /// The recipient.
+    pub member: MemberId,
+    /// Their handle.
+    pub handle: Handle,
+    /// When they acknowledged it; `None` while they have not.
+    pub acked_at: Option<OffsetDateTime>,
+}
 
 /// A thread and its messages, their members named.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +36,9 @@ pub struct ThreadView {
     pub thread: NamedThread,
     /// Its messages, oldest first.
     pub messages: Vec<NamedMessage>,
+    /// For each message that asks to be acknowledged, its recipients ordered by handle, with when
+    /// each acknowledged it.
+    pub acks: BTreeMap<MessageId, Vec<RecipientAck>>,
 }
 
 /// Shows a thread the caller may read. Reading does not mark it read; that is its own step.
@@ -45,12 +65,38 @@ impl ReadThread {
         let thread = readable_thread(&mut work, actor, thread).await?;
         let messages = work.messages(actor.project, thread.id).await?;
         let names = Names::load(&mut work).await?;
+        let mut acks = BTreeMap::new();
+        if messages.iter().any(|message| message.ack_required) {
+            let people = people(&mut work).await?;
+            let recorded = work.thread_acks(actor.project, thread.id).await?;
+            for message in messages.iter().filter(|message| message.ack_required) {
+                let of_message: Vec<Ack> = recorded
+                    .iter()
+                    .filter(|ack| ack.message == message.id)
+                    .copied()
+                    .collect();
+                let state = AckState::derive(&reached(&thread, message, &people), &of_message);
+                let mut entries = state
+                    .entries()
+                    .map(|(member, acked_at)| {
+                        Ok(RecipientAck {
+                            member,
+                            handle: names.handle(member)?,
+                            acked_at,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, AppError>>()?;
+                entries.sort_by(|a, b| a.handle.cmp(&b.handle));
+                acks.insert(message.id, entries);
+            }
+        }
         Ok(ThreadView {
             thread: names.thread(thread)?,
             messages: messages
                 .into_iter()
                 .map(|message| names.message(message))
                 .collect::<Result<_, _>>()?,
+            acks,
         })
     }
 }
@@ -79,6 +125,8 @@ mod tests {
                     item: None,
                     label: label.clone(),
                     body: Body::parse("first").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -91,6 +139,8 @@ mod tests {
                     thread: started.thread.record.id,
                     label,
                     body: Body::parse("second").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -122,5 +172,63 @@ mod tests {
                 .code(),
             "forbidden"
         );
+    }
+
+    #[tokio::test]
+    async fn a_message_that_asks_shows_each_recipient_and_their_ack() {
+        let env = Env::new().await;
+        let started = StartThread::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                StartThreadInput {
+                    subject: Subject::parse("Freeze").unwrap(),
+                    to: Addressees::Project,
+                    item: None,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("Freeze main.").unwrap(),
+                    importance: dibs_domain::message::Importance::High,
+                    ack_required: true,
+                },
+            )
+            .await
+            .unwrap();
+        let reply = PostMessage::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                PostMessageInput {
+                    thread: started.thread.record.id,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("ok").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
+                },
+            )
+            .await
+            .unwrap();
+        let read = ReadThread::new(&env.deps);
+        let id = started.message.record.id;
+        let before = read
+            .execute(&env.bob.actor, started.thread.record.id)
+            .await
+            .unwrap();
+        assert_eq!(before.acks.len(), 1, "only the message that asks");
+        assert!(!before.acks.contains_key(&reply.record.id));
+        let entries = &before.acks[&id];
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].handle.as_str(), entries[0].acked_at),
+            ("bob", None)
+        );
+        env.advance(time::Duration::minutes(4));
+        crate::use_cases::AckMessage::new(&env.deps)
+            .execute(&env.bob.actor, id)
+            .await
+            .unwrap();
+        let after = read
+            .execute(&env.alice.actor, started.thread.record.id)
+            .await
+            .unwrap();
+        assert_eq!(after.acks[&id][0].acked_at, Some(env.now()));
+        assert_eq!(after.acks[&id][0].member, env.bob.actor.member);
     }
 }

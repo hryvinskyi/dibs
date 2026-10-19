@@ -130,7 +130,7 @@ async fn run(
         synced.status = true;
     }
     if due.inbox {
-        let inbox = client.inbox(true).await?;
+        let inbox = client.inbox(crate::guard::views::GUARD_INBOX).await?;
         if let Err(error) = remote.state.remember_inbox(&inbox, now) {
             tracing::debug!(error = %error, "the inbox could not be cached");
         }

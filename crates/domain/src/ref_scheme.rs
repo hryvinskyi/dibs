@@ -61,9 +61,14 @@ impl RefSchemeRegistry {
         Self::default()
     }
 
-    /// The registry of the schemes this crate ships: `gh`.
+    /// The registry of the schemes this crate ships — the same table [`ExternalRef::parse`] writes
+    /// their references by.
     pub fn standard() -> Self {
-        Self::empty().with("gh", Box::new(GitHubIssues))
+        SHIPPED
+            .iter()
+            .fold(Self::empty(), |registry, (name, scheme)| {
+                registry.with(name, Box::new(Shipped(*scheme)))
+            })
     }
 
     /// The registry with `scheme` registered under `name`, replacing an earlier one of that name.
@@ -85,6 +90,24 @@ impl RefSchemeRegistry {
         self.schemes
             .get(reference.scheme())
             .and_then(|scheme| scheme.link(reference.value()))
+    }
+}
+
+/// A scheme of the shipped table, registered by reference.
+#[derive(Debug, Clone, Copy)]
+struct Shipped(&'static dyn RefScheme);
+
+impl RefScheme for Shipped {
+    fn canonical(&self, value: &str) -> Result<String, RefRefused> {
+        self.0.canonical(value)
+    }
+
+    fn link(&self, value: &str) -> Option<String> {
+        self.0.link(value)
+    }
+
+    fn repository(&self, value: &str) -> Option<RemoteUrl> {
+        self.0.repository(value)
     }
 }
 
@@ -184,6 +207,20 @@ mod tests {
             );
             assert_eq!(GitHubIssues.repository(value), None, "{value}");
             assert_eq!(GitHubIssues.link(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn the_standard_registry_knows_every_shipped_scheme_as_shipped() {
+        let registry = RefSchemeRegistry::standard();
+        let names: Vec<&str> = registry.schemes.keys().map(String::as_str).collect();
+        let shipped: Vec<&str> = SHIPPED.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, shipped);
+        for (name, scheme) in SHIPPED {
+            let value = "Acme/Web#3";
+            let typed = reference(&format!("{name}:{value}"));
+            assert_eq!(Ok(typed.value().to_owned()), scheme.canonical(value));
+            assert_eq!(registry.link(&typed), scheme.link(typed.value()));
         }
     }
 

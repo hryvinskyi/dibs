@@ -79,6 +79,52 @@ async fn a_claim_is_new_then_renewed() {
 }
 
 #[tokio::test]
+async fn every_answer_about_a_claim_names_its_item_by_its_reference() {
+    let team = Team::new().await;
+    let world = &team.world;
+    let item = world
+        .item(&team.alice, Some("gh:Acme/Api#12"), "Rounding")
+        .await;
+    let named = json!({
+        "id": item, "ref": "gh:acme/api#12", "title": "Rounding",
+        "link": "https://github.com/acme/api/issues/12",
+    });
+    let claimed = team
+        .claim(&team.alice, team.alice_session, item, json!([]))
+        .await;
+    assert_eq!(claimed.body["item"], named, "{}", claimed.body);
+    world.fakes.clock.advance(Duration::hours(2));
+    let taken = world
+        .post(
+            &team.bob,
+            &format!("/v1/items/{item}/takeover"),
+            json!({"session_id": team.bob_session, "reason": "You have been away."}),
+        )
+        .await;
+    assert_eq!(taken.body["item"], named, "{}", taken.body);
+    let released = world
+        .post(&team.bob, &format!("/v1/items/{item}/release"), json!({}))
+        .await;
+    assert_eq!(released.body["item"], named, "{}", released.body);
+    team.claim(&team.bob, team.bob_session, item, json!([]))
+        .await;
+    let forced = world
+        .post(
+            &team.alice,
+            &format!("/v1/admin/items/{item}/force-release"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(forced.body["item"], named, "{}", forced.body);
+    team.claim(&team.alice, team.alice_session, item, json!([]))
+        .await;
+    let done = world
+        .post(&team.alice, &format!("/v1/items/{item}/done"), json!({}))
+        .await;
+    assert_eq!(done.body["item"], named, "{}", done.body);
+}
+
+#[tokio::test]
 async fn a_claim_on_a_held_item_names_the_holder() {
     let team = Team::new().await;
     let item = team.world.item(&team.alice, None, "Billing fix").await;

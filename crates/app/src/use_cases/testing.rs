@@ -177,6 +177,11 @@ impl Env {
     pub(crate) fn advance(&self, by: Duration) {
         self.fakes.clock.advance(by);
     }
+
+    /// The clock's time.
+    pub(crate) fn now(&self) -> OffsetDateTime {
+        crate::ports::Clock::now(&*self.deps.clock)
+    }
 }
 
 /// Registers a session and answers its id.

@@ -6,6 +6,8 @@
 mod support;
 
 #[cfg(test)]
+mod acks;
+#[cfg(test)]
 mod admin;
 #[cfg(test)]
 mod auth;

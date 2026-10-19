@@ -29,6 +29,13 @@ fn an_item_is_created_claimed_listed_and_completed() {
     assert_eq!(answer["outcome"], "new");
     assert_eq!(answer["claim"]["areas"][0], "api:billing");
     assert_eq!(answer["claim"]["holder"], "alice");
+    assert_eq!(answer["item"]["ref"], "gh:acme/api#7");
+    let renewed = alice(&["claim", "gh:acme/api#7", "--area", "billing"]);
+    assert!(
+        text(&renewed.stdout).starts_with("Renewed your claim on gh:acme/api#7 (alice on "),
+        "{}",
+        text(&renewed.stdout)
+    );
 
     let mine = alice(&["items", "--mine"]);
     assert_eq!(status(&mine), 0);
@@ -46,7 +53,11 @@ fn an_item_is_created_claimed_listed_and_completed() {
 
     let done = alice(&["done", "gh:acme/api#7"]);
     assert_eq!(status(&done), 0);
-    assert!(text(&done.stdout).starts_with("Completed #"));
+    assert!(
+        text(&done.stdout).starts_with("Completed gh:acme/api#7 ("),
+        "the item is named by its reference: {}",
+        text(&done.stdout)
+    );
 }
 
 #[test]

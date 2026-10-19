@@ -20,7 +20,7 @@ use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::fields::{item_in_path, parse, parse_required};
 use crate::http::AppState;
-use crate::views::{ClaimView, MemberView, TokenView, reply};
+use crate::views::{ClaimView, ItemNameView, MemberView, TokenView, reply};
 
 /// The body of `POST /v1/admin/members`.
 #[derive(Deserialize)]
@@ -196,6 +196,8 @@ pub async fn apply_settings(
 struct ReleasedAnswer {
     /// The claim that ended.
     claim: ClaimView,
+    /// The item it was on.
+    item: ItemNameView,
 }
 
 /// Ends any member's claim on the item; the item is open again.
@@ -215,7 +217,8 @@ pub async fn force_release(
     Ok(reply(
         StatusCode::OK,
         &ReleasedAnswer {
-            claim: ClaimView::of(ended),
+            claim: ClaimView::of(ended.claim),
+            item: ItemNameView::of(ended.item),
         },
     ))
 }

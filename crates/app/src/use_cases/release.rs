@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use dibs_domain::ref_scheme::RefSchemeRegistry;
+
 use dibs_domain::claim::decide_release;
 use dibs_domain::event::{self, EventKind};
 use dibs_domain::ids::ItemId;
@@ -10,7 +12,7 @@ use dibs_domain::item::ItemStatus;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{NamedClaim, Names, refuse};
+use crate::named::{EndedClaim, ItemName, Names, refuse};
 use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
@@ -18,6 +20,7 @@ use crate::work::Work;
 
 /// Releases the caller's claim on an item, live or stale; the item is open again.
 pub struct Release {
+    ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn EventNotifier>,
@@ -27,6 +30,7 @@ impl Release {
     /// Builds the use case.
     pub fn new(deps: &Dependencies) -> Self {
         Self {
+            ref_schemes: deps.ref_schemes.clone(),
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             notifier: deps.notifier.clone(),
@@ -38,7 +42,7 @@ impl Release {
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for an unknown item; [`AppError::HolderOnly`] when nobody or another
     /// member holds it; [`AppError::Store`] when the store fails.
-    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<NamedClaim, AppError> {
+    pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<EndedClaim, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
@@ -56,7 +60,10 @@ impl Release {
             }),
         };
         end_claim(&mut work, &released.claim, ending, now).await?;
-        let ended = Names::load(&mut work).await?.claim(released.claim)?;
+        let ended = EndedClaim {
+            claim: Names::load(&mut work).await?.claim(released.claim)?,
+            item: ItemName::of(&item, &self.ref_schemes),
+        };
         work.commit(&*self.notifier).await?;
         Ok(ended)
     }
@@ -125,8 +132,14 @@ mod tests {
             .execute(&env.bob.actor, item)
             .await
             .unwrap();
-        assert_eq!(released.claim.member, env.bob.actor.member);
-        assert_eq!(released.holder.as_str(), "bob");
+        assert_eq!(released.claim.claim.member, env.bob.actor.member);
+        assert_eq!(released.claim.holder.as_str(), "bob");
+        assert_eq!(released.item.id, item);
+        assert_eq!(
+            released.item.external_ref.as_ref().map(ToString::to_string),
+            Some("gh:acme/widgets#1".to_owned()),
+            "the item is named by its reference"
+        );
         assert_eq!(
             env.kinds_after(before).await,
             [EventKind::Released(event::Released {

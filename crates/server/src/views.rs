@@ -15,7 +15,8 @@ use dibs_app::named::{
 };
 use dibs_app::records::{MemberRecord, SessionRecord};
 use dibs_app::use_cases::{
-    ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady, ReadyEntry, ReadyView as ReadyList,
+    Acknowledged, ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady, ReadyEntry,
+    ReadyView as ReadyList, RecipientAck, RecipientStatus, UnackedMessage,
 };
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::edit::{HeldReason, Verdict};
@@ -27,7 +28,7 @@ use dibs_domain::item::{
     ExternalRef, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
 };
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
-use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
+use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::session::{AgentLabel, HostName};
 
@@ -393,6 +394,8 @@ pub struct HolderView {
     pub holder: Handle,
     /// The item.
     pub item: ItemId,
+    /// The item's reference, when it has one.
+    pub item_ref: Option<ExternalRef>,
 }
 
 /// The verdict on one path.
@@ -462,9 +465,16 @@ impl PathVerdictView {
                 touched_by: touched_by
                     .into_iter()
                     .zip(named.touched_by)
-                    .map(|(holder, handle)| HolderView {
+                    .zip(
+                        named
+                            .touched_refs
+                            .into_iter()
+                            .chain(std::iter::repeat(None)),
+                    )
+                    .map(|((holder, handle), item_ref)| HolderView {
                         holder: handle,
                         item: holder.item,
+                        item_ref,
                     })
                     .collect(),
             },
@@ -540,9 +550,17 @@ pub struct MessageView {
     pub label: SessionLabel,
     /// Its text.
     pub body: Body,
+    /// How much it asks for its recipients' attention.
+    pub importance: Importance,
+    /// Whether each recipient is asked to acknowledge it.
+    pub ack_required: bool,
     /// When it was written.
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
     pub created_at: OffsetDateTime,
+    /// In a thread read, for a message that asks to be acknowledged: each recipient and when they
+    /// acknowledged it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acks: Option<Vec<RecipientAckView>>,
 }
 
 impl MessageView {
@@ -555,7 +573,108 @@ impl MessageView {
             author: named.author,
             label: message.label,
             body: message.body,
+            importance: message.importance,
+            ack_required: message.ack_required,
             created_at: message.created_at,
+            acks: None,
+        }
+    }
+
+    /// The view of a message of a thread read, with its recipients' acknowledgements when it asks
+    /// for them.
+    pub fn in_thread(named: NamedMessage, acks: Option<Vec<RecipientAck>>) -> Self {
+        Self {
+            acks: acks.map(|acks| acks.into_iter().map(RecipientAckView::of).collect()),
+            ..Self::of(named)
+        }
+    }
+}
+
+/// One recipient of a message that asks to be acknowledged.
+#[derive(Debug, Serialize)]
+pub struct RecipientAckView {
+    /// The recipient.
+    pub member: Handle,
+    /// When they acknowledged it; `null` while they have not.
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    pub acked_at: Option<OffsetDateTime>,
+}
+
+impl RecipientAckView {
+    /// The view of one recipient's acknowledgement.
+    pub fn of(ack: RecipientAck) -> Self {
+        Self {
+            member: ack.handle,
+            acked_at: ack.acked_at,
+        }
+    }
+}
+
+/// An acknowledgement recorded.
+#[derive(Debug, Serialize)]
+pub struct AckView {
+    /// The message.
+    pub message: MessageId,
+    /// Its thread.
+    pub thread: ThreadId,
+    /// The recipient who acknowledged it.
+    pub member: Handle,
+    /// When.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub at: OffsetDateTime,
+}
+
+impl AckView {
+    /// The view of an acknowledgement.
+    pub fn of(acknowledged: Acknowledged) -> Self {
+        Self {
+            message: acknowledged.ack.message,
+            thread: acknowledged.thread,
+            member: acknowledged.member,
+            at: acknowledged.ack.at,
+        }
+    }
+}
+
+/// One recipient of a message its author sent: when they read it and acknowledged it.
+#[derive(Debug, Serialize)]
+pub struct RecipientStatusView {
+    /// The recipient.
+    pub member: Handle,
+    /// When they read it.
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    pub read_at: Option<OffsetDateTime>,
+    /// When they acknowledged it.
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    pub acked_at: Option<OffsetDateTime>,
+}
+
+impl RecipientStatusView {
+    /// The view of one recipient's standing.
+    pub fn of(status: RecipientStatus) -> Self {
+        Self {
+            member: status.member,
+            read_at: status.read_at,
+            acked_at: status.acked_at,
+        }
+    }
+}
+
+/// A message awaiting the caller's acknowledgement, with its thread.
+#[derive(Debug, Serialize)]
+pub struct UnackedView {
+    /// The thread.
+    pub thread: ThreadView,
+    /// The message.
+    pub message: MessageView,
+}
+
+impl UnackedView {
+    /// The view of an unacknowledged message.
+    pub fn of(unacked: UnackedMessage) -> Self {
+        Self {
+            thread: ThreadView::of(unacked.thread),
+            message: MessageView::of(unacked.message),
         }
     }
 }
@@ -572,6 +691,10 @@ pub struct ThreadSummaryView {
     /// When its newest message was written.
     #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
     pub last_message_at: Option<OffsetDateTime>,
+    /// The highest importance among its messages.
+    pub importance: Importance,
+    /// How many of its messages ask the caller for an acknowledgement they have not given.
+    pub awaiting_ack: u64,
 }
 
 impl ThreadSummaryView {
@@ -582,6 +705,8 @@ impl ThreadSummaryView {
             messages: named.messages,
             unread: named.unread,
             last_message_at: named.last_message_at,
+            importance: named.importance,
+            awaiting_ack: named.awaiting_ack,
         }
     }
 }
@@ -741,6 +866,8 @@ mod tests {
                 author: MemberId(7),
                 label: SessionLabel::parse("web").unwrap(),
                 body: Body::parse("line one\nline two").unwrap(),
+                importance: Importance::High,
+                ack_required: true,
                 created_at: datetime!(2026-01-02 03:04:05 UTC),
             },
             author: handle("alice"),
@@ -754,7 +881,8 @@ mod tests {
             followed["message"],
             json!({
                 "id": 5, "thread": 4, "author": "alice", "label": "web",
-                "body": "line one\nline two", "created_at": "2026-01-02T03:04:05Z"
+                "body": "line one\nline two", "importance": "high", "ack_required": true,
+                "created_at": "2026-01-02T03:04:05Z"
             })
         );
         assert!(!serde_json::to_string(&followed).unwrap().contains('\n'));
@@ -775,6 +903,7 @@ mod tests {
             member: Some(handle("bob")),
             item_ref: Some(ExternalRef::parse("gh:acme/api#3").unwrap()),
             touched_by: Vec::new(),
+            touched_refs: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(PathVerdictView::of(named)).unwrap(),
@@ -810,10 +939,14 @@ mod tests {
             member: None,
             item_ref: None,
             touched_by: vec![handle("alice"), handle("bob")],
+            touched_refs: vec![Some(ExternalRef::parse("gh:acme/api#4").unwrap()), None],
         };
         assert_eq!(
             serde_json::to_value(PathVerdictView::of(named)).unwrap()["touched_by"],
-            json!([{"holder": "alice", "item": 4}, {"holder": "bob", "item": 6}])
+            json!([
+                {"holder": "alice", "item": 4, "item_ref": "gh:acme/api#4"},
+                {"holder": "bob", "item": 6, "item_ref": null}
+            ])
         );
     }
 }

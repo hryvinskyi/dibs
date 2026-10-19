@@ -7,10 +7,10 @@ use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
 use dibs_domain::grant::{GrantRefused, RevokeRefused};
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{GrantId, ItemId, SessionId, ThreadId};
+use dibs_domain::ids::{GrantId, ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::import::BatchRefused;
 use dibs_domain::item::{CreateRefused, ItemStatus};
-use dibs_domain::message::RecipientsError;
+use dibs_domain::message::{AckRefused, RecipientsError};
 use dibs_domain::settings::{AreaLookupError, SettingsError};
 
 use crate::named::Refusal;
@@ -28,6 +28,9 @@ pub enum Missing {
     /// No such thread, or one the caller may not read.
     #[error("there is no thread {0}")]
     Thread(ThreadId),
+    /// No such message, or one in a thread the caller may not read.
+    #[error("there is no message {0}")]
+    Message(MessageId),
     /// No such grant.
     #[error("there is no grant {0}")]
     Grant(GrantId),
@@ -82,6 +85,12 @@ pub enum AppError {
     /// A recipient is an integration, which receives no message.
     #[error("'{0}' is an integration and receives no messages")]
     NotARecipient(Handle),
+    /// Only the author of a message may see whom it reached.
+    #[error("only the author of a message can see who read and acknowledged it")]
+    NotAuthor,
+    /// The acknowledgement was refused.
+    #[error(transparent)]
+    Ack(#[from] AckRefused),
     /// The claim was refused; the refusal carries the handle of the member in the way.
     #[error(transparent)]
     Claim(#[from] Refusal<ClaimRefused>),
@@ -140,6 +149,11 @@ impl AppError {
             Self::Duplicate(Duplicate::Handle(_)) => "handle_taken",
             Self::ItemClosed { .. } => "item_closed",
             Self::NotARecipient(_) => "not_a_recipient",
+            Self::NotAuthor => "not_author",
+            Self::Ack(refused) => match refused {
+                AckRefused::NotRequired => "ack_not_required",
+                AckRefused::NotRecipient => "not_a_recipient",
+            },
             Self::Claim(refused) => match refused.reason {
                 ClaimRefused::HeldBy { .. } => "held",
                 ClaimRefused::Stale { .. } => "stale",

@@ -11,6 +11,7 @@ pub mod grants;
 pub mod items;
 pub mod me;
 pub mod members;
+pub mod messages;
 pub mod ready;
 pub mod sessions;
 pub mod status;

@@ -1,5 +1,7 @@
 //! The use cases, one per module, and the collection a composition root builds once.
 
+mod ack;
+mod acks;
 mod add_dependency;
 mod apply_settings;
 mod authenticate;
@@ -39,14 +41,17 @@ mod resolve_ui_session;
 mod revoke_grant;
 mod revoke_token;
 mod rotate_token;
+mod sent_status;
 mod start_thread;
 mod status;
 mod take_over;
+mod unacked;
 mod upsert_items;
 
 #[cfg(test)]
 pub(crate) mod testing;
 
+pub use ack::{AckMessage, Acknowledged};
 pub use add_dependency::{AddDependency, DependencyChange, DependencyInput};
 pub use apply_settings::{AppliedSettings, ApplySettings};
 pub use authenticate::Authenticate;
@@ -62,7 +67,7 @@ pub use force_release::ForceRelease;
 pub use get_item::{GetItem, ItemView};
 pub use grant::{Grant, GrantInput, GrantResult};
 pub use heartbeat::{Heartbeat, HeartbeatOutcome};
-pub use inbox::Inbox;
+pub use inbox::{Inbox, InboxQuery, InboxView};
 pub use init_project::{InitProject, InitProjectInput, InitializedProject};
 pub use list_completed::{CompletedItem, ListCompleted, MAX_COMPLETED};
 pub use list_events::{EventCursor, EventPage, ListEvents, MAX_PAGE};
@@ -74,7 +79,7 @@ pub use me::{Me, MeView};
 pub use open_ui_session::{OpenUiSession, OpenedUiSession, UI_SESSION_LIFETIME};
 pub use operate_project::OperateProject;
 pub use post_message::{PostMessage, PostMessageInput};
-pub use read_thread::{ReadThread, ThreadView};
+pub use read_thread::{ReadThread, RecipientAck, ThreadView};
 pub use ready::{ExcludedEntry, NamedNotReady, Ready, ReadyEntry, ReadyView};
 pub use register_session::{RegisterSession, RegisterSessionInput};
 pub use release::Release;
@@ -83,9 +88,11 @@ pub use resolve_ui_session::ResolveUiSession;
 pub use revoke_grant::RevokeGrant;
 pub use revoke_token::RevokeToken;
 pub use rotate_token::{RotateToken, RotatedToken};
+pub use sent_status::{RecipientStatus, SentStatus, SentStatusView};
 pub use start_thread::{Addressees, StartThread, StartThreadInput, StartedThread};
 pub use status::{AreaHold, HeldItem, Status, StatusView};
 pub use take_over::{TakeOver, TakeOverInput, TakenOverClaim};
+pub use unacked::{Unacked, UnackedMessage};
 pub use upsert_items::{UpsertItems, UpsertReport};
 
 use crate::dependencies::Dependencies;
@@ -146,6 +153,12 @@ pub struct UseCases {
     pub read_thread: ReadThread,
     /// See [`MarkRead`].
     pub mark_read: MarkRead,
+    /// See [`AckMessage`].
+    pub ack: AckMessage,
+    /// See [`Unacked`].
+    pub unacked: Unacked,
+    /// See [`SentStatus`].
+    pub sent_status: SentStatus,
     /// See [`ListEvents`].
     pub list_events: ListEvents,
     /// See [`FollowEvents`].
@@ -203,6 +216,9 @@ impl UseCases {
             list_threads: ListThreads::new(deps),
             read_thread: ReadThread::new(deps),
             mark_read: MarkRead::new(deps),
+            ack: AckMessage::new(deps),
+            unacked: Unacked::new(deps),
+            sent_status: SentStatus::new(deps),
             list_events: ListEvents::new(deps),
             follow_events: FollowEvents::new(deps),
             init_project: InitProject::new(deps),
@@ -221,7 +237,7 @@ impl UseCases {
 
 #[cfg(test)]
 mod integration_refusals {
-    use dibs_domain::ids::{GrantId, ItemId};
+    use dibs_domain::ids::{GrantId, ItemId, MessageId};
     use dibs_domain::message::SessionLabel;
     use dibs_domain::paths::RepoPath;
     use dibs_domain::session::{AgentLabel, HostName};
@@ -287,6 +303,12 @@ mod integration_refusals {
                         blocked_by: ItemId(9_999),
                     },
                 )
+                .await
+                .map(|_| ()),
+            app.ack.execute(bot, MessageId(9_999)).await.map(|_| ()),
+            app.unacked.execute(bot).await.map(|_| ()),
+            app.sent_status
+                .execute(bot, MessageId(9_999))
                 .await
                 .map(|_| ()),
         ];

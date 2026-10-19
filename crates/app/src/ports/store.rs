@@ -22,13 +22,14 @@ use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
 };
 use dibs_domain::item::{ExternalRef, ItemStatus};
-use dibs_domain::message::SessionLabel;
+use dibs_domain::message::{Ack, SessionLabel};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
 
 use crate::records::{
     CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
-    ProjectRecord, SessionRecord, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
+    ProjectRecord, ReadMark, SessionRecord, ThreadRecord, ThreadSummary, TokenRecord,
+    UiSessionRecord,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -77,6 +78,7 @@ pub trait Tx:
     + DependencyRows
     + GrantRows
     + ThreadRows
+    + AckRows
     + EventRows
     + SettingsRows
     + UiSessionRows
@@ -308,6 +310,32 @@ pub trait ThreadRows: Send {
         thread: ThreadId,
         at: OffsetDateTime,
     ) -> StoreResult<u64>;
+}
+
+/// The acknowledgements recipients recorded for messages, and when each member read them.
+#[async_trait]
+pub trait AckRows: Send {
+    /// Stores an acknowledgement. A second one by the same member for the same message fails with
+    /// [`StoreError::Duplicate`].
+    async fn insert_ack(&mut self, project: ProjectId, ack: &Ack) -> StoreResult<()>;
+    /// The acknowledgements of a message, oldest first.
+    async fn acks(&mut self, project: ProjectId, message: MessageId) -> StoreResult<Vec<Ack>>;
+    /// The acknowledgements of every message of a thread, oldest first.
+    async fn thread_acks(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<Vec<Ack>>;
+    /// Every message that asks to be acknowledged, that `member` did not write and has not
+    /// acknowledged, newest first. Whether the member is one of its recipients is decided by the
+    /// caller.
+    async fn ack_requests(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<Vec<MessageRecord>>;
+    /// Who read a message and when, ordered by member.
+    async fn reads_of(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<Vec<ReadMark>>;
 }
 
 /// The project's append-only event log.

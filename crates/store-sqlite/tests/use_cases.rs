@@ -29,6 +29,13 @@ mod use_cases {
     use dibs_domain::settings::SettingsDocument;
     use dibs_store_sqlite::SqliteStore;
 
+    fn unread_only(unread_only: bool) -> dibs_app::use_cases::InboxQuery {
+        dibs_app::use_cases::InboxQuery {
+            unread_only,
+            unacked: false,
+        }
+    }
+
     const RACERS: usize = 32;
 
     /// The use cases over a fresh database file, with the fakes for every other port.
@@ -371,6 +378,8 @@ mod use_cases {
                     item: Some(item),
                     label: SessionLabel::parse("web").unwrap(),
                     body: Body::parse("hello widgets").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -413,7 +422,14 @@ mod use_cases {
                 .is_empty()
         );
         assert!(app.status.execute(&dave).await.unwrap().holds.is_empty());
-        assert!(app.inbox.execute(&dave, false).await.unwrap().is_empty());
+        assert!(
+            app.inbox
+                .execute(&dave, unread_only(false))
+                .await
+                .unwrap()
+                .threads
+                .is_empty()
+        );
         let daves_log = app
             .list_events
             .execute(&dave, EventCursor::Start, 500)
@@ -558,5 +574,67 @@ mod use_cases {
             .collect();
         assert_eq!(refs, ["gh:acme/web#2"]);
         assert_eq!(ready.excluded.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_ack_on_the_file_is_recorded_once_and_its_author_sees_it() {
+        let world = World::new().await;
+        let app = &world.app;
+        let alice = project(app, "widgets", "alice").await;
+        let token = app
+            .create_member
+            .execute(
+                &alice,
+                CreateMemberInput {
+                    member: member("bob"),
+                    role: Role::Member,
+                },
+            )
+            .await
+            .unwrap()
+            .token;
+        let bob = app.authenticate.execute(token.expose()).await.unwrap();
+        world.fakes.clock.advance(Duration::minutes(1));
+        let started = app
+            .start_thread
+            .execute(
+                &alice,
+                StartThreadInput {
+                    subject: Subject::parse("Freeze main").unwrap(),
+                    to: Addressees::Members(vec![Handle::parse("bob").unwrap()]),
+                    item: None,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("Hold every push until noon.").unwrap(),
+                    importance: dibs_domain::message::Importance::Urgent,
+                    ack_required: true,
+                },
+            )
+            .await
+            .unwrap();
+        let id = started.message.record.id;
+        let waiting = app.unacked.execute(&bob).await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(
+            waiting[0].message.record.importance,
+            dibs_domain::message::Importance::Urgent
+        );
+        world.fakes.clock.advance(Duration::minutes(2));
+        let first = app.ack.execute(&bob, id).await.unwrap();
+        assert!(first.created);
+        world.fakes.clock.advance(Duration::minutes(5));
+        let again = app.ack.execute(&bob, id).await.unwrap();
+        assert!(!again.created);
+        assert_eq!(again.ack, first.ack, "the first acknowledgement stands");
+        assert!(app.unacked.execute(&bob).await.unwrap().is_empty());
+        let status = app.sent_status.execute(&alice, id).await.unwrap();
+        assert_eq!(status.recipients.len(), 1);
+        assert_eq!(
+            status.recipients[0].acked_at,
+            Some(OffsetDateTime::UNIX_EPOCH + Duration::minutes(3))
+        );
+        assert_eq!(
+            world.event_names(alice.project).await.last(),
+            Some(&"acked")
+        );
     }
 }

@@ -58,7 +58,13 @@ impl EditVerdicts {
             } else {
                 None
             };
-            verdicts.push(names.verdict(verdict, reference)?);
+            let mut touched_refs = Vec::new();
+            if let Verdict::AllowedWithNote { touched_by, .. } = &verdict.verdict {
+                for holder in touched_by {
+                    touched_refs.push(item_ref(work, holder.item).await?);
+                }
+            }
+            verdicts.push(names.verdict(verdict, reference, touched_refs)?);
         }
         Ok(Self {
             verdicts,
@@ -403,6 +409,13 @@ mod tests {
         assert_eq!(
             second.verdicts[0].touched_by,
             [Handle::parse("alice").unwrap()]
+        );
+        assert_eq!(
+            second.verdicts[0].touched_refs,
+            [Some(
+                dibs_domain::item::ExternalRef::parse("gh:acme/widgets#1").unwrap()
+            )],
+            "each editor's item by its reference, in their order"
         );
         assert_eq!(second.verdicts[0].member, None);
     }

@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use dibs_app::named::NamedClaim;
+use dibs_app::named::{EndedClaim, NamedClaim};
 use dibs_app::use_cases::{ClaimItemInput, TakeOverInput};
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::ClaimOutcome;
@@ -42,6 +42,8 @@ struct ClaimAnswer {
     /// The items the claimed item waits for that are neither done nor closed: the claim is made,
     /// and the caller is warned.
     blocked_by: Vec<ItemNameView>,
+    /// The item claimed.
+    item: ItemNameView,
 }
 
 /// Claims the item for the caller, or renews the caller's own claim. `areas` are named as a person
@@ -83,6 +85,7 @@ pub async fn claim(
         }),
         dropped_areas,
         blocked_by: made.blocked_by.into_iter().map(ItemNameView::of).collect(),
+        item: ItemNameView::of(made.item),
     };
     Ok(reply(StatusCode::OK, &answer))
 }
@@ -102,6 +105,8 @@ struct TakeOverAnswer {
     dropped_areas: BTreeSet<QualifiedArea>,
     /// The thread that told the previous holder the reason.
     thread_id: ThreadId,
+    /// The item taken over.
+    item: ItemNameView,
 }
 
 /// Takes over another member's stale claim; the previous holder is sent `reason` in a thread about
@@ -136,6 +141,7 @@ pub async fn take_over(
         }),
         dropped_areas: taken.takeover.dropped_areas,
         thread_id: taken.thread,
+        item: ItemNameView::of(taken.item),
     };
     Ok(reply(StatusCode::OK, &answer))
 }
@@ -144,6 +150,8 @@ pub async fn take_over(
 struct EndedAnswer {
     /// The claim that ended.
     claim: ClaimView,
+    /// The item it was on.
+    item: ItemNameView,
 }
 
 /// Releases the caller's claim, live or stale; the item is open again.
@@ -183,9 +191,10 @@ fn path_item(path: Result<Path<String>, PathRejection>) -> Result<ItemId, ApiErr
     item_in_path(&id)
 }
 
-fn answer_ended(claim: NamedClaim) -> Response {
+fn answer_ended(ended: EndedClaim) -> Response {
     let answer = EndedAnswer {
-        claim: ClaimView::of(claim),
+        claim: ClaimView::of(ended.claim),
+        item: ItemNameView::of(ended.item),
     };
     reply(StatusCode::OK, &answer)
 }

@@ -9,9 +9,9 @@ use serde::Deserialize;
 
 use dibs_client::api::{GrantRequest, ItemFilter, NewItem, Recipients};
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{ItemId, ThreadId};
+use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
-use dibs_domain::message::{Body, Subject};
+use dibs_domain::message::{Body, Importance, Subject};
 
 use crate::failure::{Failure, sentence};
 
@@ -217,6 +217,28 @@ impl GrantInput {
     }
 }
 
+/// How much a message asks for its recipients' attention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportanceInput {
+    /// An ordinary message: read when convenient.
+    Normal,
+    /// Read soon.
+    High,
+    /// Read now.
+    Urgent,
+}
+
+impl From<ImportanceInput> for Importance {
+    fn from(value: ImportanceInput) -> Self {
+        match value {
+            ImportanceInput::Normal => Self::Normal,
+            ImportanceInput::High => Self::High,
+            ImportanceInput::Urgent => Self::Urgent,
+        }
+    }
+}
+
 /// `dibs_send`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -231,8 +253,14 @@ pub struct SendInput {
     pub body: String,
     /// The work item a new conversation is about: its local id or its reference.
     pub item: Option<ItemKeyInput>,
-    /// The id of an existing conversation to reply to; then give only this and the body.
+    /// The id of an existing conversation to reply to; then give only this, the body and, if
+    /// needed, importance and ack_required.
     pub thread: Option<u64>,
+    /// How much the message asks for its recipients' attention: normal (the default), high or
+    /// urgent.
+    pub importance: Option<ImportanceInput>,
+    /// Ask each recipient to acknowledge the message; false by default.
+    pub ack_required: Option<bool>,
 }
 
 /// What a `dibs_send` does.
@@ -244,6 +272,10 @@ pub enum Sending {
         thread: ThreadId,
         /// The message.
         body: Body,
+        /// How much it asks for its recipients' attention.
+        importance: Importance,
+        /// Whether each recipient is asked to acknowledge it.
+        ack_required: bool,
     },
     /// A new conversation.
     Start {
@@ -255,6 +287,10 @@ pub enum Sending {
         item: Option<ItemKey>,
         /// The first message.
         body: Body,
+        /// How much the first message asks for its recipients' attention.
+        importance: Importance,
+        /// Whether each recipient is asked to acknowledge the first message.
+        ack_required: bool,
     },
 }
 
@@ -266,17 +302,21 @@ impl SendInput {
     /// both kinds, or has a value that is not valid.
     pub fn sending(&self) -> Result<Sending, Failure> {
         let body = body("body", &self.body)?;
+        let importance = self.importance.map_or(Importance::Normal, Importance::from);
+        let ack_required = self.ack_required.unwrap_or(false);
         let project = self.project.unwrap_or(false);
         if let Some(thread) = self.thread {
             if self.to.is_some() || project || self.subject.is_some() || self.item.is_some() {
                 return Err(invalid(
                     "thread",
-                    "a reply takes only the thread and the body; leave out to, project, subject and item, or leave out thread to start a new conversation",
+                    "a reply takes only the thread, the body, importance and ack_required; leave out to, project, subject and item, or leave out thread to start a new conversation",
                 ));
             }
             return Ok(Sending::Reply {
                 thread: thread_id("thread", thread)?,
                 body,
+                importance,
+                ack_required,
             });
         }
         let to = match (&self.to, project) {
@@ -311,6 +351,8 @@ impl SendInput {
             subject,
             item,
             body,
+            importance,
+            ack_required,
         })
     }
 }
@@ -321,6 +363,32 @@ impl SendInput {
 pub struct InboxInput {
     /// Only the conversations with messages you have not read.
     pub unread: Option<bool>,
+    /// List, under unacked, the messages that ask you for an acknowledgement you have not given.
+    pub unacked: Option<bool>,
+}
+
+/// `dibs_ack`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AckInput {
+    /// The id of the message to acknowledge.
+    pub message: u64,
+}
+
+impl AckInput {
+    /// The message it names.
+    ///
+    /// # Errors
+    /// A [`Failure`] when the id is zero.
+    pub fn id(&self) -> Result<MessageId, Failure> {
+        if self.message == 0 {
+            return Err(invalid(
+                "message",
+                "message ids are whole numbers starting at 1",
+            ));
+        }
+        Ok(MessageId(self.message))
+    }
 }
 
 /// `dibs_thread` and `dibs_read`.
@@ -524,9 +592,39 @@ mod tests {
             reply,
             Sending::Reply {
                 thread: ThreadId(4),
+                importance: Importance::Normal,
+                ack_required: false,
                 ..
             }
         ));
+        let urgent = sending(json!({
+            "thread": 4, "body": "stop", "importance": "urgent", "ack_required": true
+        }))
+        .unwrap();
+        assert!(matches!(
+            urgent,
+            Sending::Reply {
+                importance: Importance::Urgent,
+                ack_required: true,
+                ..
+            }
+        ));
+        let asked = sending(json!({
+            "to": ["bob"], "subject": "Freeze", "body": "hi", "importance": "high", "ack_required": true
+        }))
+        .unwrap();
+        assert!(matches!(
+            asked,
+            Sending::Start {
+                importance: Importance::High,
+                ack_required: true,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::from_value::<SendInput>(json!({"body": "b", "importance": "loud"}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -554,6 +652,22 @@ mod tests {
                 .starts_with("`thread`: a reply takes only")
         );
         assert!(refused(json!({"thread": 0, "body": "b"})).starts_with("`thread`: "));
+    }
+
+    #[test]
+    fn a_message_to_ack_is_named_by_a_positive_id() {
+        assert_eq!(
+            parse::<AckInput>(json!({"message": 7})).id().unwrap(),
+            MessageId(7)
+        );
+        assert!(
+            parse::<AckInput>(json!({"message": 0}))
+                .id()
+                .unwrap_err()
+                .message
+                .starts_with("`message`: ")
+        );
+        assert!(serde_json::from_value::<AckInput>(json!({"message": 7, "x": 1})).is_err());
     }
 
     #[test]

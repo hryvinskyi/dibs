@@ -65,6 +65,8 @@ mod tests {
                     item: None,
                     label: SessionLabel::parse("web").unwrap(),
                     body: Body::parse("hello").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await

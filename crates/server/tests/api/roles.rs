@@ -1,5 +1,6 @@
 //! What an integration may call: who it is, the members, the event feed, reading, creating and
-//! importing work items, and the ready list. Every other route of the router answers it
+//! importing work items, and the ready list; never a conversation, a message or an
+//! acknowledgement. Every other route of the router answers it
 //! `forbidden`, and each refusal comes before the request is read, so a body that would be refused
 //! for its content still answers `forbidden`.
 
@@ -123,6 +124,10 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
         (Method::POST, format!("/v1/threads/{thread}/read"), None),
         (Method::GET, "/v1/inbox".into(), None),
         (Method::GET, "/v1/inbox?unread=maybe".into(), None),
+        (Method::GET, "/v1/inbox?unacked=1".into(), None),
+        (Method::POST, "/v1/messages/999/ack".into(), None),
+        (Method::POST, "/v1/messages/abc/ack".into(), None),
+        (Method::GET, "/v1/messages/999/status".into(), None),
         (Method::GET, "/v1/events/stream".into(), None),
         (Method::GET, "/v1/events/stream?after=x".into(), None),
         (Method::POST, "/v1/admin/members".into(), Some(json!({}))),

@@ -6,8 +6,8 @@
 //! - `cache/<scope>/status.json` — the last status and when it was fetched;
 //! - `cache/<scope>/unreachable` — when a call last found the server unreachable;
 //! - `cache/<scope>/member.json` — the handle the token signs in as;
-//! - `cache/<scope>/inbox.json` — the conversations with unread messages and when they were
-//!   fetched;
+//! - `cache/<scope>/inbox.json` — the conversations with unread messages, the messages awaiting the
+//!   member's acknowledgement, and when they were fetched;
 //! - `cache/<scope>/held.json` — areas edit checks found the member holding, each with when;
 //! - `cache/<scope>/heartbeat`, `warned`, `sync-started` — when the last heartbeat was sent, when
 //!   the person was last warned about an unreachable server, when a background sync was last
@@ -34,7 +34,7 @@ use dibs_domain::ids::SessionId;
 use dibs_domain::message::SessionLabel;
 use dibs_domain::settings::SettingsDocument;
 
-use crate::api::{Session, Status, Threads};
+use crate::api::{Inbox, Session, Status};
 use crate::credentials::CredentialKey;
 
 /// The state of one project on one server.
@@ -70,8 +70,8 @@ pub struct CachedInbox {
     /// When.
     #[serde(with = "time::serde::rfc3339")]
     pub fetched_at: OffsetDateTime,
-    /// The conversations with unread messages.
-    pub inbox: Threads,
+    /// The conversations with unread messages, and the messages awaiting an acknowledgement.
+    pub inbox: Inbox,
 }
 
 /// An area an edit check found the member holding.
@@ -224,7 +224,7 @@ impl StateDir {
     ///
     /// # Errors
     /// The file system's failure.
-    pub fn remember_inbox(&self, inbox: &Threads, at: OffsetDateTime) -> io::Result<()> {
+    pub fn remember_inbox(&self, inbox: &Inbox, at: OffsetDateTime) -> io::Result<()> {
         write_json(
             &self.cache.join("inbox.json"),
             &CachedInbox {
@@ -474,11 +474,20 @@ mod tests {
         state.remember_member(&"bob".parse().unwrap()).unwrap();
         assert_eq!(state.member().unwrap().as_str(), "bob");
         let at = OffsetDateTime::UNIX_EPOCH + Duration::hours(2);
-        let inbox = Threads {
+        let inbox = Inbox {
             threads: Vec::new(),
+            unacked: Vec::new(),
         };
         state.remember_inbox(&inbox, at).unwrap();
         assert_eq!(state.inbox().unwrap().fetched_at, at);
+        let written_before_acks: CachedInbox = serde_json::from_str(
+            r#"{"fetched_at": "1970-01-01T02:00:00Z", "inbox": {"threads": []}}"#,
+        )
+        .unwrap();
+        assert!(
+            written_before_acks.inbox.unacked.is_empty(),
+            "a cache written before acknowledgements reads as awaiting none"
+        );
         assert_eq!(state.heartbeat_at(), None);
         state.remember_heartbeat(at).unwrap();
         state.remember_warning(at + Duration::seconds(1)).unwrap();

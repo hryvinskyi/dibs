@@ -19,18 +19,19 @@ use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
 };
 use dibs_domain::item::{ExternalRef, ItemStatus};
-use dibs_domain::message::{Recipients, SessionLabel};
+use dibs_domain::message::{Ack, Recipients, SessionLabel};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
 
 use crate::ports::{
-    ClaimRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows,
+    AckRows, ClaimRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows,
     SessionRows, SettingsRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
     UiSessionRows,
 };
 use crate::records::{
     CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
-    ProjectRecord, SessionRecord, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
+    ProjectRecord, ReadMark, SessionRecord, ThreadRecord, ThreadSummary, TokenRecord,
+    UiSessionRecord,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -49,7 +50,8 @@ struct State {
     grants: BTreeMap<(ProjectId, GrantId), GrantRecord>,
     threads: BTreeMap<(ProjectId, ThreadId), ThreadRecord>,
     messages: BTreeMap<(ProjectId, MessageId), MessageRecord>,
-    reads: BTreeSet<(ProjectId, MemberId, MessageId)>,
+    reads: BTreeMap<(ProjectId, MemberId, MessageId), OffsetDateTime>,
+    acks: BTreeMap<(ProjectId, MessageId, MemberId), Ack>,
     events: Vec<Event>,
     last_event: u64,
     settings: BTreeMap<ProjectId, SettingsDocument>,
@@ -114,7 +116,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 15] = [
+        let checks: [(&'static str, bool); 16] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -177,7 +179,13 @@ impl State {
             ),
             (
                 "a read mark",
-                self.reads.iter().all(|(p, m, message)| {
+                self.reads.keys().all(|(p, m, message)| {
+                    member(*p, *m) && self.messages.contains_key(&(*p, *message))
+                }),
+            ),
+            (
+                "an acknowledgement",
+                self.acks.keys().all(|(p, message, m)| {
                     member(*p, *m) && self.messages.contains_key(&(*p, *message))
                 }),
             ),
@@ -700,7 +708,8 @@ impl ThreadRows for MemoryTx {
                 let unread = messages
                     .iter()
                     .filter(|m| {
-                        m.author != reader && !self.work.reads.contains(&(project, reader, m.id))
+                        m.author != reader
+                            && !self.work.reads.contains_key(&(project, reader, m.id))
                     })
                     .count();
                 ThreadSummary {
@@ -708,6 +717,11 @@ impl ThreadRows for MemoryTx {
                     messages: u64::try_from(messages.len()).unwrap_or(u64::MAX),
                     unread: u64::try_from(unread).unwrap_or(u64::MAX),
                     last_message_at: messages.iter().map(|m| m.created_at).max(),
+                    importance: messages
+                        .iter()
+                        .map(|m| m.importance)
+                        .max()
+                        .unwrap_or_default(),
                 }
             })
             .collect();
@@ -728,7 +742,7 @@ impl ThreadRows for MemoryTx {
         project: ProjectId,
         reader: MemberId,
         thread: ThreadId,
-        _at: OffsetDateTime,
+        at: OffsetDateTime,
     ) -> StoreResult<u64> {
         let ids: Vec<MessageId> = self
             .work
@@ -739,11 +753,95 @@ impl ThreadRows for MemoryTx {
             .collect();
         let mut newly = 0;
         for id in ids {
-            if self.work.reads.insert((project, reader, id)) {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                self.work.reads.entry((project, reader, id))
+            {
+                entry.insert(at);
                 newly += 1;
             }
         }
         Ok(newly)
+    }
+}
+
+#[async_trait]
+impl AckRows for MemoryTx {
+    async fn insert_ack(&mut self, project: ProjectId, ack: &Ack) -> StoreResult<()> {
+        let key = (project, ack.message, ack.member);
+        if self.work.acks.contains_key(&key) {
+            return Err(StoreError::Duplicate);
+        }
+        self.work.acks.insert(key, *ack);
+        Ok(())
+    }
+
+    async fn acks(&mut self, project: ProjectId, message: MessageId) -> StoreResult<Vec<Ack>> {
+        let mut acks: Vec<Ack> = self
+            .work
+            .acks
+            .iter()
+            .filter(|((p, m, _), _)| *p == project && *m == message)
+            .map(|(_, ack)| *ack)
+            .collect();
+        acks.sort_by_key(|ack| (ack.at, ack.member));
+        Ok(acks)
+    }
+
+    async fn thread_acks(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<Vec<Ack>> {
+        let mut acks: Vec<Ack> = self
+            .work
+            .acks
+            .iter()
+            .filter(|((p, message, _), _)| {
+                *p == project
+                    && self
+                        .work
+                        .messages
+                        .get(&(project, *message))
+                        .is_some_and(|m| m.thread == thread)
+            })
+            .map(|(_, ack)| *ack)
+            .collect();
+        acks.sort_by_key(|ack| (ack.at, ack.message, ack.member));
+        Ok(acks)
+    }
+
+    async fn ack_requests(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<Vec<MessageRecord>> {
+        let mut asked: Vec<MessageRecord> = self
+            .work
+            .messages
+            .iter()
+            .filter(|((p, id), m)| {
+                *p == project
+                    && m.ack_required
+                    && m.author != member
+                    && !self.work.acks.contains_key(&(project, *id, member))
+            })
+            .map(|(_, m)| m.clone())
+            .collect();
+        asked.sort_by_key(|m| std::cmp::Reverse((m.created_at, m.id)));
+        Ok(asked)
+    }
+
+    async fn reads_of(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<Vec<ReadMark>> {
+        Ok(self
+            .work
+            .reads
+            .iter()
+            .filter(|((p, _, m), _)| *p == project && *m == message)
+            .map(|((_, member, _), at)| ReadMark {
+                member: *member,
+                at: *at,
+            })
+            .collect())
     }
 }
 

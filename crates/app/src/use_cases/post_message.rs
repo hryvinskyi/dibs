@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dibs_domain::event::{EventKind, MessagePosted};
 use dibs_domain::ids::{MessageId, ThreadId};
-use dibs_domain::message::{Body, SessionLabel};
+use dibs_domain::message::{Body, Importance, SessionLabel};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -24,6 +24,10 @@ pub struct PostMessageInput {
     pub label: SessionLabel,
     /// The text.
     pub body: Body,
+    /// How much it asks for its recipients' attention.
+    pub importance: Importance,
+    /// Whether each recipient is asked to acknowledge it.
+    pub ack_required: bool,
 }
 
 /// Posts a message to a thread the caller may read: its author, its recipients, or anyone in the
@@ -66,6 +70,8 @@ impl PostMessage {
             author: actor.member,
             label: input.label,
             body: input.body,
+            importance: input.importance,
+            ack_required: input.ack_required,
             created_at: now,
         };
         work.insert_message(actor.project, &message).await?;
@@ -125,6 +131,8 @@ mod tests {
                     item: None,
                     label: label(),
                     body: Body::parse("Can you look?").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -138,6 +146,8 @@ mod tests {
                     thread: started.thread.record.id,
                     label: label(),
                     body: Body::parse("On it.").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -158,6 +168,8 @@ mod tests {
                     thread: started.thread.record.id,
                     label: label(),
                     body: Body::parse("Me too").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -170,6 +182,8 @@ mod tests {
                     thread: ThreadId(9999),
                     label: label(),
                     body: Body::parse("Hello").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
@@ -182,6 +196,8 @@ mod tests {
                     thread: started.thread.record.id,
                     label: label(),
                     body: Body::parse("Hello").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await

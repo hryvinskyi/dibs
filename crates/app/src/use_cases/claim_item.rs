@@ -44,6 +44,8 @@ pub struct ClaimMade {
     /// item is made all the same — dependent work is often started in parallel — and the caller
     /// shows these as a warning.
     pub blocked_by: Vec<ItemName>,
+    /// The item claimed.
+    pub item: ItemName,
 }
 
 /// Claims a work item for the caller, or renews the caller's own claim on it.
@@ -141,6 +143,7 @@ impl ClaimItem {
             outcome,
             holder,
             blocked_by,
+            item: ItemName::of(&item, &self.ref_schemes),
         })
     }
 

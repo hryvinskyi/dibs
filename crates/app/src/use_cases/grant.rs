@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use dibs_domain::ref_scheme::RefSchemeRegistry;
+
 use dibs_domain::event::{EventKind, Granted};
 use dibs_domain::grant::{self, GrantOutcome, decide_grant};
 use dibs_domain::handle::Handle;
@@ -11,7 +13,7 @@ use dibs_domain::ids::{GrantId, ItemId};
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{NamedGrant, Names};
+use crate::named::{ItemName, NamedGrant, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::GrantRecord;
 use crate::use_cases::common::{existing_item, member_by_handle};
@@ -35,11 +37,14 @@ pub struct GrantResult {
     pub grant: NamedGrant,
     /// Whether this call gave it, rather than finding it given.
     pub created: bool,
+    /// The grantee's item.
+    pub item: ItemName,
 }
 
 /// Records the caller's consent that another member may edit inside an area the caller holds, for
 /// the grantee's live claim on an item. Giving a grant that exists changes nothing.
 pub struct Grant {
+    ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
@@ -51,6 +56,7 @@ impl Grant {
     /// Builds the use case.
     pub fn new(deps: &Dependencies) -> Self {
         Self {
+            ref_schemes: deps.ref_schemes.clone(),
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             ids: deps.ids.clone(),
@@ -94,6 +100,7 @@ impl Grant {
                 Ok(GrantResult {
                     grant: Names::load(&mut work).await?.grant(grant)?,
                     created: false,
+                    item: ItemName::of(&item, &self.ref_schemes),
                 })
             }
             GrantOutcome::New(grant) => {
@@ -119,6 +126,7 @@ impl Grant {
                 Ok(GrantResult {
                     grant,
                     created: true,
+                    item: ItemName::of(&item, &self.ref_schemes),
                 })
             }
         }

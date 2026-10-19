@@ -21,7 +21,7 @@ use dibs_domain::grant::{GrantRefused, RevokeRefused};
 use dibs_domain::handle::Handle;
 use dibs_domain::import::BatchRefused;
 use dibs_domain::item::CreateRefused;
-use dibs_domain::message::RecipientsError;
+use dibs_domain::message::{AckRefused, RecipientsError};
 use dibs_domain::settings::AreaLookupError;
 
 /// A refusal or failure as the client receives it.
@@ -278,7 +278,9 @@ fn status_of(error: &AppError) -> StatusCode {
         })
         | AppError::ForceRelease(ForceReleaseRefused::NotAdmin)
         | AppError::Grant(GrantRefused::NotHolder { .. })
-        | AppError::Revoke(RevokeRefused::NotGrantor) => StatusCode::FORBIDDEN,
+        | AppError::Revoke(RevokeRefused::NotGrantor)
+        | AppError::NotAuthor
+        | AppError::Ack(AckRefused::NotRecipient) => StatusCode::FORBIDDEN,
         AppError::NotFound(_) => StatusCode::NOT_FOUND,
         AppError::Duplicate(Duplicate::Project(_) | Duplicate::Handle(_))
         | AppError::ItemClosed { .. }
@@ -301,7 +303,8 @@ fn status_of(error: &AppError) -> StatusCode {
         })
         | AppError::ForceRelease(ForceReleaseRefused::NoClaim)
         | AppError::Grant(GrantRefused::GranteeHasNoClaim)
-        | AppError::Dependency(DependencyRefused::Cycle) => StatusCode::CONFLICT,
+        | AppError::Dependency(DependencyRefused::Cycle)
+        | AppError::Ack(AckRefused::NotRequired) => StatusCode::CONFLICT,
         AppError::NotARecipient(_)
         | AppError::Claim(Refusal {
             reason: ClaimRefused::UnknownArea { .. },

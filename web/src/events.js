@@ -20,6 +20,11 @@ export class ContractError extends Error {
 }
 
 /**
+ * How much a message asks for its readers' attention.
+ * @typedef {'normal' | 'high' | 'urgent'} Importance
+ */
+
+/**
  * A message the stream carries with the event that announces it.
  * @typedef {object} StreamMessage
  * @property {number} id
@@ -27,8 +32,17 @@ export class ContractError extends Error {
  * @property {string} author the author's handle
  * @property {string} label the label of the session it was written from
  * @property {string} body plain text, never markup
+ * @property {Importance} importance
+ * @property {boolean} ackRequired whether each recipient is asked to acknowledge it
  * @property {string} createdAt an RFC 3339 time
  */
+
+/** @type {ReadonlyMap<string, Importance>} */
+const IMPORTANCES = new Map([
+  ['normal', 'normal'],
+  ['high', 'high'],
+  ['urgent', 'urgent'],
+]);
 
 /**
  * One event of the log.
@@ -69,6 +83,31 @@ const text = (value, path) => {
 };
 
 /**
+ * @param {unknown} value
+ * @param {string} path
+ * @returns {Importance}
+ */
+const importance = (value, path) => {
+  const known = typeof value === 'string' ? IMPORTANCES.get(value) : undefined;
+  if (known === undefined) {
+    throw new ContractError(path, 'normal, high or urgent');
+  }
+  return known;
+};
+
+/**
+ * @param {unknown} value
+ * @param {string} path
+ * @returns {boolean}
+ */
+const flag = (value, path) => {
+  if (typeof value !== 'boolean') {
+    throw new ContractError(path, 'true or false');
+  }
+  return value;
+};
+
+/**
  * @param {unknown} raw
  * @returns {StreamMessage}
  */
@@ -82,6 +121,8 @@ function parseMessage(raw) {
     author: text(raw.author, '$.message.author'),
     label: text(raw.label, '$.message.label'),
     body: text(raw.body, '$.message.body'),
+    importance: importance(raw.importance, '$.message.importance'),
+    ackRequired: flag(raw.ack_required, '$.message.ack_required'),
     createdAt: text(raw.created_at, '$.message.created_at'),
   };
 }

@@ -13,13 +13,16 @@ use dibs_domain::item::ExternalRef;
 use dibs_domain::paths::RelPath;
 use dibs_domain::settings::EditPolicy;
 
-use crate::ports::{ClaimLine, InboxView, ReadyLine, StatusView};
+use crate::ports::{ClaimLine, InboxView, ReadyLine, StatusView, TouchedBy, UnackedLine};
 
 /// How many unread subjects the brief names.
 const BRIEF_SUBJECTS: usize = 3;
 
 /// How many items of the ready list the brief names.
 const BRIEF_READY: usize = 5;
+
+/// How many messages awaiting an acknowledgement the brief names.
+const BRIEF_UNACKED: usize = 5;
 
 /// How a sentence names an item: by its reference in an outside tracker when it has one, which is
 /// what people know it by, else by its local id.
@@ -57,12 +60,7 @@ pub fn needs_claim(path: &RelPath, area: Option<&QualifiedArea>) -> String {
 }
 
 /// A hot-file rule's note on `path`.
-pub fn noted(
-    path: &RelPath,
-    rule: &str,
-    note: Option<&Note>,
-    touched_by: &[(Handle, ItemId)],
-) -> String {
+pub fn noted(path: &RelPath, rule: &str, note: Option<&Note>, touched_by: &[TouchedBy]) -> String {
     let mut text = format!("{path} falls under the {rule} rule");
     if let Some(note) = note {
         let _ = write!(text, ": {note}");
@@ -70,7 +68,13 @@ pub fn noted(
     if !touched_by.is_empty() {
         let others: Vec<String> = touched_by
             .iter()
-            .map(|(holder, item)| format!("{holder} (item {item})"))
+            .map(|other| {
+                format!(
+                    "{} (item {})",
+                    other.holder,
+                    item_name(other.item, other.item_ref.as_ref())
+                )
+            })
             .collect();
         let _ = write!(text, "; also edited by {}", others.join(", "));
     }
@@ -147,6 +151,7 @@ impl Brief<'_> {
         }
         if let Some(inbox) = self.inbox {
             inbox_lines(inbox, &mut text);
+            unacked_lines(&inbox.unacked, &mut text);
         }
         if let Some(status) = self.status {
             ready_lines(status, &mut text);
@@ -271,6 +276,30 @@ fn inbox_lines(inbox: &InboxView, text: &mut String) {
     text.push_str(". Read them with dibs_inbox or dibs inbox.");
 }
 
+fn unacked_lines(unacked: &[UnackedLine], text: &mut String) {
+    if unacked.is_empty() {
+        return;
+    }
+    let mut ordered: Vec<&UnackedLine> = unacked.iter().collect();
+    ordered.sort_by_key(|line| std::cmp::Reverse(line.importance));
+    let shown = ordered.len().min(BRIEF_UNACKED);
+    let _ = write!(
+        text,
+        "\nMessages that ask for your acknowledgement, most pressing first ({shown} of {}):",
+        ordered.len()
+    );
+    for line in ordered.into_iter().take(BRIEF_UNACKED) {
+        let _ = write!(
+            text,
+            "\n- {} from {}: \"{}\" (message {})",
+            line.importance, line.sender, line.subject, line.message
+        );
+    }
+    text.push_str(
+        "\nRead each (dibs_thread), answer if a decision is needed, then acknowledge it (dibs_ack, or dibs ack <message>). An acknowledgement says you read it; it authorises nothing.",
+    );
+}
+
 /// The text with a capital first letter and a full stop at its end.
 fn sentence(text: &str) -> String {
     let mut chars = text.trim().chars();
@@ -286,7 +315,9 @@ fn sentence(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use dibs_domain::ids::MessageId;
     use dibs_domain::item::Title;
+    use dibs_domain::message::Importance;
 
     use super::*;
 
@@ -344,6 +375,7 @@ mod tests {
                 .iter()
                 .map(|subject| subject.parse().unwrap())
                 .collect(),
+            unacked: Vec::new(),
         };
         let text = Brief {
             member: &me,
@@ -367,6 +399,81 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Four"), "{text}");
+        assert!(!text.contains("acknowledgement"), "{text}");
+    }
+
+    fn unacked(message: u64, sender: &str, subject: &str, importance: Importance) -> UnackedLine {
+        UnackedLine {
+            message: MessageId(message),
+            sender: handle(sender),
+            subject: subject.parse().unwrap(),
+            importance,
+        }
+    }
+
+    #[test]
+    fn the_brief_names_what_awaits_my_ack_urgent_first_with_sender_and_subject() {
+        let me = handle("bob");
+        let inbox = InboxView {
+            unread: 1,
+            subjects: vec!["Staging".parse().unwrap()],
+            unacked: vec![
+                unacked(21, "carol", "Lunch order", Importance::Normal),
+                unacked(20, "alice", "Staging is down", Importance::Urgent),
+                unacked(19, "dave", "Rates table", Importance::High),
+                unacked(18, "erin", "Freeze", Importance::Urgent),
+                unacked(17, "carol", "Old one", Importance::Normal),
+                unacked(16, "carol", "Oldest", Importance::Normal),
+            ],
+        };
+        let text = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: None,
+            inbox: Some(&inbox),
+            status_age: None,
+        }
+        .text();
+        assert!(
+            text.contains(
+                "Messages that ask for your acknowledgement, most pressing first (5 of 6):\n\
+                 - urgent from alice: \"Staging is down\" (message 20)\n\
+                 - urgent from erin: \"Freeze\" (message 18)\n\
+                 - high from dave: \"Rates table\" (message 19)\n\
+                 - normal from carol: \"Lunch order\" (message 21)\n\
+                 - normal from carol: \"Old one\" (message 17)\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("Oldest"), "{text}");
+        assert!(text.contains("dibs_ack"), "{text}");
+        assert!(text.contains("it authorises nothing"), "{text}");
+    }
+
+    #[test]
+    fn a_note_names_the_other_editors_items_by_reference() {
+        let path = RelPath::parse("Cargo.lock").unwrap();
+        let text = noted(
+            &path,
+            "warn-shared",
+            None,
+            &[
+                TouchedBy {
+                    holder: handle("alice"),
+                    item: ItemId(1_739_000_000_123),
+                    item_ref: Some(ExternalRef::parse("gh:acme/web#12").unwrap()),
+                },
+                TouchedBy {
+                    holder: handle("carol"),
+                    item: ItemId(4),
+                    item_ref: None,
+                },
+            ],
+        );
+        assert_eq!(
+            text,
+            "Cargo.lock falls under the warn-shared rule; also edited by alice (item gh:acme/web#12), carol (item 4)."
+        );
     }
 
     fn ready(item: u64, reference: &str, priority: u8, stale: Option<&str>) -> ReadyLine {

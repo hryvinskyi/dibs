@@ -336,6 +336,46 @@ fn a_session_starts_with_a_brief() {
 }
 
 #[test]
+fn a_brief_names_the_messages_that_ask_me_for_an_ack() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let sent = setup
+        .dibs(&setup.alice, &api)
+        .args([
+            "send",
+            "--to",
+            "bob",
+            "--subject",
+            "Staging is down",
+            "--importance",
+            "urgent",
+            "--ack",
+            "Do not deploy.",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&sent), 0, "{}", text(&sent.stderr));
+    let message = crate::support::json(&sent)["message"]["id"]
+        .as_u64()
+        .unwrap();
+    let out = setup.hook("bob", &api, "session-started", &input(&api, None));
+    let context = reply(&out)["context"].as_str().unwrap().to_owned();
+    assert!(
+        context.contains(&format!(
+            "- urgent from alice: \"Staging is down\" (message {message})"
+        )),
+        "{context}"
+    );
+    let alices = setup.hook("alice", &api, "session-started", &input(&api, None));
+    let context = reply(&alices)["context"].as_str().unwrap().to_owned();
+    assert!(
+        !context.contains("ask for your acknowledgement"),
+        "never one's own message: {context}"
+    );
+}
+
+#[test]
 fn whatever_goes_wrong_a_hook_exits_0_without_a_decision() {
     let setup = Setup::new();
     let api = setup.checkout("api", Some("api"), API_REMOTE);

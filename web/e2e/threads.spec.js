@@ -1,7 +1,8 @@
 // @ts-check
 /**
  * The conversations pages in a real browser: sign in with a token, open a conversation, reply
- * through the form, and see a message posted through the API appear without a reload.
+ * through the form, see a message posted through the API appear without a reload, and acknowledge
+ * a message that asks for it.
  */
 
 import { postMessage, startThread } from './dibs-api.js';
@@ -51,6 +52,48 @@ test('a member signs in, replies in a conversation and sees a new message arrive
   await postMessage(dibs.url, dibs.adminToken, threadId, 'Thanks, shipping it today.');
   await expect(messages.getByText('Thanks, shipping it today.')).toBeVisible();
   await expect(page.locator('body')).toHaveAttribute('data-e2e-marker', 'same-document');
+});
+
+test('a recipient acknowledges an urgent message, and one that arrives live, in the browser', async ({
+  page,
+  dibs,
+}) => {
+  const subject = `Staging is down ${Date.now()}`;
+  const threadId = await startThread(dibs.url, dibs.adminToken, {
+    subject,
+    to: ['bob'],
+    body: 'Do not deploy until I say so.',
+    importance: 'urgent',
+    ack_required: true,
+  });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/threads`);
+  const row = page.getByRole('listitem').filter({ hasText: subject });
+  await expect(row.getByText('Needs your ack')).toBeVisible();
+  await expect(row.getByText('Urgent')).toBeVisible();
+  await row.getByRole('link', { name: subject }).click();
+  await expect(page).toHaveURL(`${dibs.url}/ui/threads/${threadId}`);
+  await expect(page.locator('.thread-head').getByText('Urgent')).toBeVisible();
+
+  const acks = page.getByRole('list', { name: 'Acknowledgements' });
+  await expect(acks.getByText('bob (you)')).toBeVisible();
+  await expect(acks.locator('.ack__wait')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Acknowledge' }).click();
+  await expect(page).toHaveURL(new RegExp(`/ui/threads/${threadId}#m-\\d+$`));
+  await expect(acks.locator('.ack__done')).toContainText('bob (you)');
+  await expect(page.getByRole('button', { name: 'Acknowledge' })).toHaveCount(0);
+
+  // A message that asks arrives live with its badge and its button, and the button works.
+  await postMessage(dibs.url, dibs.adminToken, threadId, 'Still down; confirm you are holding.', {
+    importance: 'high',
+    ack_required: true,
+  });
+  const live = page.locator('.msg').filter({ hasText: 'Still down; confirm you are holding.' });
+  await expect(live.getByText('High')).toBeVisible();
+  await live.getByRole('button', { name: 'Acknowledge' }).click();
+  const reloaded = page.locator('.msg').filter({ hasText: 'Still down; confirm you are holding.' });
+  await expect(reloaded.locator('.ack__done')).toContainText('bob (you)');
 });
 
 test('a token the server does not know is refused on the login page', async ({ page, dibs }) => {

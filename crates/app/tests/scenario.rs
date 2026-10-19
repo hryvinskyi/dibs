@@ -31,6 +31,13 @@ mod scenario {
     use dibs_domain::session::HostName;
     use dibs_domain::settings::SettingsDocument;
 
+    fn unread_only(unread_only: bool) -> dibs_app::use_cases::InboxQuery {
+        dibs_app::use_cases::InboxQuery {
+            unread_only,
+            unacked: false,
+        }
+    }
+
     const SETTINGS: &str = r#"{
         "stale_after": "24h",
         "edit_policy": "require-claim",
@@ -288,11 +295,18 @@ mod scenario {
                     item: Some(ranking),
                     label: SessionLabel::parse("desktop/77aa01bc").unwrap(),
                     body: Body::parse("One line in the rounding helper.\nThanks!").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
             .unwrap();
-        let inbox = app.inbox.execute(&team.alice, true).await.unwrap();
+        let inbox = app
+            .inbox
+            .execute(&team.alice, unread_only(true))
+            .await
+            .unwrap()
+            .threads;
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].thread.record.id, started.thread.record.id);
         let thread = app
@@ -315,18 +329,29 @@ mod scenario {
                     thread: started.thread.record.id,
                     label: SessionLabel::parse("web").unwrap(),
                     body: Body::parse("Go ahead.").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
                 },
             )
             .await
             .unwrap();
         assert!(
             app.inbox
-                .execute(&team.alice, true)
+                .execute(&team.alice, unread_only(true))
                 .await
                 .unwrap()
+                .threads
                 .is_empty()
         );
-        assert_eq!(app.inbox.execute(&team.bob, true).await.unwrap().len(), 1);
+        assert_eq!(
+            app.inbox
+                .execute(&team.bob, unread_only(true))
+                .await
+                .unwrap()
+                .threads
+                .len(),
+            1
+        );
 
         // Alice goes quiet for a day; Bob's heartbeats keep his own claim live.
         team.fakes.clock.advance(Duration::hours(12));
@@ -370,7 +395,12 @@ mod scenario {
             .await
             .unwrap();
         assert_eq!(taken.takeover.previous.member, team.alice.member);
-        let alices = app.inbox.execute(&team.alice, true).await.unwrap();
+        let alices = app
+            .inbox
+            .execute(&team.alice, unread_only(true))
+            .await
+            .unwrap()
+            .threads;
         assert_eq!(alices.len(), 1);
         assert_eq!(alices[0].thread.record.id, taken.thread);
         let after_takeover = app

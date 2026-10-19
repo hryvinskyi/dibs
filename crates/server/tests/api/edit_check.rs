@@ -96,7 +96,7 @@ async fn a_shared_file_names_who_else_edited_it() {
         second.body["verdicts"][0],
         json!({"repo": "api", "path": "Cargo.lock", "verdict": "allowed_with_note",
                "rule": "warn-shared", "note": "merge with care",
-               "touched_by": [{"holder": "alice", "item": team.alice_item}]})
+               "touched_by": [{"holder": "alice", "item": team.alice_item, "item_ref": null}]})
     );
 }
 
@@ -224,6 +224,8 @@ async fn a_grant_turns_held_into_granted_until_revoked() {
     assert_eq!(given.body["grant"]["to"], "bob");
     assert_eq!(given.body["grant"]["area"], "api:billing");
     assert_eq!(given.body["grant"]["item"], team.bob_item);
+    assert_eq!(given.body["item"]["id"], team.bob_item);
+    assert_eq!(given.body["item"]["title"], "Search");
     let again = team.world.post(&team.alice, "/v1/grants", body).await;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(again.body["created"], false);

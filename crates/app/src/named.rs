@@ -16,7 +16,7 @@ use dibs_domain::event::Event;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::item::{ExternalRef, Title};
-use dibs_domain::message::Recipients;
+use dibs_domain::message::{Importance, Recipients};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use crate::error::AppError;
@@ -33,6 +33,15 @@ pub struct NamedClaim {
     pub claim: Claim,
     /// The handle of `claim.member`.
     pub holder: Handle,
+}
+
+/// A claim that ended, with its holder's handle and the item it was on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndedClaim {
+    /// The claim, as it was when it ended.
+    pub claim: NamedClaim,
+    /// The item.
+    pub item: ItemName,
 }
 
 /// A work item with its creator's handle.
@@ -97,6 +106,9 @@ pub struct NamedVerdict {
     /// For [`Verdict::AllowedWithNote`], the handles of its `touched_by`, in the same order; empty
     /// for every other verdict.
     pub touched_by: Vec<Handle>,
+    /// The references of the items of `touched_by`, in the same order: `None` for an item without
+    /// one.
+    pub touched_refs: Vec<Option<ExternalRef>>,
 }
 
 /// A conversation with the handles of its author and recipients.
@@ -131,6 +143,10 @@ pub struct NamedSummary {
     pub unread: u64,
     /// When its newest message was written.
     pub last_message_at: Option<OffsetDateTime>,
+    /// The highest importance among its messages.
+    pub importance: Importance,
+    /// How many of its messages ask the reader for an acknowledgement they have not given.
+    pub awaiting_ack: u64,
 }
 
 /// An event of the log with the handles of the members it names.
@@ -320,13 +336,20 @@ impl Names {
         })
     }
 
-    /// The summary with the handles of its thread's members.
-    pub(crate) fn summary(&self, summary: ThreadSummary) -> Result<NamedSummary, AppError> {
+    /// The summary with the handles of its thread's members, and how many of its messages await
+    /// the reader's acknowledgement.
+    pub(crate) fn summary(
+        &self,
+        summary: ThreadSummary,
+        awaiting_ack: u64,
+    ) -> Result<NamedSummary, AppError> {
         Ok(NamedSummary {
             thread: self.thread(summary.thread)?,
             messages: summary.messages,
             unread: summary.unread,
             last_message_at: summary.last_message_at,
+            importance: summary.importance,
+            awaiting_ack,
         })
     }
 
@@ -350,11 +373,13 @@ impl Names {
     }
 
     /// The verdict with the handles of the members it names; `item_ref` is the reference of the
-    /// item it names, read by the caller.
+    /// item it names and `touched_refs` those of the items its `touched_by` names, read by the
+    /// caller.
     pub(crate) fn verdict(
         &self,
         verdict: PathVerdict,
         item_ref: Option<ExternalRef>,
+        touched_refs: Vec<Option<ExternalRef>>,
     ) -> Result<NamedVerdict, AppError> {
         let (member, touched_by) = match &verdict.verdict {
             Verdict::HeldBy { member, .. } => (Some(self.handle(*member)?), Vec::new()),
@@ -373,6 +398,7 @@ impl Names {
             member,
             item_ref,
             touched_by,
+            touched_refs,
         })
     }
 }

@@ -36,6 +36,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Check(args) => check::check(args, ctx).await,
         Command::Send(args) => messages::send(args, ctx).await,
         Command::Inbox(args) => messages::inbox(args, ctx).await,
+        Command::Ack(args) => messages::ack(args, ctx).await,
         Command::Thread(args) => messages::thread(args, ctx).await,
         Command::Read(args) => messages::read(args, ctx).await,
         Command::Sync(args) => sync::sync(args, ctx).await,

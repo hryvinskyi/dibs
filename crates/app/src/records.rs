@@ -14,7 +14,7 @@ use dibs_domain::item::{
     ExternalRef, ItemMeta, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
 };
 use dibs_domain::member::Role;
-use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
+use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
 use dibs_domain::ready::Candidate;
 use dibs_domain::session::HostName;
 
@@ -266,8 +266,21 @@ pub struct MessageRecord {
     pub label: SessionLabel,
     /// Its text.
     pub body: Body,
+    /// How much it asks for its recipients' attention.
+    pub importance: Importance,
+    /// Whether each of its recipients is asked to acknowledge it.
+    pub ack_required: bool,
     /// When it was written.
     pub created_at: OffsetDateTime,
+}
+
+/// That a member read a message, and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadMark {
+    /// The reader.
+    pub member: MemberId,
+    /// When they read it.
+    pub at: OffsetDateTime,
 }
 
 /// A thread with its message counts, as one reader sees them.
@@ -281,6 +294,8 @@ pub struct ThreadSummary {
     pub unread: u64,
     /// When its newest message was written.
     pub last_message_at: Option<OffsetDateTime>,
+    /// The highest importance among its messages.
+    pub importance: Importance,
 }
 
 /// An item completed, as the log records it: the item, the member who held it, and when.

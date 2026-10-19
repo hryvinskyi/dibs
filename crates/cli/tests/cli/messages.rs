@@ -70,3 +70,145 @@ fn a_message_is_sent_found_in_the_inbox_read_and_marked() {
         .unwrap();
     assert_eq!(status(&missing), 1);
 }
+
+#[test]
+fn an_urgent_message_that_asks_is_acked_once_from_the_command_line() {
+    let setup = Setup::new();
+    let dir = setup.elsewhere();
+    let sent = setup
+        .dibs(&setup.alice, &dir)
+        .args([
+            "send",
+            "--to",
+            "bob",
+            "--subject",
+            "Staging is down",
+            "--importance",
+            "urgent",
+            "--ack",
+            "Do not deploy until I say so.",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&sent), 0, "{}", text(&sent.stderr));
+    assert!(
+        text(&sent.stdout)
+            .contains("It is marked urgent, and each recipient is asked to acknowledge it."),
+        "{}",
+        text(&sent.stdout)
+    );
+
+    let waiting = setup
+        .dibs(&setup.bob, &dir)
+        .args(["inbox", "--unacked", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&waiting), 0);
+    let answer = json(&waiting);
+    let message = answer["unacked"][0]["message"]["id"].as_u64().unwrap();
+    assert_eq!(answer["unacked"][0]["message"]["importance"], "urgent");
+    let listed = setup
+        .dibs(&setup.bob, &dir)
+        .args(["inbox", "--unacked"])
+        .output()
+        .unwrap();
+    let listed = text(&listed.stdout);
+    assert!(
+        listed.contains("(from alice, urgent, 1 unread, 1 to ack)"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!("- message {message} from alice in #"))
+            && listed.contains(&format!("Staging is down [urgent]; dibs ack {message}")),
+        "{listed}"
+    );
+
+    let thread = answer["unacked"][0]["thread"]["id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let shown = setup
+        .dibs(&setup.bob, &dir)
+        .args(["thread", &thread])
+        .output()
+        .unwrap();
+    let shown = text(&shown.stdout);
+    assert!(
+        shown.contains(&format!("message {message}, alice")),
+        "{shown}"
+    );
+    assert!(shown.contains("[urgent, asks for an ack]"), "{shown}");
+    assert!(shown.contains("Acknowledgements: bob waiting."), "{shown}");
+
+    let acked = setup
+        .dibs(&setup.bob, &dir)
+        .args(["ack", &message.to_string()])
+        .output()
+        .unwrap();
+    assert_eq!(status(&acked), 0, "{}", text(&acked.stderr));
+    assert!(
+        text(&acked.stdout).starts_with(&format!(
+            "Acknowledged message {message} in conversation #{thread}"
+        )),
+        "{}",
+        text(&acked.stdout)
+    );
+    let again = setup
+        .dibs(&setup.bob, &dir)
+        .args(["ack", &message.to_string(), "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&again), 0, "a repeat is no failure");
+    assert_eq!(json(&again)["created"], false);
+    assert_eq!(json(&again)["ack"]["message"], message);
+    let repeated = setup
+        .dibs(&setup.bob, &dir)
+        .args(["ack", &message.to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        text(&repeated.stdout).starts_with(&format!(
+            "You acknowledged message {message} in conversation #{thread} already, at "
+        )),
+        "{}",
+        text(&repeated.stdout)
+    );
+    let by_author = setup
+        .dibs(&setup.alice, &dir)
+        .args(["ack", &message.to_string()])
+        .output()
+        .unwrap();
+    assert_eq!(status(&by_author), 1);
+    assert!(
+        text(&by_author.stderr).contains("Only a member this message was sent to"),
+        "{}",
+        text(&by_author.stderr)
+    );
+    let nothing = setup
+        .dibs(&setup.bob, &dir)
+        .args(["inbox", "--unacked"])
+        .output()
+        .unwrap();
+    assert!(text(&nothing.stdout).contains("No message waits for your acknowledgement."));
+    let not_an_id = setup
+        .dibs(&setup.bob, &dir)
+        .args(["ack", "zero"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&not_an_id), 2, "clap refuses it");
+    let unknown = setup
+        .dibs(&setup.alice, &dir)
+        .args([
+            "send",
+            "--to",
+            "bob",
+            "--subject",
+            "s",
+            "--importance",
+            "loud",
+            "b",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&unknown), 2);
+}

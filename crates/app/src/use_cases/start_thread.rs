@@ -6,7 +6,7 @@ use std::sync::Arc;
 use dibs_domain::event::{EventKind, MessagePosted, ThreadStarted};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
-use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
+use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -39,6 +39,10 @@ pub struct StartThreadInput {
     pub label: SessionLabel,
     /// The first message.
     pub body: Body,
+    /// How much the first message asks for its recipients' attention.
+    pub importance: Importance,
+    /// Whether each recipient is asked to acknowledge the first message.
+    pub ack_required: bool,
 }
 
 /// The new thread and its first message, their members named.
@@ -116,6 +120,8 @@ impl StartThread {
             author: actor.member,
             label: input.label,
             body: input.body,
+            importance: input.importance,
+            ack_required: input.ack_required,
             created_at: now,
         };
         work.insert_thread(project, &thread).await?;
@@ -160,6 +166,8 @@ mod tests {
             item: None,
             label: SessionLabel::parse("laptop/4f2a91c0").unwrap(),
             body: Body::parse(body).unwrap(),
+            importance: Importance::Normal,
+            ack_required: false,
         }
     }
 
