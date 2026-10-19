@@ -98,14 +98,22 @@ pub async fn stream(
 ) -> Result<Response, ApiError> {
     actor.require_person()?;
     let Query(query) = query?;
+    let from = stream_from(&headers, &query)?;
+    state.streams.open(state.app.clone(), actor, from).await
+}
+
+/// Where a stream asked for with these headers and this query starts; see [`stream_start`].
+///
+/// # Errors
+/// `invalid_request` naming the header or `after` when it is not a cursor.
+pub fn stream_from(headers: &HeaderMap, query: &StreamQuery) -> Result<EventCursor, ApiError> {
     let header = match headers.get(LAST_EVENT_ID) {
         Some(value) => Some(value.to_str().map_err(|_| {
             ApiError::invalid_field("Last-Event-ID", &"a cursor is written in ASCII digits")
         })?),
         None => None,
     };
-    let from = stream_start(header, query.after.as_deref())?;
-    state.streams.open(state.app.clone(), actor, from).await
+    stream_start(header, query.after.as_deref())
 }
 
 /// Where a stream starts: the header wins over the query; with neither, at the newest event. An

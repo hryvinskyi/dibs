@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Board{% endblock %}
+{% block main %}
+<main id="main" class="page" data-status-view data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-after="{{ after }}" data-changed-kinds="{{ changed_kinds }}">
+<div class="banner banner--info" role="status" data-changed hidden>
+  <span class="banner__icon" aria-hidden="true">↻</span>
+  <p class="banner__text">Something changed — reload</p>
+  <a class="banner__action" href="{{ reload }}">Reload</a>
+</div>
+{% call ui::session_ended(updated) %}{% endcall %}
+<div class="page-head"><h1>Board</h1><p class="page-head__meta">{% if !repos.is_empty() %}{{ repos|join(", ") }} · {% endif %}updated {% call ui::time(updated) %}{% endcall %}</p></div>
+<form class="filters" method="get" action="/ui/board" aria-label="Filter the board">
+  <div class="form-row"><label class="label" for="f-area">Area</label><span class="select-wrap"><select class="select" id="f-area" name="area"><option value="">All areas</option>{% for area in areas %}<option{% if area.as_str() == filter_area.as_str() %} selected{% endif %}>{{ area }}</option>{% endfor %}</select></span></div>
+  <div class="form-row"><label class="label" for="f-member">Member</label><span class="select-wrap"><select class="select" id="f-member" name="member"><option value="">Everyone</option>{% for member in members %}<option{% if member.as_str() == filter_member.as_str() %} selected{% endif %}>{{ member }}</option>{% endfor %}</select></span></div>
+  <div class="actions"><button class="btn" type="submit">Apply</button><a href="/ui/board">Clear</a></div>
+</form>
+<div class="board">
+<section class="column" aria-labelledby="c-ready">
+  <div class="column__head"><h2 id="c-ready">Ready</h2><span class="column__count">{{ ready.len() }}</span></div>
+  <ul class="cards">
+{% for card in ready %}<li class="card">
+  <div class="card__top"><span class="ref">{{ card.reference }}</span></div>
+  <p class="card__title">{{ card.title }}</p>
+</li>
+{% endfor %}  </ul>
+</section>
+<section class="column" aria-labelledby="c-prog">
+  <div class="column__head"><h2 id="c-prog">In progress</h2><span class="column__count">{{ in_progress.len() }}</span></div>
+  <ul class="cards">
+{% for row in in_progress %}<li class="card">
+  <div class="card__top"><span class="ref">{{ row.reference }}</span></div>
+  <p class="card__title">{{ row.title }}</p>
+  {% call ui::chips(row.areas) %}{% endcall %}
+  <p class="card__meta"><span class="member">{{ row.holder }}</span><span>heartbeat {% call ui::time(row.seen) %}{% endcall %}</span></p>
+</li>
+{% endfor %}  </ul>
+</section>
+<section class="column" aria-labelledby="c-stale">
+  <div class="column__head"><h2 id="c-stale">Stale</h2><span class="column__count">{{ stale.len() }}</span></div>
+  <ul class="cards">
+{% for row in stale %}<li class="card card--stale">
+  <div class="card__top"><span class="ref">{{ row.reference }}</span><span class="badge badge--warn"><span class="badge__icon badge__icon--ring-dashed" aria-hidden="true"></span>Stale</span></div>
+  <p class="card__title">{{ row.title }}</p>
+  {% call ui::chips(row.areas) %}{% endcall %}
+  <p class="card__meta"><span class="member">{{ row.holder }}</span><span>last seen {% call ui::time(row.seen) %}{% endcall %}</span></p>
+  {% if !row.mine %}{% call ui::takeover(row, "b-", "board", chrome.csrf) %}{% endcall %}{% endif %}
+</li>
+{% endfor %}  </ul>
+</section>
+<section class="column" aria-labelledby="c-done">
+  <div class="column__head"><h2 id="c-done">Done today{% if day_in_utc %} <span class="hint">since 00:00 UTC</span>{% endif %}</h2><span class="column__count">{{ done.len() }}</span></div>
+  <ul class="cards">
+{% for card in done %}<li class="card card--done">
+  <div class="card__top"><span class="ref">{{ card.reference }}</span><span class="badge badge--neutral"><span class="badge__icon badge__icon--check" aria-hidden="true"></span>Done</span></div>
+  <p class="card__title">{{ card.title }}</p>
+  <p class="card__meta"><span class="member">{{ card.member }}</span><span>{% call ui::time(card.at) %}{% endcall %}</span></p>
+</li>
+{% endfor %}  </ul>
+</section>
+</div>
+</main>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% macro time(m) %}<span class="time"><time datetime="{{ m.iso }}" data-clock>{{ m.clock }}</time> <span class="time__rel">· {% match m.ago %}{% when Ago::JustNow %}just now{% when Ago::Minutes(n) %}{{ n }} min ago{% when Ago::HoursMinutes(h, n) %}{{ h }} h {{ n }} min ago{% when Ago::Hours(h) %}{{ h }} h ago{% when Ago::Days(d) %}{{ d }} d ago{% endmatch %}</span></span>{% endmacro %}
+
+{% macro span(s) %}{% if s.days > 0 %}{{ s.days }} d{% if s.hours > 0 || s.minutes > 0 %} {% endif %}{% endif %}{% if s.hours > 0 %}{{ s.hours }} h{% if s.minutes > 0 %} {% endif %}{% endif %}{% if s.minutes > 0 %}{{ s.minutes }} min{% endif %}{% endmacro %}
+
+{% macro chips(areas) %}{% if areas.is_empty() %}<span class="muted">No areas</span>{% else %}<ul class="chips" aria-label="Areas">{% for area in areas.iter() %}<li><span class="chip">{{ area }}</span></li>{% endfor %}</ul>{% endif %}{% endmacro %}
+
+{% macro takeover(row, prefix, back, csrf) %}<details class="takeover">
+  <summary class="btn btn--small">Take over</summary>
+  <form class="takeover__form" method="post" action="/ui/items/{{ row.item_id }}/takeover">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="back" value="{{ back }}">
+    <div class="form-row">
+      <label class="label" for="reason-{{ prefix }}{{ row.item_id }}">Reason</label>
+      <textarea class="textarea textarea--short" id="reason-{{ prefix }}{{ row.item_id }}" name="reason" required></textarea>
+      <p class="hint">{{ row.holder }} is told in the thread for {{ row.reference }}.</p>
+    </div>
+    <div class="actions"><button class="btn btn--danger" type="submit">Take over claim</button></div>
+  </form>
+</details>{% endmacro %}
+
+{% macro session_ended(rendered) %}<div class="banner banner--danger" role="alert" data-session-ended hidden>
+  <span class="banner__icon" aria-hidden="true">▲</span>
+  <p class="banner__text">Your session ended — sign in again</p>
+  <a class="banner__action" href="/ui/login">Sign in</a>
+</div>
+<p class="hint" data-session-ended hidden>What's below is from {% call time(rendered) %}{% endcall %} and no longer updates.</p>{% endmacro %}

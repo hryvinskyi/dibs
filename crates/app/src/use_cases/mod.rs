@@ -18,6 +18,7 @@ mod grant_endings;
 mod heartbeat;
 mod inbox;
 mod init_project;
+mod list_completed;
 mod list_events;
 mod list_items;
 mod list_members;
@@ -57,6 +58,7 @@ pub use grant::{Grant, GrantInput, GrantResult};
 pub use heartbeat::{Heartbeat, HeartbeatOutcome};
 pub use inbox::Inbox;
 pub use init_project::{InitProject, InitProjectInput, InitializedProject};
+pub use list_completed::{CompletedItem, ListCompleted, MAX_COMPLETED};
 pub use list_events::{EventCursor, EventPage, ListEvents, MAX_PAGE};
 pub use list_items::{ItemQuery, ListItems};
 pub use list_members::ListMembers;
@@ -94,6 +96,8 @@ pub struct UseCases {
     pub create_item: CreateItem,
     /// See [`ListItems`].
     pub list_items: ListItems,
+    /// See [`ListCompleted`].
+    pub list_completed: ListCompleted,
     /// See [`GetItem`].
     pub get_item: GetItem,
     /// See [`ClaimItem`].
@@ -159,6 +163,7 @@ impl UseCases {
             heartbeat: Heartbeat::new(deps),
             create_item: CreateItem::new(deps),
             list_items: ListItems::new(deps),
+            list_completed: ListCompleted::new(deps),
             get_item: GetItem::new(deps),
             claim_item: ClaimItem::new(deps),
             take_over: TakeOver::new(deps),

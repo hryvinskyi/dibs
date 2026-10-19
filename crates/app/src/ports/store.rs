@@ -26,8 +26,8 @@ use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
 
 use crate::records::{
-    GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord, ProjectRecord,
-    SessionRecord, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
+    CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
+    ProjectRecord, SessionRecord, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -307,6 +307,14 @@ pub trait EventRows: Send {
     ) -> StoreResult<Vec<Event>>;
     /// The id of the newest event.
     async fn latest_event(&mut self, project: ProjectId) -> StoreResult<Option<EventId>>;
+    /// Up to `limit` completions the log records at or after `since`, newest first (by time, then
+    /// by position in the log).
+    async fn completions_since(
+        &mut self,
+        project: ProjectId,
+        since: OffsetDateTime,
+        limit: usize,
+    ) -> StoreResult<Vec<CompletionRecord>>;
 }
 
 /// The project's settings document.

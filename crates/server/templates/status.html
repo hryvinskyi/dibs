@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Status{% endblock %}
+{% block main %}
+<main id="main" class="page" data-status-view data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-after="{{ after }}" data-changed-kinds="{{ changed_kinds }}">
+<div class="banner banner--info" role="status" data-changed hidden>
+  <span class="banner__icon" aria-hidden="true">↻</span>
+  <p class="banner__text">Something changed — reload</p>
+  <a class="banner__action" href="/ui/">Reload</a>
+</div>
+{% call ui::session_ended(updated) %}{% endcall %}
+<div class="page-head"><h1>Status</h1><p class="page-head__meta">{% if live.is_empty() && stale.is_empty() %}Nothing claimed{% else %}{{ live.len() }} live claim{% if live.len() != 1 %}s{% endif %} · {{ stale.len() }} stale{% endif %} · updated {% call ui::time(updated) %}{% endcall %}</p></div>
+<section class="section" aria-labelledby="live">
+  <div class="section-head"><h2 id="live">Live claims</h2><p class="section-head__hint">Heartbeat within the last {% call ui::span(stale_after) %}{% endcall %}</p></div>
+  {% if live.is_empty() %}<div class="empty"><p class="empty__title">No live claims</p><p>When someone or an agent claims an item, it shows up here with its areas.</p></div>{% else %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th scope="col">Item</th><th scope="col">Member</th><th scope="col">Areas</th><th scope="col">Since</th><th scope="col">Last heartbeat</th></tr></thead>
+    <tbody>
+      {% for row in live %}<tr><td><span class="ref">{{ row.reference }}</span><span class="item-title">{{ row.title }}</span></td><td><span class="member">{{ row.holder }}</span><span class="session">{{ row.host }}</span></td><td>{% call ui::chips(row.areas) %}{% endcall %}</td><td>{% call ui::time(row.since) %}{% endcall %}</td><td>{% call ui::time(row.seen) %}{% endcall %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>{% endif %}
+</section>
+<section class="section" aria-labelledby="stale">
+  <div class="section-head"><h2 id="stale">Stale claims</h2><p class="section-head__hint">No heartbeat for {% call ui::span(stale_after) %}{% endcall %} or more</p></div>
+  {% if stale.is_empty() %}<div class="empty"><p class="empty__title">No stale claims</p><p>Every claim has a recent heartbeat.</p></div>{% else %}
+  <div class="table-wrap">
+  <table class="table">
+    <thead><tr><th scope="col">Item</th><th scope="col">Member</th><th scope="col">Areas</th><th scope="col">Last seen</th><th scope="col"><span class="visually-hidden">Action</span></th></tr></thead>
+    <tbody>
+      {% for row in stale %}<tr><td><span class="ref">{{ row.reference }}</span><span class="item-title">{{ row.title }}</span></td><td><span class="member">{{ row.holder }}</span><span class="session">{{ row.host }}</span></td><td>{% call ui::chips(row.areas) %}{% endcall %}</td><td><span class="badge badge--warn"><span class="badge__icon badge__icon--ring-dashed" aria-hidden="true"></span>Stale</span> {% call ui::time(row.seen) %}{% endcall %}</td><td>{% if !row.mine %}{% call ui::takeover(row, "", "status", chrome.csrf) %}{% endcall %}{% endif %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>{% endif %}
+</section>
+<section class="section" aria-labelledby="holds">
+  <div class="section-head"><h2 id="holds">Holds per area</h2><p class="section-head__hint">Area → holder → item</p></div>
+  {% if holds.is_empty() %}<div class="empty"><p class="empty__title">No areas held</p><p>All areas are free to edit.</p></div>{% else %}
+  <ul class="holds">
+  {% for hold in holds %}<li class="hold"><span class="hold__area"><span class="chip">{{ hold.area }}</span></span><span class="hold__arrow" aria-label="held by">→</span><span class="member">{{ hold.holder }}</span><span class="hold__arrow hold__arrow--2" aria-label="for">→</span><span class="hold__item"><span class="ref">{{ hold.reference }}</span></span></li>
+  {% endfor %}
+</ul>{% endif %}
+</section>
+</main>
+{% endblock %}

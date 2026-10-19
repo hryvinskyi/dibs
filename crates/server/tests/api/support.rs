@@ -79,12 +79,17 @@ impl World {
     /// A world with these network and stream options.
     pub async fn with(options: HttpOptions, stream: StreamOptions) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        let fakes = Fakes::new(START);
+        let options = HttpOptions {
+            clock: fakes.clock.clone(),
+            tokens: fakes.tokens.clone(),
+            ..options
+        };
         let store = Arc::new(
             SqliteStore::open(&dir.path().join("dibs.db"))
                 .await
                 .unwrap(),
         );
-        let fakes = Fakes::new(START);
         let notifier = Arc::new(BroadcastNotifier::new(64));
         let deps = Dependencies {
             store: store.clone(),

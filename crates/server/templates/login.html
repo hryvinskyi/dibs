@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Sign in · dibs</title>
+<link rel="stylesheet" href="/ui/static/{{ assets }}/dibs.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<main id="main" class="auth">
+  <div class="auth__box">
+    <span class="wordmark">dibs</span>
+    <form class="auth__panel" method="post" action="/ui/login">
+      <h1>Sign in</h1>
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {% if let Some(problem) = problem %}<div class="banner banner--danger" role="alert"><span class="banner__icon" aria-hidden="true">▲</span><p class="banner__text">{% match problem %}{% when SignInProblem::BadToken %}That token wasn't recognised; check it was copied in full and try again.{% when SignInProblem::Integration %}That token belongs to an integration, and integrations can't sign in here; use your own token.{% when SignInProblem::FormExpired %}This sign-in form expired; paste your token again.{% when SignInProblem::TooManyAttempts(minutes) %}Too many attempts with an unknown token from this address; try again in {{ minutes }} min.{% endmatch %}</p></div>{% endif %}
+      <div class="form-row">
+        <label class="label" for="token">Paste your token</label>
+        <input class="input input--mono" id="token" name="token" type="password" autocomplete="off" spellcheck="false" required{% if problem.is_some() %} aria-invalid="true"{% endif %} aria-describedby="token-hint">
+        <p class="hint" id="token-hint">Run <code>dibs token</code> in a terminal to get one.</p>
+      </div>
+      <button class="btn btn--primary btn--block" type="submit">Sign in</button>
+    </form>
+  </div>
+</main>
+</body>
+</html>

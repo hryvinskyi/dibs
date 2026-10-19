@@ -89,6 +89,28 @@ mod sqlite_file {
     }
 
     #[tokio::test]
+    async fn completions_since_a_time_are_read_through_their_index() {
+        let (_dir, path) = file();
+        SqliteStore::open(&path).await.unwrap().close().await;
+        let mut connection = raw(&path).await;
+        let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT id FROM events \
+             WHERE project_id = 1 AND kind = 'completed' AND at >= 0 \
+             ORDER BY at DESC, id DESC LIMIT 10",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        let plan = steps
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(plan.contains("events_by_kind_and_time"), "{plan}");
+        assert!(!plan.contains("SCAN events"), "{plan}");
+    }
+
+    #[tokio::test]
     async fn two_stores_open_one_file_in_turn_and_share_its_rows() {
         let (_dir, path) = file();
         let first = SqliteStore::open(&path).await.unwrap();

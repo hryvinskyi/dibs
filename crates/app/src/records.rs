@@ -196,6 +196,17 @@ pub struct ThreadSummary {
     pub last_message_at: Option<OffsetDateTime>,
 }
 
+/// An item completed, as the log records it: the item, the member who held it, and when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionRecord {
+    /// The item.
+    pub item: ItemId,
+    /// The member whose claim completed it.
+    pub member: MemberId,
+    /// When.
+    pub at: OffsetDateTime,
+}
+
 /// A browser session, kept as the hash of its id and bound to the token that opened it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiSessionRecord {

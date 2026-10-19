@@ -1,4 +1,5 @@
-//! The HTTP router: every route, the layers around them, and the state the handlers share.
+//! The HTTP router: every route, the API's and the browser pages', the layers around them, and the
+//! state the handlers share.
 //!
 //! Every answer carries `Cache-Control: no-store` unless its handler set its own, so a cache in
 //! front never keeps one. A request body is read up to [`BODY_LIMIT`]; a request is answered within
@@ -6,6 +7,7 @@
 //! answer starts, not the stream that follows. The request log names the method and the path only,
 //! never a header.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,13 +25,16 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
+use dibs_app::ports::{Clock, TokenGenerator};
 use dibs_app::use_cases::UseCases;
 
+use crate::adapters::{OsTokens, SystemClock};
 use crate::client_ip::ClientIpPolicy;
 use crate::error::ApiError;
 use crate::rate_limit::{AuthLimiter, LimitPolicy};
 use crate::routes;
 use crate::stream::EventStreams;
+use crate::ui;
 
 /// The largest request body read, in bytes. A message of 16 KiB grows on the wire — JSON escapes a
 /// control character to six bytes, a form percent-encodes a non-ASCII byte to three — and still
@@ -39,8 +44,8 @@ pub const BODY_LIMIT: usize = 128 * 1024;
 /// How long a request may take when nothing else is configured.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How the router treats the network around it.
-#[derive(Debug, Clone)]
+/// How the router treats the network around it, and the clock and secrets its pages use.
+#[derive(Clone)]
 pub struct HttpOptions {
     /// How the client's address is told.
     pub client_ip: ClientIpPolicy,
@@ -48,6 +53,10 @@ pub struct HttpOptions {
     pub limits: LimitPolicy,
     /// How long a request may take.
     pub timeout: Duration,
+    /// The time the pages show and count from.
+    pub clock: Arc<dyn Clock>,
+    /// Where the secrets of the sign-in form come from.
+    pub tokens: Arc<dyn TokenGenerator>,
 }
 
 impl Default for HttpOptions {
@@ -56,7 +65,19 @@ impl Default for HttpOptions {
             client_ip: ClientIpPolicy::new(None),
             limits: LimitPolicy::default(),
             timeout: REQUEST_TIMEOUT,
+            clock: Arc::new(SystemClock),
+            tokens: Arc::new(OsTokens),
         }
+    }
+}
+
+impl fmt::Debug for HttpOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpOptions")
+            .field("client_ip", &self.client_ip)
+            .field("limits", &self.limits)
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
     }
 }
 
@@ -71,6 +92,10 @@ pub struct AppState {
     pub(crate) client_ip: Arc<ClientIpPolicy>,
     /// The event streams.
     pub(crate) streams: EventStreams,
+    /// The time the pages show and count from.
+    pub(crate) clock: Arc<dyn Clock>,
+    /// Where the secrets of the sign-in form come from.
+    pub(crate) tokens: Arc<dyn TokenGenerator>,
 }
 
 /// The router over these use cases, its event streams woken and ended through `streams`.
@@ -80,6 +105,8 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         limiter: Arc::new(AuthLimiter::new(options.limits)),
         client_ip: Arc::new(options.client_ip),
         streams,
+        clock: options.clock,
+        tokens: options.tokens,
     };
     let api = Router::new()
         .route("/health", get(routes::health))
@@ -124,6 +151,7 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
             "/v1/admin/items/{id}/force-release",
             post(routes::admin::force_release),
         )
+        .merge(ui::routes())
         .fallback(no_route)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state);
