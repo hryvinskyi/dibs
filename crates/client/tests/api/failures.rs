@@ -13,7 +13,14 @@ use crate::support::{World, client, run};
 fn nothing_listening_is_a_network_failure() {
     let url = dibs_test_server::unreachable().unwrap();
     let error = run(client(&url, "dibs_token").me()).unwrap_err();
-    assert!(matches!(error, ClientError::Network { .. }), "{error:?}");
+    // A closed port refuses at once on Unix; on Windows the connect retries until it times out.
+    assert!(
+        matches!(
+            error,
+            ClientError::Network { .. } | ClientError::Timeout { .. }
+        ),
+        "{error:?}"
+    );
     assert!(error.is_unavailable());
     assert!(error.to_string().contains(&url), "{error}");
 }
