@@ -1,5 +1,7 @@
 //! A store held in memory. One transaction runs at a time: `begin` waits for the previous one to end,
-//! the transaction works on a copy, and only a commit puts the copy in place.
+//! the transaction works on a copy, and only a commit puts the copy in place — unless a record of the
+//! copy refers to one that does not exist, in which case the commit fails as a backend failure and
+//! keeps nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -16,7 +18,7 @@ use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
 };
 use dibs_domain::item::{ExternalRef, ItemStatus};
-use dibs_domain::message::SessionLabel;
+use dibs_domain::message::{Recipients, SessionLabel};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
 
@@ -94,12 +96,111 @@ fn outage() -> StoreError {
     StoreError::Backend(Box::new(std::io::Error::other("the store went away")))
 }
 
+fn dangling(what: &str) -> StoreError {
+    StoreError::Backend(Box::new(std::io::Error::other(format!(
+        "{what} refers to a record that does not exist"
+    ))))
+}
+
+impl State {
+    /// The first record that refers to a record of its project that does not exist, if any. Every
+    /// reference is to a record of the same project; references are checked as a whole when a
+    /// transaction commits, so a transaction may write its records in any order.
+    fn dangling_reference(&self) -> Option<&'static str> {
+        let project = |p: &ProjectId| self.projects.contains_key(p);
+        let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
+        let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
+        let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
+        let checks: [(&'static str, bool); 14] = [
+            ("a member", self.members.keys().all(|(p, _)| project(p))),
+            (
+                "a token",
+                self.tokens
+                    .values()
+                    .all(|t| project(&t.project) && member(t.project, t.record.member)),
+            ),
+            (
+                "a session",
+                self.sessions.iter().all(|((p, _), s)| member(*p, s.member)),
+            ),
+            (
+                "an item",
+                self.items
+                    .iter()
+                    .all(|((p, _), i)| member(*p, i.created_by)),
+            ),
+            (
+                "a claim",
+                self.claims.iter().all(|((p, i), c)| {
+                    item(*p, *i)
+                        && member(*p, c.member)
+                        && self.sessions.contains_key(&(*p, c.session))
+                }),
+            ),
+            (
+                "a shared path",
+                self.shared.iter().all(|(p, s)| item(*p, s.claim)),
+            ),
+            (
+                "a grant",
+                self.grants.iter().all(|((p, _), g)| {
+                    item(*p, g.grant.item) && member(*p, g.grant.from) && member(*p, g.grant.to)
+                }),
+            ),
+            (
+                "a thread",
+                self.threads
+                    .iter()
+                    .all(|((p, _), t)| member(*p, t.author) && t.item.is_none_or(|i| item(*p, i))),
+            ),
+            (
+                "a thread's recipient",
+                self.threads.iter().all(|((p, _), t)| match &t.recipients {
+                    Recipients::Project => true,
+                    Recipients::Members(members) => members.iter().all(|m| member(*p, *m)),
+                }),
+            ),
+            (
+                "a message",
+                self.messages
+                    .iter()
+                    .all(|((p, _), m)| thread(*p, m.thread) && member(*p, m.author)),
+            ),
+            (
+                "a read mark",
+                self.reads.iter().all(|(p, m, message)| {
+                    member(*p, *m) && self.messages.contains_key(&(*p, *message))
+                }),
+            ),
+            ("an event", self.events.iter().all(|e| project(&e.project))),
+            ("a settings document", self.settings.keys().all(project)),
+            (
+                "a browser session",
+                self.ui_sessions.values().all(|s| {
+                    member(s.project, s.record.member)
+                        && self
+                            .tokens
+                            .get(&s.record.token)
+                            .is_some_and(|t| t.project == s.project)
+                }),
+            ),
+        ];
+        checks
+            .into_iter()
+            .find(|(_, holds)| !holds)
+            .map(|(what, _)| what)
+    }
+}
+
 #[async_trait]
 impl Tx for MemoryTx {
     async fn commit(self: Box<Self>) -> StoreResult<()> {
         let mut this = *self;
         if this.fail_commit.swap(false, Ordering::SeqCst) {
             return Err(outage());
+        }
+        if let Some(what) = this.work.dangling_reference() {
+            return Err(dangling(what));
         }
         *this.guard = this.work;
         Ok(())

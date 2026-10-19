@@ -53,7 +53,12 @@ pub type StoreResult<T> = Result<T, StoreError>;
 /// Opens units of work.
 #[async_trait]
 pub trait Store: Send + Sync {
-    /// Opens a transaction that writes exclusively from its start; waits while another is open.
+    /// Opens a transaction that writes exclusively from its start.
+    ///
+    /// While another transaction is open it waits for the write lock, but only for a bounded time
+    /// the adapter sets; when that runs out it fails with
+    /// [`StoreError::Backend`]. There is one kind of transaction, so a use case that only reads
+    /// takes the same lock as one that writes.
     async fn begin(&self) -> StoreResult<Box<dyn Tx>>;
 }
 
@@ -73,7 +78,9 @@ pub trait Tx:
     + UiSessionRows
     + Send
 {
-    /// Makes every write of the transaction durable and visible, all at once.
+    /// Makes every write of the transaction durable and visible, all at once. A transaction whose
+    /// records refer to a record of their project that does not exist commits nothing and fails
+    /// with [`StoreError::Backend`].
     async fn commit(self: Box<Self>) -> StoreResult<()>;
 }
 

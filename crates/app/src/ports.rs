@@ -21,8 +21,12 @@ pub trait Clock: Send + Sync {
 }
 
 /// Ids for new records of every kind except events, whose ids the store assigns in log order.
+///
+/// Every id fits in 63 bits: it lies in `1..=i64::MAX`. A store may keep ids as signed 64-bit
+/// integers and refuses a record whose id is outside that range.
 pub trait IdGen: Send + Sync {
-    /// A number no record of any project has used, nor will be handed out again.
+    /// A number in `1..=i64::MAX` that no record of any project has used, nor will be handed out
+    /// again.
     fn next(&self) -> u64;
 }
 

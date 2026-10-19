@@ -1,6 +1,8 @@
 //! In-memory implementations of every port, for tests of this crate and of the crates that drive its
-//! use cases. They behave as the real adapters promise to: the store runs one transaction at a time
-//! and keeps nothing of one that did not commit, ids are never reused, equal secrets hash equally.
+//! use cases. They behave as the real adapters promise to: the store runs one transaction at a time,
+//! keeps nothing of one that did not commit and refuses to commit records that refer to missing
+//! ones, ids are never reused and stay within the range the id port allows, equal secrets hash
+//! equally.
 
 mod store;
 
@@ -51,7 +53,7 @@ impl Clock for FixedClock {
     }
 }
 
-/// Ids 1, 2, 3, … in the order asked.
+/// Ids 1, 2, 3, … in the order asked: never 0, and far below `i64::MAX` for any test's length.
 #[derive(Debug, Default)]
 pub struct SequentialIds {
     last: AtomicU64,
