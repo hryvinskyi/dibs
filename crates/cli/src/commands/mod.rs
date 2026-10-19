@@ -32,6 +32,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Inbox(args) => messages::inbox(args, ctx).await,
         Command::Thread(args) => messages::thread(args, ctx).await,
         Command::Read(args) => messages::read(args, ctx).await,
+        Command::Mcp => crate::mcp::serve(ctx).await,
         Command::Admin(command) => admin::run(command, ctx).await,
     }
 }

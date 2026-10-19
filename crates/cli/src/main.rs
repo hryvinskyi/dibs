@@ -7,6 +7,7 @@ mod commands;
 mod context;
 mod failure;
 mod git;
+mod mcp;
 mod output;
 
 use std::collections::HashMap;

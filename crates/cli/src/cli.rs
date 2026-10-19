@@ -55,6 +55,9 @@ pub enum Command {
     Thread(ThreadArgs),
     /// Mark a conversation read.
     Read(ThreadArgs),
+    /// Serve the same operations as tools over the Model Context Protocol on standard input and
+    /// output, for an agent that can call tools.
+    Mcp,
     /// Manage the project (admins only).
     #[command(subcommand)]
     Admin(AdminCommand),
