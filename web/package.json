@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test",
+    "test": "node --test 'test/**/*.test.js'",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "e2e": "playwright test"
   },

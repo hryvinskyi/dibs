@@ -61,8 +61,17 @@ fn an_unreachable_server_exits_3_and_is_remembered() {
         .output()
         .unwrap();
     assert_eq!(status(&out), 3);
-    assert!(text(&out.stderr).contains("could not be reached"));
-    assert!(text(&out.stdout).contains("\"network\""));
+    // A closed port refuses at once on Unix; on Windows the connect retries until it times out.
+    let said = text(&out.stderr);
+    assert!(
+        said.contains("could not be reached") || said.contains("did not answer in time"),
+        "{said}"
+    );
+    let answer = text(&out.stdout);
+    assert!(
+        answer.contains("\"network\"") || answer.contains("\"timeout\""),
+        "{answer}"
+    );
     assert!(holds_file(
         &setup.home(&setup.bob).join("state"),
         "unreachable"
@@ -75,7 +84,11 @@ fn an_unreachable_server_exits_3_and_is_remembered() {
         .output()
         .unwrap();
     assert_eq!(status(&range), 0);
-    assert!(text(&range.stderr).contains("could not be reached"));
+    let warned = text(&range.stderr);
+    assert!(
+        warned.contains("could not be reached") || warned.contains("did not answer in time"),
+        "{warned}"
+    );
 }
 
 #[test]
