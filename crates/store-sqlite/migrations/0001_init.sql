@@ -202,6 +202,8 @@ CREATE TABLE events (
 ) STRICT;
 
 CREATE INDEX events_by_project ON events (project_id, id);
+-- Completions since a time, newest first: one kind of event read by time rather than by position.
+CREATE INDEX events_by_kind_and_time ON events (project_id, kind, at);
 
 -- The settings document as JSON, repositories included.
 CREATE TABLE settings (

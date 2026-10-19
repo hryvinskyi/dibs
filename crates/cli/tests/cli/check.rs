@@ -192,6 +192,45 @@ fn a_nested_checkout_answers_for_its_own_repository() {
 }
 
 #[test]
+fn a_nested_clone_without_its_own_file_is_governed_by_none() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    alice_holds_billing(&setup, &api);
+    let vendored = api.join("vendor").join("search");
+    std::fs::create_dir_all(&vendored).unwrap();
+    git(&vendored, &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(vendored.join("src/billing")).unwrap();
+
+    let out = setup
+        .dibs(&setup.bob, &vendored.join("src"))
+        .args(["check", "billing/a.rs"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&out), 2);
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("No .dibs.toml"), "{stderr}");
+    assert!(!stderr.contains("alice"), "{stderr}");
+
+    let range = setup
+        .dibs(&setup.bob, &vendored)
+        .args(["check", "--git-range", "HEAD~0..HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&range), 0);
+    assert!(text(&range.stderr).contains("No .dibs.toml"));
+
+    let plain = api.join("src").join("billing");
+    std::fs::create_dir_all(&plain).unwrap();
+    let held = setup
+        .dibs(&setup.bob, &plain)
+        .args(["check", "a.rs"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&held), 1);
+    assert!(text(&held.stdout).contains("held by alice"));
+}
+
+#[test]
 fn a_configuration_copied_into_another_clone_is_refused() {
     let setup = Setup::new();
     let copied = setup.checkout("web-clone", Some("api"), WEB_REMOTE);

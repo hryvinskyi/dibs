@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}{{ subject }}{% endblock %}
+{% block main %}
+<main id="main" class="page" data-thread-view data-thread-id="{{ id }}" data-me="{{ chrome.handle }}" data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-after="{{ after }}" data-new-message-label="1 new message" data-new-messages-label="{count} new messages">
+{% call ui::session_ended(rendered) %}{% endcall %}
+<div class="thread-head">
+  <a class="back" href="/ui/threads">← Threads</a>
+  <h1>{{ subject }}</h1>
+  <p class="thread-row__meta">{% if let Some(reference) = reference %}<span class="ref">{{ reference }}</span>{% endif %}<span>{{ people|join(", ") }}{% if to_project %}, everyone{% endif %}</span></p>
+</div>
+<p class="conn" role="status" data-conn hidden><span aria-hidden="true">◌</span>Reconnecting… new messages will appear when the connection is back.</p>
+<ol class="messages" aria-label="Messages, oldest first" data-messages>
+{% for message in messages %}<li class="msg{% if message.mine %} msg--mine{% endif %}" id="m-{{ message.id }}">
+  <div class="msg__head"><span class="msg__author">{{ message.author }}</span><span class="msg__session">{{ message.label }}</span><span class="msg__time">{% call ui::time(message.at) %}{% endcall %}</span></div>
+  <p class="msg__body">{{ message.body }}</p>
+</li>
+{% endfor %}</ol>
+<template data-message-template><li class="msg">
+  <div class="msg__head"><span class="msg__author" data-field="author"></span><span class="msg__session" data-field="session"></span><span class="msg__time"><span class="time"><time data-field="time" data-clock></time> <span class="time__rel">· just now</span></span></span></div>
+  <p class="msg__body" data-field="body"></p>
+</li></template>
+<a class="live-pill" href="#main" data-live-pill hidden><span data-live-pill-text></span> <span aria-hidden="true">↓</span></a>
+<form class="reply" method="post" action="/ui/threads/{{ id }}/messages" aria-labelledby="reply-h">
+  <h2 id="reply-h" class="label">Reply</h2>
+  <input type="hidden" name="csrf" value="{{ chrome.csrf }}">
+  <label class="visually-hidden" for="body">Message</label>
+  <textarea class="textarea" id="body" name="body" required{% if problem.is_some() %} aria-invalid="true" aria-describedby="body-error"{% endif %}>{{ draft }}</textarea>
+  {% if let Some(problem) = problem %}<p class="field-error" id="body-error"><span aria-hidden="true">▲</span>{% match problem %}{% when ReplyProblem::Empty %}Write a message before sending.{% when ReplyProblem::TooLong %}This message is longer than 16 KiB; shorten it or split it in two.{% when ReplyProblem::Nul %}This message holds a character that can't be sent; remove it and try again.{% endmatch %}</p>{% endif %}
+  <div class="actions">
+    <button class="btn btn--primary" type="submit">Send</button>
+  </div>
+</form>
+</main>
+{% endblock %}

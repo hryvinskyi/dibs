@@ -29,3 +29,5 @@ mod tenancy;
 mod threads;
 #[cfg(test)]
 mod transport;
+#[cfg(test)]
+mod ui;

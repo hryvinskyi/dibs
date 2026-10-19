@@ -8,7 +8,8 @@
 //! one page of frames at most; a member may hold a few streams open and the service a bounded
 //! number in all. Between pages it sends a comment line at a fixed interval, so idle
 //! proxies keep the connection, and it ends when the server shuts down, when the follower's token
-//! stops working, or when the store fails.
+//! stops working, when the browser session a browser's stream was opened with ends, or when the
+//! store fails.
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -215,6 +216,32 @@ impl EventStreams {
         actor: Actor,
         from: EventCursor,
     ) -> Result<Response, ApiError> {
+        self.open_with(app, actor, from, None).await
+    }
+
+    /// Opens a stream for the browser signed in with the session of this secret. Before every read
+    /// after the first, the session is resolved again, so the stream ends at its next read once the
+    /// browser signed out or its session ended.
+    ///
+    /// # Errors
+    /// As [`EventStreams::open`].
+    pub async fn open_for_browser(
+        &self,
+        app: Arc<UseCases>,
+        actor: Actor,
+        from: EventCursor,
+        session_secret: String,
+    ) -> Result<Response, ApiError> {
+        self.open_with(app, actor, from, Some(session_secret)).await
+    }
+
+    async fn open_with(
+        &self,
+        app: Arc<UseCases>,
+        actor: Actor,
+        from: EventCursor,
+        browser: Option<String>,
+    ) -> Result<Response, ApiError> {
         let slot = self
             .per_member
             .take(actor.project, actor.member, self.options.max_per_member)
@@ -242,6 +269,7 @@ impl EventStreams {
             stop: self.stop.clone(),
             heartbeat,
             page: self.options.page,
+            browser,
             _permit: permit,
             _slot: slot,
         };
@@ -303,6 +331,8 @@ struct Follower {
     stop: StopSignal,
     heartbeat: Interval,
     page: usize,
+    /// The secret of the browser session the stream was opened with, re-checked before each read.
+    browser: Option<String>,
     _permit: OwnedSemaphorePermit,
     _slot: MemberSlot,
 }
@@ -343,8 +373,19 @@ impl Follower {
         }
     }
 
-    /// Reads the next page into the frames to send.
+    /// Reads the next page into the frames to send, once the browser session it was opened with,
+    /// if any, still resolves.
     async fn read(&mut self) -> Result<(), AppError> {
+        if let Some(secret) = &self.browser
+            && let Err(error) = self.app.resolve_ui_session.execute(secret).await
+        {
+            if matches!(error, AppError::Unauthorized) {
+                tracing::info!("an event stream ended: its browser session ended");
+            } else {
+                tracing::error!(code = error.code(), error = ?error, "an event stream failed");
+            }
+            return Err(error);
+        }
         match self
             .app
             .follow_events

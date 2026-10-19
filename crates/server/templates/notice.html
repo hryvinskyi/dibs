@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{% match problem %}{% when Problem::NotFound %}Not found{% else %}Not done{% endmatch %}{% endblock %}
+{% block main %}
+<main id="main" class="page">
+<div class="banner banner--danger" role="alert">
+  <span class="banner__icon" aria-hidden="true">▲</span>
+  <p class="banner__text">{% match problem %}{% when Problem::FormExpired %}This form expired; reload the page and try again.{% when Problem::ReasonMissing %}Write a reason before taking over a claim.{% when Problem::NotFound %}There is no such page, or you can't see it.{% when Problem::Refused(sentence) %}{{ sentence }}{% endmatch %}</p>
+  <a class="banner__action" href="{{ back }}">Go back</a>
+</div>
+</main>
+{% endblock %}

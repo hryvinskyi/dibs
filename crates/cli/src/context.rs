@@ -116,7 +116,7 @@ impl Context {
             None => credentials.sole_key().map_err(credential_failure)?.ok_or_else(|| {
                 Failure::config(
                     "no_checkout",
-                    "No .dibs.toml was found here or above, and no single sign-in is stored; run the command inside a checkout, or sign in with dibs login --server <url>.",
+                    "No .dibs.toml was found here or above in this repository, and no single sign-in is stored; run the command inside a checkout, or sign in with dibs login --server <url>.",
                 )
             })?,
         };

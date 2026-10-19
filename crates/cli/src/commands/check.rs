@@ -48,7 +48,7 @@ async fn governed(ctx: &Context) -> Result<Governed, Failure> {
     let Some(checkout) = connection.checkout.clone() else {
         return Err(Failure::config(
             "no_checkout",
-            "No .dibs.toml was found here or above; run dibs check inside a checkout.",
+            "No .dibs.toml was found here or above in this repository; run dibs check inside a checkout.",
         ));
     };
     let settings = connection.me.project_settings().map_err(|error| {

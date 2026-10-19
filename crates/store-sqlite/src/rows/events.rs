@@ -9,6 +9,7 @@ use sqlx::sqlite::SqliteRow;
 use time::OffsetDateTime;
 
 use dibs_app::ports::{EventRows, StoreError, StoreResult};
+use dibs_app::records::CompletionRecord;
 use dibs_domain::event::{Event, EventKind};
 use dibs_domain::ids::{EventId, ProjectId};
 
@@ -18,6 +19,9 @@ use crate::error::unstorable;
 
 const KIND: &str = "kind";
 const PAYLOAD: &str = "payload";
+
+/// The stored name of a completion.
+const COMPLETED: &str = "completed";
 
 /// The kind's name and its fields as JSON text.
 fn split(kind: &EventKind) -> StoreResult<(String, String)> {
@@ -87,4 +91,43 @@ impl EventRows for SqliteTx {
         let row = self.one(statement).await?;
         Ok(Fields::of(&row, "events").opt_number("id")?.map(EventId))
     }
+
+    async fn completions_since(
+        &mut self,
+        project: ProjectId,
+        since: OffsetDateTime,
+        limit: usize,
+    ) -> StoreResult<Vec<CompletionRecord>> {
+        let statement = sqlx::query(
+            "SELECT id, project_id, kind, payload, at FROM events \
+             WHERE project_id = ?1 AND kind = ?2 AND at >= ?3 \
+             ORDER BY at DESC, id DESC LIMIT ?4",
+        )
+        .bind(int(project.get())?)
+        .bind(COMPLETED)
+        .bind(nanos(since)?)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX));
+        self.all(statement)
+            .await?
+            .iter()
+            .map(|row| completion(event(row)?))
+            .collect()
+    }
+}
+
+/// The completion an event stored under the completion's name records.
+fn completion(event: Event) -> StoreResult<CompletionRecord> {
+    let EventKind::Completed(completed) = event.kind else {
+        return Err(StoreError::Corrupt {
+            what: format!(
+                "event {} is stored as a completion but is not one",
+                event.id
+            ),
+        });
+    };
+    Ok(CompletionRecord {
+        item: completed.item,
+        member: completed.member,
+        at: event.at,
+    })
 }

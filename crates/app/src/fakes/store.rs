@@ -27,8 +27,8 @@ use crate::ports::{
     Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx, UiSessionRows,
 };
 use crate::records::{
-    GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord, ProjectRecord,
-    SessionRecord, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
+    CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
+    ProjectRecord, SessionRecord, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -743,6 +743,34 @@ impl EventRows for MemoryTx {
             .rev()
             .find(|e| e.project == project)
             .map(|e| e.id))
+    }
+
+    async fn completions_since(
+        &mut self,
+        project: ProjectId,
+        since: OffsetDateTime,
+        limit: usize,
+    ) -> StoreResult<Vec<CompletionRecord>> {
+        let mut found: Vec<(EventId, CompletionRecord)> = self
+            .work
+            .events
+            .iter()
+            .filter(|e| e.project == project && e.at >= since)
+            .filter_map(|e| {
+                let EventKind::Completed(completed) = &e.kind else {
+                    return None;
+                };
+                let record = CompletionRecord {
+                    item: completed.item,
+                    member: completed.member,
+                    at: e.at,
+                };
+                Some((e.id, record))
+            })
+            .collect();
+        found.sort_by(|(a_id, a), (b_id, b)| (b.at, b_id).cmp(&(a.at, a_id)));
+        found.truncate(limit);
+        Ok(found.into_iter().map(|(_, record)| record).collect())
     }
 }
 

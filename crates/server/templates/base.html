@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}{% endblock %} · {{ chrome.project }} · dibs</title>
+<link rel="stylesheet" href="/ui/static/{{ chrome.assets }}/dibs.css">
+<script type="module" src="/ui/static/{{ chrome.assets }}/main.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="site-header__inner">
+    <div class="brand"><a class="wordmark" href="/ui/">dibs</a><span class="project">{{ chrome.project }}</span></div>
+    <nav class="nav" aria-label="Main">
+      <a href="/ui/"{% if chrome.section == "status" %} aria-current="page"{% endif %}>Status</a>
+      <a href="/ui/board"{% if chrome.section == "board" %} aria-current="page"{% endif %}>Board</a>
+      <a href="/ui/threads"{% if chrome.section == "threads" %} aria-current="page"{% endif %}>Threads{% if chrome.unread > 0 %} <span class="count">{{ chrome.unread }}</span><span class="visually-hidden">unread</span>{% endif %}</a>
+    </nav>
+    <form class="account" method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{{ chrome.csrf }}"><span>Signed in as <span class="account__who">{{ chrome.handle }}</span></span><button class="btn btn--small" type="submit">Sign out</button></form>
+  </div>
+</header>
+{% block main %}{% endblock %}
+</body>
+</html>

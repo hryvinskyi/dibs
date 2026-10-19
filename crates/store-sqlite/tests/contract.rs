@@ -13,15 +13,15 @@ mod contract {
     use dibs_app::fakes::MemoryStore;
     use dibs_app::ports::{Store, StoreError};
     use dibs_app::records::{
-        GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord, ProjectRecord,
-        SessionRecord, ThreadRecord, TokenRecord, UiSessionRecord,
+        CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord,
+        MessageRecord, ProjectRecord, SessionRecord, ThreadRecord, TokenRecord, UiSessionRecord,
     };
     use dibs_app::token::{TokenHash, TokenPrefix};
     use dibs_domain::area::QualifiedArea;
     use dibs_domain::claim::Claim;
     use dibs_domain::event::{
-        Claimed, Event, EventKind, GrantEnd, GrantRevoked, ItemCreated, MessagePosted, Reserved,
-        SettingsChanged,
+        Claimed, Completed, Event, EventKind, GrantEnd, GrantRevoked, ItemCreated, MessagePosted,
+        Reserved, SettingsChanged,
     };
     use dibs_domain::grant::Grant;
     use dibs_domain::handle::Handle;
@@ -106,6 +106,7 @@ mod contract {
         summaries_put_the_newest_activity_first_and_filter_by_item,
         events_only_increase_and_page_by_cursor,
         events_keep_every_field,
+        completions_are_read_from_a_time_newest_first,
         settings_are_replaced_whole,
         browser_sessions_are_found_by_hash_and_swept_when_ended,
         a_reference_to_a_missing_record_fails_the_commit_and_writes_nothing,
@@ -969,6 +970,77 @@ mod contract {
             tx.events_after(ProjectId(9), None, 100).await.unwrap(),
             Vec::new()
         );
+    }
+
+    async fn completions_are_read_from_a_time_newest_first(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let done =
+            |item: ItemId, member: MemberId| EventKind::Completed(Completed { item, member });
+        let mut tx = store.begin().await.unwrap();
+        assert!(tx.completions_since(A, at(0), 10).await.unwrap().is_empty());
+        tx.append_event(A, at(10), &done(FIRST, ALICE))
+            .await
+            .unwrap();
+        tx.append_event(
+            A,
+            at(20),
+            &EventKind::SettingsChanged(SettingsChanged { by: BOB }),
+        )
+        .await
+        .unwrap();
+        tx.append_event(A, at(30), &done(SECOND, BOB))
+            .await
+            .unwrap();
+        tx.append_event(A, at(30), &done(THIRD, ALICE))
+            .await
+            .unwrap();
+        tx.append_event(A, at(25), &done(GADGET, BOB))
+            .await
+            .unwrap();
+        tx.append_event(B, at(40), &done(GADGET, DAVE))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let record = |item: ItemId, member: MemberId, seconds: i64| CompletionRecord {
+            item,
+            member,
+            at: at(seconds),
+        };
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.completions_since(A, at(10), 10).await.unwrap(),
+            vec![
+                record(THIRD, ALICE, 30),
+                record(SECOND, BOB, 30),
+                record(GADGET, BOB, 25),
+                record(FIRST, ALICE, 10),
+            ]
+        );
+        assert_eq!(
+            tx.completions_since(A, at(10) + Duration::nanoseconds(1), 10)
+                .await
+                .unwrap(),
+            vec![
+                record(THIRD, ALICE, 30),
+                record(SECOND, BOB, 30),
+                record(GADGET, BOB, 25),
+            ]
+        );
+        assert_eq!(
+            tx.completions_since(A, at(0), 2).await.unwrap(),
+            vec![record(THIRD, ALICE, 30), record(SECOND, BOB, 30)]
+        );
+        assert!(
+            tx.completions_since(A, at(31), 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            tx.completions_since(B, at(0), 10).await.unwrap(),
+            vec![record(GADGET, DAVE, 40)]
+        );
+        assert!(tx.completions_since(A, at(0), 0).await.unwrap().is_empty());
     }
 
     async fn events_keep_every_field(store: Arc<dyn Store>) {

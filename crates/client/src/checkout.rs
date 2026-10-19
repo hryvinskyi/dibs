@@ -1,8 +1,11 @@
 //! A checkout's configuration: the `.dibs.toml` nearest to a directory, the repository of the
 //! project it governs, and paths turned into the repository-relative form the server reads.
 //!
-//! The nearest file wins, so a checkout nested inside another (a clone the outer one ignores)
-//! answers for its own repository. A file names the server, the project and, in a project with
+//! The nearest file wins, and the search never leaves the git repository it starts in: it stops at
+//! the first directory holding a `.git` entry (the directory of a clone, or the file of a worktree
+//! or a submodule). A checkout nested inside another (a clone the outer one ignores) therefore
+//! answers for its own repository, and when it has no file of its own it is governed by none —
+//! never by the outer checkout's. A file names the server, the project and, in a project with
 //! several repositories, which one this checkout is; that repository's remote must be the
 //! checkout's `origin`, so a file copied into another clone governs nothing.
 
@@ -158,7 +161,9 @@ pub struct ProjectMismatch {
 
 impl Checkout {
     /// The checkout whose `.dibs.toml` is nearest to `start`: in `start` itself or the closest
-    /// directory above it. `None` when no directory up to the root holds one.
+    /// directory above it within the same git repository. The search stops at the first directory
+    /// holding a `.git` entry, whether a directory or a file; `None` when no directory up to there
+    /// (or up to the root, outside any repository) holds a configuration file.
     ///
     /// # Errors
     /// [`CheckoutError`] when the nearest file cannot be read or is not valid.
@@ -166,6 +171,9 @@ impl Checkout {
         for directory in start.ancestors() {
             let path = directory.join(FILE_NAME);
             if !path.is_file() {
+                if directory.join(".git").exists() {
+                    return Ok(None);
+                }
                 continue;
             }
             let text = fs::read_to_string(&path).map_err(|source| CheckoutError::Unreadable {
@@ -433,6 +441,51 @@ mod tests {
         let outer_found = Checkout::discover(&outer.join("src")).unwrap().unwrap();
         assert_eq!(outer_found.root(), outer);
         assert_eq!(outer_found.config().repo.as_ref().unwrap().as_str(), "api");
+    }
+
+    #[test]
+    fn the_search_stops_at_the_boundary_of_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("work");
+        write(&outer.join(FILE_NAME), API);
+        fs::create_dir_all(outer.join(".git")).unwrap();
+        fs::create_dir_all(outer.join("src/deep")).unwrap();
+
+        let plain = Checkout::discover(&outer.join("src/deep"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plain.root(), outer);
+
+        let bare_clone = outer.join("vendor").join("search");
+        fs::create_dir_all(bare_clone.join(".git")).unwrap();
+        fs::create_dir_all(bare_clone.join("lib")).unwrap();
+        assert!(
+            Checkout::discover(&bare_clone.join("lib"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(Checkout::discover(&bare_clone).unwrap().is_none());
+
+        let worktree = outer.join("worktrees").join("feature");
+        write(
+            &worktree.join(".git"),
+            "gitdir: ../../.git/worktrees/feature\n",
+        );
+        fs::create_dir_all(worktree.join("src")).unwrap();
+        assert!(Checkout::discover(&worktree.join("src")).unwrap().is_none());
+
+        let configured = outer.join("vendor").join("web");
+        fs::create_dir_all(configured.join(".git")).unwrap();
+        write(
+            &configured.join(FILE_NAME),
+            "server = \"https://dibs.example.com\"\nproject = \"acme\"\nrepo = \"web\"\n",
+        );
+        fs::create_dir_all(configured.join("app")).unwrap();
+        let own = Checkout::discover(&configured.join("app"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(own.root(), configured);
+        assert_eq!(own.config().repo.as_ref().unwrap().as_str(), "web");
     }
 
     #[test]

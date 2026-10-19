@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}Threads{% endblock %}
+{% block main %}
+<main id="main" class="page">
+<div class="page-head"><h1>Threads</h1><p class="page-head__meta">Newest first{% if chrome.unread > 0 %} · {{ chrome.unread }} unread{% endif %}</p></div>
+{% if rows.is_empty() %}<div class="empty"><p class="empty__title">No threads yet</p><p>When someone or an agent writes to you or to the project, the conversation shows up here.</p></div>{% else %}
+<ul class="threads">
+{% for row in rows %}<li class="thread-row{% if row.unread > 0 %} thread-row--unread{% endif %}">
+  <div class="thread-row__main">
+    <p class="thread-row__subject"><a href="/ui/threads/{{ row.id }}">{{ row.subject }}</a></p>
+    <p class="thread-row__meta">{% if let Some(reference) = row.reference %}<span class="ref">{{ reference }}</span>{% else %}<span>no item</span>{% endif %}<span>{{ row.people|join(", ") }}{% if row.to_project %}, everyone{% endif %}</span></p>
+  </div>
+  <div class="thread-row__side">
+    {% if let Some(last) = row.last %}{% call ui::time(last) %}{% endcall %}{% endif %}
+    {% if row.unread > 0 %}<div class="badges"><span class="badge badge--unread">{{ row.unread }} unread</span></div>{% endif %}
+  </div>
+</li>
+{% endfor %}</ul>{% endif %}
+</main>
+{% endblock %}

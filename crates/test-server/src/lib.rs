@@ -1,6 +1,7 @@
 //! The real dibs router over the SQLite store on a temporary file, served on an ephemeral port of
 //! the loopback address, for the tests of the crates that talk to it over HTTP. The clock, ids and
-//! secrets are the fakes, so a test can move time; everything else is the production wiring.
+//! secrets are the fakes, for the use cases and the router alike, so a test can move time;
+//! everything else is the production wiring.
 //!
 //! The server runs on a runtime of its own, so a test may drive it from plain synchronous code (a
 //! child process it spawns) or from a runtime of its own. Setting up projects and members goes
@@ -109,7 +110,12 @@ impl TestServer {
                         ..StreamOptions::default()
                     },
                 );
-                let service = router(app.clone(), streams, HttpOptions::default())
+                let options = HttpOptions {
+                    clock: fakes.clock.clone(),
+                    tokens: fakes.tokens.clone(),
+                    ..HttpOptions::default()
+                };
+                let service = router(app.clone(), streams, options)
                     .into_make_service_with_connect_info::<SocketAddr>();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await

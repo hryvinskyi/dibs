@@ -4,7 +4,8 @@
 //! cause. Each refusal spends from the client address's bucket of failed sign-ins; while that bucket
 //! is empty the request is turned away with `429` before its token is looked at.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use axum::extract::{ConnectInfo, FromRequestParts};
@@ -26,11 +27,7 @@ impl FromRequestParts<AppState> for Authed {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let peer = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map_or(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), |info| info.0);
-        let client = state.client_ip.client(peer, &parts.headers);
+        let client = client_address(parts, state);
         state
             .limiter
             .admit(client, Instant::now())
@@ -48,6 +45,27 @@ impl FromRequestParts<AppState> for Authed {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// The address a request comes from, as the client-address policy tells it.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientAddress(pub IpAddr);
+
+impl FromRequestParts<AppState> for ClientAddress {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Infallible> {
+        Ok(Self(client_address(parts, state)))
+    }
+}
+
+/// The client's address: the connection's peer, or what a trusted proxy says it forwarded.
+fn client_address(parts: &Parts, state: &AppState) -> IpAddr {
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), |info| info.0);
+    state.client_ip.client(peer, &parts.headers)
 }
 
 /// The token of an `Authorization: Bearer <token>` header in the shape of a secret, or `None`.

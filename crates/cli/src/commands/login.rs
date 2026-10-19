@@ -38,7 +38,7 @@ pub async fn login(args: LoginArgs, ctx: &Context) -> Result<(), Failure> {
         (None, None) => {
             return Err(Failure::config(
                 "no_server",
-                "No .dibs.toml was found here or above; name the server with dibs login --server <url>.",
+                "No .dibs.toml was found here or above in this repository; name the server with dibs login --server <url>.",
             ));
         }
     };
