@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dibs_domain::handle::Handle;
 
-use crate::actor::Actor;
+use crate::authority::AdminAuthority;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::ports::{Clock, Store};
@@ -22,8 +22,8 @@ pub struct RotatedToken {
     pub token: SecretToken,
 }
 
-/// Revokes every token of a member and issues a new one. Browser sessions the old tokens opened end
-/// with them.
+/// Revokes every token of a member and issues a new one, for an admin of the project or the operator
+/// of the service. Browser sessions the old tokens opened end with them.
 pub struct RotateToken {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -44,19 +44,23 @@ impl RotateToken {
         }
     }
 
-    /// Rotates the token of the member with this handle.
+    /// Rotates the token of the member with this handle in the project `by` administers.
     ///
     /// # Errors
-    /// [`AppError::Forbidden`] unless the caller is an admin; [`AppError::NotFound`] when the
-    /// project has no such member; [`AppError::Store`] when the store fails.
-    pub async fn execute(&self, actor: &Actor, handle: &Handle) -> Result<RotatedToken, AppError> {
-        actor.require_admin()?;
+    /// [`AppError::Forbidden`] unless `by` may administer the project; [`AppError::NotFound`] when
+    /// the project has no such member; [`AppError::Store`] when the store fails.
+    pub async fn execute(
+        &self,
+        by: &impl AdminAuthority,
+        handle: &Handle,
+    ) -> Result<RotatedToken, AppError> {
+        let project = by.administered_project()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin(&*self.store, project).await?;
         let member = member_by_handle(&mut work, handle).await?;
-        for token in work.tokens_of(actor.project, member.id).await? {
+        for token in work.tokens_of(project, member.id).await? {
             if token.is_active() {
-                work.revoke_token(actor.project, &token.hash, now).await?;
+                work.revoke_token(project, &token.hash, now).await?;
             }
         }
         let token = self

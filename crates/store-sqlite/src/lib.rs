@@ -11,6 +11,7 @@
 
 mod codec;
 mod error;
+mod maintenance;
 mod rows;
 
 use std::path::Path;
@@ -25,7 +26,8 @@ use sqlx::{Sqlite, Transaction};
 
 use dibs_app::ports::{Store, StoreResult, Tx};
 
-pub use error::OpenError;
+pub use error::{MaintenanceError, OpenError};
+pub use maintenance::Checkpoint;
 
 /// How many connections the store keeps open at most.
 pub const POOL_SIZE: u32 = 8;

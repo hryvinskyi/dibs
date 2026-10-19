@@ -26,6 +26,7 @@ mod list_threads;
 mod mark_read;
 mod me;
 mod open_ui_session;
+mod operate_project;
 mod post_message;
 mod read_thread;
 mod readable;
@@ -66,6 +67,7 @@ pub use list_threads::ListThreads;
 pub use mark_read::MarkRead;
 pub use me::{Me, MeView};
 pub use open_ui_session::{OpenUiSession, OpenedUiSession, UI_SESSION_LIFETIME};
+pub use operate_project::OperateProject;
 pub use post_message::{PostMessage, PostMessageInput};
 pub use read_thread::{ReadThread, ThreadView};
 pub use register_session::{RegisterSession, RegisterSessionInput};
@@ -134,6 +136,8 @@ pub struct UseCases {
     pub follow_events: FollowEvents,
     /// See [`InitProject`].
     pub init_project: InitProject,
+    /// See [`OperateProject`].
+    pub operate_project: OperateProject,
     /// See [`CreateMember`].
     pub create_member: CreateMember,
     /// See [`RotateToken`].
@@ -182,6 +186,7 @@ impl UseCases {
             list_events: ListEvents::new(deps),
             follow_events: FollowEvents::new(deps),
             init_project: InitProject::new(deps),
+            operate_project: OperateProject::new(deps),
             create_member: CreateMember::new(deps),
             rotate_token: RotateToken::new(deps),
             revoke_token: RevokeToken::new(deps),

@@ -8,6 +8,7 @@
 //! injected by the composition roots.
 
 pub mod actor;
+pub mod authority;
 pub mod dependencies;
 pub mod error;
 pub mod named;
@@ -21,5 +22,6 @@ mod work;
 pub mod fakes;
 
 pub use actor::Actor;
+pub use authority::{AdminAuthority, Operator};
 pub use dependencies::Dependencies;
 pub use error::AppError;

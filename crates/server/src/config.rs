@@ -2,7 +2,9 @@
 //! the parser is a pure function: the binary passes the process environment, tests pass a map.
 
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use axum::http::HeaderName;
 use thiserror::Error;
@@ -16,6 +18,21 @@ pub const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
 /// The header a trusted proxy names the client in when `DIBS_CLIENT_IP_HEADER` is not set.
 pub const DEFAULT_CLIENT_IP_HEADER: &str = "X-Forwarded-For";
 
+/// How often a snapshot is taken when `DIBS_SNAPSHOT_EVERY` is not set.
+pub const DEFAULT_SNAPSHOT_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// How many snapshots are kept when `DIBS_SNAPSHOT_KEEP` is not set.
+pub const DEFAULT_SNAPSHOT_KEEP: NonZeroUsize = NonZeroUsize::MIN.saturating_add(27);
+
+/// The shortest interval between snapshots: each one copies the whole database.
+pub const MIN_SNAPSHOT_EVERY: Duration = Duration::from_secs(60);
+
+/// The longest interval between snapshots.
+pub const MAX_SNAPSHOT_EVERY: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The most snapshots that may be kept.
+pub const MAX_SNAPSHOT_KEEP: usize = 10_000;
+
 /// The server's configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -28,6 +45,20 @@ pub struct Config {
     pub proxy: Option<ProxyTrust>,
     /// The most detailed level written to the log (`DIBS_LOG`).
     pub log: LevelFilter,
+    /// Where and how often snapshots are taken, when they are (`DIBS_SNAPSHOT_DIR`,
+    /// `DIBS_SNAPSHOT_EVERY`, `DIBS_SNAPSHOT_KEEP`).
+    pub snapshots: Option<SnapshotConfig>,
+}
+
+/// Where snapshots of the database are written, how often, and how many are kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotConfig {
+    /// The directory the snapshots are written into. It must exist.
+    pub dir: PathBuf,
+    /// The time between two scheduled snapshots.
+    pub every: Duration,
+    /// How many of the newest snapshots are kept.
+    pub keep: NonZeroUsize,
 }
 
 /// Why the configuration is refused. Each message names the variable at fault.
@@ -108,13 +139,91 @@ impl Config {
                     reason: "it is one of error, warn, info, debug, trace or off".to_owned(),
                 })?,
         };
+        let snapshots = parse_snapshots(&get)?;
         Ok(Self {
             database,
             listen,
             proxy,
             log,
+            snapshots,
         })
     }
+}
+
+fn parse_snapshots(
+    get: &impl Fn(&str) -> Option<String>,
+) -> Result<Option<SnapshotConfig>, ConfigError> {
+    let every = get("DIBS_SNAPSHOT_EVERY")
+        .map(|text| parse_every(&text))
+        .transpose()?;
+    let keep = get("DIBS_SNAPSHOT_KEEP")
+        .map(|text| parse_keep(&text))
+        .transpose()?;
+    let Some(dir) = get("DIBS_SNAPSHOT_DIR") else {
+        if every.is_some() || keep.is_some() {
+            return Err(ConfigError::Missing {
+                var: "DIBS_SNAPSHOT_DIR",
+                hint: "DIBS_SNAPSHOT_EVERY and DIBS_SNAPSHOT_KEEP need the directory the snapshots are written into",
+            });
+        }
+        return Ok(None);
+    };
+    Ok(Some(SnapshotConfig {
+        dir: PathBuf::from(dir.trim()),
+        every: every.unwrap_or(DEFAULT_SNAPSHOT_EVERY),
+        keep: keep.unwrap_or(DEFAULT_SNAPSHOT_KEEP),
+    }))
+}
+
+/// A whole number followed by `s`, `m`, `h` or `d`, such as `6h`, between
+/// [`MIN_SNAPSHOT_EVERY`] and [`MAX_SNAPSHOT_EVERY`].
+fn parse_every(text: &str) -> Result<Duration, ConfigError> {
+    let invalid = |reason: &str| ConfigError::Invalid {
+        var: "DIBS_SNAPSHOT_EVERY",
+        reason: reason.to_owned(),
+    };
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .ok_or_else(|| invalid("it is a number and a unit, such as 6h, 30m or 1d"))?;
+    let (number, unit) = text.split_at(split);
+    let number: u64 = number
+        .parse()
+        .map_err(|_| invalid("it is a number and a unit, such as 6h, 30m or 1d"))?;
+    let unit_seconds: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 24 * 60 * 60,
+        _ => return Err(invalid("its unit is one of s, m, h or d, such as 6h")),
+    };
+    let every = number
+        .checked_mul(unit_seconds)
+        .map(Duration::from_secs)
+        .ok_or_else(|| invalid("it is at most 30d"))?;
+    if every < MIN_SNAPSHOT_EVERY {
+        return Err(invalid(
+            "it is at least 1m; every snapshot copies the whole database",
+        ));
+    }
+    if every > MAX_SNAPSHOT_EVERY {
+        return Err(invalid("it is at most 30d"));
+    }
+    Ok(every)
+}
+
+/// A whole number from 1 to [`MAX_SNAPSHOT_KEEP`].
+fn parse_keep(text: &str) -> Result<NonZeroUsize, ConfigError> {
+    text.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|keep| *keep <= MAX_SNAPSHOT_KEEP)
+        .and_then(NonZeroUsize::new)
+        .ok_or_else(|| ConfigError::Invalid {
+            var: "DIBS_SNAPSHOT_KEEP",
+            reason: "it is a whole number from 1 to 10000; the newest snapshot is always kept"
+                .to_owned(),
+        })
 }
 
 fn parse_cidrs(text: &str) -> Result<Vec<Cidr>, ConfigError> {
@@ -167,6 +276,84 @@ mod tests {
         assert_eq!(config.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(config.proxy, None);
         assert_eq!(config.log, LevelFilter::INFO);
+        assert_eq!(config.snapshots, None);
+    }
+
+    #[test]
+    fn a_snapshot_directory_turns_snapshots_on_with_the_defaults() {
+        let config = parse(&[
+            ("DIBS_DATABASE", "dibs.db"),
+            ("DIBS_SNAPSHOT_DIR", "/snapshots"),
+        ])
+        .unwrap();
+        let snapshots = config.snapshots.unwrap();
+        assert_eq!(snapshots.dir, PathBuf::from("/snapshots"));
+        assert_eq!(snapshots.every, Duration::from_secs(6 * 60 * 60));
+        assert_eq!(snapshots.keep.get(), 28);
+    }
+
+    #[test]
+    fn the_interval_and_retention_are_read_in_their_units() {
+        let cases: &[(&str, u64)] = &[("90s", 90), ("30m", 1800), ("6h", 21_600), ("1d", 86_400)];
+        for (text, seconds) in cases {
+            let config = parse(&[
+                ("DIBS_DATABASE", "dibs.db"),
+                ("DIBS_SNAPSHOT_DIR", "/snapshots"),
+                ("DIBS_SNAPSHOT_EVERY", text),
+                ("DIBS_SNAPSHOT_KEEP", " 3 "),
+            ])
+            .unwrap();
+            let snapshots = config.snapshots.unwrap();
+            assert_eq!(snapshots.every, Duration::from_secs(*seconds), "{text}");
+            assert_eq!(snapshots.keep.get(), 3);
+        }
+    }
+
+    #[test]
+    fn a_nonsensical_interval_or_retention_is_refused() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("DIBS_SNAPSHOT_EVERY", "0h", "at least 1m"),
+            ("DIBS_SNAPSHOT_EVERY", "30s", "at least 1m"),
+            ("DIBS_SNAPSHOT_EVERY", "31d", "at most 30d"),
+            ("DIBS_SNAPSHOT_EVERY", "99999999999999999d", "at most 30d"),
+            ("DIBS_SNAPSHOT_EVERY", "6", "a number and a unit"),
+            ("DIBS_SNAPSHOT_EVERY", "h", "a number and a unit"),
+            ("DIBS_SNAPSHOT_EVERY", "-6h", "a number and a unit"),
+            ("DIBS_SNAPSHOT_EVERY", "6 hours", "its unit"),
+            ("DIBS_SNAPSHOT_KEEP", "0", "from 1 to 10000"),
+            ("DIBS_SNAPSHOT_KEEP", "-1", "from 1 to 10000"),
+            ("DIBS_SNAPSHOT_KEEP", "10001", "from 1 to 10000"),
+            ("DIBS_SNAPSHOT_KEEP", "many", "from 1 to 10000"),
+        ];
+        for (var, value, reason) in cases {
+            let error = parse(&[
+                ("DIBS_DATABASE", "dibs.db"),
+                ("DIBS_SNAPSHOT_DIR", "/snapshots"),
+                (var, value),
+            ])
+            .unwrap_err();
+            let text = error.to_string();
+            assert!(text.starts_with(var), "{var}={value}: {text}");
+            assert!(text.contains(reason), "{var}={value}: {text}");
+        }
+    }
+
+    #[test]
+    fn snapshot_settings_without_a_directory_are_refused() {
+        for var in ["DIBS_SNAPSHOT_EVERY", "DIBS_SNAPSHOT_KEEP"] {
+            let value = if var == "DIBS_SNAPSHOT_EVERY" {
+                "6h"
+            } else {
+                "3"
+            };
+            let error = parse(&[("DIBS_DATABASE", "dibs.db"), (var, value)]).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("DIBS_SNAPSHOT_DIR is not set"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

@@ -38,6 +38,9 @@ pub enum Missing {
     /// No token of that prefix.
     #[error("there is no token starting with {0}")]
     Token(TokenPrefix),
+    /// No project of that slug.
+    #[error("there is no project '{0}'")]
+    Project(ProjectSlug),
 }
 
 /// A record that would duplicate one that exists.

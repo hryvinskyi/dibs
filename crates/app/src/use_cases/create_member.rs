@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use dibs_domain::member::Role;
 
-use crate::actor::Actor;
+use crate::authority::AdminAuthority;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::ports::{Clock, Store};
@@ -31,7 +31,8 @@ pub struct CreatedMember {
     pub token: SecretToken,
 }
 
-/// Adds a member to the admin's project and issues their token.
+/// Adds a member to a project and issues their token, for an admin of the project or the operator
+/// of the service.
 pub struct CreateMember {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -52,19 +53,19 @@ impl CreateMember {
         }
     }
 
-    /// Adds the member.
+    /// Adds the member to the project `by` administers.
     ///
     /// # Errors
-    /// [`AppError::Forbidden`] unless the caller is an admin; [`AppError::Duplicate`] when the
-    /// handle is taken in the project; [`AppError::Store`] when the store fails.
+    /// [`AppError::Forbidden`] unless `by` may administer the project; [`AppError::Duplicate`]
+    /// when the handle is taken in the project; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
-        actor: &Actor,
+        by: &impl AdminAuthority,
         input: CreateMemberInput,
     ) -> Result<CreatedMember, AppError> {
-        actor.require_admin()?;
+        let project = by.administered_project()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin(&*self.store, project).await?;
         let member = self
             .enrolment
             .add_member(&mut work, input.member, input.role, now)

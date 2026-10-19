@@ -15,6 +15,20 @@ pub enum OpenError {
     Migrate(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// Why a copy of the database or a checkpoint of its journal failed. The text is for logs.
+#[derive(Debug, Error)]
+pub enum MaintenanceError {
+    /// The copy's path cannot be handed to the database, which takes paths as UTF-8 text.
+    #[error("the path of the copy is not UTF-8 text")]
+    PathNotUtf8,
+    /// The database could not be copied.
+    #[error("the database could not be copied")]
+    Copy(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The journal could not be checkpointed.
+    #[error("the write-ahead log could not be checkpointed")]
+    Checkpoint(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
 /// A database failure as the port reports it: a broken uniqueness rule is a duplicate, everything
 /// else a failure of the backend.
 pub(crate) fn store_error(error: sqlx::Error) -> StoreError {

@@ -6,14 +6,19 @@
 
 pub mod adapters;
 pub mod auth;
+pub mod cli;
 pub mod client_ip;
+pub mod commands;
 pub mod config;
 pub mod error;
 pub mod fields;
+pub mod hold;
 pub mod http;
 pub mod rate_limit;
+pub mod restore;
 pub mod routes;
 pub mod serve;
+pub mod snapshot;
 pub mod stream;
 pub mod ui;
 pub mod views;
