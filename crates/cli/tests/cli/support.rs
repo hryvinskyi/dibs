@@ -78,6 +78,20 @@ impl Setup {
         command
     }
 
+    /// `dibs` as the person with this handle, as a plain process whose standard streams the test
+    /// wires itself, its directories the person's own.
+    pub fn process_as(&self, handle: &str, cwd: &Path) -> std::process::Command {
+        let home = self.home_of(handle);
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_dibs"));
+        command
+            .current_dir(cwd)
+            .env("DIBS_CONFIG_DIR", home.join("config"))
+            .env("DIBS_STATE_DIR", home.join("state"))
+            .env_remove("DIBS_TOKEN")
+            .env_remove("DIBS_LOG");
+        command
+    }
+
     /// `dibs login --server <url>` as `who` with `token` on standard input, outside any checkout.
     pub fn login(&self, who: &Person, token: &str) -> Output {
         self.login_as(&who.handle, token)

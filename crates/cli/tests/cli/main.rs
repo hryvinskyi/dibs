@@ -17,6 +17,8 @@ mod hook;
 #[cfg(test)]
 mod login;
 #[cfg(test)]
+mod mcp;
+#[cfg(test)]
 mod messages;
 #[cfg(test)]
 mod work;

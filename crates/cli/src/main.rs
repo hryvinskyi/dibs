@@ -12,6 +12,7 @@ mod failure;
 mod git;
 mod guard;
 mod hosts;
+mod mcp;
 mod output;
 
 use std::collections::HashMap;

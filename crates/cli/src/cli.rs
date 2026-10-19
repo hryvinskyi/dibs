@@ -81,6 +81,9 @@ pub enum Command {
     /// Send a heartbeat and refresh what this machine remembers about the project, as far as
     /// each is due.
     Sync(SyncArgs),
+    /// Serve the same operations as tools over the Model Context Protocol on standard input and
+    /// output, for an agent that can call tools.
+    Mcp,
     /// Manage the project (admins only).
     #[command(subcommand)]
     Admin(AdminCommand),

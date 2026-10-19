@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use time::OffsetDateTime;
 
-use dibs_client::api::{Me, RegisterSession};
+use dibs_client::api::{Me, RegisterSession, Session};
 use dibs_client::checkout::Checkout;
 use dibs_client::credentials::{
     CredentialKey, Credentials, OsKeychain, ReadMode, TokenLookup, TokenSource,
@@ -27,7 +27,11 @@ use crate::output::Printer;
 /// The agent label of the sessions the command line registers.
 pub const AGENT: &str = "cli";
 
+/// The longest session label.
+const MAX_LABEL: usize = 64;
+
 /// The environment, the current directory and the output form.
+#[derive(Clone)]
 pub struct Context {
     env: HashMap<String, String>,
     /// The current directory.
@@ -180,8 +184,7 @@ impl Connection {
     /// # Errors
     /// A [`Failure`] when no label can be made of the machine's name.
     pub fn label(&self) -> Result<SessionLabel, Failure> {
-        let host: String = host_name()?.as_str().chars().take(60).collect();
-        SessionLabel::parse(&format!("{host}/{AGENT}")).map_err(|_| unnamed_machine())
+        label_named(AGENT)
     }
 
     /// Registers this machine's command-line session (registering again keeps its id) and
@@ -190,21 +193,30 @@ impl Connection {
     /// # Errors
     /// The [`Failure`] of the call.
     pub async fn session(&self) -> Result<SessionId, Failure> {
-        let request = RegisterSession {
-            host: host_name()?,
-            label: self.label()?,
-            agent: AgentLabel::parse(AGENT).map_err(|_| unnamed_machine())?,
-            push: false,
-        };
-        let session = self
-            .client
-            .register_session(&request)
-            .await
-            .map_err(|error| self.failed(error))?;
+        let session = self.register(AGENT, AGENT).await?;
         if let Err(error) = self.state.remember_session(&session) {
             tracing::debug!(error = %error, "the session could not be remembered");
         }
         Ok(session.session_id)
+    }
+
+    /// Registers a session of the given kind of agent, labelled `<host>/<name>` (registering the
+    /// same label again keeps its id). The session cannot be woken while idle.
+    ///
+    /// # Errors
+    /// The [`Failure`] of the call, or a configuration one when the agent kind or the machine's
+    /// name cannot make a valid label.
+    pub async fn register(&self, agent: &str, name: &str) -> Result<Session, Failure> {
+        let request = RegisterSession {
+            host: host_name()?,
+            label: label_named(name)?,
+            agent: AgentLabel::parse(agent).map_err(|_| unnamed_machine())?,
+            push: false,
+        };
+        self.client
+            .register_session(&request)
+            .await
+            .map_err(|error| self.failed(error))
     }
 
     /// The local id of the item a key names.
@@ -234,6 +246,13 @@ pub fn host_name() -> Result<HostName, Failure> {
     HostName::parse(&cleaned)
         .or_else(|_| HostName::parse("unknown-host"))
         .map_err(|_| unnamed_machine())
+}
+
+/// The label `<host>/<name>`, the host cut short enough for the whole to be a valid label.
+fn label_named(name: &str) -> Result<SessionLabel, Failure> {
+    let room = MAX_LABEL.saturating_sub(name.chars().count() + 1);
+    let host: String = host_name()?.as_str().chars().take(room).collect();
+    SessionLabel::parse(&format!("{host}/{name}")).map_err(|_| unnamed_machine())
 }
 
 fn unnamed_machine() -> Failure {

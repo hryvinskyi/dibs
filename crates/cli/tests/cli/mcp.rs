@@ -1,0 +1,544 @@
+//! `dibs mcp` as a child process against the real server router: the JSON-RPC handshake and tool
+//! list over standard input and output, tool calls whose answers are the client's JSON, a refusal
+//! that comes back as a tool error naming the holder, and a server that cannot be reached.
+
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+
+use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
+
+const WAIT: Duration = Duration::from_secs(30);
+
+/// The tools the server offers, by name.
+const TOOLS: [&str; 13] = [
+    "dibs_check",
+    "dibs_claim",
+    "dibs_done",
+    "dibs_grant",
+    "dibs_inbox",
+    "dibs_items",
+    "dibs_new",
+    "dibs_read",
+    "dibs_release",
+    "dibs_send",
+    "dibs_status",
+    "dibs_takeover",
+    "dibs_thread",
+];
+
+/// What a tool call answered.
+struct Reply {
+    is_error: bool,
+    text: String,
+    structured: Value,
+}
+
+impl Reply {
+    /// The structured answer of a call that worked.
+    fn ok(&self) -> &Value {
+        assert!(!self.is_error, "a tool error: {}", self.text);
+        &self.structured
+    }
+
+    /// The sentence of a call that failed.
+    fn error(&self) -> &str {
+        assert!(self.is_error, "the call worked: {}", self.text);
+        &self.text
+    }
+}
+
+/// A running `dibs mcp` that has been through the handshake.
+struct Mcp {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    lines: Receiver<String>,
+    next_id: u64,
+    handshake: Value,
+}
+
+impl Mcp {
+    /// Starts `dibs mcp` as `handle` in `cwd` and performs the handshake.
+    fn start(setup: &Setup, handle: &str, cwd: &Path) -> Self {
+        Self::spawn(setup.process_as(handle, cwd))
+    }
+
+    fn spawn(mut command: std::process::Command) -> Self {
+        let mut child = command
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut mcp = Self {
+            child,
+            stdin,
+            lines,
+            next_id: 0,
+            handshake: Value::Null,
+        };
+        mcp.handshake = mcp.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.0.1"}
+            }),
+        );
+        mcp.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        mcp
+    }
+
+    fn send(&mut self, message: &Value) {
+        let stdin = self.stdin.as_mut().unwrap();
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    /// Sends a request and answers the response to it, skipping anything else the server says.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line = match self.lines.recv_timeout(left) {
+                Ok(line) => line,
+                Err(RecvTimeoutError::Timeout) => panic!("no answer to {method} in {WAIT:?}"),
+                Err(RecvTimeoutError::Disconnected) => panic!("the server closed before {method}"),
+            };
+            let message: Value = serde_json::from_str(&line)
+                .unwrap_or_else(|_| panic!("standard output carried something else: {line}"));
+            if message["id"] == json!(id) {
+                return message;
+            }
+        }
+    }
+
+    /// Calls a tool and answers its reply.
+    fn tool(&mut self, name: &str, arguments: Value) -> Reply {
+        let response = self.request("tools/call", json!({"name": name, "arguments": arguments}));
+        let result = &response["result"];
+        assert!(result.is_object(), "not a tool result: {response}");
+        Reply {
+            is_error: result["isError"].as_bool().unwrap_or(false),
+            text: result["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            structured: result["structuredContent"].clone(),
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Closes standard input and answers the exit status once the server has ended.
+    fn finish(mut self) -> Option<i32> {
+        drop(self.stdin.take());
+        let deadline = Instant::now() + WAIT;
+        while Instant::now() < deadline {
+            if let Some(code) = self.child.try_wait().unwrap() {
+                return code.code();
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+}
+
+impl Drop for Mcp {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn the_handshake_names_the_server_and_lists_every_tool_with_a_schema() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut mcp = Mcp::start(&setup, "alice", &api);
+
+    let init = &mcp.handshake["result"];
+    assert_eq!(init["serverInfo"]["name"], "dibs");
+    assert!(init["protocolVersion"].is_string());
+    assert!(init["capabilities"]["tools"].is_object());
+
+    let listed = mcp.request("tools/list", json!({}));
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    names.sort_unstable();
+    assert_eq!(names, TOOLS);
+    for tool in tools {
+        let name = tool["name"].as_str().unwrap();
+        assert!(
+            tool["description"].as_str().unwrap().len() > 40,
+            "{name} says when to use it"
+        );
+        assert_eq!(tool["inputSchema"]["type"], "object", "{name}");
+    }
+    let schema = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap()
+            .get("inputSchema")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(schema("dibs_claim")["required"], json!(["key"]));
+    assert!(schema("dibs_claim")["properties"]["areas"].is_object());
+    assert_eq!(schema("dibs_new")["required"], json!(["ref", "title"]));
+    assert_eq!(schema("dibs_check")["required"], json!(["paths"]));
+    assert_eq!(schema("dibs_send")["required"], json!(["body"]));
+    assert_eq!(schema("dibs_status")["type"], "object");
+}
+
+#[test]
+fn a_claim_is_taken_in_the_members_name_and_the_command_line_sees_it() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut mcp = Mcp::start(&setup, "alice", &api);
+
+    let created = mcp.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#7", "title": "Fix billing rounding"}),
+    );
+    assert_eq!(created.ok()["created"], true);
+    let id = created.ok()["item"]["id"].as_u64().unwrap();
+
+    let claimed = mcp.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#7", "areas": ["billing"]}),
+    );
+    let answer = claimed.ok();
+    assert_eq!(answer["outcome"], "new");
+    assert_eq!(answer["claim"]["holder"], "alice");
+    assert_eq!(answer["claim"]["areas"], json!(["api:billing"]));
+    let as_text: Value = serde_json::from_str(&claimed.text).unwrap();
+    assert_eq!(&as_text, answer, "the text carries the same JSON");
+
+    let renewed = mcp.tool(
+        "dibs_claim",
+        json!({"key": id, "areas": ["billing", "search"]}),
+    );
+    assert_eq!(renewed.ok()["outcome"], "renewed");
+
+    let from_cli = setup
+        .dibs(&setup.alice, &api)
+        .args(["items", "--mine"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&from_cli), 0);
+    assert!(text(&from_cli.stdout).contains("gh:acme/api#7 Fix billing rounding [claimed]"));
+
+    let mine = mcp.tool("dibs_items", json!({"mine": true, "status": "claimed"}));
+    assert_eq!(mine.ok()["items"].as_array().unwrap().len(), 1);
+    let open = mcp.tool("dibs_items", json!({"status": "open"}));
+    assert!(open.ok()["items"].as_array().unwrap().is_empty());
+
+    let state = mcp.tool("dibs_status", json!({}));
+    assert_eq!(state.ok()["live"].as_array().unwrap().len(), 1);
+
+    let released = mcp.tool("dibs_release", json!({"key": "gh:acme/api#7"}));
+    assert_eq!(released.ok()["claim"]["item"], id);
+    let reclaimed = mcp.tool("dibs_claim", json!({"key": id}));
+    assert_eq!(reclaimed.ok()["outcome"], "new");
+    let done = mcp.tool("dibs_done", json!({"key": id}));
+    assert_eq!(done.ok()["claim"]["holder"], "alice");
+    let finished = mcp.tool("dibs_items", json!({"status": "done"}));
+    assert_eq!(finished.ok()["items"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_held_claim_is_a_tool_error_naming_the_holder() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#1", "title": "Billing"}),
+    );
+    bob.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#2", "title": "More billing"}),
+    );
+    alice
+        .tool(
+            "dibs_claim",
+            json!({"key": "gh:acme/api#1", "areas": ["billing"]}),
+        )
+        .ok();
+
+    let item_held = bob.tool("dibs_claim", json!({"key": "gh:acme/api#1"}));
+    assert!(item_held.error().contains("alice"), "{}", item_held.text);
+    assert!(item_held.error().ends_with('.'));
+    let code = item_held.structured["error"]["code"].as_str().unwrap();
+    assert!(code.contains("held"), "{code}");
+
+    let area_held = bob.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#2", "areas": ["billing"]}),
+    );
+    assert!(area_held.error().contains("alice"), "{}", area_held.text);
+
+    let not_stale = bob.tool(
+        "dibs_takeover",
+        json!({"key": "gh:acme/api#1", "reason": "You went quiet."}),
+    );
+    assert!(not_stale.error().contains("alice"), "{}", not_stale.text);
+
+    let unknown = bob.tool("dibs_claim", json!({"key": "gh:acme/api#99"}));
+    assert!(
+        unknown.error().contains("gh:acme/api#99"),
+        "{}",
+        unknown.text
+    );
+}
+
+#[test]
+fn a_check_answers_a_verdict_per_path_and_changes_nothing() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#1", "title": "Billing"}),
+    );
+    alice
+        .tool(
+            "dibs_claim",
+            json!({"key": "gh:acme/api#1", "areas": ["billing"]}),
+        )
+        .ok();
+    let absolute = api.join("src/billing/a.rs").display().to_string();
+
+    let theirs = bob.tool(
+        "dibs_check",
+        json!({"paths": ["src/billing/a.rs", "README.md", "src/search/b.rs"]}),
+    );
+    let verdicts = theirs.ok()["verdicts"].as_array().unwrap();
+    assert_eq!(verdicts.len(), 3);
+    assert_eq!(verdicts[0]["verdict"], "held_by");
+    assert_eq!(verdicts[0]["holder"], "alice");
+    assert_eq!(verdicts[0]["path"], "src/billing/a.rs");
+    assert_eq!(verdicts[1]["verdict"], "allowed");
+    assert_eq!(verdicts[2]["verdict"], "needs_claim");
+
+    let mine = alice.tool("dibs_check", json!({"paths": [absolute]}));
+    assert_eq!(mine.ok()["verdicts"][0]["verdict"], "allowed");
+
+    let nested = api.join("src");
+    std::fs::create_dir_all(&nested).unwrap();
+    let from_below =
+        Mcp::start(&setup, "alice", &nested).tool("dibs_check", json!({"paths": ["billing/a.rs"]}));
+    assert_eq!(from_below.ok()["verdicts"][0]["path"], "src/billing/a.rs");
+
+    let outside = bob.tool("dibs_check", json!({"paths": ["../elsewhere/file.rs"]}));
+    assert!(outside.error().ends_with('.'), "{}", outside.text);
+    let none = bob.tool("dibs_check", json!({"paths": []}));
+    assert!(none.error().starts_with("`paths`: "), "{}", none.text);
+
+    let after = bob.tool("dibs_status", json!({}));
+    assert_eq!(after.ok()["live"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn messages_are_sent_read_and_answered_under_the_sessions_label() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#7", "title": "Billing"}),
+    );
+
+    let sent = alice.tool(
+        "dibs_send",
+        json!({
+            "to": ["bob"], "subject": "Billing rates", "body": "Line one\nLine two",
+            "item": "gh:acme/api#7"
+        }),
+    );
+    let thread = sent.ok()["thread"]["id"].as_u64().unwrap();
+    let label = sent.ok()["message"]["label"].as_str().unwrap();
+    assert!(label.ends_with(&format!("/mcp-{}", alice.pid())), "{label}");
+    assert!(sent.ok()["thread"]["item"].is_u64());
+
+    let inbox = bob.tool("dibs_inbox", json!({"unread": true}));
+    let threads = inbox.ok()["threads"].as_array().unwrap();
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0]["unread"], 1);
+    assert_eq!(threads[0]["thread"]["subject"], "Billing rates");
+
+    let shown = bob.tool("dibs_thread", json!({"thread": thread}));
+    assert_eq!(shown.ok()["messages"][0]["body"], "Line one\nLine two");
+    let still_unread = bob.tool("dibs_inbox", json!({"unread": true}));
+    assert_eq!(still_unread.ok()["threads"].as_array().unwrap().len(), 1);
+
+    let answered = bob.tool("dibs_send", json!({"thread": thread, "body": "Thanks."}));
+    let label = answered.ok()["message"]["label"].as_str().unwrap();
+    assert!(label.ends_with(&format!("/mcp-{}", bob.pid())), "{label}");
+
+    let read = bob.tool("dibs_read", json!({"thread": thread}));
+    assert_eq!(read.ok()["newly_read"], 1);
+    let none = bob.tool("dibs_inbox", json!({"unread": true}));
+    assert!(none.ok()["threads"].as_array().unwrap().is_empty());
+
+    let from_cli = setup
+        .dibs(&setup.alice, &api)
+        .args(["inbox", "--unread"])
+        .output()
+        .unwrap();
+    assert!(
+        text(&from_cli.stdout).contains(&format!("#{thread} Billing rates")),
+        "{}",
+        text(&from_cli.stdout)
+    );
+
+    let everyone = alice.tool(
+        "dibs_send",
+        json!({"project": true, "subject": "Freeze", "body": "Merge freeze on Friday."}),
+    );
+    assert_eq!(everyone.ok()["thread"]["to_project"], true);
+}
+
+#[test]
+fn input_that_cannot_be_used_is_a_tool_error_that_says_what_to_change() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut mcp = Mcp::start(&setup, "alice", &api);
+
+    let bad_key = mcp.tool("dibs_claim", json!({"key": "not a key"}));
+    assert!(
+        bad_key
+            .error()
+            .starts_with("`key`: 'not a key' is not a work item"),
+        "{}",
+        bad_key.text
+    );
+    let no_recipient = mcp.tool("dibs_send", json!({"subject": "s", "body": "b"}));
+    assert!(
+        no_recipient.error().starts_with("`to`: "),
+        "{}",
+        no_recipient.text
+    );
+    let mixed = mcp.tool(
+        "dibs_send",
+        json!({"thread": 3, "subject": "s", "body": "b"}),
+    );
+    assert!(mixed.error().starts_with("`thread`: "), "{}", mixed.text);
+    let no_reason = mcp.tool("dibs_takeover", json!({"key": 1, "reason": " "}));
+    assert!(
+        no_reason.error().starts_with("`reason`: "),
+        "{}",
+        no_reason.text
+    );
+    let bad_grantee = mcp.tool(
+        "dibs_grant",
+        json!({"key": 1, "area": "api:billing", "to": "Not A Handle"}),
+    );
+    assert!(
+        bad_grantee.error().starts_with("`to`: "),
+        "{}",
+        bad_grantee.text
+    );
+
+    let misspelt = mcp.tool("dibs_claim", json!({"key": 1, "area": ["billing"]}));
+    assert!(misspelt.error().contains("area"), "{}", misspelt.text);
+    let wrong_type = mcp.tool("dibs_inbox", json!({"unread": "yes"}));
+    assert!(wrong_type.is_error);
+
+    let unknown = mcp.request(
+        "tools/call",
+        json!({"name": "dibs_nothing", "arguments": {}}),
+    );
+    assert!(unknown["error"].is_object() || unknown["result"]["isError"] == true);
+}
+
+#[test]
+fn a_server_that_cannot_be_reached_is_one_plain_sentence_and_the_tools_still_list() {
+    let setup = Setup::new();
+    let url = dibs_test_server::unreachable().unwrap();
+    let dir = setup.root.path().join("offline");
+    make_checkout(&dir, &url, "acme", Some("api"), API_REMOTE);
+    let mut command = setup.process_as("bob", &dir);
+    command.env("DIBS_TOKEN", &setup.bob.token);
+    let mut mcp = Mcp::spawn(command);
+
+    let listed = mcp.request("tools/list", json!({}));
+    assert_eq!(
+        listed["result"]["tools"].as_array().unwrap().len(),
+        TOOLS.len()
+    );
+    for (tool, arguments) in [
+        ("dibs_status", json!({})),
+        ("dibs_claim", json!({"key": 1})),
+        (
+            "dibs_send",
+            json!({"to": ["alice"], "subject": "s", "body": "b"}),
+        ),
+    ] {
+        let reply = mcp.tool(tool, arguments);
+        let sentence = reply.error();
+        assert!(sentence.contains("cannot be reached"), "{tool}: {sentence}");
+        assert!(
+            sentence.ends_with('.') && !sentence.contains('\n'),
+            "{sentence}"
+        );
+        assert!(
+            !sentence.contains("127.0.0.1") && !sentence.contains("http"),
+            "{sentence}"
+        );
+        assert_eq!(reply.structured["error"]["code"], "unreachable");
+    }
+}
+
+#[test]
+fn a_server_that_goes_away_mid_session_is_met_the_same_way_and_a_session_ends_with_its_input() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut mcp = Mcp::start(&setup, "alice", &api);
+    assert!(!mcp.tool("dibs_status", json!({})).is_error);
+
+    let Setup { server, .. } = setup;
+    drop(server);
+
+    let reply = mcp.tool("dibs_items", json!({}));
+    assert!(
+        reply.error().contains("cannot be reached"),
+        "{}",
+        reply.text
+    );
+    assert_eq!(reply.structured["error"]["code"], "unreachable");
+    assert_eq!(mcp.finish(), Some(0));
+}
