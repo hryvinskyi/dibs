@@ -12,4 +12,17 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-lock = { version = "3.4.2", optional = true }
+async-trait = "0.1.92"
 dibs-domain = { path = "../domain" }
+thiserror = "2.0.21"
+time = "0.3.55"
+
+[features]
+# In-memory implementations of every port, for tests of this crate and of the crates that drive it.
+fakes = ["dep:async-lock"]
+
+[dev-dependencies]
+dibs-app = { path = ".", features = ["fakes"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.0", features = ["rt", "rt-multi-thread", "macros"] }

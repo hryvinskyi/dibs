@@ -5,6 +5,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::area::QualifiedArea;
 use crate::claim::Claim;
+use crate::event::GrantEnd;
 use crate::ids::{ItemId, MemberId};
 use crate::settings::ProjectSettings;
 
@@ -39,6 +40,45 @@ impl Grant {
             .any(|claim| claim.member == self.to && claim.item == self.item);
         grantor_holds && grantee_works
     }
+
+    /// Why the grant no longer rests on these claims, or `None` while it does.
+    ///
+    /// A grant rests on the grantee's claim on its item and on a claim of the grantor declaring its
+    /// area. It ends when either is gone — released, completed, taken over, forced, or the area no
+    /// longer declared — and the grantee's side is looked at first. Liveness does not matter here: a
+    /// claim that went stale suspends the grant ([`Grant::in_force`] reads it as not in force) without
+    /// ending it.
+    pub fn ending(&self, claims: &[Claim]) -> Option<GrantEnd> {
+        let grantee_works = claims
+            .iter()
+            .any(|claim| claim.member == self.to && claim.item == self.item);
+        let grantor_holds = claims
+            .iter()
+            .any(|claim| claim.member == self.from && claim.holds(&self.area));
+        if !grantee_works {
+            Some(GrantEnd::GranteeLeft)
+        } else if !grantor_holds {
+            Some(GrantEnd::GrantorLeft)
+        } else {
+            None
+        }
+    }
+}
+
+impl AsRef<Grant> for Grant {
+    fn as_ref(&self) -> &Grant {
+        self
+    }
+}
+
+/// The grants, in the order given, that no longer rest on these claims, each with why it ended (see
+/// [`Grant::ending`]). Takes anything that holds a grant, so a caller keeping grants with their ids
+/// gets its own records back.
+pub fn orphaned<'a, G: AsRef<Grant>>(grants: &'a [G], claims: &[Claim]) -> Vec<(&'a G, GrantEnd)> {
+    grants
+        .iter()
+        .filter_map(|held| held.as_ref().ending(claims).map(|end| (held, end)))
+        .collect()
 }
 
 /// What a successful grant did.
@@ -276,5 +316,95 @@ mod tests {
         let g = grant(2, "api:billing", ALICE, BOB);
         assert_eq!(decide_revoke_grant(&g, ALICE), Ok(()));
         assert_eq!(decide_revoke_grant(&g, BOB), Err(RevokeRefused::NotGrantor));
+    }
+
+    #[test]
+    fn a_grant_stands_while_both_claims_stand() {
+        let grants = [grant(2, "api:billing", ALICE, BOB)];
+        let claims = [claim(1, ALICE, &["api:billing"], 0), claim(2, BOB, &[], 0)];
+        assert!(orphaned(&grants, &claims).is_empty());
+        assert_eq!(grants[0].ending(&claims), None);
+    }
+
+    #[test]
+    fn a_grant_ends_with_the_grantees_claim() {
+        let grants = [grant(2, "api:billing", ALICE, BOB)];
+        let claims = [claim(1, ALICE, &["api:billing"], 0)];
+        assert_eq!(
+            orphaned(&grants, &claims),
+            vec![(&grants[0], GrantEnd::GranteeLeft)]
+        );
+    }
+
+    #[test]
+    fn a_grant_ends_when_the_grantor_declares_the_area_nowhere() {
+        let grants = [grant(2, "api:billing", ALICE, BOB)];
+        let claims = [claim(1, ALICE, &["api:search"], 0), claim(2, BOB, &[], 0)];
+        assert_eq!(
+            orphaned(&grants, &claims),
+            vec![(&grants[0], GrantEnd::GrantorLeft)]
+        );
+    }
+
+    #[test]
+    fn the_grantees_side_is_named_when_both_are_gone() {
+        let grants = [grant(2, "api:billing", ALICE, BOB)];
+        assert_eq!(grants[0].ending(&[]), Some(GrantEnd::GranteeLeft));
+    }
+
+    #[test]
+    fn another_claim_of_the_grantor_on_the_area_keeps_the_grant() {
+        let grants = [grant(2, "api:billing", ALICE, BOB)];
+        let claims = [claim(3, ALICE, &["api:billing"], 0), claim(2, BOB, &[], 0)];
+        assert!(orphaned(&grants, &claims).is_empty());
+    }
+
+    #[test]
+    fn a_claim_of_the_grantee_on_another_item_does_not_carry_the_grant() {
+        let grants = [grant(2, "api:billing", ALICE, BOB)];
+        let claims = [claim(1, ALICE, &["api:billing"], 0), claim(4, BOB, &[], 0)];
+        assert_eq!(
+            orphaned(&grants, &claims),
+            vec![(&grants[0], GrantEnd::GranteeLeft)]
+        );
+    }
+
+    #[test]
+    fn a_stale_claim_suspends_a_grant_without_ending_it() {
+        let grants = [grant(2, "api:billing", ALICE, BOB)];
+        let claims = [claim(1, ALICE, &["api:billing"], 0), claim(2, BOB, &[], 0)];
+        let stale_after = two_repo_settings().stale_after();
+        let late = at(0) + stale_after + Duration::minutes(1);
+        assert!(!grants[0].in_force(&claims, late, stale_after));
+        assert!(orphaned(&grants, &claims).is_empty());
+    }
+
+    #[test]
+    fn orphaned_returns_the_callers_own_records() {
+        struct Stored {
+            id: u64,
+            grant: Grant,
+        }
+        impl AsRef<Grant> for Stored {
+            fn as_ref(&self) -> &Grant {
+                &self.grant
+            }
+        }
+        let stored = [
+            Stored {
+                id: 7,
+                grant: grant(2, "api:billing", ALICE, BOB),
+            },
+            Stored {
+                id: 8,
+                grant: grant(5, "api:billing", ALICE, CAROL),
+            },
+        ];
+        let claims = [claim(1, ALICE, &["api:billing"], 0), claim(2, BOB, &[], 0)];
+        let ended: Vec<(u64, GrantEnd)> = orphaned(&stored, &claims)
+            .into_iter()
+            .map(|(record, end)| (record.id, end))
+            .collect();
+        assert_eq!(ended, [(8, GrantEnd::GranteeLeft)]);
     }
 }

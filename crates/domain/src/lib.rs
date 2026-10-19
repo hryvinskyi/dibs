@@ -16,6 +16,7 @@ pub mod item;
 pub mod member;
 pub mod message;
 pub mod paths;
+pub mod project;
 pub mod ref_scheme;
 pub mod repo;
 pub mod reservation;

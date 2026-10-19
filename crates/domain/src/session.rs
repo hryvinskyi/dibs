@@ -1,4 +1,4 @@
-//! The machine a session runs on.
+//! What a session reports about itself: the machine it runs on and the kind of agent it runs.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -39,6 +39,36 @@ impl HostName {
 
 string_value!(HostName, HostNameError);
 
+/// The kind of agent a session runs, as the session reports it. Nothing is decided by it: 1 to 64
+/// characters after trimming, with no control characters.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentLabel(String);
+
+/// Why a text is not an agent label.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AgentLabelError {
+    /// The trimmed text is empty, longer than 64 characters, or has control characters.
+    #[error("an agent label is 1 to 64 characters with no control characters")]
+    Malformed,
+}
+
+impl AgentLabel {
+    /// Parses an agent label, trimming whitespace at both ends.
+    ///
+    /// # Errors
+    /// [`AgentLabelError::Malformed`] when the trimmed text breaks the rules above.
+    pub fn parse(value: &str) -> Result<Self, AgentLabelError> {
+        let value = value.trim();
+        if value.is_empty() || value.chars().count() > 64 || has_control(value) {
+            return Err(AgentLabelError::Malformed);
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+string_value!(AgentLabel, AgentLabelError);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +91,17 @@ mod tests {
         for (value, ok) in cases {
             assert_eq!(HostName::parse(value).is_ok(), *ok, "{value:?}");
         }
+    }
+
+    #[test]
+    fn agent_label_is_trimmed_and_bounded() {
+        assert_eq!(AgentLabel::parse(" agent ").unwrap().as_str(), "agent");
+        assert!(AgentLabel::parse(&"a".repeat(64)).is_ok());
+        assert_eq!(
+            AgentLabel::parse(&"a".repeat(65)),
+            Err(AgentLabelError::Malformed)
+        );
+        assert_eq!(AgentLabel::parse("a\tb"), Err(AgentLabelError::Malformed));
+        assert_eq!(AgentLabel::parse("  "), Err(AgentLabelError::Malformed));
     }
 }
