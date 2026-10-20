@@ -61,7 +61,7 @@ check_binary() {
   if [ -z "$installed" ]; then
     message "dibs: dibs --version did not name a version, so this plugin cannot tell whether dibs is recent enough. Run dibs doctor."
   elif [ -n "$needed" ] && older "$installed" "$needed"; then
-    message "dibs: this plugin needs dibs $needed or newer, and dibs $installed is installed; until it is updated, some of its hooks do nothing. Install the latest release: $install_url"
+    message "dibs: this plugin needs dibs $needed or newer, and dibs $installed is installed; until it is updated, some of its hooks do nothing. Update it with dibs self-update in a terminal, or install the latest release: $install_url"
   fi
 }
 

@@ -181,7 +181,8 @@ impl Run<'_> {
         if matches!(event, HostEvent::BeforeTool { .. }) {
             return outcome;
         }
-        self.keep_up(outcome)
+        let starting = matches!(event, HostEvent::SessionStarted { .. });
+        self.keep_up(outcome, starting)
     }
 
     fn session_started(&self) -> Result<GuardOutcome, Problem> {
@@ -224,6 +225,7 @@ impl Run<'_> {
             status: status.as_ref().map(|cached| &cached.value),
             inbox: inbox.as_ref().map(|cached| &cached.value),
             status_age,
+            newer: cache.newer_release(),
             now: self.now,
         };
         Ok(GuardOutcome::NoObjection {
@@ -535,13 +537,12 @@ impl Run<'_> {
         }
     }
 
-    /// Starts the background upkeep when something is due and the server is not known to be
-    /// unreachable; a failure to start it joins the outcome as a notice.
-    fn keep_up(&self, outcome: GuardOutcome) -> GuardOutcome {
+    /// Starts the background upkeep when something is due; a failure to start it joins the outcome
+    /// as a notice. Only the start of a session may ask for the daily check for a newer client,
+    /// and while the server is known to be unreachable that check is all that is started: a client
+    /// the server no longer serves still learns what to update to.
+    fn keep_up(&self, outcome: GuardOutcome, starting: bool) -> GuardOutcome {
         let cache = self.workspace.cache();
-        if circuit_open(cache.unreachable_since(), self.now) {
-            return outcome;
-        }
         let settings = cache.settings().ok().flatten();
         let freshness = Freshness {
             heartbeat_every: settings.as_ref().map_or(DEFAULT_HEARTBEAT, |cached| {
@@ -551,11 +552,17 @@ impl Run<'_> {
             settings_at: settings.as_ref().map(|cached| cached.at),
             status_at: cache.status().map(|cached| cached.at),
             inbox_at: cache.inbox().map(|cached| cached.at),
+            versions_at: cache.versions_checked_at(),
         };
-        if !Due::at(self.now, &freshness).any() {
+        let mut due = Due::at(self.now, &freshness);
+        due.update &= starting;
+        if circuit_open(cache.unreachable_since(), self.now) {
+            due = due.update_only();
+        }
+        if !due.any() {
             return outcome;
         }
-        match self.workspace.upkeep().start(&self.session, self.now) {
+        match self.workspace.upkeep().start(&self.session, self.now, due) {
             Ok(_) => outcome,
             Err(error) => with_notice(outcome, wording::upkeep_failed(&error.to_string())),
         }

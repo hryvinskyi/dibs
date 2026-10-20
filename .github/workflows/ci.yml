@@ -103,6 +103,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: minisign, which the install script's test signs its releases with
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
       - name: Test the scripts
         run: |
           scripts/tests/check-clean.test.sh

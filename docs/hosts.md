@@ -28,7 +28,11 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
   two seconds.
   On Windows the detached sync still inherits the hook's own output pipe (the standard library has no stable way
   yet to stop that), so a host that waits for the hook's output to close waits for the sync too: up to a few
-  seconds, at most once per refresh interval.
+  seconds, at most once per refresh interval. That is also why the background sync never installs a newer release
+  on Windows: there it only remembers it for the brief, and the person runs `dibs self-update`.
+- **A newer client is installed in the background only.** Only the start of a session, at most once a day, asks the
+  detached sync to check which client the server recommends (`dibs sync --update`) and to install it when it is newer;
+  a hook itself never downloads anything. A server that serves only newer clients (`426`) is read as unreachable.
 - **A server that failed is left alone for a minute**, and the person is warned at most once a minute.
 - **Nothing is produced that the host cannot carry**: each adapter declares its capabilities, and the guard
   computes no answer, and fetches nothing, for something the host would drop.

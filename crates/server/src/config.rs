@@ -10,7 +10,10 @@ use axum::http::HeaderName;
 use thiserror::Error;
 use tracing::level_filters::LevelFilter;
 
+use semver::Version;
+
 use crate::client_ip::{Cidr, ProxyTrust};
+use crate::versions::ClientVersions;
 
 /// The address the server listens on when `DIBS_LISTEN` is not set.
 pub const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
@@ -48,6 +51,9 @@ pub struct Config {
     /// Where and how often snapshots are taken, when they are (`DIBS_SNAPSHOT_DIR`,
     /// `DIBS_SNAPSHOT_EVERY`, `DIBS_SNAPSHOT_KEEP`).
     pub snapshots: Option<SnapshotConfig>,
+    /// The oldest client served and the client recommended (`DIBS_MIN_CLIENT`,
+    /// `DIBS_LATEST_CLIENT`).
+    pub versions: ClientVersions,
 }
 
 /// Where snapshots of the database are written, how often, and how many are kept.
@@ -140,14 +146,38 @@ impl Config {
                 })?,
         };
         let snapshots = parse_snapshots(&get)?;
+        let versions = parse_versions(&get)?;
         Ok(Self {
             database,
             listen,
             proxy,
             log,
             snapshots,
+            versions,
         })
     }
+}
+
+fn parse_versions(get: &impl Fn(&str) -> Option<String>) -> Result<ClientVersions, ConfigError> {
+    let min = get("DIBS_MIN_CLIENT")
+        .map(|text| parse_version("DIBS_MIN_CLIENT", &text))
+        .transpose()?;
+    let latest = get("DIBS_LATEST_CLIENT")
+        .map(|text| parse_version("DIBS_LATEST_CLIENT", &text))
+        .transpose()?;
+    ClientVersions::new(min, latest).map_err(|error| ConfigError::Invalid {
+        var: "DIBS_LATEST_CLIENT",
+        reason: format!("{error}; raise it to DIBS_MIN_CLIENT or above"),
+    })
+}
+
+/// A release version such as `1.4.0`, written with or without a leading `v`.
+fn parse_version(var: &'static str, text: &str) -> Result<Version, ConfigError> {
+    let text = text.trim();
+    Version::parse(text.strip_prefix('v').unwrap_or(text)).map_err(|_| ConfigError::Invalid {
+        var,
+        reason: "it is a release version, such as 1.4.0".to_owned(),
+    })
 }
 
 fn parse_snapshots(
@@ -277,6 +307,42 @@ mod tests {
         assert_eq!(config.proxy, None);
         assert_eq!(config.log, LevelFilter::INFO);
         assert_eq!(config.snapshots, None);
+        assert_eq!(config.versions, ClientVersions::default());
+    }
+
+    #[test]
+    fn the_client_versions_are_release_versions_in_order() {
+        let config = parse(&[
+            ("DIBS_DATABASE", "dibs.db"),
+            ("DIBS_MIN_CLIENT", " v0.4.0 "),
+            ("DIBS_LATEST_CLIENT", "0.5.1"),
+        ])
+        .unwrap();
+        assert_eq!(
+            config.versions.min().map(ToString::to_string).as_deref(),
+            Some("0.4.0")
+        );
+        assert_eq!(
+            config.versions.latest().map(ToString::to_string).as_deref(),
+            Some("0.5.1")
+        );
+        let cases: &[(&[(&str, &str)], &str)] = &[
+            (&[("DIBS_MIN_CLIENT", "four")], "DIBS_MIN_CLIENT"),
+            (&[("DIBS_LATEST_CLIENT", "1.2")], "DIBS_LATEST_CLIENT"),
+            (
+                &[
+                    ("DIBS_MIN_CLIENT", "0.5.0"),
+                    ("DIBS_LATEST_CLIENT", "0.4.9"),
+                ],
+                "DIBS_LATEST_CLIENT",
+            ),
+        ];
+        for (pairs, var) in cases {
+            let mut all = vec![("DIBS_DATABASE", "dibs.db")];
+            all.extend_from_slice(pairs);
+            let error = parse(&all).unwrap_err();
+            assert!(error.to_string().starts_with(var), "{pairs:?}: {error}");
+        }
     }
 
     #[test]

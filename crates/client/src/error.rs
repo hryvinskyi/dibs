@@ -39,6 +39,13 @@ pub enum ClientError {
         /// The server's sentence.
         message: String,
     },
+    /// The server serves only newer clients than this one (`426`); the sentence says how to
+    /// update.
+    #[error("{message}")]
+    Outdated {
+        /// The server's sentence.
+        message: String,
+    },
     /// Another member is in the way (`409`): the item or an area is held, a claim is not stale.
     #[error("{message}")]
     Conflict {
@@ -81,16 +88,20 @@ impl ClientError {
             Self::Timeout { .. } => "timeout",
             Self::Unauthorized { .. } => "unauthorized",
             Self::Unexpected { .. } => "unexpected",
+            Self::Outdated { .. } => "client_too_old",
             Self::Conflict { code, .. } | Self::Refused { code, .. } => code,
         }
     }
 
     /// Whether the server could not give a decision: it was unreachable, too slow, failed itself,
-    /// or answered something this client does not understand. A caller that must never block work
-    /// on the service's account treats such a failure as no decision.
+    /// answered something this client does not understand, or serves only newer clients. A caller
+    /// that must never block work on the service's account treats such a failure as no decision.
     pub fn is_unavailable(&self) -> bool {
         match self {
-            Self::Network { .. } | Self::Timeout { .. } | Self::Unexpected { .. } => true,
+            Self::Network { .. }
+            | Self::Timeout { .. }
+            | Self::Unexpected { .. }
+            | Self::Outdated { .. } => true,
             Self::Refused { status, .. } => *status >= 500,
             Self::Unauthorized { .. } | Self::Conflict { .. } => false,
         }
@@ -218,6 +229,9 @@ pub(crate) fn decode<T: DeserializeOwned>(response: Response<'_>) -> Result<T, C
     let ErrorBody { error } = serde_json::from_slice(response.body).map_err(|_| unexpected())?;
     Err(match response.status {
         401 => ClientError::Unauthorized {
+            message: error.message,
+        },
+        426 => ClientError::Outdated {
             message: error.message,
         },
         409 => ClientError::Conflict {
@@ -357,5 +371,23 @@ mod tests {
 
         let failing = error_body(503, "timeout", json!({}));
         assert!(failing.is_unavailable());
+    }
+
+    #[test]
+    fn a_server_that_serves_only_newer_clients_gives_no_decision_and_says_how_to_update() {
+        let outdated = error_body(426, "client_too_old", json!({"min_client": "0.4.0"}));
+        assert_eq!(
+            outdated,
+            ClientError::Outdated {
+                message: "A sentence.".to_owned()
+            }
+        );
+        assert!(outdated.is_unavailable());
+        assert_eq!(outdated.code(), "client_too_old");
+        let page = decode::<Heartbeat>(response(426, Some("text/html"), b"<html></html>"));
+        assert!(matches!(
+            page,
+            Err(ClientError::Unexpected { status: 426, .. })
+        ));
     }
 }

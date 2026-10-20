@@ -22,6 +22,9 @@ pub const WARN_EVERY: Duration = Duration::seconds(60);
 /// The heartbeat interval while the project's settings are not known yet.
 pub const DEFAULT_HEARTBEAT: Duration = Duration::minutes(1);
 
+/// How often, at most, the server is asked which client it recommends, and a newer one installed.
+pub const UPDATE_EVERY: Duration = Duration::days(1);
+
 /// When each cache was last filled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Freshness {
@@ -35,6 +38,8 @@ pub struct Freshness {
     pub status_at: Option<OffsetDateTime>,
     /// When the inbox was fetched.
     pub inbox_at: Option<OffsetDateTime>,
+    /// When the server was last asked which client it recommends.
+    pub versions_at: Option<OffsetDateTime>,
 }
 
 /// What is due.
@@ -48,6 +53,8 @@ pub struct Due {
     pub status: bool,
     /// The inbox is old or unknown.
     pub inbox: bool,
+    /// The server was not asked within a day which client it recommends.
+    pub update: bool,
 }
 
 impl Due {
@@ -62,12 +69,23 @@ impl Due {
             heartbeat: older(freshness.last_heartbeat, freshness.heartbeat_every),
             status: older(freshness.status_at, STATUS_FRESH),
             inbox: older(freshness.inbox_at, INBOX_FRESH),
+            update: older(freshness.versions_at, UPDATE_EVERY),
         }
     }
 
     /// Whether anything is due.
     pub fn any(&self) -> bool {
-        self.settings || self.heartbeat || self.status || self.inbox
+        self.settings || self.heartbeat || self.status || self.inbox || self.update
+    }
+
+    /// Only what asks the server nothing about the project: the check for a newer client, when it
+    /// is due.
+    #[must_use]
+    pub fn update_only(self) -> Self {
+        Self {
+            update: self.update,
+            ..Self::default()
+        }
     }
 }
 
@@ -94,6 +112,7 @@ mod tests {
             settings_at: Some(now),
             status_at: Some(now),
             inbox_at: Some(now),
+            versions_at: Some(now),
         }
     }
 
@@ -138,11 +157,31 @@ mod tests {
             settings_at: None,
             status_at: None,
             inbox_at: None,
+            versions_at: None,
         };
         let due = Due::at(now, &never);
-        assert!(due.settings && due.heartbeat && due.status && due.inbox);
+        assert!(due.settings && due.heartbeat && due.status && due.inbox && due.update);
         let future = fresh_all(now + Duration::hours(1));
         assert!(Due::at(now, &future).status);
+    }
+
+    #[test]
+    fn a_newer_client_is_looked_for_at_most_once_a_day() {
+        let checked = NOW + Duration::days(10);
+        let due = |after: Duration| Due::at(checked + after, &fresh_all(checked)).update;
+        assert!(!due(Duration::ZERO));
+        assert!(!due(Duration::hours(23) + Duration::minutes(59)));
+        assert!(due(Duration::days(1)));
+        assert!(due(-Duration::hours(1)), "a check from the future is due");
+        let only = Due::at(checked + Duration::days(2), &fresh_all(checked)).update_only();
+        assert_eq!(
+            only,
+            Due {
+                update: true,
+                ..Due::default()
+            }
+        );
+        assert!(!Due::default().update_only().any());
     }
 
     #[test]

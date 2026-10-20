@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use dibs_agent_host::ports::{Cached, InboxView, KnownSettings, LocalCache, PortError, StatusView};
+use dibs_agent_host::ports::{
+    Cached, InboxView, KnownSettings, LocalCache, NewerRelease, PortError, StatusView,
+};
 use dibs_agent_host::upkeep::STATUS_FRESH;
 use dibs_client::state::{StateDir, read_json, write_json};
 use dibs_domain::area::QualifiedArea;
@@ -14,6 +16,7 @@ use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::settings::ProjectSettings;
 
 use crate::guard::views;
+use crate::release;
 
 /// The project's state directory, read and written for the guard, for the checkout at `root`. A
 /// write that fails is logged and otherwise ignored: what was not remembered is fetched again
@@ -144,5 +147,18 @@ impl LocalCache for StateCache {
             write_json(&self.state.file(REPO_WARNINGS), &warnings),
             "the repository warning mark",
         );
+    }
+
+    fn versions_checked_at(&self) -> Option<OffsetDateTime> {
+        self.state.versions().map(|cached| cached.checked_at)
+    }
+
+    fn newer_release(&self) -> Option<NewerRelease> {
+        let installed = release::installed().ok()?;
+        let latest = self.state.versions()?.versions.latest_client?;
+        (latest > installed).then(|| NewerRelease {
+            installed: installed.to_string(),
+            latest: latest.to_string(),
+        })
     }
 }

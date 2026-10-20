@@ -37,6 +37,7 @@ use dibs_domain::settings::SettingsDocument;
 use dibs_server::adapters::BroadcastNotifier;
 use dibs_server::http::{HttpOptions, router};
 use dibs_server::stream::{EventStreams, Shutdown, StreamOptions};
+use dibs_server::versions::ClientVersions;
 use dibs_store_sqlite::SqliteStore;
 
 /// When every test server's clock starts.
@@ -142,6 +143,26 @@ impl TestServer {
     /// # Errors
     /// When the runtime, the database or the port cannot be set up.
     pub fn start() -> Setup<Self> {
+        Self::serving(ClientVersions::default())
+    }
+
+    /// Starts a server that serves `dibs` clients from `min` on and recommends `latest`, each a
+    /// release version such as `0.4.0`; `None` leaves it unset.
+    ///
+    /// # Errors
+    /// When a version does not parse, `latest` is older than `min`, or the server cannot start.
+    pub fn with_client_versions(min: Option<&str>, latest: Option<&str>) -> Setup<Self> {
+        let parse = |text: Option<&str>| {
+            text.map(semver::Version::parse)
+                .transpose()
+                .map_err(failed("a client version"))
+        };
+        let versions = ClientVersions::new(parse(min)?, parse(latest)?)
+            .map_err(failed("the client versions"))?;
+        Self::serving(versions)
+    }
+
+    fn serving(versions: ClientVersions) -> Setup<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -178,6 +199,7 @@ impl TestServer {
                 let options = HttpOptions {
                     clock: fakes.clock.clone(),
                     tokens: fakes.tokens.clone(),
+                    versions,
                     ..HttpOptions::default()
                 };
                 let service = router(app.clone(), streams, options)

@@ -28,7 +28,7 @@ use crate::api::{
     Heartbeat, Inbox, InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me, Member,
     MessageStatus, NewItem, NewMember, PostMessage, Posted, ReadyList, RegisterSession, Revoked,
     Session, SettingsApplied, StartThread, StartThreadBody, Started, Status, TakeOverRequest,
-    TakenOver, ThreadDetail, Threads, TokenRevoked,
+    TakenOver, ThreadDetail, Threads, TokenRevoked, Versions,
 };
 use crate::api::{
     ForceReleaseSlotRequest, ReleaseSlotRequest, SlotAnswer, SlotForced, SlotReleased,
@@ -173,6 +173,15 @@ impl Client {
     /// The server this client talks to.
     pub fn server(&self) -> &ServerUrl {
         &self.server
+    }
+
+    /// `GET /v1/version`: the versions the server serves and recommends. The server answers it to a
+    /// client of any version.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn versions(&self) -> Result<Versions, ClientError> {
+        self.send(self.request(Method::GET, "/v1/version")).await
     }
 
     /// `GET /v1/me`: the caller, their project, its repositories and settings.
@@ -793,7 +802,7 @@ fn percent_encode_segment(text: &str) -> String {
 
 /// Makes rustls use the `ring` provider for every TLS connection of this process, unless one is
 /// already chosen.
-fn install_crypto_provider() {
+pub(crate) fn install_crypto_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
@@ -918,7 +927,7 @@ impl Follow {
             },
             Err(error) => error,
         };
-        if error.is_unavailable() {
+        if error.is_unavailable() && !matches!(error, ClientError::Outdated { .. }) {
             Opened::Retry
         } else {
             Opened::Refused(error)

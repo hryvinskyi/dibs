@@ -8,6 +8,7 @@ pub mod graph;
 pub mod hook;
 pub mod login;
 pub mod messages;
+pub mod self_update;
 pub mod slot;
 pub mod sync;
 pub mod work;
@@ -43,6 +44,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Slot(command) => slot::run(command, ctx).await,
         Command::Sync(args) => sync::sync(args, ctx).await,
         Command::Mcp => crate::mcp::serve(ctx).await,
+        Command::SelfUpdate(args) => self_update::self_update(args, ctx).await,
         Command::Admin(command) => admin::run(command, ctx).await,
     }
 }

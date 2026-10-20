@@ -40,4 +40,6 @@ mod transport;
 #[cfg(test)]
 mod ui;
 #[cfg(test)]
+mod versions;
+#[cfg(test)]
 mod wide;

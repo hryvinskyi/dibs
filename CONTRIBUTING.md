@@ -45,7 +45,8 @@ npm --prefix web run e2e
   repositories). `web/e2e/` drives the pages in Chromium with Playwright against the same binary (`DIBS_SERVER_BIN`
   names another build) and fails a test when the page reports a content security policy violation. Both run in CI in
   the `e2e` job; `cargo test --workspace` also runs the first.
-- The scripts have tests of their own under `scripts/tests/`, run in CI.
+- The scripts have tests of their own under `scripts/tests/`, run in CI. The install script's test signs its
+  releases with a key it makes, so it needs [minisign](https://jedisct1.github.io/minisign/) installed.
 - `deploy/` is validated in CI: every Caddyfile with `caddy validate` in the `caddy:2` image, the compose file with
   `docker compose config`, and the image by building it and starting it. `actionlint` checks the workflows.
 - `cargo bench -p dibs` measures a hook on a warm cache, process start included. CI reports it and does not gate on it.
@@ -79,6 +80,31 @@ configuration parser is a pure function over an injected lookup (`impl Fn(&str) 
 
 Add a dependency with `cargo add <crate>`, which takes the latest stable version, not a version written from memory.
 `cargo deny check` must pass: licences from the allowed list, no advisory, no yanked crate.
+
+## Release signing
+
+A release is published by pushing a tag `v<version>` that matches the workspace's version and the `version` of every
+plugin manifest under `integrations/` (a plugin with auto-update on sees a new release only by that string). The release workflow signs the release's `SHA256SUMS` with the project's minisign key and publishes
+the signature as `SHA256SUMS.minisig`; `dibs self-update` installs nothing that signature does not cover. The workflow
+refuses to publish when the secret is missing or its signature does not verify against `keys/release.pub`, which is
+compiled into every binary and written into the released `install.sh` (`scripts/stamp-release-key.sh`), so that
+script checks the same signature when minisign is installed.
+
+Until a key is made, `keys/release.pub` holds a placeholder: builds then refuse every self-update, and no release can be
+published. To make the key, once, on a trusted machine with [minisign](https://jedisct1.github.io/minisign/)
+installed (`brew install minisign`, `apt install minisign`):
+
+```sh
+minisign -G -W -p keys/release.pub -s dibs-release.key   # -W: no password, as the workflow signs unattended
+gh secret set DIBS_RELEASE_SIGNING_KEY < dibs-release.key  # the repository secret the workflow reads
+```
+
+Commit the new `keys/release.pub`. Store `dibs-release.key` in the maintainers' password manager, then delete the file
+from the machine; nothing else needs it. Binaries built before the commit trust no key and update only through the
+install scripts.
+
+Replacing the key (it leaked, or its holder left) is the same two commands and a commit. Binaries built with the old
+key refuse every release signed with the new one, so announce that each member reinstalls with the install script once.
 
 ## A public repository
 

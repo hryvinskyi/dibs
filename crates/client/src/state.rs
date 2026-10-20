@@ -14,6 +14,8 @@
 //! - `cache/<scope>/heartbeat`, `warned`, `sync-started` — when the last heartbeat was sent, when
 //!   the person was last warned about an unreachable server, when a background sync was last
 //!   started;
+//! - `cache/<scope>/versions.json` — the client versions the server serves and recommends, and when
+//!   they were last asked for;
 //! - `cache/<scope>/<name>.lock` — the lock files of whoever holds them;
 //! - `cache/<scope>/<name>` — files callers keep for themselves ([`StateDir::file`]).
 //!
@@ -36,7 +38,7 @@ use dibs_domain::ids::{MessageId, SessionId, ThreadId};
 use dibs_domain::message::{Importance, SessionLabel, Subject};
 use dibs_domain::settings::SettingsDocument;
 
-use crate::api::{Inbox, PendingOffer, Session, Status};
+use crate::api::{Inbox, PendingOffer, Session, Status, Versions};
 use crate::credentials::CredentialKey;
 
 /// The state of one project on one server.
@@ -64,6 +66,16 @@ pub struct CachedStatus {
     pub fetched_at: OffsetDateTime,
     /// The status.
     pub status: Status,
+}
+
+/// The client versions the server serves and recommends, as last asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedVersions {
+    /// When.
+    #[serde(with = "time::serde::rfc3339")]
+    pub checked_at: OffsetDateTime,
+    /// The answer.
+    pub versions: Versions,
 }
 
 /// The inbox as last fetched.
@@ -217,6 +229,25 @@ impl StateDir {
             &CachedStatus {
                 fetched_at: at,
                 status: status.clone(),
+            },
+        )
+    }
+
+    /// The client versions as last asked for.
+    pub fn versions(&self) -> Option<CachedVersions> {
+        read_json(&self.cache.join("versions.json"))
+    }
+
+    /// Remembers the client versions the server answered at `at`.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn remember_versions(&self, versions: &Versions, at: OffsetDateTime) -> io::Result<()> {
+        write_json(
+            &self.cache.join("versions.json"),
+            &CachedVersions {
+                checked_at: at,
+                versions: versions.clone(),
             },
         )
     }
@@ -482,6 +513,23 @@ mod tests {
             push: false,
             last_seen: OffsetDateTime::UNIX_EPOCH,
         }
+    }
+
+    #[test]
+    fn the_client_versions_are_remembered_with_when_they_were_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path(), &key("widgets"));
+        assert_eq!(state.versions(), None);
+        let versions = Versions {
+            server: semver::Version::new(0, 5, 0),
+            min_client: None,
+            latest_client: Some(semver::Version::new(0, 5, 0)),
+        };
+        let at = OffsetDateTime::UNIX_EPOCH + Duration::days(3);
+        state.remember_versions(&versions, at).unwrap();
+        let cached = state.versions().unwrap();
+        assert_eq!(cached.checked_at, at);
+        assert_eq!(cached.versions, versions);
     }
 
     #[test]

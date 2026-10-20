@@ -25,6 +25,7 @@ dibs-store-sqlite = { path = "../store-sqlite" }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 lru = "0.19.0"
 rand = "0.10.3"
+semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.10.9"

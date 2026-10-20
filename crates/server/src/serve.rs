@@ -116,6 +116,7 @@ pub async fn serve(
     let streams = EventStreams::new(notifier, stopping.signal(), StreamOptions::default());
     let options = HttpOptions {
         client_ip: ClientIpPolicy::new(config.proxy),
+        versions: config.versions,
         ..HttpOptions::default()
     };
     let listener = TcpListener::bind(config.listen)

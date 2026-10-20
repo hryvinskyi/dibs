@@ -30,13 +30,16 @@ tracing = "0.1.44"
 time = "0.3.55"
 tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
 rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
+semver = "1.0.28"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
 criterion = "0.8.2"
 dibs-test-server = { path = "../test-server" }
+minisign = "0.10.0"
 serde_json = "1.0.154"
 tempfile = "3.27.0"
+url = "2.5.8"
 
 [[bench]]
 name = "warm_hook"

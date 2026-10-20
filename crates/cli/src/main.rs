@@ -14,6 +14,7 @@ mod guard;
 mod hosts;
 mod mcp;
 mod output;
+mod release;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -33,6 +34,7 @@ const LOG_VAR: &str = "DIBS_LOG";
 
 fn main() -> ExitCode {
     let started = Instant::now();
+    remove_replaced_binary();
     let args: Vec<OsString> = std::env::args_os().collect();
     let env: HashMap<String, String> = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
@@ -83,6 +85,19 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// Deletes the binary a self-update renamed aside on Windows, which cannot delete a running
+/// executable; on the next start it no longer runs.
+#[cfg(windows)]
+fn remove_replaced_binary() {
+    if let Ok(binary) = std::env::current_exe() {
+        dibs_client::update::install::remove_previous(&binary);
+    }
+}
+
+/// Nothing is left aside where a running binary can be replaced in place.
+#[cfg(not(windows))]
+fn remove_replaced_binary() {}
 
 fn run(command: Command, env: HashMap<String, String>, printer: Printer) -> Result<(), Failure> {
     let cwd = std::env::current_dir()

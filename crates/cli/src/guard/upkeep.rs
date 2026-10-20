@@ -2,6 +2,9 @@
 //! that outlives the hook, with nothing of the hook's open (its standard streams go nowhere, so a
 //! host waiting for the hook's output to end is not kept waiting).
 //!
+//! A start of a session that finds the daily check for a newer client due asks the sync for it
+//! (`--update`); no other event does.
+//!
 //! One at a time per project: the hook starts one only while it can take the project's sync lock,
 //! and not again within a few seconds of the last start; the sync itself takes the same lock for
 //! the whole of its run. A second hook that cannot take the lock starts nothing.
@@ -15,7 +18,7 @@ use std::time::Duration as StdDuration;
 use time::{Duration, OffsetDateTime};
 
 use dibs_agent_host::ports::{PortError, SessionRef, Upkeep};
-use dibs_agent_host::upkeep::is_fresh;
+use dibs_agent_host::upkeep::{Due, is_fresh};
 use dibs_client::state::StateDir;
 
 /// The name of the lock the sync holds while it runs.
@@ -48,7 +51,12 @@ fn refused(what: &str) -> impl Fn(std::io::Error) -> PortError + '_ {
 }
 
 impl Upkeep for DetachedSync {
-    fn start(&self, session: &SessionRef, now: OffsetDateTime) -> Result<bool, PortError> {
+    fn start(
+        &self,
+        session: &SessionRef,
+        now: OffsetDateTime,
+        due: Due,
+    ) -> Result<bool, PortError> {
         let lock = open_lock(&self.state).map_err(refused("Opening the sync lock"))?;
         match lock.try_lock() {
             Ok(()) => {}
@@ -76,6 +84,7 @@ impl Upkeep for DetachedSync {
                 "--session",
             ])
             .arg(session.key.as_str())
+            .args(due.update.then_some("--update"))
             .current_dir(&self.root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

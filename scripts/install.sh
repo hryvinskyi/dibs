@@ -1,6 +1,7 @@
 #!/bin/sh
 # Installs the dibs command line from a release: picks the archive for this machine, checks it
-# against the release's SHA256SUMS, and puts `dibs` in ~/.local/bin.
+# against the release's SHA256SUMS, and puts `dibs` in ~/.local/bin. When minisign is installed, it
+# first checks that SHA256SUMS carries the release key's signature (SHA256SUMS.minisig).
 #
 #   curl -fsSL https://github.com/hryvinskyi/dibs/releases/latest/download/install.sh | sh
 #   curl -fsSL https://github.com/hryvinskyi/dibs/releases/latest/download/install.sh | sh -s -- --version 1.2.3
@@ -14,8 +15,13 @@
 #   DIBS_RELEASE_URL   where releases are downloaded from, laid out as GitHub lays them out
 #                      (default: https://github.com/hryvinskyi/dibs/releases)
 #
-# Nothing is installed unless the archive's checksum matches the release's SHA256SUMS.
+# Nothing is installed unless the archive's checksum matches the release's SHA256SUMS, and, with
+# minisign on the PATH, unless that file's signature verifies against the release key below.
 set -eu
+
+# The public release key, the second line of keys/release.pub, written in when a release is built.
+# Anything but a minisign public key here means the script cannot verify signatures.
+release_key='@DIBS_RELEASE_KEY@'
 
 release_url="${DIBS_RELEASE_URL:-https://github.com/hryvinskyi/dibs/releases}"
 version=""
@@ -132,6 +138,37 @@ listed_hash() {
   return 1
 }
 
+# key_is_set: whether release_key holds a minisign public key (56 base64 characters, from RW).
+key_is_set() {
+  case "$release_key" in
+    RW*) ;;
+    *) return 1 ;;
+  esac
+  case "$release_key" in
+    *[!A-Za-z0-9+/=]*) return 1 ;;
+  esac
+  [ "${#release_key}" -eq 56 ]
+}
+
+# verify_signature <SHA256SUMS> <base URL>: refuses unless the release's signature of the file
+# verifies against the release key; says once that only the checksum is checked when this script
+# carries no key or minisign is not installed.
+verify_signature() {
+  if ! key_is_set; then
+    say "This install script carries no release signing key, so it cannot verify the release's signature; it checks the archive against SHA256SUMS only."
+    return 0
+  fi
+  if ! command -v minisign >/dev/null 2>&1; then
+    say "minisign is not installed, so the release's signature is not checked; the archive is checked against SHA256SUMS only. Install minisign to have the signature checked too."
+    return 0
+  fi
+  fetch "$2/SHA256SUMS.minisig" "$work/SHA256SUMS.minisig"
+  if ! minisign -V -q -P "$release_key" -m "$1" -x "$work/SHA256SUMS.minisig" >/dev/null 2>&1; then
+    die "the signature of the release's SHA256SUMS does not verify against the release key; nothing was installed."
+  fi
+  say "The release's signature verifies against the release key."
+}
+
 # latest_version <SHA256SUMS>: the version of the archive listed for this machine's target.
 latest_version() {
   while read -r _ name; do
@@ -165,6 +202,7 @@ archive="dibs-$version-$target.tar.gz"
 
 say "Installing dibs $version for $target."
 fetch "$base/SHA256SUMS" "$work/SHA256SUMS"
+verify_signature "$work/SHA256SUMS" "$base"
 expected="$(listed_hash "$work/SHA256SUMS" "$archive")" ||
   die "release $version lists no archive named $archive."
 fetch "$base/$archive" "$work/$archive"

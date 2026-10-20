@@ -61,6 +61,20 @@ pub struct RepoRef {
     pub remote: Option<RemoteUrl>,
 }
 
+/// `GET /v1/version`: the server's version, the oldest client it serves and the client it
+/// recommends, each when set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Versions {
+    /// The server's own version.
+    pub server: semver::Version,
+    /// The oldest client the server serves.
+    #[serde(default)]
+    pub min_client: Option<semver::Version>,
+    /// The client the server recommends.
+    #[serde(default)]
+    pub latest_client: Option<semver::Version>,
+}
+
 /// `GET /v1/me`: the caller, their project, its repositories and its settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Me {

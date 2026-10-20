@@ -22,4 +22,5 @@ pub mod snapshot;
 pub mod stream;
 pub mod sweep;
 pub mod ui;
+pub mod versions;
 pub mod views;

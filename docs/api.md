@@ -16,6 +16,11 @@ members `alice` and `bob`.
 - **Caching.** Every answer carries `Cache-Control: no-store` unless its route sets its own.
 - **Limits.** A request body is at most 128 KiB; an import batch (`PUT /v1/items`) at most 2 MiB and 500 items. A request is answered within 10 seconds or refused with `timeout`
   (the event stream is bounded only until its answer starts). A message body is at most 16 KiB.
+- **Client versions.** The `dibs` client sends `User-Agent: dibs/<version>`. When the server sets `DIBS_MIN_CLIENT`
+  (see [operations](operations.md#client-versions)), a `dibs` client older than it is answered
+  `426 client_too_old` on every `/v1` route but `GET /v1/version`, with a sentence saying how to update and
+  `details.min_client`. Another agent, a browser or a probe is not judged by its `User-Agent`. The client's hooks treat
+  this answer as a server that cannot be reached: no decision, one warning.
 - **Unknown fields.** A field a route does not read is ignored in a request, except in the settings document and in an
   import batch (`PUT /v1/items`), which refuse unknown fields.
 
@@ -39,7 +44,7 @@ for every cause. Failed attempts are counted per client address (see `DIBS_TRUST
 
 Roles: `member` and `admin` are people; `importer` is an integration that feeds the project from an outside tracker. An
 integration holds no claim, receives no message and reads no conversation. Its token may call exactly the routes marked
-*any* and *import* below — `GET /v1/me`, `GET /v1/members`, `GET /v1/events`, `GET`, `POST` and `PUT /v1/items`,
+*any* and *import* below — `GET /v1/version`, `GET /v1/me`, `GET /v1/members`, `GET /v1/events`, `GET`, `POST` and `PUT /v1/items`,
 `GET /v1/items/{id}` and `GET /v1/ready` — and every other route answers it `403 forbidden`. Routes marked *people*,
 *import* and *admin* answer `403 forbidden` to a role they do not name before they read the request.
 
@@ -73,6 +78,7 @@ cause of an internal failure and answers `internal`.
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
 | `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`) |
+| `426` | `client_too_old` (details: `min_client`) |
 | `429` | `too_many_attempts` (details: `retry_after`), `importance_limited` (`limit`, `frees_at`) |
 | `500` | `internal` |
 | `503` | `timeout`, `too_many_streams` |
@@ -84,6 +90,7 @@ cause of an internal failure and answers `internal`.
 | Method and path | Auth | What it does |
 |---|---|---|
 | `GET /health` | none | The process answers: `{"ok":true}`. |
+| `GET /v1/version` | any | The server's version, the oldest client it serves and the client it recommends; answered to a client of any version. |
 | `GET /v1/me` | any | The caller, their project and its settings. |
 | `GET /v1/members` | any | The project's members. |
 | `POST /v1/sessions` | people | Register a session, or update the one of the same label. |
@@ -162,6 +169,18 @@ mentions another item: `link` is the tracker's page for its reference (a `gh` re
 A message's `importance` says how much it asks for its recipients' attention, and `ack_required` whether it asks each of
 them to acknowledge it; `acks` is in a thread read only, for a message that asks. A summary's `importance` is the highest
 among its messages and `awaiting_ack` how many of them ask the caller for an acknowledgement not given yet.
+
+### Versions
+
+`GET /v1/version`:
+
+```json
+{ "server": "0.5.0", "min_client": "0.4.0", "latest_client": "0.5.0" }
+```
+
+`min_client` and `latest_client` are `null` while the server does not set them. This route is never answered
+`426`, so a client too old for the others still learns what to update to; `dibs sync --update` reads it at most once a
+day.
 
 ### Me and members
 

@@ -16,8 +16,8 @@ use dibs_domain::settings::EditPolicy;
 use dibs_domain::slot::{Purpose, SlotName};
 
 use crate::ports::{
-    ClaimLine, HeldWay, InboxView, OfferLine, Pending, ReadyLine, SlotLine, StatusView, TouchedBy,
-    UnackedLine, WideLine,
+    ClaimLine, HeldWay, InboxView, NewerRelease, OfferLine, Pending, ReadyLine, SlotLine,
+    StatusView, TouchedBy, UnackedLine, WideLine,
 };
 use crate::text::Text;
 
@@ -305,6 +305,8 @@ pub struct Brief<'a> {
     pub inbox: Option<&'a InboxView>,
     /// How old the status is, when it is not fresh.
     pub status_age: Option<Duration>,
+    /// A newer release of dibs the server recommends, when there is one.
+    pub newer: Option<NewerRelease>,
     /// Now, which the slots' expiries are counted from.
     pub now: OffsetDateTime,
 }
@@ -313,6 +315,13 @@ impl Brief<'_> {
     /// The brief as text.
     pub fn text(&self) -> String {
         let mut text = format!("dibs coordinates this checkout; you are {}.", self.member);
+        if let Some(newer) = &self.newer {
+            let _ = write!(
+                text,
+                "\n[DIBS] update dibs: {} → {} — run dibs self-update in a terminal.",
+                newer.installed, newer.latest
+            );
+        }
         if let Some(status) = self.status {
             self.stalled_lines(&status.slots, &mut text);
         }
@@ -711,6 +720,7 @@ mod tests {
             status: Some(&status),
             inbox: Some(&inbox),
             status_age: None,
+            newer: None,
             now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
@@ -763,6 +773,7 @@ mod tests {
             status: None,
             inbox: Some(&inbox),
             status_age: None,
+            newer: None,
             now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
@@ -843,6 +854,7 @@ mod tests {
             status: Some(&status),
             inbox: None,
             status_age: None,
+            newer: None,
             now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
@@ -868,11 +880,40 @@ mod tests {
             status: Some(&StatusView::default()),
             inbox: None,
             status_age: None,
+            newer: None,
             now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
         assert!(nothing.contains("Ready to pick up: nothing."), "{nothing}");
         assert!(!nothing.contains("Not ready"), "{nothing}");
+    }
+
+    #[test]
+    fn a_brief_names_the_newer_release_the_server_recommends() {
+        let me = handle("bob");
+        let brief = |newer: Option<NewerRelease>| {
+            Brief {
+                member: &me,
+                policy: EditPolicy::Advise,
+                status: None,
+                inbox: None,
+                status_age: None,
+                newer,
+                now: OffsetDateTime::UNIX_EPOCH,
+            }
+            .text()
+        };
+        let text = brief(Some(NewerRelease {
+            installed: "0.1.0".to_owned(),
+            latest: "0.2.0".to_owned(),
+        }));
+        let line = text.lines().nth(1).unwrap();
+        assert!(
+            line.starts_with("[DIBS] update dibs: 0.1.0 → 0.2.0 — run dibs self-update"),
+            "{text}"
+        );
+        assert!(line.contains("dibs self-update"), "{text}");
+        assert!(!brief(None).contains("[DIBS]"));
     }
 
     #[test]
@@ -884,6 +925,7 @@ mod tests {
             status: None,
             inbox: None,
             status_age: None,
+            newer: None,
             now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
@@ -944,6 +986,7 @@ mod tests {
             status: Some(&status),
             inbox: Some(&inbox),
             status_age: None,
+            newer: None,
             now: at(12),
         }
         .text();

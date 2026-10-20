@@ -27,4 +27,6 @@ mod shell;
 #[cfg(test)]
 mod slots;
 #[cfg(test)]
+mod versions;
+#[cfg(test)]
 mod work;

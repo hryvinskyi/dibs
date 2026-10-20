@@ -29,6 +29,14 @@ jobs:
             echo "::error::The tag $GITHUB_REF_NAME names version $version, but the workspace builds $built."
             exit 1
           fi
+          # A plugin installed with auto-update on sees a new release only by its version string.
+          for manifest in integrations/*/.*-plugin/plugin.json; do
+            plugin="$(jq -r '.version' "$manifest")"
+            if [ "$version" != "$plugin" ]; then
+              echo "::error::The tag $GITHUB_REF_NAME names version $version, but $manifest names $plugin."
+              exit 1
+            fi
+          done
           echo "version=$version" >> "$GITHUB_OUTPUT"
           case "$version" in
             *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
@@ -141,11 +149,33 @@ jobs:
           pattern: dibs-*
           path: release
           merge-multiple: true
-      - name: The install scripts
-        run: cp scripts/install.sh scripts/install.ps1 release/
+      - name: The install scripts, the POSIX one with the release key written in
+        run: |
+          scripts/stamp-release-key.sh keys/release.pub scripts/install.sh release/install.sh
+          cp scripts/install.ps1 release/
       - name: Checksums of the archives
         working-directory: release
         run: sha256sum dibs-*.tar.gz dibs-*.zip > SHA256SUMS
+      - name: Sign the checksums with the release key
+        working-directory: release
+        env:
+          SIGNING_KEY: ${{ secrets.DIBS_RELEASE_SIGNING_KEY }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          # dibs self-update installs nothing whose SHA256SUMS this signature does not cover.
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::The repository secret DIBS_RELEASE_SIGNING_KEY is not set; a release is never published unsigned."
+            exit 1
+          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          key="$RUNNER_TEMP/release.key"
+          (umask 077 && printf '%s\n' "$SIGNING_KEY" > "$key")
+          minisign -S -s "$key" -m SHA256SUMS -x SHA256SUMS.minisig -t "dibs $VERSION SHA256SUMS"
+          rm -f "$key"
+      - name: The signature verifies against the key the binaries trust
+        working-directory: release
+        run: minisign -V -p ../keys/release.pub -m SHA256SUMS -x SHA256SUMS.minisig
       - name: Publish the release
         env:
           PRERELEASE: ${{ needs.plan.outputs.prerelease }}

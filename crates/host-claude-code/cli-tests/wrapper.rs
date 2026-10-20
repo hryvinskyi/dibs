@@ -144,8 +144,14 @@ fn an_installed_dibs_older_than_the_plugin_needs_gets_the_update_hint() {
     let old = check("dibs 0.0.1");
     let hint = line_for_the_person(&old);
     assert!(hint.contains("dibs 0.0.1 is installed"), "{hint}");
+    assert!(hint.contains("dibs self-update"), "{hint}");
     assert!(hint.contains("#install"), "{hint}");
     assert_eq!(check("dibs 999.0.0"), Value::Null);
+    let plugin_needs = check("dibs 0.0.1-rc.1");
+    assert!(
+        line_for_the_person(&plugin_needs).contains("dibs 0.0.1 is installed"),
+        "a pre-release is read by its numbers: {plugin_needs}"
+    );
     let unknown = check("dibs");
     assert!(line_for_the_person(&unknown).contains("did not name a version"));
 }

@@ -12,7 +12,10 @@ line, an MCP server and a guard that hooks into the agent hosts.
 ### The command line
 
 `dibs` is one binary for macOS, Linux and Windows. The install scripts pick the archive for your machine, check it
-against the release's `SHA256SUMS`, and refuse to install anything that does not match.
+against the release's `SHA256SUMS`, and refuse to install anything that does not match. When [minisign](https://jedisct1.github.io/minisign/)
+is installed, `install.sh` also checks the release's signature of `SHA256SUMS` against the release key written into
+it, and refuses a signature that does not verify; without minisign it says that it checked the checksum only.
+`install.ps1` checks the checksum only and says so.
 
 macOS and Linux, into `~/.local/bin`:
 
@@ -53,6 +56,27 @@ do not run on musl systems such as Alpine. To build from source: `cargo build --
   binary they install runs as it is.
 - On Windows, a file downloaded through a browser carries the mark of the web and SmartScreen warns about it. Clear it
   once: `Unblock-File <path to dibs.exe>`. The install script does this for the file it installs.
+
+### Updating
+
+`dibs self-update` replaces the installed binary with the newest release (`--version 1.2.3` for a particular one). It
+never installs an older release than the one installed. Before anything is written it checks the release's
+`SHA256SUMS` against the signature the release carries (`SHA256SUMS.minisig`, a minisign ed25519 signature made with
+the project's release key, whose public half is built into `dibs`), and the archive against `SHA256SUMS`; a missing or
+wrong signature, or an archive that does not match, installs nothing. The new binary is written beside the old one and
+put in its place in one step. On Windows a running `dibs.exe` cannot be overwritten, so it is renamed to
+`dibs.old.exe` first and deleted the next time `dibs` starts.
+
+It needs to write into the directory `dibs` is installed in. When that directory is not yours (a system directory, a
+package manager's), it refuses and tells you to install the new release with the install script into a directory you
+own. Like the install script, it downloads from a process, so macOS sets no quarantine attribute on what it installs.
+
+You rarely need to run it. When the team's server recommends a newer release (`DIBS_LATEST_CLIENT`), the start of an
+agent's session says so in its brief (`[DIBS] update dibs: 0.4.1 → 0.4.2 — run dibs self-update in a terminal`) and
+the background sync installs it, at most once a day, never inside a hook's own time. On Windows the background only
+tells: run `dibs self-update` there yourself. A server can also stop serving clients older than a version
+(`DIBS_MIN_CLIENT`): such a client's hooks give one warning a minute and let every edit through, and its commands say
+how to update. [docs/operations.md](docs/operations.md#client-versions) has the rules for operators.
 
 ### The server
 
@@ -275,7 +299,32 @@ so and let everything through.
    ```
 
    or inside a session: `/plugin install dibs --marketplace hryvinskyi/dibs`.
-3. Start a new session in the checkout. `dibs doctor` shows whether the plugin is installed.
+3. Turn on auto-update for the `dibs` marketplace, so the plugin follows the releases: in a session, run `/plugin`, open
+   the **Marketplaces** tab, select `dibs` and choose **Enable auto-update**. Claude Code turns auto-update off by
+   default for a third-party marketplace. A team can turn it on for everyone who opens a repository in its committed
+   `.claude/settings.json`, which registers the marketplace and its auto-update together
+   (`extraKnownMarketplaces`, with `"autoUpdate": true` beside its `source`):
+
+   ```json
+   {
+     "extraKnownMarketplaces": {
+       "dibs": { "source": { "source": "github", "repo": "hryvinskyi/dibs" }, "autoUpdate": true }
+     },
+     "enabledPlugins": { "dibs@dibs": true }
+   }
+   ```
+
+   Claude Code then refreshes the marketplace in the background after a session starts and updates the plugin on
+   disk; the next session loads the new version. `DISABLE_AUTOUPDATER=1` or `DISABLE_UPDATES=1` on a machine turns this
+   off unless `FORCE_AUTOUPDATE_PLUGINS=1` is also set. (Claude Code's plugin documentation:
+   [Keep plugins updated](https://code.claude.com/docs/en/discover-plugins#keep-plugins-updated),
+   [When auto-update runs](https://code.claude.com/docs/en/plugins/loading#when-auto-update-runs),
+   [`extraKnownMarketplaces`](https://code.claude.com/docs/en/settings-reference#extraknownmarketplaces).)
+4. Start a new session in the checkout. `dibs doctor` shows whether the plugin is installed.
+
+A plugin that auto-updated can be newer than the `dibs` binary on the machine. Its hooks never block anything because
+of that: at the start of a session it compares the version it needs with `dibs --version` and, when the binary is
+older, says once to run `dibs self-update`; every hook exits 0 whatever the binary answers.
 
 The hooks never approve a tool call: a call dibs has no objection to goes through Claude Code's own permission
 settings as it would without the plugin. A refusal names the holder and the way on. When the server cannot be
@@ -324,7 +373,8 @@ dibs slot leave deploy:prod                       # stop waiting, or give up the
 dibs slot list                                    # every slot: who holds it and why, until when, who waits
 dibs slot test settings.toml -- 'cd ops && ./deploy.sh prod'   # what a command line needs, without a server
 dibs slot takeover deploy:prod --purpose "finish it" --reason "the deploy log stopped; checked the hosts"
-dibs sync [--force] [--quiet]                     # heartbeat and refresh what this machine remembers
+dibs sync [--force] [--quiet] [--update]          # heartbeat and refresh what this machine remembers
+dibs self-update [--version 1.2.3]                # install a newer release, checked against the release key
 dibs mcp                                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook
 dibs doctor                                       # the agent hosts this build supports

@@ -22,6 +22,7 @@ use dibs_domain::slot::{Liveness, Purpose, SlotName};
 
 use crate::adapter::HostId;
 use crate::event::SessionKey;
+use crate::upkeep::Due;
 
 /// Why a port could not do what it was asked.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -52,6 +53,15 @@ pub struct KnownSettings {
     pub member: Handle,
     /// The project's settings.
     pub settings: ProjectSettings,
+}
+
+/// A release of dibs newer than the one running, which the project's server recommends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewerRelease {
+    /// The version running.
+    pub installed: String,
+    /// The version recommended.
+    pub latest: String,
 }
 
 /// A claim as the brief shows it.
@@ -499,6 +509,12 @@ pub trait LocalCache {
 
     /// Remembers that the person was told so at `at`.
     fn mark_repo_warning(&self, at: OffsetDateTime);
+
+    /// When the server was last asked which client it recommends.
+    fn versions_checked_at(&self) -> Option<OffsetDateTime>;
+
+    /// The release the server last recommended, when it is newer than the one running.
+    fn newer_release(&self) -> Option<NewerRelease>;
 }
 
 /// The project's server. Every answer it fetches is also remembered, so the next read of
@@ -560,12 +576,14 @@ pub trait LedgerEntry {
     fn write(&self, ledger: &SessionLedger) -> bool;
 }
 
-/// The upkeep the guard never waits for: heartbeats and refreshed caches.
+/// The upkeep the guard never waits for: heartbeats, refreshed caches and, at most once a day, a
+/// newer client.
 pub trait Upkeep {
-    /// Starts the upkeep in the background for `session`, unless it is already running or was
-    /// started a moment ago; answers whether it was started now.
+    /// Starts the upkeep of what is `due` in the background for `session`, unless it is already
+    /// running or was started a moment ago; answers whether it was started now.
     ///
     /// # Errors
     /// [`PortError::Refused`] when it could not be started.
-    fn start(&self, session: &SessionRef, now: OffsetDateTime) -> Result<bool, PortError>;
+    fn start(&self, session: &SessionRef, now: OffsetDateTime, due: Due)
+    -> Result<bool, PortError>;
 }

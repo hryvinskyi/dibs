@@ -17,6 +17,7 @@ dibs-app = { path = "../app", features = ["fakes"] }
 dibs-domain = { path = "../domain" }
 dibs-server = { path = "../server" }
 dibs-store-sqlite = { path = "../store-sqlite" }
+semver = "1.0.28"
 serde_json = "1.0.154"
 tempfile = "3.27.0"
 time = { version = "0.3.55", features = ["macros"] }

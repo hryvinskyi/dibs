@@ -100,6 +100,8 @@ pub enum Command {
     /// Serve the same operations as tools over the Model Context Protocol on standard input and
     /// output, for an agent that can call tools.
     Mcp,
+    /// Replace this dibs with a newer release, checked against the release key built into it.
+    SelfUpdate(SelfUpdateArgs),
     /// Manage the project (admins only).
     #[command(subcommand)]
     Admin(AdminCommand),
@@ -120,6 +122,18 @@ pub struct SyncArgs {
     /// Print nothing.
     #[arg(long)]
     pub quiet: bool,
+    /// Also ask the server, at most once a day, which dibs it recommends, and install it when it
+    /// is newer than this one.
+    #[arg(long)]
+    pub update: bool,
+}
+
+/// `dibs self-update`.
+#[derive(Debug, Args)]
+pub struct SelfUpdateArgs {
+    /// The release to install (1.2.3 or v1.2.3); the newest when absent. Never an older one.
+    #[arg(long)]
+    pub version: Option<String>,
 }
 
 /// `dibs login`.
@@ -628,6 +642,8 @@ mod tests {
         assert!(
             Cli::try_parse_from(["dibs", "sync", "--host", "neutral", "--session", "s"]).is_ok()
         );
+        assert!(Cli::try_parse_from(["dibs", "sync", "--update", "--quiet"]).is_ok());
+        assert!(Cli::try_parse_from(["dibs", "self-update", "--version", "v1.2.3"]).is_ok());
     }
 
     #[test]

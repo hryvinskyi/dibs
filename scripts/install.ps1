@@ -18,7 +18,8 @@
 #   DIBS_RELEASE_URL   where releases are downloaded from, laid out as GitHub lays them out
 #                      (default: https://github.com/hryvinskyi/dibs/releases)
 #
-# Nothing is installed unless the archive's checksum matches the release's SHA256SUMS.
+# Nothing is installed unless the archive's checksum matches the release's SHA256SUMS. This script
+# does not check the release's signature of that file; `dibs self-update` does.
 param(
     [string]$Version = $env:DIBS_VERSION,
     [string]$InstallDir = $env:DIBS_INSTALL_DIR
@@ -109,6 +110,7 @@ try {
 
     $sums = Join-Path $work 'SHA256SUMS'
     Get-Release "$base/SHA256SUMS" $sums
+    Write-Host "This install script does not verify the release's signature; it checks the archive against SHA256SUMS only."
     $entry = @(Read-Sums $sums | Where-Object { $_.Name -eq $archive })
     if ($entry.Count -eq 0) {
         Stop-Install "release $Version lists no archive named $archive."

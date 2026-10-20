@@ -125,6 +125,8 @@ A value the server refuses stops it with status 2 and a sentence naming the vari
 | `DIBS_SNAPSHOT_DIR` | none (snapshots off) | The directory snapshots are written into. It must exist. |
 | `DIBS_SNAPSHOT_EVERY` | `6h` | The time between snapshots: a whole number and `s`, `m`, `h` or `d`, from `1m` to `30d`. |
 | `DIBS_SNAPSHOT_KEEP` | `28` | How many of the newest snapshots are kept, 1 to 10000. |
+| `DIBS_MIN_CLIENT` | none (every client served) | The oldest `dibs` client served, a release version such as `0.4.0`; older ones are answered `426`. See [Client versions](#client-versions). |
+| `DIBS_LATEST_CLIENT` | none (no update recommended) | The `dibs` release clients are told to update to; not older than `DIBS_MIN_CLIENT`. |
 
 `DIBS_SNAPSHOT_EVERY` and `DIBS_SNAPSHOT_KEEP` without `DIBS_SNAPSHOT_DIR` are refused. With `X-Forwarded-For` the
 client is the right-most address outside the trusted set; any other header is read as one address. A malformed header
@@ -133,6 +135,46 @@ from a trusted proxy falls back to the proxy's address and logs a warning.
 The server logs JSON lines to standard output. The request log names the method and the path, never a header, so a
 token in `Authorization` or a cookie is not written anywhere. Every command other than `serve` writes its answer to
 standard output and its log to standard error.
+
+## Client versions
+
+Every `dibs` client names its version in its `User-Agent` (`dibs/0.4.2`). Two settings decide what the server does with
+it:
+
+- **`DIBS_LATEST_CLIENT`** is the release the team should run. At the start of an agent's session, at most once a day
+  and in the background, each client asks `GET /v1/version`; when this release is newer than its own, it says so in the
+  session's brief (`[DIBS] update dibs: 0.4.1 → 0.4.2`) and installs it the way `dibs self-update` does, checked
+  against the release key built into it. On Windows the background only tells, since a download there would hold
+  the hook that started the sync; the person runs `dibs self-update`. A client that cannot install it (a directory
+  its user cannot write to, a build without a release key) keeps running and keeps saying so.
+- **`DIBS_MIN_CLIENT`** is the oldest client served. An older one is answered `426 client_too_old` with a sentence
+  saying how to update. Its hooks read that as a server that cannot be reached: no decision, one warning a minute,
+  and every edit goes through, so an old client never stops anyone's work; it is simply no longer coordinated. Its
+  daily check still works, because `GET /v1/version` is never refused.
+
+The order of an upgrade:
+
+1. Upgrade the server first; it serves the clients it served before.
+2. Once the new release's client binaries are published, set `DIBS_LATEST_CLIENT` to it and restart the server. The
+   clients update themselves over the following day, as each person starts a session.
+3. Raise `DIBS_MIN_CLIENT` only after `DIBS_LATEST_CLIENT` has been out for a week, so that a laptop that was closed for
+   a few days has had its chance to update.
+
+`dibs` also checks that the project's plugin is not newer than the binary (the plugin's `min_binary`): a plugin that
+auto-updated ahead of the binary prints the update hint once per session and its hooks still exit 0.
+
+## The release signing key
+
+The client binaries are not code-signed, so `dibs self-update` takes their origin from a signature instead: each
+release carries `SHA256SUMS.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature of its `SHA256SUMS`
+made with the project's ed25519 release key. The public half is `keys/release.pub`, compiled into every binary; the
+secret half is the repository secret `DIBS_RELEASE_SIGNING_KEY`, which the release workflow signs with. The release
+workflow also writes the public key into the released `install.sh`, which checks the same signature when minisign is
+installed on the machine and says it checked the checksum only when it is not. A build whose
+`keys/release.pub` holds the placeholder instead of a key refuses every update and points to the install script, and
+the release workflow refuses to publish a release whose signature does not verify against `keys/release.pub`.
+
+[CONTRIBUTING.md](../CONTRIBUTING.md#release-signing) has the steps to make the key and to replace it.
 
 ## Commands
 
@@ -280,7 +322,8 @@ A reference of another shape is corrected in place (`UPDATE items SET external_r
 given a scheme of its own (`note:…`). Then start the server again; the migration lowers the remaining `gh` references.
 The event log keeps the dropped id where it already named it.
 
-Upgrade the server before the clients. A stop is graceful on `SIGTERM`: the server stops accepting connections, ends the
+Upgrade the server before the clients, then move the clients with `DIBS_LATEST_CLIENT` and `DIBS_MIN_CLIENT` (see
+[Client versions](#client-versions)). A stop is graceful on `SIGTERM`: the server stops accepting connections, ends the
 event streams, gives requests in flight 10 seconds, finishes a snapshot it is writing, checkpoints the write-ahead log
 and closes the database. The compose file allows 20 seconds.
 

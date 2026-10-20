@@ -297,6 +297,40 @@ fn an_unreachable_server_is_one_warning_and_then_a_minute_without_requests() {
 }
 
 #[test]
+fn a_server_that_serves_only_newer_clients_is_one_warning_and_never_a_decision() {
+    let setup = Setup::new();
+    let gated = dibs_test_server::TestServer::with_client_versions(Some("9.0.0"), None).unwrap();
+    let alice = gated.project("acme", "alice").unwrap();
+    gated
+        .settings(&alice, dibs_test_server::two_repositories())
+        .unwrap();
+    let dir = setup.checkout_on("gated", &gated.url(), Some("api"));
+    let run = |event: &str, input: &str| {
+        reply(
+            &setup
+                .dibs("alice", &dir)
+                .env("DIBS_TOKEN", &alice.token)
+                .args(["hook", "claude-code", event])
+                .write_stdin(input.to_owned())
+                .output()
+                .unwrap(),
+        )
+    };
+    let first = run("pre-tool-use", &write_of(&dir, "src/billing/a.rs"));
+    assert_eq!(decision(&first), None, "{first}");
+    assert_eq!(first.get("hookSpecificOutput"), None, "{first}");
+    let warning = first["systemMessage"].as_str().unwrap();
+    assert!(warning.contains("dibs self-update"), "{warning}");
+    let asked = gated.requests();
+    assert_eq!(
+        run("pre-tool-use", &write_of(&dir, "src/billing/b.rs")),
+        Value::Null,
+        "the circuit is open, the warning given"
+    );
+    assert_eq!(gated.requests(), asked);
+}
+
+#[test]
 fn an_html_403_in_front_of_the_server_is_treated_as_unreachable() {
     let setup = Setup::new();
     let url = dibs_test_server::fixed_answer(

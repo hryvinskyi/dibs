@@ -15,6 +15,7 @@ use axum::Router;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderValue, Request, header};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use tower::ServiceBuilder;
@@ -35,6 +36,7 @@ use crate::rate_limit::{AuthLimiter, LimitPolicy};
 use crate::routes;
 use crate::stream::EventStreams;
 use crate::ui;
+use crate::versions::{self, ClientVersions, VERSION_ROUTE};
 
 /// The largest request body read, in bytes. A message of 16 KiB grows on the wire — JSON escapes a
 /// control character to six bytes, a form percent-encodes a non-ASCII byte to three — and still
@@ -61,6 +63,8 @@ pub struct HttpOptions {
     pub clock: Arc<dyn Clock>,
     /// Where the secrets of the sign-in form come from.
     pub tokens: Arc<dyn TokenGenerator>,
+    /// The oldest client served and the client recommended.
+    pub versions: ClientVersions,
 }
 
 impl Default for HttpOptions {
@@ -71,6 +75,7 @@ impl Default for HttpOptions {
             timeout: REQUEST_TIMEOUT,
             clock: Arc::new(SystemClock),
             tokens: Arc::new(OsTokens),
+            versions: ClientVersions::default(),
         }
     }
 }
@@ -81,6 +86,7 @@ impl fmt::Debug for HttpOptions {
             .field("client_ip", &self.client_ip)
             .field("limits", &self.limits)
             .field("timeout", &self.timeout)
+            .field("versions", &self.versions)
             .finish_non_exhaustive()
     }
 }
@@ -100,10 +106,13 @@ pub struct AppState {
     pub(crate) clock: Arc<dyn Clock>,
     /// Where the secrets of the sign-in form come from.
     pub(crate) tokens: Arc<dyn TokenGenerator>,
+    /// The oldest client served and the client recommended.
+    pub(crate) versions: Arc<ClientVersions>,
 }
 
 /// The router over these use cases, its event streams woken and ended through `streams`.
 pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -> Router {
+    let versions = Arc::new(options.versions);
     let state = AppState {
         app,
         limiter: Arc::new(AuthLimiter::new(options.limits)),
@@ -111,9 +120,11 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         streams,
         clock: options.clock,
         tokens: options.tokens,
+        versions: versions.clone(),
     };
     let api = Router::new()
         .route("/health", get(routes::health))
+        .route(VERSION_ROUTE, get(routes::version::version))
         .route("/v1/me", get(routes::me::me))
         .route("/v1/members", get(routes::members::list))
         .route("/v1/sessions", post(routes::sessions::register))
@@ -187,7 +198,8 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .merge(ui::routes())
         .fallback(no_route)
         .method_not_allowed_fallback(method_not_allowed)
-        .with_state(state);
+        .with_state(state)
+        .layer(middleware::from_fn_with_state(versions, versions::gate));
     api.layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(
             ServiceBuilder::new()

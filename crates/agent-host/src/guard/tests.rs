@@ -79,6 +79,9 @@ struct State {
     calls: Vec<String>,
     opened: u32,
     upkeep_starts: u32,
+    upkeep_due: Vec<crate::upkeep::Due>,
+    versions_checked: Option<OffsetDateTime>,
+    newer: Option<crate::ports::NewerRelease>,
 }
 
 impl State {
@@ -122,6 +125,9 @@ impl State {
             calls: Vec::new(),
             opened: 0,
             upkeep_starts: 0,
+            upkeep_due: Vec::new(),
+            versions_checked: Some(at(0)),
+            newer: None,
         }
     }
 }
@@ -288,6 +294,14 @@ impl LocalCache for World {
     fn mark_repo_warning(&self, at: OffsetDateTime) {
         self.0.borrow_mut().last_repo_warning = Some(at);
     }
+
+    fn versions_checked_at(&self) -> Option<OffsetDateTime> {
+        self.0.borrow().versions_checked
+    }
+
+    fn newer_release(&self) -> Option<crate::ports::NewerRelease> {
+        self.0.borrow().newer.clone()
+    }
 }
 
 impl CoordinationGateway for World {
@@ -341,9 +355,15 @@ impl CoordinationGateway for World {
 }
 
 impl Upkeep for World {
-    fn start(&self, _session: &SessionRef, _now: OffsetDateTime) -> Result<bool, PortError> {
+    fn start(
+        &self,
+        _session: &SessionRef,
+        _now: OffsetDateTime,
+        due: crate::upkeep::Due,
+    ) -> Result<bool, PortError> {
         let mut state = self.0.borrow_mut();
         state.upkeep_starts += 1;
+        state.upkeep_due.push(due);
         state.upkeep.clone()
     }
 }
@@ -1204,6 +1224,87 @@ fn no_upkeep_starts_before_a_tool_or_while_the_server_is_unreachable() {
     world.set(|state| state.unreachable = Some(at(0)));
     run(&world, "neutral", "after-tool", &input(None));
     assert_eq!(world.0.borrow().upkeep_starts, 0);
+}
+
+#[test]
+fn only_the_start_of_a_session_asks_for_the_daily_check_for_a_newer_client() {
+    let world = World::new().with(|state| {
+        state.now = at(3600);
+        state.versions_checked = Some(at(3600) - Duration::days(1));
+    });
+    for event in ["after-tool", "prompt-submitted"] {
+        run(&world, "neutral", event, &input(None));
+    }
+    run(&world, "neutral", "before-tool", &edit(&["README.md"]));
+    {
+        let state = world.0.borrow();
+        assert!(!state.upkeep_due.is_empty(), "the caches were due");
+        assert!(
+            state.upkeep_due.iter().all(|due| !due.update),
+            "{:?}",
+            state.upkeep_due
+        );
+    }
+    run(&world, "neutral", "session-started", &input(None));
+    assert!(world.0.borrow().upkeep_due.last().unwrap().update);
+    world.set(|state| {
+        state.upkeep_due.clear();
+        state.versions_checked = Some(at(3600) - Duration::hours(23));
+    });
+    run(&world, "neutral", "session-started", &input(None));
+    assert!(
+        world.0.borrow().upkeep_due.iter().all(|due| !due.update),
+        "checked less than a day ago"
+    );
+    assert!(
+        world.calls().iter().all(|call| call != "versions"),
+        "never waited for"
+    );
+}
+
+#[test]
+fn an_unreachable_server_still_lets_the_start_of_a_session_look_for_a_newer_client() {
+    let world = World::new().with(|state| {
+        state.now = at(3600);
+        state.unreachable = Some(at(3590));
+        state.last_heartbeat = None;
+        state.versions_checked = None;
+    });
+    run(&world, "neutral", "after-tool", &input(None));
+    assert_eq!(
+        world.0.borrow().upkeep_starts,
+        0,
+        "nothing but the check is started"
+    );
+    run(&world, "neutral", "session-started", &input(None));
+    let state = world.0.borrow();
+    assert_eq!(state.upkeep_due.len(), 1);
+    assert_eq!(
+        state.upkeep_due[0],
+        crate::upkeep::Due {
+            update: true,
+            ..crate::upkeep::Due::default()
+        }
+    );
+}
+
+#[test]
+fn the_brief_names_a_newer_release_the_server_recommends() {
+    let world = World::new().with(|state| {
+        state.newer = Some(crate::ports::NewerRelease {
+            installed: "0.1.0".to_owned(),
+            latest: "0.3.0".to_owned(),
+        });
+    });
+    let answer = run(&world, "neutral", "session-started", &input(None));
+    let brief = no_objection(&answer)["context"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        brief.contains("[DIBS] update dibs: 0.1.0 → 0.3.0"),
+        "{brief}"
+    );
 }
 
 #[test]

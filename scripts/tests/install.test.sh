@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Runs the real scripts/install.sh, under every POSIX shell found among sh, dash and bash, against a
 # release directory laid out the way GitHub lays out downloads, with the platform faked by shims of
-# `uname` and `ldd` placed first on the PATH.
+# `uname` and `ldd` placed first on the PATH. The releases' SHA256SUMS are signed with a minisign key
+# made for the run, and the script is also run with that key written in by
+# scripts/stamp-release-key.sh, as the release workflow writes in the project's key. minisign must be
+# installed.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 script="$here/../install.sh"
+stamp="$here/../stamp-release-key.sh"
 # shellcheck source=harness.sh
 . "$here/harness.sh"
 
@@ -15,6 +19,23 @@ sha256() {
   else
     shasum -a 256 "$1" | cut -d ' ' -f 1
   fi
+}
+
+if ! command -v minisign >/dev/null 2>&1; then
+  echo "minisign is needed to sign the test releases; install it (brew install minisign, apt install minisign)." >&2
+  exit 1
+fi
+
+# The key the test releases are signed with, and another one.
+keys="$scratch/keys"
+mkdir -p "$keys"
+minisign -G -W -p "$keys/good.pub" -s "$keys/good.key" >/dev/null
+minisign -G -W -p "$keys/other.pub" -s "$keys/other.key" >/dev/null
+
+# sign <SHA256SUMS> <secret key>: writes the file's signature beside it.
+sign() {
+  rm -f "$1.minisig"
+  minisign -S -s "$2" -m "$1" -x "$1.minisig" >/dev/null
 }
 
 targets=(
@@ -39,6 +60,7 @@ make_release() {
     tar -czf "$dir/$name.tar.gz" -C "$root/pack" "$name"
     printf '%s  %s\n' "$(sha256 "$dir/$name.tar.gz")" "$name.tar.gz" >>"$dir/SHA256SUMS"
   done
+  sign "$dir/SHA256SUMS" "$keys/good.key"
 }
 
 # A release 0.1.0 and a newer 0.2.0, which is the latest.
@@ -70,9 +92,26 @@ echo "ldd (GNU libc) 2.39"
 SHIM
 chmod 755 "$shims/uname" "$shims/ldd"
 
-# Which release directory and which libc the next install sees.
+# Which release directory, libc and PATH after the shims the next install sees.
 root="$release"
 libc=glibc
+path_tail="$PATH"
+
+# The script with the run's key written in, and with the repository's own key file.
+signed="$scratch/install-signed.sh"
+"$stamp" "$keys/good.pub" "$script" "$signed"
+as_released="$scratch/install-as-released.sh"
+"$stamp" "$here/../../keys/release.pub" "$script" "$as_released"
+
+# A PATH holding every tool the script runs but minisign.
+toolbox="$scratch/toolbox"
+mkdir -p "$toolbox"
+for tool in sh dash bash curl wget sha256sum shasum openssl cut tr sed mktemp rm mkdir tar gzip cp chmod mv cat grep head perl env; do
+  found="$(command -v "$tool" 2>/dev/null || true)"
+  case "$found" in
+    /*) ln -s "$found" "$toolbox/$tool" ;;
+  esac
+done
 
 # install <shell> <os> <machine> [script arguments...]: runs the installer into $dest as that
 # shell, on that platform, downloading from $root.
@@ -80,8 +119,8 @@ install() {
   local shell="$1" os="$2" machine="$3"
   shift 3
   FAKE_OS="$os" FAKE_MACHINE="$machine" FAKE_LIBC="$libc" \
-    PATH="$shims:$PATH" DIBS_RELEASE_URL="file://$root" DIBS_INSTALL_DIR="$dest" \
-    "$shell" "$script" "$@"
+    PATH="$shims:$path_tail" DIBS_RELEASE_URL="file://$root" DIBS_INSTALL_DIR="$dest" \
+    "$shell" "${installer:-$script}" "$@"
 }
 
 # copy_release <name>: a copy of the release directory that a test may damage.
@@ -106,6 +145,7 @@ for shell in "${shells[@]}"; do
   dest="$scratch/$shell-ok"
   check "a good checksum installs the requested release" 0 install "$shell" Linux x86_64 --version 0.1.0
   expect_output "the install is announced" "Installed $dest/dibs"
+  expect_output "a script with no key written in says it cannot verify signatures" "carries no release signing key"
   check "the installed binary runs" 0 "$dest/dibs"
   expect_output "it is the requested version for this target" "dibs 0.1.0 (x86_64-unknown-linux-gnu)"
 
@@ -200,6 +240,69 @@ for shell in "${shells[@]}"; do
   check "--help prints the usage" 0 install "$shell" Linux x86_64 --help
   expect_output "the usage names the version option" "--version"
   check "--help installs nothing" 1 test -e "$dest/dibs"
+
+  # The script as a release builds it: the run's key written in.
+  installer="$signed"
+  root="$release"
+  dest="$scratch/$shell-signed"
+  check "a release signed by the key written in installs" 0 install "$shell" Linux x86_64 --version 0.1.0
+  expect_output "the signature was checked" "signature verifies"
+  check "and runs" 0 "$dest/dibs"
+  dest="$scratch/$shell-signed-latest"
+  check "the latest release is checked the same way" 0 install "$shell" Linux x86_64
+  expect_output "its signature too" "signature verifies"
+
+  root="$(copy_release "other-key-$shell")"
+  sign "$root/download/v0.1.0/SHA256SUMS" "$keys/other.key"
+  dest="$scratch/$shell-other-key"
+  check "a release signed by another key is refused" 1 install "$shell" Linux x86_64 --version 0.1.0
+  expect_output "the refusal names the signature" "does not verify"
+  check "nothing was installed" 1 test -e "$dest/dibs"
+
+  root="$(copy_release "resummed-$shell")"
+  printf '%s  %s\n' "$(printf 'x' >"$scratch/x" && sha256 "$scratch/x")" "extra.tar.gz" >>"$root/download/v0.1.0/SHA256SUMS"
+  dest="$scratch/$shell-resummed"
+  check "a SHA256SUMS changed after it was signed is refused" 1 install "$shell" Linux x86_64 --version 0.1.0
+  expect_output "the refusal names the signature" "does not verify"
+  check "nothing was installed" 1 test -e "$dest/dibs"
+
+  root="$(copy_release "unsigned-$shell")"
+  rm "$root/download/v0.1.0/SHA256SUMS.minisig"
+  dest="$scratch/$shell-unsigned"
+  check "a release without a signature is refused" 1 install "$shell" Linux x86_64 --version 0.1.0
+  expect_output "the refusal names the missing file" "SHA256SUMS.minisig"
+  check "nothing was installed" 1 test -e "$dest/dibs"
+
+  root="$release"
+  path_tail="$toolbox"
+  dest="$scratch/$shell-no-minisign"
+  check "without minisign a good checksum still installs" 0 install "$shell" Linux x86_64 --version 0.1.0
+  expect_output "and it says the signature was not checked" "minisign is not installed"
+  check "and runs" 0 "$dest/dibs"
+  path_tail="$PATH"
+
+  installer="$as_released"
+  dest="$scratch/$shell-as-released"
+  check "the script stamped with the repository's key file installs" 0 install "$shell" Linux x86_64 --version 0.1.0
+  case "$(sed -n 2p "$here/../../keys/release.pub")" in
+    RW*) expect_output "and checks the signature against that key" "signature" ;;
+    *) expect_output "while that file holds the placeholder, it says it cannot verify" "carries no release signing key" ;;
+  esac
+  installer=""
 done
+
+# Stamping copies base64 characters only, so a key file cannot become shell syntax.
+{
+  echo "untrusted comment: not a key"
+  echo "RW\$(touch $scratch/injected)';touch $scratch/injected;'"
+} >"$keys/evil.pub"
+"$stamp" "$keys/evil.pub" "$script" "$scratch/install-evil.sh"
+dest="$scratch/evil"
+installer="$scratch/install-evil.sh"
+check "a stamped key file with shell syntax in it installs as a script without a key" 0 install sh Linux x86_64 --version 0.1.0
+expect_output "and says so" "carries no release signing key"
+check "and ran none of it" 1 test -e "$scratch/injected"
+installer=""
+check "a script with no place for the key is not stamped" 1 "$stamp" "$keys/good.pub" "$keys/good.pub" "$scratch/nowhere"
 
 finish
