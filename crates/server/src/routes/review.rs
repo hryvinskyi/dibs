@@ -2,7 +2,7 @@
 //! integration reports merges and closes on `POST /v1/prs/merged` and `POST /v1/prs/closed`, and
 //! reads `GET /v1/review-claims` and `GET /v1/pr-status`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
@@ -19,12 +19,15 @@ use dibs_app::use_cases::{
 };
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
+use dibs_domain::paths::RelPath;
 use dibs_domain::pr_status::PrState;
+use dibs_domain::radar::BranchName;
+use dibs_domain::repo::RepoId;
 use dibs_domain::review::PrRef;
 
 use crate::auth::Authed;
 use crate::error::ApiError;
-use crate::fields::{item_in_path, parse_required, required};
+use crate::fields::{item_in_path, parse, parse_required, required};
 use crate::http::AppState;
 use crate::views::{ClaimView, ItemNameView, reply};
 
@@ -121,6 +124,7 @@ pub struct MergedBody {
     base: Option<String>,
     merged_at: Option<String>,
     files: Option<Vec<String>>,
+    head: Option<String>,
 }
 
 /// The body of `POST /v1/prs/closed`.
@@ -163,9 +167,14 @@ impl ReportAnswer {
 /// 3339). Only a pull request a claim in review recorded counts: it leaves that claim, and the
 /// merge of the claim's last one completes it — areas free, item done, its holder told — unless
 /// more were to follow, when the claim is worked on again. In a repository that protects branches,
-/// a merge into any other base delivers nothing: the claim is set aside as after a close. A pull request no claim recorded, or a
-/// report sent again, answers `matched: false` and changes nothing. `files`, the paths the merge
-/// changed, is accepted, at most 3000 of them.
+/// a merge into any other base delivers nothing: the claim is set aside as after a close. A pull
+/// request no claim recorded, or a report sent again, answers `matched: false` and changes no
+/// claim. `files`, at most 3000 paths relative to the repository's root, are the paths the merge
+/// changed, and `head` the branch it was merged from: a merge that delivers moves the base under
+/// every live branch measured against `base` from an older merge base whose footprint holds one of
+/// them, other than the merged branch, and each such branch's holder is told once. Without
+/// `files`, the merged branch's footprint stands for them; without `head`, the footprint of the
+/// claim that recorded the pull request is taken for the merged branch.
 ///
 /// # Errors
 /// `forbidden` for anyone but an integration or an admin; `invalid_request` for a missing or
@@ -178,7 +187,7 @@ pub async fn merged(
     actor.require_import()?;
     let Json(body) = body?;
     let pr = parse_required("pr", body.pr.as_deref(), PrRef::parse)?;
-    parse_required("merged_at", body.merged_at.as_deref(), |text| {
+    let merged_at = parse_required("merged_at", body.merged_at.as_deref(), |text| {
         OffsetDateTime::parse(text, &Rfc3339).map_err(|_| "it is a time in RFC 3339")
     })?;
     if body
@@ -191,10 +200,29 @@ pub async fn merged(
             &format!("a merge lists at most {MAX_MERGED_FILES} paths"),
         ));
     }
+    let files = body
+        .files
+        .map(|files| {
+            files
+                .iter()
+                .map(|text| parse("files", text, RelPath::parse))
+                .collect::<Result<BTreeSet<_>, _>>()
+        })
+        .transpose()?;
+    let head = body
+        .head
+        .as_deref()
+        .map(|text| parse("head", text, BranchName::parse_ref))
+        .transpose()?;
     let base = parse_required("base", body.base.as_deref(), branch_text)?;
     let report = PrReport {
         pr,
-        end: ReportedEnd::Merged { base },
+        end: ReportedEnd::Merged {
+            base,
+            merged_at,
+            files,
+            head,
+        },
     };
     let outcome = state.app.report_pr.execute(&actor, report).await?;
     Ok(reply(StatusCode::OK, &ReportAnswer::of(outcome)))
@@ -243,12 +271,14 @@ struct ReviewClaimView {
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
     since: OffsetDateTime,
     more: bool,
+    branches: BTreeMap<RepoId, BranchName>,
 }
 
 impl ReviewClaimView {
     fn of(claim: ReviewClaim) -> Self {
         Self {
             item: ItemNameView::of(claim.item),
+            branches: claim.claim.claim.branches,
             holder: claim.claim.holder,
             prs: claim.prs,
             since: claim.since,
@@ -262,8 +292,9 @@ struct ReviewClaimsAnswer {
     claims: Vec<ReviewClaimView>,
 }
 
-/// The claims in review, ordered by item, each with its holder and the pull requests it recorded:
-/// what an integration watches for merges and closes.
+/// The claims in review, ordered by item, each with its holder, the pull requests it recorded and
+/// the branch its work is on in each repository: what an integration watches for merges and
+/// closes.
 ///
 /// # Errors
 /// `forbidden` for anyone but an integration or an admin.

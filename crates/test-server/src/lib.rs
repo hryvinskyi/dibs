@@ -28,11 +28,16 @@ use time::{Duration, OffsetDateTime};
 use tokio::runtime::Runtime;
 
 use dibs_app::fakes::Fakes;
-use dibs_app::use_cases::{CreateMemberInput, InitProjectInput, NewMember, UseCases};
+use dibs_app::use_cases::{
+    CreateMemberInput, FootprintInput, FootprintRecorded, InitProjectInput, NewMember, UseCases,
+};
 use dibs_app::{Actor, Dependencies};
 use dibs_domain::handle::Handle;
+use dibs_domain::ids::ItemId;
 use dibs_domain::member::{DisplayName, Role};
+use dibs_domain::paths::RelPath;
 use dibs_domain::project::ProjectSlug;
+use dibs_domain::radar::{BranchName, CommitSha, FootprintBase};
 use dibs_domain::settings::SettingsDocument;
 use dibs_server::adapters::BroadcastNotifier;
 use dibs_server::http::{HttpOptions, router};
@@ -316,6 +321,49 @@ impl TestServer {
             .block_on(self.app.apply_settings.execute(&admin.actor, document))
             .map_err(failed("the settings are applied"))?;
         Ok(())
+    }
+
+    /// Reports, as the integration `importer`, that the branch `branch` of the claim on `item`
+    /// changes `paths` of `repo` against `main`, from the merge base `base` committed when the
+    /// server's clock started.
+    ///
+    /// # Errors
+    /// When a value is malformed, or the report is refused or not stored.
+    pub fn footprint(
+        &self,
+        importer: &Person,
+        item: u64,
+        repo: &str,
+        branch: &str,
+        base: &str,
+        paths: &[&str],
+    ) -> Setup<()> {
+        let input = FootprintInput {
+            item: ItemId(item),
+            repo: repo.to_owned(),
+            branch: BranchName::parse(branch).map_err(failed("a branch"))?,
+            base: FootprintBase {
+                branch: BranchName::parse("main").map_err(failed("a base branch"))?,
+                sha: CommitSha::parse(base).map_err(failed("a commit"))?,
+                at: START,
+            },
+            paths: paths
+                .iter()
+                .map(|path| RelPath::parse(path).map_err(failed("a path")))
+                .collect::<Setup<_>>()?,
+            truncated: false,
+        };
+        let recorded = self
+            .runtime
+            .block_on(self.app.record_footprint.execute(&importer.actor, input))
+            .map_err(failed("the footprint is recorded"))?;
+        match recorded {
+            FootprintRecorded::Stored { .. } => Ok(()),
+            FootprintRecorded::NotStored(why) => Err(SetupError(format!(
+                "the footprint is not stored: {}",
+                why.code()
+            ))),
+        }
     }
 
     /// Moves the server's clock forward.

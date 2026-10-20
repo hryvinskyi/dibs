@@ -7,14 +7,16 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use dibs_app::use_cases::RegisterSessionInput;
+use dibs_app::use_cases::{OnBranch, RegisterSessionInput};
 use dibs_domain::ids::ItemId;
 use dibs_domain::message::SessionLabel;
+use dibs_domain::radar::BranchName;
+use dibs_domain::repo::RepoId;
 use dibs_domain::session::{AgentLabel, HostName};
 
 use crate::auth::Authed;
 use crate::error::ApiError;
-use crate::fields::{parse_required, session_in_body};
+use crate::fields::{parse, parse_required, required, session_in_body};
 use crate::http::AppState;
 use crate::views::{SessionView, reply};
 
@@ -55,6 +57,8 @@ pub async fn register(
 #[derive(Deserialize)]
 pub struct HeartbeatBody {
     session_id: Option<u64>,
+    repo: Option<String>,
+    branch: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -62,11 +66,15 @@ struct HeartbeatAnswer {
     refreshed: Vec<ItemId>,
 }
 
-/// Records a session's sign of life and answers the claims it kept alive.
+/// Records a session's sign of life and answers the claims it kept alive. `repo` and `branch` name
+/// the checkout the session works in and the branch it is on, which the claims of this session it
+/// kept alive record; a checkout on a detached head sends no branch, and a branch needs its
+/// repository.
 ///
 /// # Errors
 /// `forbidden` for an integration;
-/// `invalid_request` without a session; the answer for the use case's failure.
+/// `invalid_request` without a session, for a malformed repository or branch, or a branch without
+/// its repository; the answer for the use case's failure.
 pub async fn heartbeat(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -75,7 +83,23 @@ pub async fn heartbeat(
     actor.require_person()?;
     let Json(body) = body?;
     let session = session_in_body("session_id", body.session_id)?;
-    let outcome = state.app.heartbeat.execute(&actor, session).await?;
+    let repo = body
+        .repo
+        .as_deref()
+        .map(|text| parse("repo", text, RepoId::parse))
+        .transpose()?;
+    let branch = match body.branch.as_deref() {
+        Some(text) => Some(OnBranch {
+            branch: parse("branch", text, BranchName::parse)?,
+            repo: required("repo", repo)?,
+        }),
+        None => None,
+    };
+    let outcome = state
+        .app
+        .heartbeat
+        .execute(&actor, session, branch.as_ref())
+        .await?;
     let answer = HeartbeatAnswer {
         refreshed: outcome.refreshed,
     };

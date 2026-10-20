@@ -12,11 +12,13 @@ use dibs_agent_host::ports::{
     CoordinationGateway, DeliveryLedger, LocalCache, PortError, Upkeep, Workspace, Workspaces,
 };
 use dibs_agent_host::upkeep::is_fresh;
+use dibs_client::branch::current_branch;
 use dibs_client::checkout::Checkout;
 use dibs_client::locations::Locations;
 use dibs_client::state::{StateDir, read_json, write_json};
 use dibs_domain::paths::RelPath;
 use dibs_domain::push::GitFacts;
+use dibs_domain::radar::BranchName;
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::settings::ProjectSettings;
 
@@ -27,6 +29,9 @@ use crate::guard::gateway::HookGateway;
 use crate::guard::ledger::SessionLedgers;
 use crate::guard::remote::{Remote, RemoteError, checkout_of};
 use crate::guard::upkeep::DetachedSync;
+
+/// The variable that names a git directory other than the checkout's own.
+pub const GIT_DIR: &str = "GIT_DIR";
 
 /// How long a checkout's `origin`, once read from git, is taken as it was.
 pub const ORIGIN_FRESH: Duration = Duration::minutes(10);
@@ -56,13 +61,17 @@ impl Workspaces for ClientWorkspaces {
         let locations = Locations::from_env(&|name| self.env.get(name).cloned())
             .map_err(|error| PortError::Refused(sentence(&error.to_string())))?;
         let remote = Remote::new(&checkout, &locations, &self.env);
-        Ok(Some(Box::new(ClientWorkspace::new(checkout, remote))))
+        let git_dir = self.env.get(GIT_DIR).map(PathBuf::from);
+        Ok(Some(Box::new(ClientWorkspace::new(
+            checkout, remote, git_dir,
+        ))))
     }
 }
 
 /// One checkout, its project and the ports over them.
 pub struct ClientWorkspace {
     checkout: Checkout,
+    git_dir: Option<PathBuf>,
     state: StateDir,
     cache: StateCache,
     gateway: HookGateway,
@@ -71,7 +80,7 @@ pub struct ClientWorkspace {
 }
 
 impl ClientWorkspace {
-    fn new(checkout: Checkout, remote: Remote) -> Self {
+    fn new(checkout: Checkout, remote: Remote, git_dir: Option<PathBuf>) -> Self {
         let state = remote.state.clone();
         Self {
             cache: StateCache::new(state.clone(), checkout.root()),
@@ -79,6 +88,7 @@ impl ClientWorkspace {
             ledger: SessionLedgers::new(state.clone()),
             gateway: HookGateway::new(remote, checkout.clone()),
             checkout,
+            git_dir,
             state,
         }
     }
@@ -143,6 +153,10 @@ impl Workspace for ClientWorkspace {
             return false;
         };
         dir.starts_with(root)
+    }
+
+    fn branch(&self) -> Option<BranchName> {
+        current_branch(self.checkout.root(), self.git_dir.as_deref())
     }
 
     fn cache(&self) -> &dyn LocalCache {

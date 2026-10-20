@@ -98,7 +98,7 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/me` | any | The caller, their project and its settings. |
 | `GET /v1/members` | any | The project's members. |
 | `POST /v1/sessions` | people | Register a session, or update the one of the same label. |
-| `POST /v1/heartbeat` | people | A session's sign of life. |
+| `POST /v1/heartbeat` | people | A session's sign of life, and the branch its checkout is on. |
 | `GET /v1/items` | any | List work items. |
 | `POST /v1/items` | any | Create a work item, or return the one a reference names. |
 | `PUT /v1/items` | import | Create and update the items an outside source lists, and their imported dependencies. |
@@ -115,8 +115,10 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/prs/merged` | import | A pull request was merged: the claim that recorded it moves on, or completes. |
 | `POST /v1/prs/closed` | import | A pull request was closed unmerged: the claim that recorded it moves on. |
 | `GET /v1/review-claims` | import | The claims in review and the pull requests they wait for. |
+| `GET /v1/claims` | any | The live claims, with where each one's work stands and the branch it is on in each repository. |
 | `GET /v1/pr-status` | import | The status a forge shows on a repository's pull requests into a base branch. |
-| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims, the caller's ready list, the slots, and whether the integrations went silent. |
+| `PUT /v1/items/{id}/footprint` | import | What the branch of the item's claim changes against its base; the overlaps it makes are announced. |
+| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims, the caller's ready list, the slots, whether the integrations went silent, and the overlaps between live claims. |
 | `POST /v1/edit-check` | people | May I edit these paths? |
 | `POST /v1/grants` | people | Let another member edit in an area you hold. |
 | `DELETE /v1/grants/{id}` | people | Withdraw a grant you gave. |
@@ -163,7 +165,7 @@ item     { id, ref | null, title, status: "open" | "claimed" | "done" | "dropped
            source_status | null, closed, source | null, created_by, created_at }
 item ref { id, ref | null, title, link | null }
 claim    { item, holder, session_id, host, areas: ["repo:area", …], wide: { areas: ["repo:area", …], reason } | null,
-           claimed_at, renewed_at, last_seen }
+           claimed_at, renewed_at, last_seen, state, review, branches: { "<repo id>": "<branch>", … } }
 grant    { id, item, area, from, to, created_at }
 thread   { id, subject, item | null, author, system, to_project, to: [handle, …], created_at }
 message  { id, thread, author, system, label, body, importance: "normal" | "high" | "urgent", ack_required,
@@ -226,9 +228,18 @@ day.
 and `agent` are required, `push` (default `false`) says the session can be woken while idle. Answers `200` with the
 session. A label registers once per member; registering it again updates the session and keeps its id.
 
-`POST /v1/heartbeat`, body `{ "session_id": 7 }`, answers `{ "refreshed": [12] }`: the items whose claims the heartbeat
-kept alive. A claim is *live* while its holder was seen within the project's `stale_after`; a heartbeat, an edit check
-that reserves, or a renewal counts as seen.
+`POST /v1/heartbeat`, body `{ "session_id": 7, "repo": "api", "branch": "bob/42-refunds" }`, answers
+`{ "refreshed": [12] }`: the items whose claims the heartbeat kept alive. A claim is *live* while its holder was seen
+within the project's `stale_after`; a heartbeat, an edit check that reserves, or a renewal counts as seen.
+
+`repo` and `branch` are optional and name the checkout the session works in and the branch it is on; a checkout on a
+detached head sends no `branch`, and a `branch` needs its `repo`. The claims the heartbeat kept alive that this session
+took or last renewed record the branch for the repository (`branch_recorded` when it is another one than before): one
+session works in one checkout, while another session of the same machine may work in another checkout on another
+branch, and its claims are left alone. A claim whose branch changes loses its footprint of that repository (see
+[Branches and overlaps](#branches-and-overlaps)). A repository the project does not list records nothing. Refusals add
+`invalid_request` for a malformed `repo` (whether or not a `branch` comes with it) or `branch`, or a `branch` without
+`repo`.
 
 ### Items
 
@@ -409,7 +420,11 @@ A claim carries `state`: `working` while its holder works on it, `in_review` whi
   "ready": { "ready": [], "excluded": [] },
   "escalations": [{ "subject": { "item": 12 }, "about": "work item gh:acme/widgets#7 \"Refund rounding\"",
                     "by": "bob", "arbiters": ["carol"], "thread_id": 40, "message_id": 41, "at": "…" }],
-  "integration_silent_since": null
+  "integration_silent_since": null,
+  "overlaps": [{ "kind": "same_file",
+                 "items": [{ "id": 12, "ref": "gh:acme/widgets#7", "title": "…", "link": "…", "holder": "alice" },
+                           { "id": 14, "ref": "gh:acme/widgets#9", "title": "…", "link": "…", "holder": "bob" }],
+                 "pr": null, "paths": ["default:config/app.yaml"] }]
 }
 ```
 
@@ -417,6 +432,9 @@ A claim carries `state`: `working` while its holder works on it, `in_review` whi
 for one that never called, when it joined), shown only while the project's reviews rely on one — a claim is in review,
 or a repository's `pr_status` is enabled — and `null` otherwise, while one calls, or when the project has none: while
 they are silent, merges complete no claims and pull request statuses go stale. A claim in review is always live.
+
+`overlaps` lists, by kind and then by items, the overlaps the radar found whose claims are all live (see
+[Branches and overlaps](#branches-and-overlaps)).
 
 `escalations` lists, newest first, the escalations the caller may read (it reached them, or they sent it) that no arbiter
 has acknowledged yet. `holds` never lists an area a wide claim names. `wide` lists the live wide claims by item, each area with where it
@@ -454,9 +472,12 @@ reports answer `{ "matched": false }` and change nothing for a pull request no c
 so a worker may send every report again; a match answers
 `{ "matched": true, "item": 12, "claim": "in_review" | "set_aside" | "working" | "completed" }`.
 
-`POST /v1/prs/merged`, body `{ "pr": "acme/api#12", "base": "main", "merged_at": "2026-03-02T10:00:00Z", "files": [] }`
-(`files`, the paths the merge changed, is optional and holds at most 3000; the body may be up to 2 MiB). The pull
-request leaves its claim (`pr_merged`). A merge **delivers** the work when its repository protects no branch, or when
+`POST /v1/prs/merged`, body
+`{ "pr": "acme/api#12", "base": "main", "merged_at": "2026-03-02T10:00:00Z", "files": [], "head": "bob/42-refunds" }`
+(`files`, the paths the merge changed relative to the repository's root, is optional and holds at most 3000; `head`,
+the branch the pull request was merged from, is optional; the body may be up to 2 MiB). The pull request leaves its claim (`pr_merged`). A merge that delivers also **moves the base** under
+other members' branches: see [Branches and overlaps](#branches-and-overlaps). That happens whether or not a claim
+recorded the pull request, so a merge no claim recorded still answers `matched: false` and changes no claim. A merge **delivers** the work when its repository protects no branch, or when
 `base` (`main` or `refs/heads/main`) is one of its protected branches; a merge into any other base — a stacked pull
 request merged into the branch of the one below it — delivers nothing yet, and is treated as a close (below).
 After a merge that delivers, with other pull requests recorded, the claim stays in review (`in_review`). With none left,
@@ -472,7 +493,8 @@ seen now — a claim that sat in review for days is not stale on arrival — and
 `review_ended`).
 
 `GET /v1/review-claims` answers the claims in review, by item:
-`{ "claims": [{ "item": item ref, "holder": "bob", "prs": ["acme/api#12"], "since": "…", "more": false }] }`. A worker
+`{ "claims": [{ "item": item ref, "holder": "bob", "prs": ["acme/api#12"], "since": "…", "more": false,
+"branches": { "api": "bob/42-refunds" } }] }`, `branches` being the branch the claim's work is on in each repository. A worker
 reconciles **every** pull request listed here on each pass: it asks the forge where each one stands and reports those
 already merged or closed. That is how a pull request merged before its holder recorded it, or while the worker was
 down, is reported at all; the forge's own lists of recent changes alone would miss it.
@@ -495,12 +517,87 @@ does (an expired hold is ended and its holder told, once). Refusals: `not_found`
 list or a base that is no branch, `invalid_request` for a missing field. A worker writes a status only when its state or
 description changed since the last one it wrote for that commit, and only on pull requests of the project's members.
 
+### Branches and overlaps
+
+Work that collides rarely does so in one commit: it collides over the days a branch spends apart from its base, on the
+files every branch touches, and through a published interface changed in one place and used in another. dibs records
+which branch each claim works on, keeps what each of those branches changes, and tells the holders when two of them meet.
+
+**Branches.** Which branch a claim works on is recorded, never guessed from a branch's name. An edit check that reserves
+sends the `branch` the checkout is on, and the claims the edits are attributed to record it for the check's repository;
+a heartbeat sends it too, for the claims of its own session (see [Sessions](#sessions)). A claim keeps the last branch
+seen per repository (`branches` in the claim), and `branch_recorded` marks each change. When the branch changes, the
+claim's footprint of that repository goes with what it made: it measured the branch the claim left. The command line
+reads the branch from git's own files (`HEAD` of the directory `GIT_DIR` names, or of the nearest `.git`, in a linked
+worktree the one its `.git` file names), never by starting git, and sends none on a detached head or in a repository
+that keeps its refs in a reftable.
+
+`GET /v1/claims` answers every live claim, ordered by item:
+`{ "claims": [{ "item": 12, "holder": "bob", "state": "working" | "in_review", "branches": { "api": "bob/42-refunds" } }] }`.
+It names no path and no conversation, so every role reads it; it is the list an integration measures footprints of.
+
+**Footprints.** `PUT /v1/items/{id}/footprint`, body
+
+```json
+{ "repo": "api", "branch": "bob/42-refunds", "base": "main", "base_sha": "4f2a91c0",
+  "base_at": "2026-03-02T08:12:00Z", "paths": ["src/billing/refund.rs"], "truncated": false }
+```
+
+is what an integration reports, for each branch of `GET /v1/claims`, after asking the forge what the branch changes
+against its base. `repo` is a repository's id or the path of its `remote` (`acme/api`; in a project that lists no
+repositories, `default`). `base` is the base branch it compared against (`main` or `refs/heads/main`); `base_sha` is the
+**merge base** of the branch and that base (4 to 64 hexadecimal digits) — the commit the branch left the base at, not the
+base's tip — and `base_at` that commit's committer time (RFC 3339); with GitHub's compare of `{base}...{branch}`, they
+are `merge_base_commit.sha` and `merge_base_commit.commit.committer.date`. `paths` holds at most 3000 paths relative to
+the repository's root, and `truncated: true` says the forge gave fewer than the branch changes. The body may be up to
+2 MiB. It replaces the claim's footprint of that repository and answers `{ "stored": true, "changed": true }` with
+`footprint_changed`; a report that repeats the stored footprint answers `"changed": false` and appends nothing. A report
+for an item no live claim holds, or for another branch than the one the claim records there, is not stored and answers
+`{ "stored": false, "reason": "no_live_claim" | "other_branch" }`: the integration reads the branches between two of its
+passes, and a claim may have ended or moved since. A footprint is visible to the project like its claim, and goes when
+the claim ends, when its branch changes, when it is the branch of a delivering merge, or when the settings stop listing
+its repository. Refusals: `not_found` (`404`) for a repository the project does not list, `invalid_request` for a
+missing or malformed field or more than 3000 paths, `forbidden` for anyone but an integration or an admin.
+
+**Overlaps.** From the footprints dibs derives three kinds of overlap:
+
+- `same_file` — two claims of different members change one path. Its `paths` are the shared ones.
+- `contract` — a claim's branch changes a path a `contracts` entry of its repository covers, and a claim of another
+  member changes a path of another area that consumes it: an area `area_deps` declares as depending on the contract
+  path's area, or a consumer the contract names (`repo:*` for every path of a repository, `repo:area` for one area).
+  Its `paths` are the contract paths. Contracts work across repositories.
+- `main_moved` — a pull request merged into a branch that delivers its work (see [Review](#review)) changed a path a
+  claim's branch changes, and that branch is measured against the same base branch from a merge base older than the
+  merge (`base_at` before `merged_at`). It names one item and the merged `pr`. Every such claim is told, the merge's own
+  author's other branches included — one member's series of pull requests is what it is for — but not the branch that
+  was merged: the footprint of `head`, or, without `head`, the footprint of the claim that recorded the pull request.
+  Its paths come from the merge report's `files`, or, without them, from the merged branch's footprint. A merge into
+  `release/2`, or into a feature branch, tells nobody whose footprint is against `main`.
+
+One member's own claims never collide (`same_file`, `contract`).
+
+Each overlap is **announced once**, the first time it is found while every claim it names is live: a conversation
+started by dibs about the first item it names, addressed to the holders of the claims it names (both of them; one for
+`main_moved`), whose one message is `high` for `same_file` and `contract` and `normal` for `main_moved` — every merge
+brings one — and says to rebase onto the base now, and for a contract to read the other change before going on.
+`overlap_found` records each announcement. The same overlap on more paths is not new.
+
+An overlap **ends** only when what it rests on changes: a footprint it rests on changes so that it no longer holds, a
+claim's branch changes, a merge delivers the branch it rests on, the settings change so that it no longer holds, or a
+claim it names ends. A `main_moved` also ends when the claim's footprint in that repository is measured from a merge
+base no older than the merge: the branch caught up. A claim going stale ends nothing: a stale claim is only left out
+of what is found anew, so an overlap stays stored, unshown, while a claim of it is stale, and is not announced again
+when that claim comes back. One that ended and is found again later is new. The overlaps are derived again whenever a
+footprint changes, a branch changes, a merge is reported or the settings change (new `contracts` or `area_deps` apply to
+the stored footprints at once). `GET /v1/status` and the board list those whose claims are all live.
+
 ### Edit check
 
 `POST /v1/edit-check`, body `{ "session_id": 7, "repo": "default", "paths": ["packages/billing/a.rs"], "reserve": false }`.
 Every path lies in the one repository `repo` names (an id from `/v1/me`) and is relative to its root, `/`-separated.
 With `reserve: true` the edit is being made and what the check plans is recorded on the caller's claim; without it, the
-check writes nothing. Answers a verdict per path, in the order asked:
+check writes nothing. An optional `branch` names the branch the checkout is on; with `reserve: true` the claims the
+edits are attributed to record it (see [Branches and overlaps](#branches-and-overlaps)). Answers a verdict per path, in the order asked:
 
 ```json
 { "verdicts": [
@@ -763,6 +860,9 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `pr_merged`, `pr_closed`, `pr_dropped` | `item`, `member`, `pr` (`pr_dropped`: its holder removed it) |
 | `review_ended` | `item`, `member` (the claim is worked on again) |
 | `completed_by_merge` | `item`, `member` (the merge of its last pull request completed the claim) |
+| `branch_recorded` | `item`, `member`, `repo`, `branch` (the branch the claim's work is on there now) |
+| `footprint_changed` | `item`, `member`, `repo`, `branch`, `paths` (how many), `truncated` |
+| `overlap_found` | `kind` (`same_file`, `contract`, `main_moved`), `items`, `pr` (`main_moved`; else `null`), `paths` (the first 100) |
 
 `item_updated` is appended when one of an item's reported facts actually changed; read the item for what it says now.
 `wide_claimed` is appended when a claim becomes wide or its scope grows; a renewal that names nothing new appends none.
@@ -814,7 +914,9 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | `hot` | For a project with one repository: hot-file rules, first match wins. |
 | `protected_refs` | For a project with one repository: the branches only some members may push to; see below. |
 | `pr_status` | For a project with one repository: whether and how its pull requests get a status; see below. |
-| `repos` | For a project with several: `[{ "id", "remote", "areas", "hot", "protected_refs", "pr_status" }]`. The two layouts are never mixed. |
+| `contracts` | For a project with one repository: its published contracts; see below. |
+| `area_deps` | For a project with one repository: which of its areas depend on which; see below. |
+| `repos` | For a project with several: `[{ "id", "remote", "areas", "hot", "protected_refs", "pr_status", "contracts", "area_deps" }]`. The two layouts are never mixed. |
 | `slots` | The shared actions one member does at a time; see below. |
 | `arbiters` | The handles of the members who settle what agents do not agree on (`POST /v1/escalations`). A handle that is no person of the project, or a member removed since, settles nothing. |
 
@@ -881,6 +983,17 @@ A person in a terminal can still push with `git push --no-verify`; that breaks t
 **Pull-request status.** `pr_status: { "enabled": false, "context": "dibs", "describe_holder": false }` (the defaults)
 says whether the repository's pull requests get a status from `GET /v1/pr-status`, the name it is filed under (1 to 100
 characters), and whether its description names the slot, its holder and their purpose.
+
+**Contracts and area dependencies.** `contracts: [{ "paths": ["schema/**"], "consumers": ["web:*"] }]` declares, per
+repository, paths other work depends on (each entry with at least one glob); `consumers` (optional) names who reads
+them besides the areas that depend on the contract's area — it exists because a contract that lies in no area, or is
+read by a repository without areas, has no area for `area_deps` to depend on: `repo:*` for every path of a listed repository, `repo:area`
+for one declared area, or a bare area of the same repository. `area_deps: { "search": ["billing", "web:checkout"] }`
+says, per repository, which of its declared areas depend on which other declared areas — by name in the same
+repository, as `repo:area` in another; an area never depends on itself. A team may generate `area_deps` from its
+packages' manifests. A path's area is the first in declaration order that contains it. Both feed the radar's `contract`
+overlaps (see [Branches and overlaps](#branches-and-overlaps)). Refusals name the contract by its position or the area
+at fault.
 
 ### Admin routes
 

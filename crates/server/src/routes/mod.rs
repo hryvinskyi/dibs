@@ -13,6 +13,7 @@ pub mod items;
 pub mod me;
 pub mod members;
 pub mod messages;
+pub mod radar;
 pub mod ready;
 pub mod review;
 pub mod sessions;

@@ -16,8 +16,9 @@ use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId,
 use dibs_domain::item::{ExternalRef, ItemStatus, Priority, SourceId, SourceStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
-use dibs_domain::paths::RelPath;
+use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::project::ProjectSlug;
+use dibs_domain::radar::{BranchName, OverlapKind};
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::review::PrRef;
 use dibs_domain::session::{AgentLabel, HostName};
@@ -353,6 +354,9 @@ pub struct Claim {
     /// While it is in review, the pull requests it recorded.
     #[serde(default)]
     pub review: Option<ReviewInfo>,
+    /// The branch its work is on in each repository, by repository id.
+    #[serde(default)]
+    pub branches: BTreeMap<RepoId, BranchName>,
 }
 
 impl Claim {
@@ -596,6 +600,37 @@ pub struct Status {
     /// Since when the project's integrations have not called, once that counts as silent.
     #[serde(default, with = "time::serde::rfc3339::option")]
     pub integration_silent_since: Option<OffsetDateTime>,
+    /// The overlaps between live claims and the moved bases under them.
+    #[serde(default)]
+    pub overlaps: Vec<OverlapInfo>,
+}
+
+/// An overlap the radar found between live claims, or a base a merge moved under one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlapInfo {
+    /// Its kind.
+    pub kind: OverlapKind,
+    /// The items it names, each with its holder.
+    pub items: Vec<OverlapParty>,
+    /// The merged pull request of a moved base.
+    #[serde(default)]
+    pub pr: Option<PrRef>,
+    /// The paths it is on.
+    pub paths: BTreeSet<RepoPath>,
+}
+
+/// One item an overlap names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlapParty {
+    /// The item's local id.
+    pub id: ItemId,
+    /// Its reference in an outside tracker.
+    #[serde(rename = "ref", default)]
+    pub external_ref: Option<ExternalRef>,
+    /// Its title.
+    pub title: Title,
+    /// The holder of its claim.
+    pub holder: Handle,
 }
 
 /// An escalation that waits for an arbiter.
@@ -762,6 +797,18 @@ pub struct EditCheckRequest {
     pub paths: Vec<RelPath>,
     /// Whether the edits are being made, so what the check plans is recorded.
     pub reserve: bool,
+    /// The branch the checkout is on; none on a detached head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<BranchName>,
+}
+
+/// The checkout a request comes from and the branch it is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OnBranch {
+    /// The repository.
+    pub repo: RepoId,
+    /// The branch.
+    pub branch: BranchName,
 }
 
 /// `POST /v1/edit-check`'s answer.

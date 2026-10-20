@@ -85,7 +85,7 @@ mod sqlite_file {
             "SELECT group_concat(version || ':' || success) FROM _sqlx_migrations",
         )
         .await;
-        assert_eq!(applied, "1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1");
+        assert_eq!(applied, "1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1,9:1");
         assert_eq!(scalar(&path, "PRAGMA journal_mode").await, "wal");
     }
 
@@ -110,6 +110,38 @@ mod sqlite_file {
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(plan.contains("messages_asking_ack"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn the_footprints_holding_a_path_and_the_overlaps_of_an_item_are_found_through_indexes() {
+        let (_dir, path) = file();
+        SqliteStore::open(&path).await.unwrap().close().await;
+        let mut connection = raw(&path).await;
+        for (sql, index) in [
+            (
+                "EXPLAIN QUERY PLAN SELECT fp.item_id, fp.path FROM json_each('[\"a\"]') AS asked \
+                 CROSS JOIN footprint_paths AS fp \
+                 WHERE fp.project_id = 1 AND fp.repo = 'api' AND fp.path = asked.value \
+                 ORDER BY fp.item_id, fp.path",
+                "footprint_paths_by_path",
+            ),
+            (
+                "EXPLAIN QUERY PLAN DELETE FROM overlaps WHERE project_id = 1 AND overlap_key IN \
+                 (SELECT overlap_key FROM overlap_items WHERE project_id = 1 AND item_id = 5)",
+                "overlap_items_by_item",
+            ),
+        ] {
+            let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+            let plan = steps
+                .into_iter()
+                .map(|(_, _, _, detail)| detail)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(plan.contains(index), "{plan}");
+        }
     }
 
     #[tokio::test]

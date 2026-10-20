@@ -488,3 +488,57 @@ fn doctor_lists_the_hosts_and_what_they_carry() {
     assert!(shown.contains("neutral: carries"), "{shown}");
     assert!(shown.contains("nothing to install"), "{shown}");
 }
+
+#[test]
+fn an_edit_check_names_the_branch_the_checkout_is_on_and_a_detached_head_none() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    crate::support::git(&api, &["checkout", "-q", "-b", "bob/5-rates"]);
+    claim(&setup, "bob", &api, "gh:acme/api#5", &[]);
+    let edited = setup.hook(
+        "bob",
+        &api,
+        "before-tool",
+        &edit(&api, &["src/billing/a.rs"]),
+    );
+    assert_eq!(decision(&edited), "no_objection");
+    let sent: Vec<String> = setup
+        .server
+        .request_log()
+        .into_iter()
+        .filter(|request| request.contains("/v1/edit-check"))
+        .collect();
+    assert!(
+        sent.iter()
+            .any(|request| request.contains(r#""branch":"bob/5-rates""#)),
+        "{sent:?}"
+    );
+    let state = setup
+        .dibs(&setup.bob, &api)
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        json(&state)["live"][0]["claim"]["branches"],
+        json!({"api": "bob/5-rates"})
+    );
+
+    crate::support::git(&api, &["checkout", "-q", "--detach"]);
+    let before = setup.server.request_log().len();
+    let detached = setup.hook(
+        "bob",
+        &api,
+        "before-tool",
+        &edit(&api, &["src/search/a.rs"]),
+    );
+    assert_eq!(decision(&detached), "no_objection");
+    let after: Vec<String> = setup.server.request_log()[before..]
+        .iter()
+        .filter(|request| request.contains("/v1/edit-check"))
+        .cloned()
+        .collect();
+    assert!(
+        !after.is_empty() && after.iter().all(|request| !request.contains("\"branch\"")),
+        "{after:?}"
+    );
+}

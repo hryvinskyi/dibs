@@ -2,8 +2,9 @@
 /**
  * The server's JSON API as the cases use it: start a conversation and post a message as a member,
  * each optionally raised in importance or asking to be acknowledged; acknowledge a message; import
- * items as an integration does; open a session and claim an item from it; apply settings, take a
- * slot, and escalate a work item to the project's arbiters.
+ * items as an integration does; open a session and claim an item from it; send a session's
+ * heartbeat from a checkout on a branch; report what a claim's branch changes as an integration
+ * does; apply settings, take a slot, and escalate a work item to the project's arbiters.
  * Answers are parsed into the few values a case needs; a body of another shape is an error.
  */
 
@@ -164,6 +165,36 @@ export async function openSession(baseUrl, token, host) {
  */
 export async function claimItem(baseUrl, token, itemId, sessionId) {
   await send(baseUrl, token, 'POST', `/v1/items/${itemId}/claim`, { session_id: sessionId, areas: [] }, 200);
+}
+
+/**
+ * Sends a session's heartbeat from a checkout of `repo` on `branch`.
+ * @param {string} baseUrl
+ * @param {string} token the member's token
+ * @param {number} sessionId
+ * @param {string} repo
+ * @param {string} branch
+ * @returns {Promise<void>}
+ */
+export async function heartbeatOn(baseUrl, token, sessionId, repo, branch) {
+  await send(baseUrl, token, 'POST', '/v1/heartbeat', { session_id: sessionId, repo, branch }, 200);
+}
+
+/**
+ * Reports, as an integration does, that the branch of the claim on an item changes these paths.
+ * @param {string} baseUrl
+ * @param {string} token an admin's or an importer's token
+ * @param {number} itemId
+ * @param {{ repo: string, branch: string, base: string, base_sha: string, base_at: string, paths: string[] }} footprint
+ * @returns {Promise<boolean>} whether the footprint was stored
+ */
+export async function reportFootprint(baseUrl, token, itemId, footprint) {
+  const body = await send(baseUrl, token, 'PUT', `/v1/items/${itemId}/footprint`, footprint, 200);
+  const stored = isRecord(body) ? body.stored : undefined;
+  if (typeof stored !== 'boolean') {
+    throw new Error('the answer says nothing of whether the footprint was stored');
+  }
+  return stored;
 }
 
 /**

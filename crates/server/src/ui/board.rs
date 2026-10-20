@@ -15,7 +15,10 @@
 //! that member; an item nobody holds names no member and a completion no area, so those filters
 //! leave them out. A wide claim is kept by an area it names, and by its member or a member holding
 //! one of its areas. A banner says since when the project's integrations are silent, while they
-//! are: merges then complete no claims.
+//! are: merges then complete no claims. A banner names each overlap the radar found between live
+//! claims — two branches changing one file, a published contract and its consumer — and each base
+//! a merge moved under a branch, whatever the filter: they concern the two holders and whoever
+//! works near them.
 //!
 //! The fragment answers a request without a live session with `401`, never with the sign-in page,
 //! so a script cannot mistake that page for the board; it says what it is in the `X-Dibs-Fragment`
@@ -30,7 +33,10 @@ use serde::Deserialize;
 use time::UtcOffset;
 
 use dibs_app::named::NamedClaim;
+use dibs_app::use_cases::NamedOverlap;
 use dibs_domain::handle::Handle;
+use dibs_domain::message::Importance;
+use dibs_domain::radar::OverlapKind;
 use dibs_domain::settings::ProjectSettings;
 
 use crate::error::ApiError;
@@ -146,7 +152,8 @@ const BOARD_FRAGMENT: HeaderValue = HeaderValue::from_static("board");
 const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependency_removed \
      settings_changed slot_taken slot_renewed slot_queued slot_left slot_offered \
      slot_offer_lapsed slot_released slot_expired slot_force_released slot_stalled slot_resumed \
-     slot_stall_taken_over escalated acked thread_started member_removed";
+     slot_stall_taken_over escalated acked thread_started member_removed overlap_found \
+     footprint_changed";
 
 /// An escalation waiting for an arbiter, as the board's banner shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +163,65 @@ struct EscalationBanner {
     arbiters: String,
     thread: u64,
 }
+
+/// An overlap between live claims, as the board's banner shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OverlapBanner {
+    /// Whether it asks for attention now: a collision between two members' branches.
+    high: bool,
+    /// What it says.
+    text: String,
+}
+
+impl OverlapBanner {
+    fn of(named: &NamedOverlap) -> Self {
+        let parties: Vec<String> = named
+            .items
+            .iter()
+            .map(|(item, holder)| {
+                format!(
+                    "{} ({holder})",
+                    reference(item.id, item.external_ref.as_ref())
+                )
+            })
+            .collect();
+        let parties = parties.join(" and ");
+        let mut paths: Vec<String> = named
+            .overlap
+            .paths()
+            .iter()
+            .take(BANNER_PATHS)
+            .map(ToString::to_string)
+            .collect();
+        let more = named.overlap.paths().len().saturating_sub(BANNER_PATHS);
+        if more > 0 {
+            paths.push(format!("{more} more"));
+        }
+        let paths = paths.join(", ");
+        let pr = named
+            .overlap
+            .pr()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        let kind = named.overlap.kind();
+        let text = match kind {
+            OverlapKind::SameFile => format!("{parties} change the same files: {paths}"),
+            OverlapKind::Contract => {
+                format!("{parties} meet at a published contract: {paths}")
+            }
+            OverlapKind::MainMoved => {
+                format!("{pr} moved the base under {parties}, changing {paths}")
+            }
+        };
+        Self {
+            high: kind.importance() != Importance::Normal,
+            text,
+        }
+    }
+}
+
+/// The most paths an overlap's banner names.
+const BANNER_PATHS: usize = 5;
 
 /// What the board shows below its filters, as the page and the fragment render it alike.
 #[derive(Debug, Clone)]
@@ -167,6 +233,8 @@ struct BoardColumns {
     escalations: Vec<EscalationBanner>,
     /// Since when the project's integrations are silent, once that counts.
     integration_silent: Option<Moment>,
+    /// The overlaps between live claims, in key order.
+    overlaps: Vec<OverlapBanner>,
     slots: Vec<SlotRow>,
     wide: Vec<WideRow>,
     ready: Vec<ReadyCard>,
@@ -296,6 +364,7 @@ async fn columns(
         integration_silent: view
             .integration_silent_since
             .map(|since| moment(since, now)),
+        overlaps: view.overlaps.iter().map(OverlapBanner::of).collect(),
         escalations: view
             .escalations
             .iter()
@@ -430,6 +499,7 @@ mod tests {
                 renewed_at: at,
                 last_seen: at,
                 state: dibs_domain::review::ClaimState::Working,
+                branches: std::collections::BTreeMap::new(),
             },
             holder: Handle::parse(holder).unwrap(),
         }

@@ -7,8 +7,9 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use dibs_app::use_cases::EditCheckInput;
+use dibs_app::use_cases::{EditCheckInput, OnBranch};
 use dibs_domain::paths::{RelPath, RepoPath};
+use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
 
 use crate::auth::Authed;
@@ -24,6 +25,7 @@ pub struct CheckBody {
     repo: Option<String>,
     paths: Option<Vec<String>>,
     reserve: Option<bool>,
+    branch: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -35,7 +37,8 @@ struct CheckAnswer {
 /// names (its id in the project's settings; a project that lists no repositories has one, named by
 /// the id `/v1/me` reports) and is relative to that repository's root, `/`-separated. With
 /// `reserve: true` the edits are being made and what the check plans is recorded; without it
-/// (the default) the check writes nothing.
+/// (the default) the check writes nothing. `branch` names the branch the checkout is on, which the
+/// claims the edits are attributed to record; a checkout on a detached head sends none.
 ///
 /// # Errors
 /// `forbidden` for an integration;
@@ -60,10 +63,20 @@ pub async fn check(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let branch = body
+        .branch
+        .as_deref()
+        .map(|text| parse("branch", text, BranchName::parse))
+        .transpose()?
+        .map(|branch| OnBranch {
+            repo: repo.clone(),
+            branch,
+        });
     let input = EditCheckInput {
         session,
         paths,
         reserve: body.reserve.unwrap_or(false),
+        branch,
     };
     let check = state.app.edit_check.execute(&actor, input).await?;
     let answer = CheckAnswer {

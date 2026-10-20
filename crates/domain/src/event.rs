@@ -14,6 +14,8 @@ use crate::escalation::EscalationSubject;
 use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
 use crate::item::{ExternalRef, Title};
 use crate::paths::RepoPath;
+use crate::radar::{BranchName, OverlapKind};
+use crate::repo::RepoId;
 use crate::retention::PruneCounts;
 use crate::review::PrRef;
 use crate::session::HostName;
@@ -125,6 +127,14 @@ pub enum EventKind {
     ReviewEnded(ReviewEnded),
     /// The merge of a claim's last recorded pull request completed it; the item is done.
     CompletedByMerge(CompletedByMerge),
+    /// A claim's work was seen on a branch of a repository it did not record there before.
+    BranchRecorded(BranchRecorded),
+    /// An integration reported what a claim's branch changes, and it differs from the report
+    /// before.
+    FootprintChanged(FootprintChanged),
+    /// The radar found an overlap it had not announced: its message went to the holders it
+    /// concerns.
+    OverlapFound(OverlapFound),
 }
 
 impl EventKind {
@@ -172,6 +182,9 @@ impl EventKind {
             Self::PrDropped(_) => "pr_dropped",
             Self::ReviewEnded(_) => "review_ended",
             Self::CompletedByMerge(_) => "completed_by_merge",
+            Self::BranchRecorded(_) => "branch_recorded",
+            Self::FootprintChanged(_) => "footprint_changed",
+            Self::OverlapFound(_) => "overlap_found",
         }
     }
 
@@ -230,6 +243,9 @@ impl EventKind {
             Self::PrMerged(e) | Self::PrClosed(e) | Self::PrDropped(e) => vec![Some(e.member)],
             Self::ReviewEnded(e) => vec![Some(e.member)],
             Self::CompletedByMerge(e) => vec![Some(e.member)],
+            Self::BranchRecorded(e) => vec![Some(e.member)],
+            Self::FootprintChanged(e) => vec![Some(e.member)],
+            Self::OverlapFound(_) => Vec::new(),
         };
         named.into_iter().flatten().collect()
     }
@@ -277,7 +293,10 @@ impl EventKind {
             | Self::PrClosed(_)
             | Self::PrDropped(_)
             | Self::ReviewEnded(_)
-            | Self::CompletedByMerge(_) => None,
+            | Self::CompletedByMerge(_)
+            | Self::BranchRecorded(_)
+            | Self::FootprintChanged(_)
+            | Self::OverlapFound(_) => None,
         }
     }
 
@@ -330,7 +349,10 @@ impl EventKind {
             | Self::PrClosed(_)
             | Self::PrDropped(_)
             | Self::ReviewEnded(_)
-            | Self::CompletedByMerge(_) => None,
+            | Self::CompletedByMerge(_)
+            | Self::BranchRecorded(_)
+            | Self::FootprintChanged(_)
+            | Self::OverlapFound(_) => None,
         }
     }
 
@@ -746,6 +768,55 @@ pub struct CompletedByMerge {
     pub member: MemberId,
 }
 
+/// A claim's work was seen on a branch it did not record for the repository before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchRecorded {
+    /// The item of the claim.
+    pub item: ItemId,
+    /// Its holder.
+    pub member: MemberId,
+    /// The repository.
+    pub repo: RepoId,
+    /// The branch the claim records there now.
+    pub branch: BranchName,
+}
+
+/// What a claim's branch changes was reported anew. Carries how many paths, never the paths: a
+/// footprint is read for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FootprintChanged {
+    /// The item of the claim.
+    pub item: ItemId,
+    /// Its holder.
+    pub member: MemberId,
+    /// The repository.
+    pub repo: RepoId,
+    /// The branch.
+    pub branch: BranchName,
+    /// How many paths the branch changes, as reported.
+    pub paths: usize,
+    /// Whether the report holds fewer paths than the branch changes.
+    pub truncated: bool,
+}
+
+/// The radar found an overlap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlapFound {
+    /// Its kind.
+    pub kind: OverlapKind,
+    /// The items it names.
+    pub items: BTreeSet<ItemId>,
+    /// The merged pull request, for a moved base.
+    pub pr: Option<PrRef>,
+    /// The paths it is on, the first [`OverlapFound::MAX_PATHS`] in order.
+    pub paths: BTreeSet<RepoPath>,
+}
+
+impl OverlapFound {
+    /// The most paths the event carries.
+    pub const MAX_PATHS: usize = 100;
+}
+
 /// An admin deleted a conversation. Carries the id only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadDeleted {
@@ -1033,6 +1104,70 @@ mod tests {
         assert_eq!(
             started["payload"]["prs"],
             serde_json::json!(["acme/api#12", "acme/web#3"])
+        );
+    }
+
+    #[test]
+    fn radar_events_round_trip_and_carry_ids_branches_counts_and_overlap_paths_only() {
+        let item = ItemId(4);
+        let repo = RepoId::parse("api").unwrap();
+        let branch = BranchName::parse("alice/4-rates").unwrap();
+        let kinds = [
+            EventKind::BranchRecorded(BranchRecorded {
+                item,
+                member: ALICE,
+                repo: repo.clone(),
+                branch: branch.clone(),
+            }),
+            EventKind::FootprintChanged(FootprintChanged {
+                item,
+                member: ALICE,
+                repo,
+                branch,
+                paths: 2,
+                truncated: false,
+            }),
+            EventKind::OverlapFound(OverlapFound {
+                kind: OverlapKind::SameFile,
+                items: BTreeSet::from([item, ItemId(5)]),
+                pr: None,
+                paths: BTreeSet::from([RepoPath::parse("api:config/app.yaml").unwrap()]),
+            }),
+        ];
+        let names: Vec<&str> = kinds.iter().map(EventKind::name).collect();
+        assert_eq!(
+            names,
+            ["branch_recorded", "footprint_changed", "overlap_found"]
+        );
+        for kind in &kinds {
+            let value = serde_json::to_value(kind).unwrap();
+            assert_eq!(value["kind"], kind.name());
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(&back, kind);
+            assert_eq!(
+                (
+                    kind.message(),
+                    kind.thread(),
+                    kind.slot(),
+                    kind.completion()
+                ),
+                (None, None, None, None)
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&kinds[1]).unwrap()["payload"],
+            serde_json::json!({"item": 4, "member": 1, "repo": "api", "branch": "alice/4-rates",
+                               "paths": 2, "truncated": false})
+        );
+        assert_eq!(
+            serde_json::to_value(&kinds[2]).unwrap()["payload"],
+            serde_json::json!({"kind": "same_file", "items": [4, 5], "pr": null,
+                               "paths": ["api:config/app.yaml"]})
+        );
+        assert_eq!(kinds[0].members(), BTreeSet::from([ALICE]));
+        assert!(
+            kinds[2].members().is_empty(),
+            "an overlap names items, not members"
         );
     }
 

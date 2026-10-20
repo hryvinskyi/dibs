@@ -14,6 +14,7 @@ use dibs_client::Client;
 use dibs_client::api::EditCheckRequest;
 use dibs_client::checkout::Checkout;
 use dibs_domain::paths::RelPath;
+use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
 use dibs_domain::slot::SlotName;
 
@@ -132,6 +133,7 @@ impl CoordinationGateway for HookGateway {
         &self,
         session: &SessionRef,
         repo: &RepoId,
+        branch: Option<&BranchName>,
         paths: &[RelPath],
     ) -> Result<Vec<PathAnswer>, PortError> {
         let client = self.client()?;
@@ -143,6 +145,7 @@ impl CoordinationGateway for HookGateway {
                 repo: repo.clone(),
                 paths: paths.to_vec(),
                 reserve: true,
+                branch: branch.cloned(),
             };
             Ok::<_, RemoteError>(client.edit_check(&request).await?)
         });

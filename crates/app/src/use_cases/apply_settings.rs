@@ -4,13 +4,15 @@ use std::sync::Arc;
 
 use dibs_domain::event::{EventKind, SettingsChanged};
 use dibs_domain::hot_rule::HotRuleRegistry;
+use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::settings::{ProjectSettings, SettingsDocument};
 use dibs_domain::slot::decide_slots_removed;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::ports::{Clock, EventNotifier, Store};
+use crate::ports::{Clock, EventNotifier, IdGen, Store};
+use crate::use_cases::radar::Radar;
 use crate::work::Work;
 
 /// The settings now in force.
@@ -26,12 +28,15 @@ pub struct AppliedSettings {
 /// repositories under `repos` — and makes it the project's settings. The document is stored in its
 /// normal form, so applying the same settings again changes nothing and appends no event. A slot
 /// the new settings no longer declare loses its hold, its queue and its offer in the same
-/// transaction, each recorded as ended by the admin.
+/// transaction, each recorded as ended by the admin. The contract overlaps are derived again under
+/// the new areas, contracts and area dependencies, and those that are new are announced.
 pub struct ApplySettings {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
+    ref_schemes: Arc<RefSchemeRegistry>,
 }
 
 impl ApplySettings {
@@ -40,8 +45,10 @@ impl ApplySettings {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
+            ref_schemes: deps.ref_schemes.clone(),
         }
     }
 
@@ -77,6 +84,14 @@ impl ApplySettings {
             for event in removed.events {
                 work.record(now, event).await?;
             }
+            Radar {
+                ids: &*self.ids,
+                schemes: &self.ref_schemes,
+                settings: &settings,
+                now,
+            }
+            .refresh_contracts(&mut work)
+            .await?;
         }
         work.commit(&*self.notifier).await?;
         Ok(AppliedSettings { settings, changed })

@@ -148,11 +148,16 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/items/{id}/review", post(routes::review::start))
         .route("/v1/items/{id}/review/drop", post(routes::review::drop))
         .route(
+            "/v1/items/{id}/footprint",
+            put(routes::radar::footprint).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
+        )
+        .route(
             "/v1/prs/merged",
             post(routes::review::merged).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
         )
         .route("/v1/prs/closed", post(routes::review::closed))
         .route("/v1/review-claims", get(routes::review::claims))
+        .route("/v1/claims", get(routes::radar::claims))
         .route("/v1/pr-status", get(routes::review::status))
         .route("/v1/status", get(routes::status::status))
         .route("/v1/edit-check", post(routes::edit_check::check))

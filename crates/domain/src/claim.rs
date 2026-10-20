@@ -1,7 +1,7 @@
 //! Claims: a member holding a work item, and every decision that creates, renews or ends one.
 
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
@@ -9,6 +9,8 @@ use time::{Duration, OffsetDateTime};
 use crate::area::QualifiedArea;
 use crate::ids::{ItemId, MemberId, SessionId};
 use crate::member::Role;
+use crate::radar::BranchName;
+use crate::repo::RepoId;
 use crate::review::ClaimState;
 use crate::session::HostName;
 use crate::settings::ProjectSettings;
@@ -39,6 +41,9 @@ pub struct Claim {
     pub last_seen: OffsetDateTime,
     /// Whether its holder works on it or its work waits in pull requests.
     pub state: ClaimState,
+    /// The branch its work is on in each repository, the last one its holder's checkout was seen
+    /// on there.
+    pub branches: BTreeMap<RepoId, BranchName>,
 }
 
 impl Claim {
@@ -63,6 +68,11 @@ impl Claim {
     /// Whether the claim is wide and its scope names the area.
     pub fn names_wide(&self, area: &QualifiedArea) -> bool {
         self.wide.as_ref().is_some_and(|scope| scope.names(area))
+    }
+
+    /// The branch its work is on in the repository, when one was seen.
+    pub fn branch(&self, repo: &RepoId) -> Option<&BranchName> {
+        self.branches.get(repo)
     }
 
     /// The claim's member and item.
@@ -498,6 +508,7 @@ fn new_claim(
         renewed_at: now,
         last_seen: now,
         state: ClaimState::Working,
+        branches: BTreeMap::new(),
     }
 }
 

@@ -25,6 +25,7 @@ pub mod pr_status;
 pub mod project;
 pub mod protection;
 pub mod push;
+pub mod radar;
 pub mod ready;
 pub mod ref_scheme;
 pub mod repo;

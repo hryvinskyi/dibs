@@ -283,7 +283,9 @@ impl Run<'_> {
         if ask.is_empty() {
             return Ok(GuardOutcome::silent());
         }
-        let answers = self.call(|gateway| gateway.edit_check(&self.session, &repo, &ask))?;
+        let branch = self.workspace.branch();
+        let answers =
+            self.call(|gateway| gateway.edit_check(&self.session, &repo, branch.as_ref(), &ask))?;
         if answers.len() != ask.len() {
             return Err(Problem::Unreachable(
                 "the server answered for a different number of files than it was asked about."

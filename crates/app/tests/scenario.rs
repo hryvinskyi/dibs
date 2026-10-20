@@ -159,6 +159,7 @@ mod scenario {
                         session,
                         paths: paths.iter().map(|p| path(p)).collect(),
                         reserve: true,
+                        branch: None,
                     },
                 )
                 .await
@@ -359,7 +360,7 @@ mod scenario {
         team.fakes.clock.advance(Duration::hours(12));
         let beat = app
             .heartbeat
-            .execute(&team.bob, team.bob_session)
+            .execute(&team.bob, team.bob_session, None)
             .await
             .unwrap();
         assert_eq!(beat.refreshed, [ranking]);

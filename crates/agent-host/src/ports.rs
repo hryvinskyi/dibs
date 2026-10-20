@@ -16,6 +16,7 @@ use dibs_domain::item::{ExternalRef, Priority, Title};
 use dibs_domain::message::{Importance, Subject};
 use dibs_domain::paths::RelPath;
 use dibs_domain::push::GitFacts;
+use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
 use dibs_domain::review::PrRef;
 use dibs_domain::session::HostName;
@@ -473,6 +474,10 @@ pub trait Workspace {
     /// Whether `dir`, a `git -C` directory relative to `cwd`, lies in this checkout.
     fn contains_dir(&self, cwd: &Path, dir: &str) -> bool;
 
+    /// The branch the checkout is on, read without starting git; `None` on a detached head or when
+    /// it cannot be told. Asked only before an edit check goes to the server.
+    fn branch(&self) -> Option<BranchName>;
+
     /// What this machine remembers about the project.
     fn cache(&self) -> &dyn LocalCache;
 
@@ -567,7 +572,7 @@ pub trait CoordinationGateway {
     fn slots(&self, names: &[SlotName]) -> Result<Vec<SlotState>, PortError>;
 
     /// The answers for `paths` of `repo`, one per path in the order asked, recording the edits as
-    /// being made by `session`.
+    /// being made by `session` in a checkout on `branch`, when it is on one.
     ///
     /// # Errors
     /// [`PortError`].
@@ -575,6 +580,7 @@ pub trait CoordinationGateway {
         &self,
         session: &SessionRef,
         repo: &RepoId,
+        branch: Option<&BranchName>,
         paths: &[RelPath],
     ) -> Result<Vec<PathAnswer>, PortError>;
 }

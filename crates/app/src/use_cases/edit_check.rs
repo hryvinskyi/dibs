@@ -5,11 +5,12 @@ use std::sync::Arc;
 
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::edit::{self, EditCheckInput as DomainInput, Verdict, edit_verdicts};
-use dibs_domain::event::{EventKind, Reserved};
+use dibs_domain::event::{BranchRecorded, EventKind, Reserved};
 use dibs_domain::grant::Grant;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::paths::RepoPath;
+use dibs_domain::radar::record_branch;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::reservation::ReservationPlan;
 
@@ -19,6 +20,7 @@ use crate::error::AppError;
 use crate::named::{NamedVerdict, Names, item_ref};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::common::own_session;
+use crate::use_cases::radar::{OnBranch, Radar};
 use crate::use_cases::wide_asks::Announcer;
 use crate::work::Work;
 
@@ -32,6 +34,9 @@ pub struct EditCheckInput {
     /// Whether the edits are being made: then what the check plans is recorded and the claims the
     /// edits were attributed to are refreshed. A check that only asks (`false`) writes nothing.
     pub reserve: bool,
+    /// The checkout the edits are made in and the branch it is on, when it is on one: the claims
+    /// the edits are attributed to record that their work is on that branch.
+    pub branch: Option<OnBranch>,
 }
 
 /// The verdicts of a check, each with the handles of the members it names, and what the check
@@ -81,7 +86,10 @@ impl EditVerdicts {
 /// were attributed to, wherever those claims were taken. A `Reserved` event is appended per claim
 /// that actually gained something, so a repeated check appends nothing. An area an edit adds to the
 /// caller's claim that another member's live wide claim names makes the caller one of that wide
-/// claim's holders, so its announcement is sent to them in the same transaction.
+/// claim's holders, so its announcement is sent to them in the same transaction. The claims the
+/// edits are attributed to record the branch of the checkout the edits are made in, with a
+/// `BranchRecorded` event when it is another one than they recorded; the claim's footprint of the
+/// repository, which measured the branch before, goes with what it made.
 pub struct EditCheck {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -170,14 +178,38 @@ impl EditCheck {
             claim.member == actor.member
                 && (gains.contains_key(&claim.item) || check.touch.contains(&claim.item))
         });
+        let mut branched = Vec::new();
         for mut claim in changed {
             if let Some(gain) = gains.get(&claim.item) {
                 claim.areas.extend(gain.areas.iter().cloned());
             }
             if check.touch.contains(&claim.item) {
                 claim.last_seen = now;
+                if let Some(on) = &input.branch
+                    && let Some(moved) = record_branch(&claim, &on.repo, &on.branch)
+                {
+                    claim = moved;
+                    branched.push(BranchRecorded {
+                        item: claim.item,
+                        member: actor.member,
+                        repo: on.repo.clone(),
+                        branch: on.branch.clone(),
+                    });
+                }
             }
             work.save_claim(project, &claim).await?;
+        }
+        let radar = Radar {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        };
+        for recorded in branched {
+            let (item, repo) = (recorded.item, recorded.repo.clone());
+            work.record(now, EventKind::BranchRecorded(recorded))
+                .await?;
+            radar.drop_footprint(&mut work, item, &repo).await?;
         }
         let held_more = gains.values().any(|gain| !gain.areas.is_empty());
         for (item, gain) in gains {
@@ -250,6 +282,7 @@ mod tests {
                     session: who.session,
                     paths: paths.iter().map(|p| path(p)).collect(),
                     reserve,
+                    branch: None,
                 },
             )
             .await
@@ -451,6 +484,7 @@ mod tests {
                     session: env.bob.session,
                     paths: vec![path("web:src/a.rs")],
                     reserve: true,
+                    branch: None,
                 },
             )
             .await
@@ -463,6 +497,7 @@ mod tests {
                     session: env.alice.session,
                     paths: Vec::new(),
                     reserve: false,
+                    branch: None,
                 },
             )
             .await

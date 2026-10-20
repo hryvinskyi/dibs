@@ -349,6 +349,7 @@ mod tests {
                     session: who.session,
                     paths: vec![RepoPath::parse(path).unwrap()],
                     reserve: true,
+                    branch: None,
                 },
             )
             .await

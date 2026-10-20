@@ -574,7 +574,7 @@ mod use_cases {
         );
         not_found(
             app.heartbeat
-                .execute(&dave, alices_session)
+                .execute(&dave, alices_session, None)
                 .await
                 .map(|_| ()),
         );
@@ -803,6 +803,9 @@ mod use_cases {
             pr: pr.clone(),
             end: ReportedEnd::Merged {
                 base: "main".to_owned(),
+                merged_at: time::OffsetDateTime::UNIX_EPOCH,
+                files: None,
+                head: None,
             },
         };
         assert_eq!(
@@ -828,6 +831,140 @@ mod use_cases {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn footprints_on_the_file_find_one_shared_file_among_thousands_and_tell_it_once() {
+        use dibs_app::use_cases::{FootprintInput, FootprintRecorded, OnBranch};
+        use dibs_domain::paths::RelPath;
+        use dibs_domain::radar::{BranchName, CommitSha, FootprintBase, OverlapKind};
+        use dibs_domain::repo::RepoId;
+
+        let world = World::new().await;
+        let admin = project(&world.app, "widgets", "alice").await;
+        let mut people = Vec::new();
+        for handle in ["bob", "carol"] {
+            let created = world
+                .app
+                .create_member
+                .execute(
+                    &admin,
+                    CreateMemberInput {
+                        member: member(handle),
+                        role: Role::Member,
+                    },
+                )
+                .await
+                .unwrap();
+            people.push(
+                world
+                    .app
+                    .authenticate
+                    .execute(created.token.expose())
+                    .await
+                    .unwrap(),
+            );
+        }
+        let importer = world
+            .app
+            .create_member
+            .execute(
+                &admin,
+                CreateMemberInput {
+                    member: member("worker"),
+                    role: Role::Importer,
+                },
+            )
+            .await
+            .unwrap();
+        let bot = world
+            .app
+            .authenticate
+            .execute(importer.token.expose())
+            .await
+            .unwrap();
+        let mut items = Vec::new();
+        for (n, person) in people.iter().enumerate() {
+            let session = register(&world.app, person, n).await;
+            let item = create_item(&world.app, &admin, n + 1).await;
+            world
+                .app
+                .claim_item
+                .execute(
+                    person,
+                    ClaimItemInput {
+                        item,
+                        session,
+                        areas: Vec::new(),
+                        wide: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let on = OnBranch {
+                repo: RepoId::implicit(),
+                branch: BranchName::parse(&format!("work-{n}")).unwrap(),
+            };
+            world
+                .app
+                .heartbeat
+                .execute(person, session, Some(&on))
+                .await
+                .unwrap();
+            let mut paths: Vec<String> = (0..2999).map(|k| format!("src/{n}/f{k}.rs")).collect();
+            paths.push("config/app.yaml".to_owned());
+            let report = FootprintInput {
+                item,
+                repo: "default".to_owned(),
+                branch: on.branch.clone(),
+                base: FootprintBase {
+                    branch: BranchName::parse("main").unwrap(),
+                    sha: CommitSha::parse("abcd").unwrap(),
+                    at: OffsetDateTime::UNIX_EPOCH,
+                },
+                paths: paths.iter().map(|p| RelPath::parse(p).unwrap()).collect(),
+                truncated: false,
+            };
+            for _ in 0..2 {
+                world
+                    .app
+                    .record_footprint
+                    .execute(&bot, report.clone())
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                world
+                    .app
+                    .record_footprint
+                    .execute(&bot, report)
+                    .await
+                    .unwrap(),
+                FootprintRecorded::Stored { changed: false }
+            );
+            items.push(item);
+        }
+        let mut tx = world.store.begin().await.unwrap();
+        let overlaps = tx.overlaps(admin.project).await.unwrap();
+        assert_eq!(overlaps.len(), 1, "{overlaps:?}");
+        assert_eq!(overlaps[0].kind(), OverlapKind::SameFile);
+        assert_eq!(overlaps[0].items(), &items.iter().copied().collect());
+        assert_eq!(overlaps[0].paths().len(), 1);
+        drop(tx);
+        let names = world.event_names(admin.project).await;
+        let count = |name: &str| names.iter().filter(|n| **n == name).count();
+        assert_eq!(count("overlap_found"), 1);
+        assert_eq!(count("footprint_changed"), 2);
+        assert_eq!(count("branch_recorded"), 2);
+        world
+            .app
+            .release
+            .execute(&people[0], items[0])
+            .await
+            .unwrap();
+        let mut tx = world.store.begin().await.unwrap();
+        assert!(tx.overlaps(admin.project).await.unwrap().is_empty());
+        assert_eq!(tx.footprints(admin.project).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -1,5 +1,7 @@
 //! Work items.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 
@@ -123,6 +125,26 @@ impl ItemRows for SqliteTx {
             .as_ref()
             .map(item)
             .transpose()
+    }
+
+    async fn items_of(
+        &mut self,
+        project: ProjectId,
+        ids: &BTreeSet<ItemId>,
+    ) -> StoreResult<Vec<ItemRecord>> {
+        let wanted = ids
+            .iter()
+            .map(|id| int(id.get()))
+            .collect::<StoreResult<Vec<i64>>>()?;
+        let statement = sqlx::query(concat!(
+            "SELECT ",
+            columns!(),
+            " FROM items i WHERE i.project_id = ?1 \
+             AND i.id IN (SELECT value FROM json_each(?2)) ORDER BY i.id"
+        ))
+        .bind(int(project.get())?)
+        .bind(json(&wanted)?);
+        self.all(statement).await?.iter().map(item).collect()
     }
 
     async fn items(

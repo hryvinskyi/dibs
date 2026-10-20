@@ -17,7 +17,7 @@ use crate::cli::{
 };
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
-use crate::output::{claim_text, escalation_line, item_label, item_line};
+use crate::output::{claim_text, escalation_line, item_label, item_line, overlap_line};
 
 /// Shows the live and stale claims and the areas they hold.
 ///
@@ -67,6 +67,15 @@ pub async fn status(ctx: &Context) -> Result<(), Failure> {
             let _ = writeln!(text, "Escalations waiting for an arbiter:");
             for escalation in &status.escalations {
                 let _ = writeln!(text, "  {}", escalation_line(escalation));
+            }
+        }
+        if !status.overlaps.is_empty() {
+            let _ = writeln!(
+                text,
+                "Overlaps (rebase onto the base now; for a contract, read the other change before going on):"
+            );
+            for overlap in &status.overlaps {
+                let _ = writeln!(text, "  {}", overlap_line(overlap));
             }
         }
         if text.is_empty() {

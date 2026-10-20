@@ -579,6 +579,7 @@ mod tests {
             slots: Vec::new(),
             escalations: Vec::new(),
             integration_silent_since: None,
+            overlaps: Vec::new(),
         };
         let earlier: Status =
             serde_json::from_str(r#"{"live": [], "stale": [], "holds": []}"#).unwrap();

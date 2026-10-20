@@ -12,7 +12,9 @@ use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
 use dibs_domain::message::{Author, Importance, Recipients};
+use dibs_domain::paths::RelPath;
 use dibs_domain::pr_status::{PrState, pr_status};
+use dibs_domain::radar::BranchName;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::review::{
     DropRequest, PrEnd, PrRef, PrSettled, ReviewRequest, decide_drop_pr, decide_pr_end,
@@ -26,6 +28,7 @@ use crate::named::{ItemName, NamedClaim, Names, refuse};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
+use crate::use_cases::radar::{MergedInto, Radar};
 use crate::use_cases::slots::Scene;
 use crate::use_cases::wide_asks::Announcer;
 use crate::use_cases::writing::{Posted, SystemPost, system_body};
@@ -136,6 +139,12 @@ pub enum ReportedEnd {
     Merged {
         /// The branch it was merged into.
         base: String,
+        /// When it was merged.
+        merged_at: OffsetDateTime,
+        /// The paths it changed, when the integration read them.
+        files: Option<BTreeSet<RelPath>>,
+        /// The branch it was merged from, when the integration read it.
+        head: Option<BranchName>,
     },
     /// It was closed without being merged.
     Closed,
@@ -168,8 +177,12 @@ pub enum PrReportOutcome {
 }
 
 /// Applies an integration's report that a pull request was merged or closed, matched only against
-/// the pull requests claims in review recorded. A report nobody's claim matches changes nothing, so
-/// an integration may send every report again safely.
+/// the pull requests claims in review recorded. A report nobody's claim matches changes no claim, so
+/// an integration may send every report again safely. A merge into a branch that delivers the work
+/// also moves the base under every live branch measured against that branch from an older base
+/// that changes a path it changed — the merged branch's own claim's other branches included — each
+/// such moved base announced once, whether or not a claim recorded the pull request. The merged
+/// branch's footprint of a claim that stays live goes: its work is in the base.
 pub struct ReportPr {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -207,15 +220,41 @@ impl ReportPr {
         let mut work = Work::begin_for(&*self.store, actor).await?;
         let settings = work.project_settings(&self.hot_rules).await?;
         let end = match &report.end {
-            ReportedEnd::Merged { base } if merge_counts(&settings, &report.pr, base) => {
+            ReportedEnd::Merged { base, .. } if merge_counts(&settings, &report.pr, base) => {
                 PrEnd::Merged
             }
             ReportedEnd::Merged { .. } => PrEnd::MergedElsewhere,
             ReportedEnd::Closed => PrEnd::Closed,
         };
         let claims = work.claims(actor.project).await?;
-        let Some(settled) = decide_pr_end(&claims, &report.pr, end, now) else {
-            work.commit_quietly().await?;
+        let settled = decide_pr_end(&claims, &report.pr, end, now);
+        let radar = Radar {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        };
+        let mut merged_branch = None;
+        if let ReportedEnd::Merged {
+            base,
+            merged_at,
+            files,
+            head,
+        } = &report.end
+            && end.delivers()
+        {
+            let merge = MergedInto {
+                pr: &report.pr,
+                base,
+                merged_at: *merged_at,
+                files: files.as_ref(),
+                head: head.as_ref(),
+                author: settled.as_ref().map(|settled| settled.claim().item),
+            };
+            merged_branch = radar.merged(&mut work, &merge).await?;
+        }
+        let Some(settled) = settled else {
+            work.commit(&*self.notifier).await?;
             return Ok(PrReportOutcome::Unmatched);
         };
         let claim = settled.claim().clone();
@@ -234,7 +273,7 @@ impl ReportPr {
         .await?;
         let pr = &report.pr;
         let how = match &report.end {
-            ReportedEnd::Merged { base } => format!(
+            ReportedEnd::Merged { base, .. } => format!(
                 "was merged into {base}, which is not a branch the project protects, so its work is not delivered yet"
             ),
             ReportedEnd::Closed => "was closed without being merged".to_owned(),
@@ -312,6 +351,10 @@ impl ReportPr {
                 PrReportOutcome::Completed(claim.item)
             }
         };
+        let stays = !matches!(outcome, PrReportOutcome::Completed(_));
+        if let Some(repo) = merged_branch.filter(|_| stays) {
+            radar.drop_footprint(&mut work, claim.item, &repo).await?;
+        }
         work.commit(&*self.notifier).await?;
         Ok(outcome)
     }

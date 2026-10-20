@@ -123,6 +123,7 @@ mod tests {
                     session: env.bob.session,
                     paths: vec![RepoPath::parse("default:config/app.yaml").unwrap()],
                     reserve: true,
+                    branch: None,
                 },
             )
             .await

@@ -12,7 +12,11 @@
   <span class="banner__icon" aria-hidden="true">!</span>
   <p class="banner__text">Integration silent since {% call ui::time(since) %}{% endcall %}: merges complete no claims and pull request statuses go stale until it calls again</p>
 </div>
-{% when None %}{% endmatch %}{% for escalation in board.escalations %}<div class="banner banner--danger" role="status" data-escalation>
+{% when None %}{% endmatch %}{% for overlap in board.overlaps %}<div class="banner {% if overlap.high %}banner--warn{% else %}banner--info{% endif %}" role="status" data-overlap>
+  <span class="banner__icon" aria-hidden="true">{% if overlap.high %}!{% else %}i{% endif %}</span>
+  <p class="banner__text">Overlap: {{ overlap.text }} — rebase onto the base now</p>
+</div>
+{% endfor %}{% for escalation in board.escalations %}<div class="banner banner--danger" role="status" data-escalation>
   <span class="banner__icon" aria-hidden="true">▲</span>
   <p class="banner__text">Escalated by {{ escalation.by }}: {{ escalation.about }} — waiting for an arbiter ({{ escalation.arbiters }}) to acknowledge it</p>
   <a class="banner__action" href="/ui/threads/{{ escalation.thread }}">Open the conversation</a>

@@ -2,18 +2,19 @@
 
 mod document;
 mod duration;
+mod radar;
 mod review;
 mod slots;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::Duration;
 
 pub use document::{
-    AreaDocument, CommandDocument, HotRuleDocument, PrStatusDocument, ProtectedRefDocument,
-    RepoDocument, SettingsDocument, SlotDocument,
+    AreaDocument, CommandDocument, ContractDocument, HotRuleDocument, PrStatusDocument,
+    ProtectedRefDocument, RepoDocument, SettingsDocument, SlotDocument,
 };
 pub use duration::{DurationError, format_duration, parse_duration};
 pub use slots::SlotError;
@@ -26,6 +27,7 @@ use crate::hot_rule::{
 use crate::paths::{PathGlob, PathGlobError, RelPath, RepoPath};
 use crate::pr_status::PrStatusSettings;
 use crate::protection::ProtectedRef;
+use crate::radar::Contract;
 use crate::repo::{RemoteUrl, RemoteUrlError, RepoId, RepoIdError};
 use crate::review::PrRef;
 use crate::slot::{RepoRef, SlotCatalog};
@@ -41,8 +43,8 @@ pub enum EditPolicy {
     Advise,
 }
 
-/// One repository of a project: its remote, areas, hot-file rules, protected branches and how its
-/// pull requests get a status.
+/// One repository of a project: its remote, areas, hot-file rules, protected branches, how its
+/// pull requests get a status, its published contracts and which of its areas depend on which.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSpec {
     /// The repository's id.
@@ -57,6 +59,11 @@ pub struct RepoSpec {
     pub protected_refs: Vec<ProtectedRef>,
     /// Whether and how its pull requests get a status.
     pub pr_status: PrStatusSettings,
+    /// Its published contracts, in declaration order.
+    pub contracts: Vec<Contract>,
+    /// For each of its areas that depends on others, those areas, of any repository; an area
+    /// never depends on itself.
+    pub area_deps: BTreeMap<AreaName, BTreeSet<QualifiedArea>>,
 }
 
 impl RepoSpec {
@@ -88,6 +95,13 @@ impl RepoSpec {
             format!("refs/heads/{name}")
         };
         RepoRef::of(self.id.clone(), &full)
+    }
+
+    /// The contracts, in declaration order, whose globs match the path.
+    pub fn contracts_for<'a>(&'a self, path: &'a RelPath) -> impl Iterator<Item = &'a Contract> {
+        self.contracts
+            .iter()
+            .filter(move |contract| contract.covers(path))
     }
 
     /// The area name qualified by this repository.
@@ -131,10 +145,10 @@ pub enum SettingsError {
     /// `raised_per_hour` is outside 1 to 1000.
     #[error("raised_per_hour is between 1 and 1000")]
     RaisedPerHourOutOfRange,
-    /// Top-level areas, hot rules, protected refs or a pull-request status sit beside a `repos`
-    /// list.
+    /// Top-level areas, hot rules, protected refs, a pull-request status, contracts or area
+    /// dependencies sit beside a `repos` list.
     #[error(
-        "areas, hot rules, protected refs and pr_status are declared either at the top level, for a project with one repository, or inside each entry of repos, never both"
+        "areas, hot rules, protected refs, pr_status, contracts and area_deps are declared either at the top level, for a project with one repository, or inside each entry of repos, never both"
     )]
     MixedLayout,
     /// A repository id is invalid.
@@ -304,6 +318,59 @@ pub enum SettingsError {
         #[source]
         error: crate::pr_status::StatusContextError,
     },
+    /// A contract has no glob.
+    #[error("contract {number} of repository '{repo}' has no paths")]
+    ContractWithoutPaths {
+        /// The repository.
+        repo: RepoId,
+        /// The contract's position, counting from 1.
+        number: usize,
+    },
+    /// A contract's glob is invalid.
+    #[error("contract {number} of repository '{repo}', path '{glob}': {error}")]
+    ContractGlob {
+        /// The repository.
+        repo: RepoId,
+        /// The contract's position, counting from 1.
+        number: usize,
+        /// The glob as written.
+        glob: String,
+        /// What is wrong with it.
+        #[source]
+        error: PathGlobError,
+    },
+    /// A contract's consumer is malformed or names what the project does not declare.
+    #[error(
+        "contract {number} of repository '{repo}': the consumer '{text}' is not written 'repo:*', 'repo:area' or 'area', or names a repository or area the project does not declare"
+    )]
+    ContractConsumer {
+        /// The repository.
+        repo: RepoId,
+        /// The contract's position, counting from 1.
+        number: usize,
+        /// The consumer as written.
+        text: String,
+    },
+    /// An area dependency is declared for an area the repository does not declare.
+    #[error("area_deps of repository '{repo}': '{area}' is not an area of that repository")]
+    AreaDepArea {
+        /// The repository.
+        repo: RepoId,
+        /// The area as written.
+        area: String,
+    },
+    /// An area depends on an area that is malformed, not declared, or itself.
+    #[error(
+        "area_deps of repository '{repo}': area '{area}' depends on '{text}', which is not another area the project declares"
+    )]
+    AreaDep {
+        /// The repository.
+        repo: RepoId,
+        /// The depending area as written.
+        area: String,
+        /// The dependency as written.
+        text: String,
+    },
 }
 
 /// Why an area named by a person does not resolve.
@@ -363,6 +430,8 @@ struct RepoInput<'a> {
     hot: &'a [HotRuleDocument],
     protected_refs: &'a [ProtectedRefDocument],
     pr_status: Option<&'a PrStatusDocument>,
+    contracts: &'a [ContractDocument],
+    area_deps: &'a BTreeMap<String, Vec<String>>,
 }
 
 impl ProjectSettings {
@@ -380,7 +449,9 @@ impl ProjectSettings {
     /// declared repositories; arbiters named by handle, each once; per repository, protected
     /// branches written `refs/heads/<branch>`, each once, their pushers named by handle, and a
     /// pull-request status whose context is 1 to 100 characters (off, `dibs` and not describing the
-    /// holder by default). Whether an arbiter or a pusher is a member is for the project to say, not
+    /// holder by default); per repository, contracts each with at least one valid glob and
+    /// consumers that name a listed repository (`repo:*`) or a declared area, and area
+    /// dependencies from a declared area of the repository to other declared areas. Whether an arbiter or a pusher is a member is for the project to say, not
     /// the document.
     ///
     /// # Errors
@@ -411,7 +482,9 @@ impl ProjectSettings {
         let top_level_repo = !document.areas.is_empty()
             || !document.hot.is_empty()
             || !document.protected_refs.is_empty()
-            || document.pr_status.is_some();
+            || document.pr_status.is_some()
+            || !document.contracts.is_empty()
+            || !document.area_deps.is_empty();
         if lists_repositories && top_level_repo {
             return Err(SettingsError::MixedLayout);
         }
@@ -426,6 +499,8 @@ impl ProjectSettings {
                     hot: &repo.hot,
                     protected_refs: &repo.protected_refs,
                     pr_status: repo.pr_status.as_ref(),
+                    contracts: &repo.contracts,
+                    area_deps: &repo.area_deps,
                 })
                 .collect()
         } else {
@@ -436,6 +511,8 @@ impl ProjectSettings {
                 hot: &document.hot,
                 protected_refs: &document.protected_refs,
                 pr_status: document.pr_status.as_ref(),
+                contracts: &document.contracts,
+                area_deps: &document.area_deps,
             }]
         };
         let mut repos: Vec<RepoSpec> = Vec::with_capacity(inputs.len());
@@ -455,6 +532,7 @@ impl ProjectSettings {
             }
             repos.push(repo);
         }
+        radar::check_references(&repos)?;
         let slots = slots::parse_slots(&document.slots, &repos, lists_repositories)
             .map_err(|(slot, error)| SettingsError::Slot { slot, error })?;
         let arbiters = document
@@ -555,6 +633,13 @@ impl ProjectSettings {
         })
     }
 
+    /// Whether the area `dependent` is declared as depending on the area `on`.
+    pub fn depends(&self, dependent: &QualifiedArea, on: &QualifiedArea) -> bool {
+        self.repo(&dependent.repo)
+            .and_then(|repo| repo.area_deps.get(&dependent.name))
+            .is_some_and(|targets| targets.contains(on))
+    }
+
     /// The declared area.
     pub fn area(&self, area: &QualifiedArea) -> Option<&Area> {
         self.repo(&area.repo).and_then(|repo| repo.area(&area.name))
@@ -639,6 +724,8 @@ impl ProjectSettings {
         };
         let protected = |repo: &RepoSpec| review::protected_documents(&repo.protected_refs);
         let status = |repo: &RepoSpec| review::pr_status_document(&repo.pr_status);
+        let contracts = radar::contract_documents;
+        let area_deps = radar::area_deps_document;
         let mut document = SettingsDocument {
             stale_after: Some(format_duration(self.stale_after)),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
@@ -664,6 +751,8 @@ impl ProjectSettings {
                     hot: hot(repo),
                     protected_refs: protected(repo),
                     pr_status: status(repo),
+                    contracts: contracts(repo),
+                    area_deps: area_deps(repo),
                 })
                 .collect();
         } else if let Some(repo) = self.repos.first() {
@@ -671,6 +760,8 @@ impl ProjectSettings {
             document.hot = hot(repo);
             document.protected_refs = protected(repo);
             document.pr_status = status(repo);
+            document.contracts = contracts(repo);
+            document.area_deps = area_deps(repo);
         }
         document
     }
@@ -726,6 +817,7 @@ fn parse_repo(
     }
     let protected_refs = review::parse_protected_refs(&id, input.protected_refs)?;
     let pr_status = review::parse_pr_status(&id, input.pr_status)?;
+    let contracts = radar::parse_contracts(&id, input.contracts)?;
     let mut repo = RepoSpec {
         id,
         remote,
@@ -733,7 +825,10 @@ fn parse_repo(
         hot: Vec::with_capacity(input.hot.len()),
         protected_refs,
         pr_status,
+        contracts,
+        area_deps: BTreeMap::new(),
     };
+    repo.area_deps = radar::parse_area_deps(&repo, input.area_deps)?;
     for (index, written) in input.hot.iter().enumerate() {
         let rule = parse_hot_rule(&repo, index + 1, written, hot_rules)?;
         repo.hot.push(rule);

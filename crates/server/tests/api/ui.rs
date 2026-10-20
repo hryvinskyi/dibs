@@ -1763,3 +1763,52 @@ async fn the_board_shows_claims_in_review_with_their_pull_requests_and_a_merge_a
         silent.text
     );
 }
+
+#[tokio::test]
+async fn the_board_names_each_overlap_between_live_claims_and_drops_it_when_a_claim_ends() {
+    let (world, alice, bob) = team().await;
+    let bot = world.member(&alice, "worker", Role::Importer).await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let alices = world.item(&alice, Some("gh:acme/api#5"), "Rates").await;
+    let bobs = world.item(&bob, Some("gh:acme/api#6"), "Refunds").await;
+    claim(&world, &alice, alice_session, alices, json!([])).await;
+    claim(&world, &bob, bob_session, bobs, json!([])).await;
+    for (who, session, item, branch) in [
+        (&alice, alice_session, alices, "alice/5"),
+        (&bob, bob_session, bobs, "bob/6"),
+    ] {
+        world
+            .post(
+                who,
+                "/v1/heartbeat",
+                json!({"session_id": session, "repo": "api", "branch": branch}),
+            )
+            .await;
+        let stored = world
+            .put(
+                &bot,
+                &format!("/v1/items/{item}/footprint"),
+                json!({"repo": "api", "branch": branch, "base": "main", "base_at": "2026-03-01T00:00:00Z", "base_sha": "abcd",
+                       "paths": ["config/app.yaml"]}),
+            )
+            .await;
+        assert_eq!(stored.body["stored"], true, "{}", stored.body);
+    }
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/board").await;
+    assert!(
+        page.text.contains("data-overlap")
+            && page.text.contains(
+                "Overlap: gh:acme/api#5 (alice) and gh:acme/api#6 (bob) change the same files: api:config/app.yaml"
+            ),
+        "{}",
+        page.text
+    );
+    let released = world
+        .post(&bob, &format!("/v1/items/{bobs}/release"), json!({}))
+        .await;
+    assert_eq!(released.status, StatusCode::OK, "{}", released.body);
+    let after = browser.get(&world, "/ui/board").await;
+    assert!(!after.text.contains("data-overlap"), "{}", after.text);
+}

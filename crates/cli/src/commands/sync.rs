@@ -14,6 +14,7 @@
 //! minute nothing is tried. Each answer is written to its cache in one step, so a hook reading
 //! it never sees half of one.
 
+use std::path::Path;
 use std::time::Duration as StdDuration;
 
 use serde::Serialize;
@@ -24,8 +25,11 @@ use dibs_agent_host::ports::{ClaimedDelivery as GuardClaim, LocalCache, Pending,
 use dibs_agent_host::upkeep::{DEFAULT_HEARTBEAT, Due, Freshness, circuit_open};
 use dibs_agent_host::{HostId, SessionKey};
 use dibs_client::Client;
+use dibs_client::api::OnBranch;
+use dibs_client::branch::current_branch;
 use dibs_client::checkout::Checkout;
 use dibs_client::update::{Updated, Wanted};
+use dibs_domain::repo::RepoId;
 use semver::Version;
 
 use crate::cli::SyncArgs;
@@ -36,6 +40,7 @@ use crate::guard::cache::StateCache;
 use crate::guard::remote::{Remote, RemoteError};
 use crate::guard::upkeep::take_lock;
 use crate::guard::views;
+use crate::guard::workspace::GIT_DIR;
 use crate::hosts;
 use crate::release::{self, BackgroundUpdate};
 
@@ -123,7 +128,12 @@ pub async fn sync(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
     };
     let session = session(&args);
     let client = remote.client().map_err(config)?;
-    let result = run(&remote, &client, &checkout, session.as_ref(), due, now).await;
+    let on = checkout_branch(&checkout, ctx.env().get(GIT_DIR).map(Path::new));
+    let checked = Checked {
+        checkout: &checkout,
+        on: on.as_ref(),
+    };
+    let result = run(&remote, &client, &checked, session.as_ref(), due, now).await;
     let recommended = if update_due {
         recommended(&remote, now).await
     } else {
@@ -203,22 +213,28 @@ fn notify_only(latest: &Version) -> String {
     format!("dibs {latest} is recommended; run dibs self-update in a terminal to install it.")
 }
 
+/// The checkout a sync runs in and the branch it is on.
+struct Checked<'a> {
+    checkout: &'a Checkout,
+    on: Option<&'a OnBranch>,
+}
+
 async fn run(
     remote: &Remote,
     client: &Client,
-    checkout: &Checkout,
+    checked: &Checked<'_>,
     session: Option<&SessionRef>,
     due: Due,
     now: OffsetDateTime,
 ) -> Result<Synced, RemoteError> {
     let mut synced = Synced::default();
     if due.settings {
-        remote.me(client, checkout, now).await?;
+        remote.me(client, checked.checkout, now).await?;
         synced.settings = true;
     }
     if let Some(session) = session.filter(|_| due.heartbeat) {
         let id = remote.session(client, session).await?;
-        client.heartbeat(id).await?;
+        client.heartbeat(id, checked.on).await?;
         if let Err(error) = remote.state.remember_heartbeat(now) {
             tracing::debug!(error = %error, "the heartbeat could not be remembered");
         }
@@ -242,6 +258,19 @@ async fn run(
         }
     }
     Ok(synced)
+}
+
+/// The repository of the checkout and the branch it is on, for the heartbeat: the repository its
+/// configuration names, or the one repository of a project that lists none. Nothing on a detached
+/// head.
+fn checkout_branch(checkout: &Checkout, git_dir: Option<&Path>) -> Option<OnBranch> {
+    let branch = current_branch(checkout.root(), git_dir)?;
+    let repo = checkout
+        .config()
+        .repo
+        .clone()
+        .unwrap_or_else(RepoId::implicit);
+    Some(OnBranch { repo, branch })
 }
 
 /// Whether the session's host can be shown what is delivered between its tool calls.

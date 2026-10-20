@@ -6,11 +6,12 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use dibs_client::api::{
-    Claim, HeldReason, Item, ItemName, Message, OpenEscalation, PathVerdict, ThreadSummary,
-    Unacked, Verdict,
+    Claim, HeldReason, Item, ItemName, Message, OpenEscalation, OverlapInfo, PathVerdict,
+    ThreadSummary, Unacked, Verdict,
 };
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
+use dibs_domain::radar::OverlapKind;
 
 use crate::failure::Failure;
 
@@ -229,6 +230,47 @@ pub fn escalation_line(escalation: &OpenEscalation) -> String {
         arbiters.join(", "),
         escalation.thread_id
     )
+}
+
+/// One line for an overlap between live claims:
+/// `same file: gh:acme/api#1 (alice) and gh:acme/api#2 (bob) on api:config/app.yaml`, the paths
+/// after the first five counted.
+pub fn overlap_line(overlap: &OverlapInfo) -> String {
+    const NAMED: usize = 5;
+    let parties: Vec<String> = overlap
+        .items
+        .iter()
+        .map(|party| {
+            let name = party
+                .external_ref
+                .as_ref()
+                .map_or_else(|| format!("#{}", party.id), ToString::to_string);
+            format!("{name} ({})", party.holder)
+        })
+        .collect();
+    let mut paths: Vec<String> = overlap
+        .paths
+        .iter()
+        .take(NAMED)
+        .map(ToString::to_string)
+        .collect();
+    let more = overlap.paths.len().saturating_sub(NAMED);
+    if more > 0 {
+        paths.push(format!("{more} more"));
+    }
+    let kind = match overlap.kind {
+        OverlapKind::SameFile => "same file".to_owned(),
+        OverlapKind::Contract => "contract".to_owned(),
+        OverlapKind::MainMoved => format!(
+            "base moved by {}",
+            overlap
+                .pr
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        ),
+    };
+    format!("{kind}: {} on {}", parties.join(" and "), paths.join(", "))
 }
 
 /// What a sent message asks of its recipients, as a sentence to follow the line that sent it;

@@ -19,6 +19,7 @@ use crate::error::AppError;
 use crate::named::{ItemName, NamedClaim, NamedItem, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::use_cases::escalate::{OpenEscalation, open_escalations};
+use crate::use_cases::radar::{NamedOverlap, live_overlaps};
 use crate::use_cases::ready::{ReadyScope, ReadyView};
 use crate::use_cases::slots::{Scene, SlotLine, scene_lines};
 use crate::work::Work;
@@ -92,12 +93,15 @@ pub struct StatusView {
     /// pull requests get a status: merges then complete no claims and statuses go stale. `None`
     /// while one calls, when the project has none, or when nothing relies on them.
     pub integration_silent_since: Option<OffsetDateTime>,
+    /// The overlaps the radar found between live claims, and the moved bases under them, in key
+    /// order.
+    pub overlaps: Vec<NamedOverlap>,
 }
 
 /// Shows the project's live and stale claims, the areas held, the live wide claims with where each
 /// of their areas stands, the caller's ready list, where the slots stand — after applying, and
-/// recording, what time changed about them — the escalations still waiting for an arbiter, and
-/// whether the project's integrations went silent.
+/// recording, what time changed about them — the escalations still waiting for an arbiter,
+/// whether the project's integrations went silent, and the overlaps between live claims.
 pub struct Status {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -150,8 +154,18 @@ impl Status {
             slots: scene_lines(&mut work, &scene).await?,
             escalations: open_escalations(&mut work, actor, &names, &self.ref_schemes).await?,
             integration_silent_since: None,
+            overlaps: Vec::new(),
         };
         let claims = work.claims(actor.project).await?;
+        view.overlaps = live_overlaps(
+            &mut work,
+            &claims,
+            &names,
+            &settings,
+            &self.ref_schemes,
+            now,
+        )
+        .await?;
         if review_in_use(&claims, &settings) {
             view.integration_silent_since = integration_silence(&mut work, now).await?;
         }

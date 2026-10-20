@@ -1,7 +1,7 @@
 //! What an integration may call: who it is, the members, the event feed, reading, creating and
 //! importing work items, the ready list, reading the slots, reporting a finished workflow run,
-//! reporting merged and closed pull requests, and reading the claims in review and the
-//! pull-request status;
+//! reporting merged and closed pull requests, reading the claims in review and the pull-request
+//! status, listing the live claims, and reporting what a claim's branch changes;
 //! never a conversation, a message, an acknowledgement or a slot hold. Every other route of the router answers it
 //! `forbidden`, and each refusal comes before the request is read, so a body that would be refused
 //! for its content still answers `forbidden`.
@@ -83,10 +83,19 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             None,
             StatusCode::OK,
         ),
+        (Method::GET, "/v1/claims".into(), None, StatusCode::OK),
         (
             Method::GET,
             "/v1/pr-status?repo=default&base=main".into(),
             None,
+            StatusCode::OK,
+        ),
+        (
+            Method::PUT,
+            format!("/v1/items/{item}/footprint"),
+            Some(
+                json!({"repo": "default", "branch": "main", "base": "main", "base_at": "2026-03-01T00:00:00Z", "base_sha": "abcd", "paths": ["a.rs"]}),
+            ),
             StatusCode::OK,
         ),
     ];

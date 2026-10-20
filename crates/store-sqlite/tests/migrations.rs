@@ -762,4 +762,53 @@ mod migrations {
         .await;
         assert!(kept.is_ok());
     }
+
+    #[tokio::test]
+    async fn radar_carries_every_claim_over_with_no_branch_and_starts_with_no_footprint() {
+        use dibs_domain::radar::BranchName;
+        use dibs_domain::repo::RepoId;
+
+        let (_dir, path) = database_at(8, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let project = ProjectId(1);
+        let claims = tx.claims(project).await.unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims.iter().all(|claim| claim.branches.is_empty()),
+            "no claim of before records a branch"
+        );
+        assert!(tx.footprints(project).await.unwrap().is_empty());
+        assert!(tx.overlaps(project).await.unwrap().is_empty());
+        let branched = Claim {
+            branches: [(RepoId::implicit(), BranchName::parse("alice/51").unwrap())].into(),
+            ..claims[0].clone()
+        };
+        tx.save_claim(project, &branched).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim(project, branched.item).await.unwrap(),
+            Some(branched)
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for update in [
+            "UPDATE claims SET branches = '[]' WHERE item_id = 52",
+            "UPDATE claims SET branches = 'main' WHERE item_id = 52",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{update}"
+            );
+        }
+    }
 }

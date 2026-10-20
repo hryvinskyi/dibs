@@ -79,10 +79,13 @@ pub(crate) fn resolve_areas(
         .collect()
 }
 
-/// Removes a claim together with the paths recorded as shared under it.
+/// Removes a claim together with the paths recorded as shared under it, its footprints and every
+/// overlap that names it.
 pub(crate) async fn remove_claim(work: &mut Work, claim: &Claim) -> Result<(), AppError> {
     let project = work.project_id();
     work.delete_shared_paths(project, claim.item).await?;
+    work.delete_footprints(project, claim.item).await?;
+    work.delete_overlaps_of(project, claim.item).await?;
     work.delete_claim(project, claim.item).await?;
     Ok(())
 }

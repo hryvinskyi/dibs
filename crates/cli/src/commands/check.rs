@@ -131,6 +131,7 @@ impl Governed {
             repo: self.repo.clone(),
             paths,
             reserve: false,
+            branch: None,
         };
         edit_verdicts(&connection.client, &self.settings, &request)
             .await

@@ -365,6 +365,55 @@ describe_holder = false
 - **`describe_holder`** decides whether a status names the slot, its holder and their purpose. Everyone who can read the
   repository reads a status; keep it `false` where they should not see who holds what.
 
+## Branches and overlaps
+
+dibs tells two members when their branches meet, before the second merge does: both change one file, one changes a
+published contract the other's work depends on, or a merge into the base changed files a branch still changes on an old
+base. Every claim records the branch its holder's checkout is on (the hook and the heartbeat send it); the rest comes
+from the integration and the settings.
+
+- **Declare what is published.** Per repository (at the top level for a project with one), `contracts` lists the paths
+  other work depends on and who consumes them, and `area_deps` which areas depend on which:
+
+  ```toml
+  [[contracts]]
+  paths = ["packages/*/src/Api/**"]
+
+  [[contracts]]
+  paths = ["schema/**"]
+  consumers = ["web:*"]
+
+  [area_deps]
+  search = ["billing"]
+  ```
+
+  `area_deps` may be generated from the packages' own manifests. A change takes effect at once: the stored footprints
+  are read again under the new settings, and the contract overlaps that makes are announced.
+- **Report the footprints.** On every pass the integration reads the branches of the live claims with one call,
+  `GET /v1/claims`, asks the forge what each branch changes against its base, and sends it with
+  `PUT /v1/items/{id}/footprint`. For GitHub, that is `compare/{base}...{branch}` (conditional on its ETag), and the
+  report's fields come from its answer: `paths` from `files[].filename` (at most 3000, `truncated: true` when the forge
+  capped the list), `base` the base branch compared against, `base_sha` from `merge_base_commit.sha` and `base_at` from
+  `merge_base_commit.commit.committer.date` — the merge base and its time, never the base's tip: that is what tells a
+  branch that has a merge from one that does not. A repeat changes nothing, and a branch the claim no longer records
+  answers `stored: false`. A branch deleted after its merge sends nothing; a footprint goes when its claim ends, its
+  branch changes, or its branch is the one a delivering merge brought in. Send the merged pull request's `files` and
+  its `head` branch with `POST /v1/prs/merged`, too: without `files` the merged branch's footprint stands for what
+  moved, and without `head` the claim that recorded the pull request is taken to have been on the merged branch.
+- **What it costs.** A footprint's paths are kept one row each, under an index by path, so the claims sharing a path
+  are found by looking up the reported paths, not by reading every footprint; the contract overlaps are derived from a
+  small summary of each footprint (its areas and its contract paths). A settings change reads every footprint once.
+- **What people see.** Each overlap is announced once in a message from dibs to the holders it concerns (`high` for a
+  shared file or a contract, `normal` for a moved base, which every merge brings), and listed by `GET /v1/status`,
+  `dibs status` and the board while its claims are live. A claim going stale ends no overlap and is not told again when
+  it comes back; an overlap ends when a footprint, a branch or the settings it rests on change, when a merge brings its
+  branch in, or when a claim it names ends. Removing a repository from the settings drops its footprints and what they
+  made.
+- **Branches the client cannot read.** The hook and the heartbeat read the branch from git's files without starting git:
+  `HEAD` of the directory `GIT_DIR` names, or of the nearest `.git` (a linked worktree's `.git` file is followed). A
+  repository that keeps its refs in a reftable has a `HEAD` that names no branch (`refs/heads/.invalid`), so its claims
+  record no branch and get no footprint.
+
 ## Restoring
 
 A restore is offline and never replaces a database: it writes a new file. It refuses while a server holds the target

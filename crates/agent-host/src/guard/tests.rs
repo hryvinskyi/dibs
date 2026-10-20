@@ -12,6 +12,7 @@ use dibs_domain::ids::{ItemId, MessageId};
 use dibs_domain::item::ExternalRef;
 use dibs_domain::message::Importance;
 use dibs_domain::paths::RelPath;
+use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
 use dibs_domain::settings::{ProjectSettings, SettingsDocument};
 
@@ -84,6 +85,8 @@ struct State {
     newer: Option<crate::ports::NewerRelease>,
     git: Option<dibs_domain::push::GitFacts>,
     git_reads: u32,
+    branch: Option<BranchName>,
+    branch_reads: u32,
 }
 
 impl State {
@@ -144,6 +147,8 @@ impl State {
                 ],
             }),
             git_reads: 0,
+            branch: None,
+            branch_reads: 0,
         }
     }
 }
@@ -213,6 +218,12 @@ impl Workspace for World {
 
     fn contains_dir(&self, _cwd: &Path, dir: &str) -> bool {
         dir == "."
+    }
+
+    fn branch(&self) -> Option<BranchName> {
+        let mut state = self.0.borrow_mut();
+        state.branch_reads += 1;
+        state.branch.clone()
     }
 
     fn cache(&self) -> &dyn LocalCache {
@@ -367,11 +378,13 @@ impl CoordinationGateway for World {
         &self,
         session: &SessionRef,
         repo: &RepoId,
+        branch: Option<&BranchName>,
         paths: &[RelPath],
     ) -> Result<Vec<PathAnswer>, PortError> {
         let asked: Vec<&str> = paths.iter().map(RelPath::as_str).collect();
+        let on = branch.map_or_else(String::new, |branch| format!(" on {branch}"));
         self.call(&format!(
-            "edit_check {} {} {repo} {}",
+            "edit_check {} {} {repo} {}{on}",
             session.host,
             session.key,
             asked.join(",")
@@ -592,6 +605,42 @@ fn a_held_path_is_denied_naming_the_holder() {
     assert_eq!(
         world.calls(),
         ["edit_check neutral s-1 api src/billing/a.rs"]
+    );
+}
+
+#[test]
+fn an_edit_check_names_the_branch_the_checkout_is_on_and_a_detached_head_names_none() {
+    let world = World::new().with(|state| {
+        state.answers = Ok(vec![PathAnswer::Allowed]);
+        state.branch = Some(BranchName::parse("bob/42-refunds").unwrap());
+    });
+    run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    assert_eq!(
+        world.calls(),
+        ["edit_check neutral s-1 api src/billing/a.rs on bob/42-refunds"]
+    );
+    let detached = World::new().with(|state| state.answers = Ok(vec![PathAnswer::Allowed]));
+    run(
+        &detached,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    assert_eq!(
+        detached.calls(),
+        ["edit_check neutral s-1 api src/billing/a.rs"]
+    );
+    let quiet = World::new();
+    run(&quiet, "neutral", "before-tool", &edit(&["README.md"]));
+    assert_eq!(
+        quiet.0.borrow().branch_reads,
+        0,
+        "an edit the server is not asked about reads no branch"
     );
 }
 

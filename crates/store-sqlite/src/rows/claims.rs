@@ -20,7 +20,7 @@ use crate::codec::{Fields, int, json, nanos, opt_nanos};
 macro_rules! claim_columns {
     () => {
         "item_id, member_id, session_id, host, areas, wide_areas, wide_reason, claimed_at, \
-         renewed_at, last_seen, review_prs, review_since, review_more"
+         renewed_at, last_seen, review_prs, review_since, review_more, branches"
     };
 }
 
@@ -70,6 +70,7 @@ fn claim(row: &SqliteRow) -> StoreResult<Claim> {
         renewed_at: f.time("renewed_at")?,
         last_seen: f.time("last_seen")?,
         state,
+        branches: f.json("branches")?,
     })
 }
 
@@ -116,14 +117,15 @@ impl ClaimRows for SqliteTx {
         let statement = sqlx::query(
             "INSERT INTO claims (project_id, item_id, member_id, session_id, host, areas, \
              wide_areas, wide_reason, claimed_at, renewed_at, last_seen, review_prs, review_since, \
-             review_more) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+             review_more, branches) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
              ON CONFLICT (project_id, item_id) DO UPDATE SET member_id = excluded.member_id, \
              session_id = excluded.session_id, host = excluded.host, areas = excluded.areas, \
              wide_areas = excluded.wide_areas, wide_reason = excluded.wide_reason, \
              claimed_at = excluded.claimed_at, renewed_at = excluded.renewed_at, \
              last_seen = excluded.last_seen, review_prs = excluded.review_prs, \
-             review_since = excluded.review_since, review_more = excluded.review_more",
+             review_since = excluded.review_since, review_more = excluded.review_more, \
+             branches = excluded.branches",
         )
         .bind(int(project.get())?)
         .bind(int(record.item.get())?)
@@ -149,7 +151,8 @@ impl ClaimRows for SqliteTx {
         .bind(nanos(record.last_seen)?)
         .bind(review.map(|review| json(review.prs())).transpose()?)
         .bind(opt_nanos(review.map(Review::since))?)
-        .bind(review.map(|review| i64::from(review.more())));
+        .bind(review.map(|review| i64::from(review.more())))
+        .bind(json(&record.branches)?);
         self.run(statement).await?;
         Ok(())
     }

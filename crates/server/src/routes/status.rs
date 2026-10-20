@@ -16,7 +16,7 @@ use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::http::AppState;
 use crate::views::slots::SlotView;
-use crate::views::{HeldItemView, ReadyView, reply};
+use crate::views::{HeldItemView, OverlapView, ReadyView, reply};
 
 #[derive(Serialize)]
 struct StatusAnswer {
@@ -31,6 +31,8 @@ struct StatusAnswer {
     /// while one calls or when there is none.
     #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
     integration_silent_since: Option<OffsetDateTime>,
+    /// The overlaps between live claims and the moved bases under them.
+    overlaps: Vec<OverlapView>,
 }
 
 /// An escalation the caller may read that no arbiter has acknowledged yet.
@@ -114,8 +116,8 @@ struct HoldView {
 
 /// The project's live claims, its stale claims, the areas the live ones hold, the live wide claims
 /// with where each of their areas stands, the caller's ready list, the slots, the escalations
-/// still waiting for an arbiter, each ordered as the use case orders it, and since when the
-/// project's integrations are silent.
+/// still waiting for an arbiter, each ordered as the use case orders it, since when the project's
+/// integrations are silent, and the overlaps the radar found between live claims.
 ///
 /// # Errors
 /// `forbidden` for an integration; the answer for the use case's failure.
@@ -146,6 +148,7 @@ pub async fn status(
             .map(EscalationView::of)
             .collect(),
         integration_silent_since: view.integration_silent_since,
+        overlaps: view.overlaps.into_iter().map(OverlapView::of).collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

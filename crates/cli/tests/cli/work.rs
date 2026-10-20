@@ -406,3 +406,56 @@ fn a_claim_goes_to_review_through_the_command_line_and_its_holder_reads_the_pull
     ]);
     assert_eq!(status(&unknown), 1);
 }
+
+#[test]
+fn the_status_names_each_overlap_with_the_way_on() {
+    use dibs_domain::member::Role;
+
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let worker = setup
+        .server
+        .member(&setup.alice, "worker", Role::Importer)
+        .unwrap();
+    let mut items = Vec::new();
+    for (who, reference) in [
+        (&setup.alice, "gh:acme/api#1"),
+        (&setup.bob, "gh:acme/api#2"),
+    ] {
+        let out = setup
+            .dibs(who, &api)
+            .args(["new", reference, "--title", "Rates"])
+            .output()
+            .unwrap();
+        assert_eq!(status(&out), 0, "{}", text(&out.stderr));
+        let claimed = setup
+            .dibs(who, &api)
+            .args(["claim", reference, "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(status(&claimed), 0, "{}", text(&claimed.stderr));
+        let item = json(&claimed)["claim"]["item"].as_u64().unwrap();
+        let synced = setup
+            .dibs(who, &api)
+            .args(["sync", "--force", "--quiet"])
+            .output()
+            .unwrap();
+        assert_eq!(status(&synced), 0, "{}", text(&synced.stderr));
+        items.push(item);
+    }
+    for item in &items {
+        setup
+            .server
+            .footprint(&worker, *item, "api", "main", "abcd", &["config/app.yaml"])
+            .unwrap();
+    }
+    let out = setup.dibs(&setup.bob, &api).arg("status").output().unwrap();
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("Overlaps (rebase onto the base now")
+            && shown.contains(
+                "same file: gh:acme/api#1 (alice) and gh:acme/api#2 (bob) on api:config/app.yaml"
+            ),
+        "{shown}"
+    );
+}

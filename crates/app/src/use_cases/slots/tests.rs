@@ -661,7 +661,7 @@ async fn a_heartbeat_keeps_a_waiters_place() {
     for _ in 0..3 {
         env.advance(Duration::minutes(25));
         Heartbeat::new(&env.deps)
-            .execute(&env.bob.actor, env.bob.session)
+            .execute(&env.bob.actor, env.bob.session, None)
             .await
             .unwrap();
     }

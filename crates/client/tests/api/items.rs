@@ -242,6 +242,7 @@ fn edit_checks_answer_per_path_and_ungoverned_paths_need_no_server() {
             repo: RepoId::parse("api").unwrap(),
             paths: paths(&["README.md", "src/billing/a.rs", "src/search/b.rs"]),
             reserve: false,
+            branch: None,
         };
         let verdicts = bob.edit_check(&request).await.unwrap().verdicts;
         assert_eq!(verdicts.len(), 3);
@@ -325,6 +326,7 @@ fn a_holder_grants_another_member_edits_for_their_item() {
                 repo: RepoId::parse("api").unwrap(),
                 paths: paths(&["src/billing/a.rs"]),
                 reserve: false,
+                branch: None,
             })
             .await
             .unwrap();
@@ -423,7 +425,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
         .unwrap();
         bob.done(item).await.unwrap();
         assert_eq!(bob.item(item).await.unwrap().item.status, ItemStatus::Done);
-        let heartbeat = bob.heartbeat(bob_session).await.unwrap();
+        let heartbeat = bob.heartbeat(bob_session, None).await.unwrap();
         assert!(heartbeat.refreshed.is_empty());
     });
 }
@@ -542,6 +544,7 @@ fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
             repo: RepoId::parse("api").unwrap(),
             paths: paths(&["src/billing/a.rs"]),
             reserve: true,
+            branch: None,
         };
         let held = bob.edit_check(&request).await.unwrap().verdicts;
         assert!(
@@ -625,6 +628,7 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
                 repo: RepoId::parse("api").unwrap(),
                 paths: paths(&["src/billing/round.rs"]),
                 reserve: false,
+                branch: None,
             })
             .await
             .unwrap();

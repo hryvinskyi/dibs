@@ -35,6 +35,9 @@ const SETTINGS: &str = r#"{
 fn merged() -> ReportedEnd {
     ReportedEnd::Merged {
         base: "main".to_owned(),
+        merged_at: time::OffsetDateTime::UNIX_EPOCH,
+        files: None,
+        head: None,
     }
 }
 
@@ -564,6 +567,9 @@ async fn a_stacked_pull_request_merged_into_a_branch_that_is_not_protected_compl
         .unwrap();
     let stacked = ReportedEnd::Merged {
         base: "bob/42-base".to_owned(),
+        merged_at: time::OffsetDateTime::UNIX_EPOCH,
+        files: None,
+        head: None,
     };
     assert_eq!(
         report(&env, "acme/widgets#8", stacked.clone()).await,
@@ -583,7 +589,10 @@ async fn a_stacked_pull_request_merged_into_a_branch_that_is_not_protected_compl
             &env,
             "acme/widgets#7",
             ReportedEnd::Merged {
-                base: "refs/heads/main".to_owned()
+                base: "refs/heads/main".to_owned(),
+                merged_at: time::OffsetDateTime::UNIX_EPOCH,
+                files: None,
+                head: None,
             }
         )
         .await,
@@ -619,7 +628,10 @@ async fn without_protected_branches_a_merge_into_any_base_counts() {
             &env,
             "acme/widgets#7",
             ReportedEnd::Merged {
-                base: "develop".to_owned()
+                base: "develop".to_owned(),
+                merged_at: time::OffsetDateTime::UNIX_EPOCH,
+                files: None,
+                head: None,
             }
         )
         .await,

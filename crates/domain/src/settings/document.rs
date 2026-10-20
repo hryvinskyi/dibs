@@ -1,6 +1,8 @@
 //! The plain settings document, as a person writes it in a settings file or sends it to the API.
 //! Nothing here is validated; [`ProjectSettings::parse`](super::ProjectSettings::parse) does that.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::EditPolicy;
@@ -39,6 +41,12 @@ pub struct SettingsDocument {
     /// Whether and how the pull requests of the project's only repository get a status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_status: Option<PrStatusDocument>,
+    /// The published contracts of the project's only repository.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contracts: Vec<ContractDocument>,
+    /// Which areas of the project's only repository depend on which others, each area by its name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub area_deps: BTreeMap<String, Vec<String>>,
     /// The project's repositories, when it has several.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<RepoDocument>,
@@ -115,6 +123,26 @@ pub struct RepoDocument {
     /// Whether and how its pull requests get a status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_status: Option<PrStatusDocument>,
+    /// Its published contracts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contracts: Vec<ContractDocument>,
+    /// Which of its areas depend on which others: an area by its name, the areas it depends on
+    /// by their name in this repository or as `repo:area` in another.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub area_deps: BTreeMap<String, Vec<String>>,
+}
+
+/// One published contract as written.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractDocument {
+    /// The globs of its paths (`schema/**`).
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Who consumes it besides the areas that depend on its area: `repo:*` for every path of a
+    /// repository, `repo:area` or a bare area of this repository.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumers: Vec<String>,
 }
 
 /// One protected branch as written.

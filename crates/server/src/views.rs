@@ -16,7 +16,8 @@ use dibs_app::named::{
 use dibs_app::records::{MemberRecord, SessionRecord};
 use dibs_app::use_cases::{
     Acknowledged, DeliverableMessage, ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady,
-    ReadyEntry, ReadyView as ReadyList, RecipientAck, RecipientStatus, UnackedMessage,
+    NamedOverlap, ReadyEntry, ReadyView as ReadyList, RecipientAck, RecipientStatus,
+    UnackedMessage,
 };
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::delivery::Delivery;
@@ -30,6 +31,8 @@ use dibs_domain::item::{
 };
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
+use dibs_domain::paths::RepoPath;
+use dibs_domain::radar::{BranchName, OverlapKind};
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::review::{PrRef, Review};
 use dibs_domain::session::{AgentLabel, HostName};
@@ -327,6 +330,9 @@ pub struct ClaimView {
     pub state: &'static str,
     /// While it is in review, the pull requests it recorded; `null` otherwise.
     pub review: Option<ReviewView>,
+    /// The branch its work is on in each repository, by repository id, as its holder's checkout
+    /// was last seen.
+    pub branches: BTreeMap<RepoId, BranchName>,
 }
 
 /// The review of a claim in review.
@@ -371,6 +377,49 @@ impl ClaimView {
             last_seen: claim.last_seen,
             state: claim.state.code(),
             review: claim.state.review().map(ReviewView::of),
+            branches: claim.branches,
+        }
+    }
+}
+
+/// An overlap between live claims, or a moved base under one.
+#[derive(Debug, Serialize)]
+pub struct OverlapView {
+    /// `same_file`, `contract` or `main_moved`.
+    pub kind: OverlapKind,
+    /// The items it names, each with its holder.
+    pub items: Vec<OverlapItemView>,
+    /// The merged pull request of a moved base; `null` otherwise.
+    pub pr: Option<PrRef>,
+    /// The paths it is on, `repo:path`, in order.
+    pub paths: BTreeSet<RepoPath>,
+}
+
+/// One item an overlap names.
+#[derive(Debug, Serialize)]
+pub struct OverlapItemView {
+    /// The item.
+    #[serde(flatten)]
+    pub item: ItemNameView,
+    /// The holder of its claim.
+    pub holder: Handle,
+}
+
+impl OverlapView {
+    /// The view of an overlap.
+    pub fn of(named: NamedOverlap) -> Self {
+        Self {
+            kind: named.overlap.kind(),
+            pr: named.overlap.pr().cloned(),
+            paths: named.overlap.paths().clone(),
+            items: named
+                .items
+                .into_iter()
+                .map(|(item, holder)| OverlapItemView {
+                    item: ItemNameView::of(item),
+                    holder,
+                })
+                .collect(),
         }
     }
 }
@@ -918,6 +967,10 @@ mod tests {
             renewed_at: datetime!(2026-01-02 03:04:05 UTC),
             last_seen: datetime!(2026-01-02 03:05:00 UTC),
             state: dibs_domain::review::ClaimState::Working,
+            branches: std::collections::BTreeMap::from([(
+                RepoId::parse("api").unwrap(),
+                BranchName::parse("alice/5-rates").unwrap(),
+            )]),
         };
         let view = serde_json::to_value(ClaimView::of(NamedClaim {
             claim: claim.clone(),
@@ -934,7 +987,8 @@ mod tests {
                 "renewed_at": "2026-01-02T03:04:05Z",
                 "last_seen": "2026-01-02T03:05:00Z",
                 "state": "working",
-                "review": null
+                "review": null,
+                "branches": {"api": "alice/5-rates"}
             })
         );
         let reviewing = Claim {

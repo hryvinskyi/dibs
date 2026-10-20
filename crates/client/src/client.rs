@@ -26,9 +26,10 @@ use crate::api::{
     Acked, AddDependency, ClaimRequest, Claimed, CreatedItem, Delivered, DependencyChange,
     DropPrRequest, EditCheck, EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest,
     Granted, Heartbeat, Inbox, InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me,
-    Member, MessageStatus, NewItem, NewMember, PostMessage, Posted, ReadyList, RegisterSession,
-    ReviewRequest, Reviewed, Revoked, Session, SettingsApplied, StartThread, StartThreadBody,
-    Started, Status, TakeOverRequest, TakenOver, ThreadDetail, Threads, TokenRevoked, Versions,
+    Member, MessageStatus, NewItem, NewMember, OnBranch, PostMessage, Posted, ReadyList,
+    RegisterSession, ReviewRequest, Reviewed, Revoked, Session, SettingsApplied, StartThread,
+    StartThreadBody, Started, Status, TakeOverRequest, TakenOver, ThreadDetail, Threads,
+    TokenRevoked, Versions,
 };
 use crate::api::{
     Escalated, EscalationRequest, ForceReleaseSlotRequest, MemberRemoved, ReleaseSlotRequest,
@@ -93,8 +94,10 @@ struct MembersAnswer {
 }
 
 #[derive(Serialize)]
-struct HeartbeatBody {
+struct HeartbeatBody<'a> {
     session_id: SessionId,
+    #[serde(flatten)]
+    on: Option<&'a OnBranch>,
 }
 
 #[derive(Serialize)]
@@ -215,13 +218,19 @@ impl Client {
             .await
     }
 
-    /// `POST /v1/heartbeat`: a session's sign of life.
+    /// `POST /v1/heartbeat`: a session's sign of life, from a checkout on a branch when `on` names
+    /// one.
     ///
     /// # Errors
     /// [`ClientError`].
-    pub async fn heartbeat(&self, session: SessionId) -> Result<Heartbeat, ClientError> {
+    pub async fn heartbeat(
+        &self,
+        session: SessionId,
+        on: Option<&OnBranch>,
+    ) -> Result<Heartbeat, ClientError> {
         let body = HeartbeatBody {
             session_id: session,
+            on,
         };
         self.send(self.request(Method::POST, "/v1/heartbeat").json(&body))
             .await

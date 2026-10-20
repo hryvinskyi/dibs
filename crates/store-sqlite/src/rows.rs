@@ -10,6 +10,7 @@ mod grants;
 mod items;
 mod members;
 mod projects;
+mod radar;
 mod sessions;
 mod settings;
 mod slots;

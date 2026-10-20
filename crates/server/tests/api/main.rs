@@ -24,6 +24,8 @@ mod items;
 #[cfg(test)]
 mod people;
 #[cfg(test)]
+mod radar;
+#[cfg(test)]
 mod ready;
 #[cfg(test)]
 mod review;

@@ -425,6 +425,11 @@ pub fn checkout(dir: &Path, server: &Server, repo: Option<&str>, remote: &str) -
     dir.to_owned()
 }
 
+/// Starts the branch `name` in the checkout at `dir` and moves the checkout onto it.
+pub fn start_branch(dir: &Path, name: &str) {
+    git(dir, &["checkout", "-q", "-b", name]);
+}
+
 /// Runs git in `dir` with an empty environment.
 fn git(dir: &Path, args: &[&str]) {
     let output = clean(Path::new("git"), dir)

@@ -119,7 +119,7 @@ mod tenancy {
         not_found(app.release.execute(&dave, item).await.map(|_| ()));
         not_found(
             app.heartbeat
-                .execute(&alice, daves_session)
+                .execute(&alice, daves_session, None)
                 .await
                 .map(|_| ()),
         );

@@ -11,6 +11,8 @@
 //! sweep expired browser sessions of every project ([`UiSessionRows::delete_expired_ui_sessions`]),
 //! or find the projects whose slots are in use ([`SlotRows::busy_slot_projects`]).
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -25,6 +27,9 @@ use dibs_domain::ids::{
 };
 use dibs_domain::item::{ExternalRef, ItemStatus};
 use dibs_domain::message::{Ack, SessionLabel};
+use dibs_domain::paths::RelPath;
+use dibs_domain::radar::{Footprint, FootprintDigest, FootprintEntry, Overlap, OverlapKey};
+use dibs_domain::repo::RepoId;
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
@@ -79,6 +84,7 @@ pub trait Tx:
     + SessionRows
     + ItemRows
     + ClaimRows
+    + RadarRows
     + DependencyRows
     + GrantRows
     + ThreadRows
@@ -227,6 +233,12 @@ pub trait ItemRows: Send {
         project: ProjectId,
         reference: &ExternalRef,
     ) -> StoreResult<Option<ItemRecord>>;
+    /// The items of these ids, ordered by id; an id the project has no item of is left out.
+    async fn items_of(
+        &mut self,
+        project: ProjectId,
+        ids: &BTreeSet<ItemId>,
+    ) -> StoreResult<Vec<ItemRecord>>;
     /// The items matching every filter given, ordered by id.
     async fn items(
         &mut self,
@@ -283,6 +295,62 @@ pub trait ClaimRows: Send {
     ) -> StoreResult<()>;
     /// Removes every path recorded under the item's claim.
     async fn delete_shared_paths(&mut self, project: ProjectId, item: ItemId) -> StoreResult<()>;
+}
+
+/// What claims' branches change against their base, and the overlaps found between them.
+#[async_trait]
+pub trait RadarRows: Send {
+    /// Every footprint, without its paths, ordered by item and repository.
+    async fn footprints(&mut self, project: ProjectId) -> StoreResult<Vec<Footprint>>;
+    /// The footprint of the item's claim in the repository, with its paths.
+    async fn footprint(
+        &mut self,
+        project: ProjectId,
+        item: ItemId,
+        repo: &RepoId,
+    ) -> StoreResult<Option<(Footprint, BTreeSet<RelPath>)>>;
+    /// Stores the footprint with these paths, replacing the item's footprint of that repository
+    /// and every path it had.
+    async fn save_footprint(
+        &mut self,
+        project: ProjectId,
+        footprint: &Footprint,
+        paths: &BTreeSet<RelPath>,
+    ) -> StoreResult<()>;
+    /// Replaces what the radar reads of a stored footprint's paths, leaving the paths as they are;
+    /// a footprint that does not exist is left alone.
+    async fn set_footprint_digest(
+        &mut self,
+        project: ProjectId,
+        item: ItemId,
+        repo: &RepoId,
+        digest: &FootprintDigest,
+    ) -> StoreResult<()>;
+    /// Removes the item's footprint of the repository, with its paths, if there is one.
+    async fn delete_footprint(
+        &mut self,
+        project: ProjectId,
+        item: ItemId,
+        repo: &RepoId,
+    ) -> StoreResult<()>;
+    /// Removes every footprint of the item, with its paths.
+    async fn delete_footprints(&mut self, project: ProjectId, item: ItemId) -> StoreResult<()>;
+    /// The paths of the repository's footprints, of any item, that are among `paths`, ordered by
+    /// item and path. The cost follows how many are asked for, not how many are stored.
+    async fn footprint_entries(
+        &mut self,
+        project: ProjectId,
+        repo: &RepoId,
+        paths: &BTreeSet<RelPath>,
+    ) -> StoreResult<Vec<FootprintEntry>>;
+    /// Every overlap stored, ordered by key.
+    async fn overlaps(&mut self, project: ProjectId) -> StoreResult<Vec<Overlap>>;
+    /// Stores the overlap, replacing the one of the same key.
+    async fn save_overlap(&mut self, project: ProjectId, overlap: &Overlap) -> StoreResult<()>;
+    /// Removes the overlap of this key, if there is one.
+    async fn delete_overlap(&mut self, project: ProjectId, key: &OverlapKey) -> StoreResult<()>;
+    /// Removes every overlap that names the item.
+    async fn delete_overlaps_of(&mut self, project: ProjectId, item: ItemId) -> StoreResult<()>;
 }
 
 /// Grants.

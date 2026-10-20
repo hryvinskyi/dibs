@@ -1,8 +1,9 @@
-//! The client side of dibs: the typed HTTP client of its API, a checkout's `.dibs.toml`, the
-//! member's credentials, what the client remembers on this machine between runs, and the verified
-//! replacement of the installed binary by a newer release.
+//! The client side of dibs: the typed HTTP client of its API, a checkout's `.dibs.toml` and the
+//! branch it is on, the member's credentials, what the client remembers on this machine between
+//! runs, and the verified replacement of the installed binary by a newer release.
 
 pub mod api;
+pub mod branch;
 pub mod checkout;
 pub mod client;
 pub mod credentials;

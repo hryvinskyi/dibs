@@ -3,12 +3,21 @@
  * The board in a real browser: an item imported through the API shows in Ready, a claim made
  * through the API moves it to In progress without a reload and the page's updated time with it,
  * a take-over reason the person is typing survives the events that arrive meanwhile, the board
- * catching up once the form is left, and a slot taken through the API shows as held in the Slots
- * strip without a reload.
+ * catching up once the form is left, a slot taken through the API shows as held in the Slots
+ * strip without a reload, and an overlap of two members' branches an integration reports shows
+ * as a banner without a reload.
  */
 
 import { ageClaim } from './claim-age.js';
-import { applySettings, claimItem, importItems, openSession, takeSlot } from './dibs-api.js';
+import {
+  applySettings,
+  claimItem,
+  heartbeatOn,
+  importItems,
+  openSession,
+  reportFootprint,
+  takeSlot,
+} from './dibs-api.js';
 import { expect, test } from './fixtures.js';
 import { signIn } from './sign-in.js';
 
@@ -146,5 +155,48 @@ test('a slot taken through the API shows as held in the Slots strip without a re
   await expect(card).toContainText('alice');
   await expect(card).toContainText('ship the e2e build');
   await expect(card.locator('time[data-clock]')).toHaveText(/^\d{2}:\d{2}$/);
+  await expectSameDocument(page);
+});
+
+test('an overlap of two branches reported through the API shows as a banner without a reload', async ({
+  page,
+  dibs,
+}) => {
+  const number = Date.now();
+  const shared = `config/e2e-${number}.yaml`;
+  const refs = [`gh:acme/widgets#${number}`, `gh:acme/widgets#${number + 1}`];
+  const ids = await importItems(
+    dibs.url,
+    dibs.adminToken,
+    refs.map((ref) => ({ ref, title: `Overlapping work ${ref}` })),
+  );
+  const people = [
+    { token: dibs.adminToken, branch: `alice/${number}` },
+    { token: dibs.memberToken, branch: `bob/${number}` },
+  ];
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/board`);
+  await markDocument(page);
+  for (const [index, person] of people.entries()) {
+    const itemId = ids[index];
+    if (itemId === undefined) {
+      throw new Error('the import created fewer items than asked');
+    }
+    const session = await openSession(dibs.url, person.token, `laptop-${index}`);
+    await claimItem(dibs.url, person.token, itemId, session);
+    await heartbeatOn(dibs.url, person.token, session, 'default', person.branch);
+    const stored = await reportFootprint(dibs.url, dibs.adminToken, itemId, {
+      repo: 'default',
+      branch: person.branch,
+      base: 'main',
+      base_sha: 'abcd1234',
+      base_at: '2026-03-01T00:00:00Z',
+      paths: [shared],
+    });
+    expect(stored).toBe(true);
+  }
+  const banner = page.locator('[data-overlap]', { hasText: shared });
+  await expect(banner).toContainText(`${refs[0]} (alice) and ${refs[1]} (bob) change the same files`);
   await expectSameDocument(page);
 });

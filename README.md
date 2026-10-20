@@ -150,6 +150,12 @@ revokes their tokens and releases everything they held at once. With the Claude 
   merge into a branch that is not protected, delivers nothing and returns the claim to its holder. Branch names and how
   a pull request names its ticket are a team's own conventions; the agents' workflow suggests defaults (`bob/42-slug`,
   `Refs #42`) that many teams use.
+- **Overlap.** Each claim records the branch its holder's checkout is on, and an integration reports what each branch
+  changes against its base (its *footprint*). When two members' branches change one file, when one changes a published
+  contract (`contracts`) that the other's area depends on (`area_deps`), or when a merge into the base changes files a
+  branch still changes on its old base, dibs tells the holders once, in a message that says to rebase now — and, for a
+  contract, to read the other change first. Two claims of one member never collide; a moved base is told to anyone
+  whose branch is behind, the merge's own author included.
 - **Protected branch.** A branch of a repository only the members a project lists may push to; everyone else's agent is
   refused a push there, with the pull request as the way on, and so is a push whose branches dibs cannot read. A push to
   a fork is not judged. The pre-push check judges protection from what the machine remembers, so it holds while the
@@ -432,7 +438,9 @@ project's event log as a page (`GET /v1/events`) or as server-sent events (`GET 
 worker feeds the project from an outside tracker with an `importer` token: it sends its whole view to `PUT /v1/items` as
 often as it likes, and a view equal to what is stored changes nothing. The same token reports merged and closed pull
 requests (`POST /v1/prs/merged`, `POST /v1/prs/closed`), lists the claims in review (`GET /v1/review-claims`) and reads
-the status to set on pull requests (`GET /v1/pr-status`); each report may be sent again. When no integration has called
+the status to set on pull requests (`GET /v1/pr-status`), lists the live claims and their branches
+(`GET /v1/claims`), and reports what each claim's branch changes (`PUT /v1/items/{id}/footprint`); each report may
+be sent again. When no integration has called
 for 15 minutes while claims wait in review or pull requests get a status, the status, the brief and the board say so.
 
 ## Web UI
@@ -445,8 +453,8 @@ The server also serves pages for people at `/ui`, where you sign in with your to
   who holds each and why, until when, a stalled run in red and who waits, the live wide claims with who has
   acknowledged them, your ready list with priorities, likely
   areas and links to the tracker, the open items that wait with their blockers, what is in progress and what waits in
-  review with its pull requests, what went stale and what was done today, filterable by area and member, and a banner
-  while the project's integration is silent. The columns refresh by themselves when claims, items or slots change;
+  review with its pull requests, what went stale and what was done today, filterable by area and member, a banner
+  for each overlap between live claims, and a banner while the project's integration is silent. The columns refresh by themselves when claims, items or slots change;
   while you are typing a take-over reason they stay as they are and a banner offers a reload instead.
 - **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply. Each conversation
   shows its importance and whether a message in it awaits your acknowledgement; a message that asks for one lists who has

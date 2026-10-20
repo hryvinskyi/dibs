@@ -24,6 +24,7 @@ mod grant_endings;
 mod heartbeat;
 mod inbox;
 mod init_project;
+mod list_claims;
 mod list_completed;
 mod list_events;
 mod list_items;
@@ -35,6 +36,7 @@ mod open_ui_session;
 mod operate_project;
 mod post_message;
 mod prune;
+mod radar;
 mod read_thread;
 mod readable;
 mod ready;
@@ -84,6 +86,7 @@ pub use inbox::{
     PendingOffer,
 };
 pub use init_project::{InitProject, InitProjectInput, InitializedProject};
+pub use list_claims::ListClaims;
 pub use list_completed::{CompletedItem, ListCompleted, MAX_COMPLETED};
 pub use list_events::{EventCursor, EventPage, ListEvents, MAX_PAGE};
 pub use list_items::{ItemQuery, ListItems};
@@ -95,6 +98,7 @@ pub use open_ui_session::{OpenUiSession, OpenedUiSession, UI_SESSION_LIFETIME};
 pub use operate_project::OperateProject;
 pub use post_message::{PostMessage, PostMessageInput};
 pub use prune::{Prune, PruneReport};
+pub use radar::{FootprintInput, FootprintRecorded, NamedOverlap, OnBranch, RecordFootprint};
 pub use read_thread::{ReadThread, RecipientAck, ThreadView};
 pub use ready::{ExcludedEntry, NamedNotReady, Ready, ReadyEntry, ReadyView};
 pub use register_session::{RegisterSession, RegisterSessionInput};
@@ -169,8 +173,12 @@ pub struct UseCases {
     pub report_pr: ReportPr,
     /// See [`ReviewClaims`].
     pub review_claims: ReviewClaims,
+    /// See [`ListClaims`].
+    pub list_claims: ListClaims,
     /// See [`ReadPrStatus`].
     pub pr_status: ReadPrStatus,
+    /// See [`RecordFootprint`].
+    pub record_footprint: RecordFootprint,
     /// See [`Status`].
     pub status: Status,
     /// See [`EditCheck`].
@@ -276,7 +284,9 @@ impl UseCases {
             drop_pr: DropPr::new(deps),
             report_pr: ReportPr::new(deps),
             review_claims: ReviewClaims::new(deps),
+            list_claims: ListClaims::new(deps),
             pr_status: ReadPrStatus::new(deps),
+            record_footprint: RecordFootprint::new(deps),
             status: Status::new(deps),
             edit_check: EditCheck::new(deps),
             escalate: Escalate::new(deps),
@@ -352,7 +362,7 @@ mod integration_refusals {
                 )
                 .await
                 .map(|_| ()),
-            app.heartbeat.execute(bot, session).await.map(|_| ()),
+            app.heartbeat.execute(bot, session, None).await.map(|_| ()),
             app.edit_check
                 .execute(
                     bot,
@@ -360,6 +370,7 @@ mod integration_refusals {
                         session,
                         paths: vec![RepoPath::parse("default:packages/billing/a.rs").unwrap()],
                         reserve: false,
+                        branch: None,
                     },
                 )
                 .await

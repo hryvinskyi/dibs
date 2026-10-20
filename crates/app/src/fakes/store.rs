@@ -22,6 +22,9 @@ use dibs_domain::ids::{
 };
 use dibs_domain::item::{ExternalRef, ItemStatus};
 use dibs_domain::message::{Ack, Recipients, SessionLabel, speaks_for};
+use dibs_domain::paths::{RelPath, RepoPath};
+use dibs_domain::radar::{Footprint, FootprintDigest, FootprintEntry, Overlap, OverlapKey};
+use dibs_domain::repo::RepoId;
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
@@ -29,8 +32,8 @@ use dibs_domain::wide::WideAsk;
 
 use crate::ports::{
     AckRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows, GrantRows,
-    ItemRows, MemberRows, ProjectRows, RaisedRows, SessionRows, SettingsRows, SlotRows, Store,
-    StoreError, StoreResult, ThreadRows, TokenRows, Tx, UiSessionRows, WideAskRows,
+    ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, SessionRows, SettingsRows, SlotRows,
+    Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx, UiSessionRows, WideAskRows,
 };
 use crate::records::{
     CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
@@ -51,6 +54,8 @@ struct State {
     claims: BTreeMap<(ProjectId, ItemId), Claim>,
     dependencies: BTreeMap<(ProjectId, ItemId, ItemId), Dependency>,
     shared: BTreeSet<(ProjectId, SharedPath)>,
+    footprints: BTreeMap<(ProjectId, ItemId, RepoId), (Footprint, BTreeSet<RelPath>)>,
+    overlaps: BTreeMap<(ProjectId, OverlapKey), Overlap>,
     grants: BTreeMap<(ProjectId, GrantId), GrantRecord>,
     threads: BTreeMap<(ProjectId, ThreadId), ThreadRecord>,
     messages: BTreeMap<(ProjectId, MessageId), MessageRecord>,
@@ -127,7 +132,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 22] = [
+        let checks: [(&'static str, bool); 24] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -162,6 +167,16 @@ impl State {
             (
                 "a shared path",
                 self.shared.iter().all(|(p, s)| item(*p, s.claim)),
+            ),
+            (
+                "a footprint",
+                self.footprints.keys().all(|(p, i, _)| item(*p, *i)),
+            ),
+            (
+                "an overlap",
+                self.overlaps
+                    .iter()
+                    .all(|((p, _), o)| o.items().iter().all(|i| item(*p, *i))),
             ),
             (
                 "a grant",
@@ -565,6 +580,17 @@ impl ItemRows for MemoryTx {
             .map(|(_, i)| i.clone()))
     }
 
+    async fn items_of(
+        &mut self,
+        project: ProjectId,
+        ids: &BTreeSet<ItemId>,
+    ) -> StoreResult<Vec<ItemRecord>> {
+        Ok(ids
+            .iter()
+            .filter_map(|id| self.work.items.get(&(project, *id)).cloned())
+            .collect())
+    }
+
     async fn items(
         &mut self,
         project: ProjectId,
@@ -696,6 +722,134 @@ impl ClaimRows for MemoryTx {
         self.work
             .shared
             .retain(|(p, shared)| !(*p == project && shared.claim == item));
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RadarRows for MemoryTx {
+    async fn footprints(&mut self, project: ProjectId) -> StoreResult<Vec<Footprint>> {
+        Ok(self
+            .work
+            .footprints
+            .iter()
+            .filter(|((p, _, _), _)| *p == project)
+            .map(|(_, (footprint, _))| footprint.clone())
+            .collect())
+    }
+
+    async fn footprint(
+        &mut self,
+        project: ProjectId,
+        item: ItemId,
+        repo: &RepoId,
+    ) -> StoreResult<Option<(Footprint, BTreeSet<RelPath>)>> {
+        Ok(self
+            .work
+            .footprints
+            .get(&(project, item, repo.clone()))
+            .cloned())
+    }
+
+    async fn save_footprint(
+        &mut self,
+        project: ProjectId,
+        footprint: &Footprint,
+        paths: &BTreeSet<RelPath>,
+    ) -> StoreResult<()> {
+        let stored = Footprint {
+            path_count: paths.len(),
+            ..footprint.clone()
+        };
+        self.work.footprints.insert(
+            (project, footprint.item, footprint.repo.clone()),
+            (stored, paths.clone()),
+        );
+        Ok(())
+    }
+
+    async fn set_footprint_digest(
+        &mut self,
+        project: ProjectId,
+        item: ItemId,
+        repo: &RepoId,
+        digest: &FootprintDigest,
+    ) -> StoreResult<()> {
+        if let Some((footprint, _)) = self.work.footprints.get_mut(&(project, item, repo.clone())) {
+            footprint.digest = digest.clone();
+        }
+        Ok(())
+    }
+
+    async fn delete_footprint(
+        &mut self,
+        project: ProjectId,
+        item: ItemId,
+        repo: &RepoId,
+    ) -> StoreResult<()> {
+        self.work.footprints.remove(&(project, item, repo.clone()));
+        Ok(())
+    }
+
+    async fn delete_footprints(&mut self, project: ProjectId, item: ItemId) -> StoreResult<()> {
+        self.work
+            .footprints
+            .retain(|(p, i, _), _| !(*p == project && *i == item));
+        Ok(())
+    }
+
+    async fn footprint_entries(
+        &mut self,
+        project: ProjectId,
+        repo: &RepoId,
+        paths: &BTreeSet<RelPath>,
+    ) -> StoreResult<Vec<FootprintEntry>> {
+        Ok(self
+            .work
+            .footprints
+            .iter()
+            .filter(|((p, _, r), _)| *p == project && r == repo)
+            .flat_map(|((_, item, _), (_, stored))| {
+                stored
+                    .intersection(paths)
+                    .map(|path| FootprintEntry {
+                        item: *item,
+                        path: RepoPath {
+                            repo: repo.clone(),
+                            path: path.clone(),
+                        },
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect())
+    }
+
+    async fn overlaps(&mut self, project: ProjectId) -> StoreResult<Vec<Overlap>> {
+        Ok(self
+            .work
+            .overlaps
+            .iter()
+            .filter(|((p, _), _)| *p == project)
+            .map(|(_, overlap)| overlap.clone())
+            .collect())
+    }
+
+    async fn save_overlap(&mut self, project: ProjectId, overlap: &Overlap) -> StoreResult<()> {
+        self.work
+            .overlaps
+            .insert((project, overlap.key()), overlap.clone());
+        Ok(())
+    }
+
+    async fn delete_overlap(&mut self, project: ProjectId, key: &OverlapKey) -> StoreResult<()> {
+        self.work.overlaps.remove(&(project, key.clone()));
+        Ok(())
+    }
+
+    async fn delete_overlaps_of(&mut self, project: ProjectId, item: ItemId) -> StoreResult<()> {
+        self.work
+            .overlaps
+            .retain(|(p, _), overlap| !(*p == project && overlap.involves(item)));
         Ok(())
     }
 }

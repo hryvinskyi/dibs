@@ -36,8 +36,12 @@ mod contract {
     };
     use dibs_domain::member::{DisplayName, ExternalLogin, Role};
     use dibs_domain::message::{Ack, Author, Body, Importance, Recipients, SessionLabel, Subject};
-    use dibs_domain::paths::RepoPath;
+    use dibs_domain::paths::{RelPath, RepoPath};
     use dibs_domain::project::ProjectSlug;
+    use dibs_domain::radar::{
+        BranchName, CommitSha, Footprint, FootprintBase, FootprintDigest, MergeMark, Overlap,
+        OverlapKind,
+    };
     use dibs_domain::repo::{RemoteUrl, RepoId};
     use dibs_domain::reservation::SharedPath;
     use dibs_domain::review::{ClaimState, PrRef, Review};
@@ -109,6 +113,12 @@ mod contract {
         dependencies_are_one_per_pair_scoped_and_removed,
         claims_are_kept_live_or_stale_and_replaced_per_item,
         a_claim_in_review_keeps_its_pull_requests_start_and_whether_more_follow,
+        a_claim_keeps_the_branch_of_each_repository,
+        footprints_keep_their_paths_and_are_replaced_per_item_and_repository,
+        footprint_paths_are_found_by_path_within_their_repository_and_project,
+        overlaps_are_one_per_key_and_go_with_any_item_they_name,
+        items_are_read_together_by_id_within_their_project,
+        a_footprint_or_overlap_naming_a_missing_item_fails_the_commit,
         calls_are_kept_per_member_and_replaced,
         shared_paths_are_kept_once_and_removed_explicitly,
         grants_are_listed_by_id,
@@ -234,6 +244,7 @@ mod contract {
             renewed_at: at(11),
             last_seen: at(12),
             state: ClaimState::Working,
+            branches: std::collections::BTreeMap::new(),
         }
     }
 
@@ -837,6 +848,373 @@ mod contract {
         tx.commit().await.unwrap();
         let mut tx = store.begin().await.unwrap();
         assert_eq!(tx.claim(A, THIRD).await.unwrap(), Some(working));
+    }
+
+    async fn a_claim_keeps_the_branch_of_each_repository(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let mut branched = claim(FIRST, ALICE, ALICE_LAPTOP, &[]);
+        branched.branches.insert(
+            RepoId::parse("api").unwrap(),
+            BranchName::parse("alice/1-rates").unwrap(),
+        );
+        branched.branches.insert(
+            RepoId::parse("web").unwrap(),
+            BranchName::parse("main").unwrap(),
+        );
+        tx.save_claim(A, &branched).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.claim(A, FIRST).await.unwrap(), Some(branched.clone()));
+        let fewer = Claim {
+            branches: [(
+                RepoId::parse("api").unwrap(),
+                BranchName::parse("alice/1-next").unwrap(),
+            )]
+            .into(),
+            ..branched
+        };
+        tx.save_claim(A, &fewer).await.unwrap();
+        assert_eq!(tx.claims(A).await.unwrap(), vec![fewer]);
+    }
+
+    fn rel_paths(texts: &[&str]) -> BTreeSet<RelPath> {
+        texts
+            .iter()
+            .map(|text| RelPath::parse(text).unwrap())
+            .collect()
+    }
+
+    fn footprint(item: ItemId, repo: &str, base: &str, since: i64) -> Footprint {
+        Footprint {
+            item,
+            repo: RepoId::parse(repo).unwrap(),
+            branch: BranchName::parse("alice/1-rates").unwrap(),
+            base: FootprintBase {
+                branch: BranchName::parse("main").unwrap(),
+                sha: CommitSha::parse(base).unwrap(),
+                at: at(since),
+            },
+            truncated: false,
+            path_count: 0,
+            digest: FootprintDigest {
+                areas: areas(&["api:billing"]),
+                unzoned: true,
+                contracts: rel_paths(&["schema/a.json"]),
+            },
+        }
+    }
+
+    async fn footprints_keep_their_paths_and_are_replaced_per_item_and_repository(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let many: Vec<String> = (0..3000).map(|n| format!("src/f{n}.rs")).collect();
+        let many: BTreeSet<RelPath> = many.iter().map(|p| RelPath::parse(p).unwrap()).collect();
+        let api = footprint(FIRST, "api", "abcd", 20);
+        tx.save_footprint(A, &api, &many).await.unwrap();
+        let web = Footprint {
+            truncated: true,
+            ..footprint(FIRST, "web", "beef", 21)
+        };
+        tx.save_footprint(A, &web, &rel_paths(&["a.ts"]))
+            .await
+            .unwrap();
+        tx.save_footprint(
+            A,
+            &footprint(SECOND, "api", "abcd", 22),
+            &rel_paths(&["x.rs"]),
+        )
+        .await
+        .unwrap();
+        tx.save_footprint(
+            B,
+            &footprint(GADGET, "api", "abcd", 23),
+            &rel_paths(&["y.rs"]),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let listed = tx.footprints(A).await.unwrap();
+        let keys: Vec<(ItemId, &str, usize)> = listed
+            .iter()
+            .map(|f| (f.item, f.repo.as_str(), f.path_count))
+            .collect();
+        assert_eq!(
+            keys,
+            [(FIRST, "api", 3000), (FIRST, "web", 1), (SECOND, "api", 1)],
+            "ordered by item and repository, each counting its paths"
+        );
+        assert_eq!(
+            listed[0],
+            Footprint {
+                path_count: 3000,
+                ..api.clone()
+            }
+        );
+        assert!(listed[1].truncated);
+        let api_repo = RepoId::parse("api").unwrap();
+        let (read, paths) = tx.footprint(A, FIRST, &api_repo).await.unwrap().unwrap();
+        assert_eq!(read.base.at, at(20), "its time to the nanosecond");
+        assert_eq!(read.base.branch.as_str(), "main");
+        assert_eq!(paths, many);
+        assert_eq!(tx.footprint(B, FIRST, &api_repo).await.unwrap(), None);
+
+        let replaced = footprint(FIRST, "api", "cafe", 30);
+        tx.save_footprint(A, &replaced, &rel_paths(&["src/new.rs"]))
+            .await
+            .unwrap();
+        let digest = FootprintDigest {
+            areas: areas(&["api:search"]),
+            unzoned: false,
+            contracts: BTreeSet::new(),
+        };
+        tx.set_footprint_digest(A, FIRST, &api_repo, &digest)
+            .await
+            .unwrap();
+        tx.set_footprint_digest(A, THIRD, &api_repo, &digest)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let (read, paths) = tx.footprint(A, FIRST, &api_repo).await.unwrap().unwrap();
+        assert_eq!(paths, rel_paths(&["src/new.rs"]), "the old paths are gone");
+        assert_eq!(read.base.sha.as_str(), "cafe");
+        assert_eq!(read.digest, digest);
+        assert_eq!(read.path_count, 1);
+        assert!(
+            tx.footprint(A, THIRD, &api_repo).await.unwrap().is_none(),
+            "a digest for no footprint makes none"
+        );
+        let web_repo = RepoId::parse("web").unwrap();
+        tx.delete_footprint(A, FIRST, &web_repo).await.unwrap();
+        tx.delete_footprint(A, THIRD, &web_repo).await.unwrap();
+        let left: Vec<(ItemId, String)> = tx
+            .footprints(A)
+            .await
+            .unwrap()
+            .iter()
+            .map(|f| (f.item, f.repo.to_string()))
+            .collect();
+        assert_eq!(
+            left,
+            [(FIRST, "api".to_owned()), (SECOND, "api".to_owned())],
+            "one repository's footprint goes, the item's others stay"
+        );
+        assert!(
+            tx.footprint_entries(A, &web_repo, &rel_paths(&["a.ts"]))
+                .await
+                .unwrap()
+                .is_empty(),
+            "with its paths"
+        );
+        tx.delete_footprints(A, FIRST).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let left: Vec<ItemId> = tx
+            .footprints(A)
+            .await
+            .unwrap()
+            .iter()
+            .map(|f| f.item)
+            .collect();
+        assert_eq!(left, [SECOND]);
+        assert!(
+            tx.footprint_entries(A, &api_repo, &rel_paths(&["src/new.rs"]))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(tx.footprints(B).await.unwrap().len(), 1);
+    }
+
+    async fn footprint_paths_are_found_by_path_within_their_repository_and_project(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.save_footprint(
+            A,
+            &footprint(FIRST, "api", "abcd", 1),
+            &rel_paths(&["a.rs", "b.rs"]),
+        )
+        .await
+        .unwrap();
+        tx.save_footprint(
+            A,
+            &footprint(SECOND, "api", "abcd", 1),
+            &rel_paths(&["b.rs", "c.rs"]),
+        )
+        .await
+        .unwrap();
+        tx.save_footprint(
+            A,
+            &footprint(THIRD, "web", "abcd", 1),
+            &rel_paths(&["b.rs"]),
+        )
+        .await
+        .unwrap();
+        tx.save_footprint(
+            B,
+            &footprint(GADGET, "api", "abcd", 1),
+            &rel_paths(&["b.rs"]),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let api = RepoId::parse("api").unwrap();
+        let found = tx
+            .footprint_entries(A, &api, &rel_paths(&["b.rs", "c.rs", "z.rs"]))
+            .await
+            .unwrap();
+        let named: Vec<(ItemId, String)> = found
+            .iter()
+            .map(|entry| (entry.item, entry.path.to_string()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                (FIRST, "api:b.rs".to_owned()),
+                (SECOND, "api:b.rs".to_owned()),
+                (SECOND, "api:c.rs".to_owned()),
+            ],
+            "ordered by item and path; another repository's and project's are left out"
+        );
+        assert!(
+            tx.footprint_entries(A, &api, &BTreeSet::new())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    fn overlap(kind: OverlapKind, items: &[ItemId], pr: Option<&str>, paths: &[&str]) -> Overlap {
+        Overlap::new(
+            kind,
+            items.iter().copied().collect(),
+            pr.map(|text| MergeMark {
+                pr: PrRef::parse(text).unwrap(),
+                at: at(70),
+            }),
+            paths
+                .iter()
+                .map(|text| RepoPath::parse(text).unwrap())
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    async fn overlaps_are_one_per_key_and_go_with_any_item_they_name(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let shared = overlap(OverlapKind::SameFile, &[FIRST, SECOND], None, &["api:a.rs"]);
+        let contract = overlap(
+            OverlapKind::Contract,
+            &[SECOND, THIRD],
+            None,
+            &["api:schema/a.json"],
+        );
+        let moved = overlap(
+            OverlapKind::MainMoved,
+            &[THIRD],
+            Some("acme/api#12"),
+            &["api:b.rs", "api:c.rs"],
+        );
+        for made in [&moved, &contract, &shared] {
+            tx.save_overlap(A, made).await.unwrap();
+        }
+        let elsewhere = overlap(
+            OverlapKind::MainMoved,
+            &[GADGET],
+            Some("acme/api#12"),
+            &["api:x"],
+        );
+        tx.save_overlap(B, &elsewhere).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.overlaps(A).await.unwrap(),
+            vec![shared.clone(), contract.clone(), moved.clone()],
+            "ordered by key: kind, then items, then pull request"
+        );
+        let wider = overlap(
+            OverlapKind::SameFile,
+            &[FIRST, SECOND],
+            None,
+            &["api:a.rs", "api:d.rs"],
+        );
+        tx.save_overlap(A, &wider).await.unwrap();
+        assert_eq!(
+            tx.overlaps(A).await.unwrap(),
+            vec![wider.clone(), contract.clone(), moved.clone()],
+            "one per key"
+        );
+        tx.delete_overlap(A, &moved.key()).await.unwrap();
+        tx.delete_overlap(A, &moved.key()).await.unwrap();
+        tx.delete_overlaps_of(A, SECOND).await.unwrap();
+        tx.save_overlap(A, &moved).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.overlaps(A).await.unwrap(), vec![moved]);
+        tx.delete_overlaps_of(A, THIRD).await.unwrap();
+        assert!(tx.overlaps(A).await.unwrap().is_empty());
+        assert_eq!(tx.overlaps(B).await.unwrap(), vec![elsewhere]);
+    }
+
+    async fn items_are_read_together_by_id_within_their_project(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let asked: BTreeSet<ItemId> = [THIRD, FIRST, GADGET, ItemId(999)].into();
+        let ids: Vec<ItemId> = tx
+            .items_of(A, &asked)
+            .await
+            .unwrap()
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(
+            ids,
+            [FIRST, THIRD],
+            "ordered by id; another project's item and a missing one are left out"
+        );
+        assert!(tx.items_of(A, &BTreeSet::new()).await.unwrap().is_empty());
+        let read = tx.items_of(B, &[GADGET].into()).await.unwrap();
+        assert_eq!(read, [item(GADGET, Some("gh:acme/widgets#1"), DAVE)]);
+    }
+
+    async fn a_footprint_or_overlap_naming_a_missing_item_fails_the_commit(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let missing = ItemId(999);
+        let mut tx = store.begin().await.unwrap();
+        tx.save_footprint(
+            A,
+            &footprint(missing, "api", "abcd", 1),
+            &rel_paths(&["a.rs"]),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(tx.commit().await, Err(StoreError::Backend(_))));
+        let mut tx = store.begin().await.unwrap();
+        tx.save_overlap(
+            A,
+            &overlap(
+                OverlapKind::SameFile,
+                &[FIRST, missing],
+                None,
+                &["api:a.rs"],
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(tx.commit().await, Err(StoreError::Backend(_))));
+        let mut tx = store.begin().await.unwrap();
+        assert!(tx.footprints(A).await.unwrap().is_empty());
+        assert!(tx.overlaps(A).await.unwrap().is_empty());
     }
 
     async fn calls_are_kept_per_member_and_replaced(store: Arc<dyn Store>) {
