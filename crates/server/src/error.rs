@@ -23,6 +23,7 @@ use dibs_domain::import::BatchRefused;
 use dibs_domain::item::CreateRefused;
 use dibs_domain::message::{AckRefused, RecipientsError};
 use dibs_domain::settings::AreaLookupError;
+use dibs_domain::slot::{BeatRefused, SlotRefused};
 use dibs_domain::wide::WideScopeError;
 
 /// A refusal or failure as the client receives it.
@@ -281,8 +282,16 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::Grant(GrantRefused::NotHolder { .. })
         | AppError::Revoke(RevokeRefused::NotGrantor)
         | AppError::NotAuthor
-        | AppError::Ack(AckRefused::NotRecipient) => StatusCode::FORBIDDEN,
-        AppError::NotFound(_) => StatusCode::NOT_FOUND,
+        | AppError::Ack(AckRefused::NotRecipient)
+        | AppError::Slot(Refusal {
+            reason: SlotRefused::NotHolder { .. },
+            ..
+        }) => StatusCode::FORBIDDEN,
+        AppError::NotFound(_)
+        | AppError::Slot(Refusal {
+            reason: SlotRefused::UnknownSlot { .. },
+            ..
+        }) => StatusCode::NOT_FOUND,
         AppError::Duplicate(Duplicate::Project(_) | Duplicate::Handle(_))
         | AppError::ItemClosed { .. }
         | AppError::Claim(Refusal {
@@ -309,7 +318,21 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::ForceRelease(ForceReleaseRefused::NoClaim)
         | AppError::Grant(GrantRefused::GranteeHasNoClaim)
         | AppError::Dependency(DependencyRefused::Cycle)
-        | AppError::Ack(AckRefused::NotRequired) => StatusCode::CONFLICT,
+        | AppError::Ack(AckRefused::NotRequired)
+        | AppError::Slot(Refusal {
+            reason:
+                SlotRefused::HoldsOther { .. }
+                | SlotRefused::NotHeld
+                | SlotRefused::RunEnded
+                | SlotRefused::NotWaiting
+                | SlotRefused::OwnHold
+                | SlotRefused::NotStalled { .. },
+            ..
+        })
+        | AppError::Beat(Refusal {
+            reason: BeatRefused::TakenOver { .. } | BeatRefused::Ended,
+            ..
+        }) => StatusCode::CONFLICT,
         AppError::NotARecipient(_)
         | AppError::Claim(Refusal {
             reason: ClaimRefused::UnknownArea { .. } | ClaimRefused::WideAndHeld { .. },
@@ -414,6 +437,32 @@ fn details_of(error: &AppError) -> Map<String, Value> {
             details.put("remote", remote);
         }
         AppError::EditCheck(EditCheckRefused::UnknownRepo { repo }) => details.put("repo", repo),
+        AppError::Slot(Refusal {
+            reason: SlotRefused::NotHolder { .. },
+            member,
+            ..
+        })
+        | AppError::Beat(Refusal {
+            reason: BeatRefused::TakenOver { .. },
+            member,
+            ..
+        }) => details.holder(member.as_ref()),
+        AppError::Slot(Refusal {
+            reason: SlotRefused::NotStalled { last_seen, .. },
+            member,
+            ..
+        }) => {
+            details.holder(member.as_ref());
+            details.time("last_seen", *last_seen);
+        }
+        AppError::Slot(Refusal {
+            reason: SlotRefused::HoldsOther { held },
+            ..
+        }) => details.put("held", held),
+        AppError::Slot(Refusal {
+            reason: SlotRefused::UnknownSlot { slot },
+            ..
+        }) => details.put("slot", slot),
         _ => {}
     }
     details.0

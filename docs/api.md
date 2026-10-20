@@ -66,10 +66,10 @@ cause of an internal failure and answers `internal`.
 |---|---|
 | `400` | `invalid_json` (the body is not JSON of the shape the route expects), `invalid_query` |
 | `401` | `unauthorized` |
-| `403` | `forbidden`, `not_holder` (details: `holder`), `not_grantor`, `not_a_recipient` (an acknowledgement by somebody a message did not reach), `not_author` |
-| `404` | `not_found` (also: a record of another project, and a conversation the caller may not read) |
+| `403` | `forbidden`, `not_holder` (details: `holder`; for a slot too), `not_grantor`, `not_a_recipient` (an acknowledgement by somebody a message did not reach), `not_author` |
+| `404` | `not_found` (also: a record of another project, and a conversation the caller may not read), `unknown_slot` (`slot`) |
 | `405` | `method_not_allowed` |
-| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required` |
+| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`) |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
 | `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`) |
@@ -99,7 +99,7 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/items/{id}/takeover` | people | Take over another member's stale claim. |
 | `POST /v1/items/{id}/release` | people | Release your claim. |
 | `POST /v1/items/{id}/done` | people | Complete your claim. |
-| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims and the caller's ready list. |
+| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims, the caller's ready list and the slots. |
 | `POST /v1/edit-check` | people | May I edit these paths? |
 | `POST /v1/grants` | people | Let another member edit in an area you hold. |
 | `DELETE /v1/grants/{id}` | people | Withdraw a grant you gave. |
@@ -108,9 +108,17 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/threads/{id}` | people | A conversation with its messages. |
 | `POST /v1/threads/{id}/messages` | people | Post a message. |
 | `POST /v1/threads/{id}/read` | people | Mark a conversation read. |
-| `GET /v1/inbox` | people | Conversations waiting for you, and the messages awaiting your acknowledgement. |
+| `GET /v1/inbox` | people | Conversations waiting for you, the messages awaiting your acknowledgement, and the slots offered to you. |
 | `POST /v1/messages/{id}/ack` | people | Acknowledge a message you were sent. |
 | `GET /v1/messages/{id}/status` | people | Who read and acknowledged a message you wrote. |
+| `GET /v1/slots` | any | Every declared slot: its group's hold, queue and offer. |
+| `GET /v1/slots/{name}` | any | One slot, fresh. |
+| `POST /v1/slots/{name}/take` | people | Take a slot, renew your hold, or join its queue. |
+| `POST /v1/slots/{name}/release` | people | Release a slot you hold; a run gives its exit. |
+| `POST /v1/slots/{name}/leave` | people | Leave a slot's queue, or give up the offer to you. |
+| `POST /v1/slots/{name}/heartbeat` | people | The heartbeat of the run that holds a slot. |
+| `POST /v1/slots/{name}/takeover` | people | Take over another member's stalled hold. |
+| `POST /v1/slots/{name}/run-finished` | import | A forge workflow run finished: end the hold that waited for it. |
 | `GET /v1/events` | any | A page of the project's event log. |
 | `GET /v1/events/stream` | people | The event log as server-sent events. |
 | `POST /v1/admin/members` | admin | Add a member. |
@@ -118,6 +126,7 @@ cause of an internal failure and answers `internal`.
 | `DELETE /v1/admin/tokens/{prefix}` | admin | Revoke one token. |
 | `PUT /v1/admin/settings` | admin | Replace the project's settings. |
 | `POST /v1/admin/items/{id}/force-release` | admin | End any member's claim. |
+| `POST /v1/admin/slots/{name}/force-release` | admin | End any member's hold on a slot. |
 
 A path that is no route is answered `404 not_found`; a route with the wrong method, `405 method_not_allowed`. A path
 segment that is not an id names no record and is answered `404 not_found`.
@@ -418,7 +427,8 @@ first. `GET /v1/inbox` answers the same shape for the conversations waiting for 
 only those with messages they have not read. With `unacked=1` (or `true`) the answer also carries
 `"unacked": [{ "thread": thread, "message": message }, …]`, newest first: every message that asks the caller for an
 acknowledgement they have not given. A conversation the caller may not read is reported as missing, the same as one that
-does not exist.
+does not exist. Every inbox answer carries `"offers": [{ "slot": "deploy:prod", "until": "…" }, …]`: the slots offered
+to the caller now, each theirs if they take it before `until` (what time changed about the slots is applied first).
 
 `GET /v1/threads/{id}` answers `{ "thread": thread, "messages": [message, …] }`, oldest first; a message that asks to be
 acknowledged carries `acks`, each recipient ordered by handle with when they acknowledged it (`null` while they have
@@ -451,6 +461,80 @@ message in a conversation the caller may not read.
 
 Recipients are ordered by handle. Refusals: `not_author` (`403`) for a message somebody else wrote, `not_found` for one
 in a conversation the caller may not read.
+
+### Slots
+
+A slot is a named shared action one member does at a time — a deploy, a release, a migration of a shared database. It is
+declared in the settings (below); the routes take it, wait for it and end it. A hold is the member's, like a claim: any
+session of theirs acts on it. Slots of one `group` exclude each other: one hold across the group at a time, one queue
+and one offer. Every slot route applies what time changed before it answers — a hold past its expiry ends, a run's hold
+without a heartbeat for 2 minutes is stalled, an offer past its deadline lapses and its member leaves the queue, a waiter
+silent for longer than `max_wait` loses their place — and the server does the same every 30 seconds for every project
+with a hold, a waiter or an offer, so a freed slot is offered to the first waiter even when nobody touches it. The slot
+name in a path is percent-encoded like any segment; a name that is no slot name is answered `404 unknown_slot`.
+
+```text
+slot   { name, group | null, max_hold: "30m", offer_for: "5m", max_wait: "2h", run_only, freezes: ["api:refs/heads/main"],
+         note | null, hold: hold | null, queue: [waiter, …], offer: offer | null }
+hold   { slot, holder, purpose, item | null, session_id, host,
+         liveness: { "mode": "session" } | { "mode": "run", "run": 7 } | { "mode": "until_run", "workflow", "sha" },
+         taken_at, expires_at, last_seen, stalled }
+waiter { member, slot, purpose, since, last_seen }
+offer  { member, slot, purpose, until }
+```
+
+A slot shows its group's hold, queue and offer; `hold.slot` names the slot held when it is another of the group.
+
+`GET /v1/slots` answers `{ "slots": [slot, …] }` in declaration order, `GET /v1/slots/{name}` answers `{ "slot": slot }`.
+An integration may read them.
+
+`POST /v1/slots/{name}/take`, body `{ "session_id": 9, "purpose": "ship 2.4", "item": 12, "mode": "session" }` (`item`
+and `mode` optional). `purpose` is 1 to 200 characters every member reads — never a credential, a host or a customer's
+data. `mode` is `session` (the default: the hold ends at its expiry), `run` (kept by the heartbeats of
+`POST …/heartbeat`; the answer names the run), or `until_run` with `workflow` and `sha` (kept until the worker reports
+that run finished, or its expiry). Answers
+`{ "outcome": "taken" | "renewed" | "queued", "position": 1 | null, "run_id": 7 | null, "slot": slot }`:
+
+- a free slot, or one on offer to the caller, is `taken`: it expires `max_hold` from now (`slot_taken`);
+- the caller's own hold is `renewed` to `max_hold` from now, but while somebody waits never past twice `max_hold` from
+  when it was taken, and never shortened (`slot_renewed`); a plain take keeps a hold kept by a run or a workflow;
+- otherwise the caller is `queued` behind the group's hold or its offer, at `position` from 1 (`slot_queued`). Taking
+  again while queued keeps the place, refreshes it and records the slot and purpose asked for now.
+
+Refusals: `unknown_slot` (`404`), `holds_other_slot` (`409`, details `held`) when the caller holds another slot of the
+group, `not_found` for a session or item not the caller's, `invalid_request` for a missing purpose or a mode without
+its fields.
+
+`POST /v1/slots/{name}/release`, body `{}` or, from a run, `{ "run_id": 7, "exit": { "code": 3 } }` (`exit` is
+`{"code": n}` or `{"signal": "SIGTERM"}`). Answers `{ "released": hold, "slot": slot }`: the group's first waiter is
+offered the slot for `offer_for` (`slot_released` with `exit`, then `slot_offered`). Refusals: `slot_not_held`
+(`409`), `not_holder` (`403`, naming the holder), `run_ended` (`409`) when `run_id` no longer holds it.
+
+`POST /v1/slots/{name}/leave` takes no body: the caller leaves the group's queue, or gives up the offer to them, which
+passes to the next waiter (`slot_left`). Answers `{ "slot": slot }`; `not_waiting` (`409`) otherwise.
+
+`POST /v1/slots/{name}/heartbeat`, body `{ "run_id": 7 }`: the run's hold is seen now; a stalled one is live again
+(`slot_resumed`). Answers `{ "slot": slot }`. When the hold is no longer the run's: `taken_over` (`409`, naming who
+holds it now) or `run_ended` (`409`). A stalled hold offers nothing and does not end at its expiry.
+
+`POST /v1/slots/{name}/takeover`, body `{ "session_id": 9, "purpose": "finish the deploy", "reason": "the deploy log
+stopped; nothing runs" }`: takes over another member's **stalled** hold and sends them `reason` in a conversation of its
+own (`slot_stall_taken_over`). Answers `{ "previous": hold, "thread_id": 31, "slot": slot }`. Refusals:
+`slot_not_held`, `own_hold`, `not_stalled` (`409`, naming the holder and `last_seen`).
+
+`POST /v1/slots/{name}/run-finished`, body `{ "workflow": "deploy.yml", "sha": "abc1234", "conclusion": "success" }`,
+for an integration watching the forge (the importer or an admin): ends the hold taken `until_run` for exactly that
+workflow and commit, with `{"conclusion": …}` as its exit, and answers `{ "matched": true }`. Any report that matches no
+hold — a repeat, a slot released since — changes nothing and answers `{ "matched": false }`, so it may be sent again.
+
+`POST /v1/admin/slots/{name}/force-release`, body `{ "session_id": 9, "reason": "…" }`, ends any member's hold, sends
+the holder `reason`, and offers the slot on (`slot_force_released`, cause `admin`). Answers
+`{ "released": hold, "holder": "bob", "thread_id": 31 | null, "slot": slot }`; `slot_not_held` (`409`) when nobody
+holds it.
+
+A settings change that no longer declares a slot ends its hold, its queue and its offer in the same change
+(`slot_force_released`, cause `slot_removed`). The slot events carry the slot, the members and, for `slot_taken`,
+`slot_queued` and `slot_stall_taken_over`, the purpose; they never carry a reason.
 
 ### Events
 
@@ -536,6 +620,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | `areas` | For a project with one repository: `[{ "name": "billing", "paths": ["packages/billing/**"] }]`. |
 | `hot` | For a project with one repository: hot-file rules, first match wins. |
 | `repos` | For a project with several: `[{ "id", "remote", "areas", "hot" }]`. The two layouts are never mixed. |
+| `slots` | The shared actions one member does at a time; see below. |
 
 A path glob is matched against a path relative to the repository root: `*` and `?` never cross a `/`, `**` as a whole
 segment crosses any number of them, `[…]` and `{a,b}` work as in shells, and matching is case-sensitive. The first area
@@ -548,6 +633,26 @@ in declaration order that contains a path governs it. A hot-file rule has `paths
 | `owner` | Only the holder of the `area` it names (an area of the same repository) edits it. |
 | `warn-shared` | Anyone may edit; the verdict names the other members' live claims that edited the same file. |
 | `free` | Anyone may edit, with nothing said. |
+
+A slot has a `name` (1 to 64 characters: lowercase letters, digits and `:._-`) and:
+
+| Field | Meaning |
+|---|---|
+| `max_hold` | Required: the longest one hold lasts before it is renewed, 1 minute to 24 hours. |
+| `offer_for` | How long an offer to the first waiter stands: 1 minute to 1 hour; default 5 minutes. |
+| `max_wait` | How long a waiter keeps their place without a sign of life: 1 minute to 24 hours; default 2 hours. |
+| `commands` | Up to 20 `{ "matches": "<regex>", "unless": "<regex>" }`, each 1 to 500 characters, matched against one simple command of a command line (below). |
+| `run_only` | Its commands run only inside `dibs slot run`: a hold from a plain take does not let them through. |
+| `group` | Slots of one group exclude each other. |
+| `freezes` | Branch refs nobody but the holder may push while it is held: `api:refs/heads/main`, or `refs/heads/main` in a project with one repository. |
+| `note` | Shown with the slot, 1 to 500 characters. |
+
+The patterns are regular expressions of the Rust `regex` crate, which match in time linear in the input and have no
+look-around (`unless` is the exclusion). A command line is split into simple commands before a pattern sees it — on
+`;`, `&&`, `||`, `|`, `&`, parentheses and line breaks outside quotes, without `VAR=value`, `env`, `sudo`, `nohup`,
+`time`, `command`, `exec` and a leading `./`, and with the script of `sh -c` split too — so `^deploy\.sh prod` matches
+`cd ops && ./deploy.sh prod` and not `echo "./deploy.sh prod"`. `dibs slot test <settings.toml> -- <command line>`
+shows what a line needs without a server.
 
 ### Admin routes
 

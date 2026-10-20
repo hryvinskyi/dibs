@@ -2,6 +2,7 @@
 
 mod document;
 mod duration;
+mod slots;
 
 use std::collections::BTreeSet;
 
@@ -9,8 +10,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::Duration;
 
-pub use document::{AreaDocument, HotRuleDocument, RepoDocument, SettingsDocument};
+pub use document::{
+    AreaDocument, CommandDocument, HotRuleDocument, RepoDocument, SettingsDocument, SlotDocument,
+};
 pub use duration::{DurationError, format_duration, parse_duration};
+pub use slots::SlotError;
 
 use crate::area::{Area, AreaName, AreaNameError, QualifiedArea};
 use crate::hot_rule::{
@@ -18,6 +22,7 @@ use crate::hot_rule::{
 };
 use crate::paths::{PathGlob, PathGlobError, RelPath, RepoPath};
 use crate::repo::{RemoteUrl, RemoteUrlError, RepoId, RepoIdError};
+use crate::slot::SlotCatalog;
 
 /// Whether a governed path needs a live claim.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -82,6 +87,7 @@ pub struct ProjectSettings {
     edit_policy: EditPolicy,
     lists_repositories: bool,
     repos: Vec<RepoSpec>,
+    slots: SlotCatalog,
 }
 
 /// Why a settings document is refused. Each message names the setting at fault.
@@ -223,6 +229,15 @@ pub enum SettingsError {
         #[source]
         error: HotRuleRefused,
     },
+    /// A slot is refused.
+    #[error("slot '{slot}': {error}")]
+    Slot {
+        /// The slot's name as written.
+        slot: String,
+        /// What is wrong with it.
+        #[source]
+        error: SlotError,
+    },
 }
 
 /// Why an area named by a person does not resolve.
@@ -284,7 +299,11 @@ impl ProjectSettings {
     /// between 1 and 15 minutes (default 1 minute); either top-level areas and rules or a `repos`
     /// list, never both; repository ids and remotes unique; area names unique within their
     /// repository, each area with at least one glob; each hot rule with at least one glob, a kind
-    /// the registry knows, and, for kinds that take one, an area its repository declares.
+    /// the registry knows, and, for kinds that take one, an area its repository declares; slot
+    /// names unique, each slot with `max_hold` between 1 minute and 24 hours, `offer_for` between
+    /// 1 minute and 1 hour (default 5 minutes), `max_wait` between 1 minute and 24 hours (default
+    /// 2 hours), at most 20 command patterns that compile within their limits, and frozen refs of
+    /// declared repositories.
     ///
     /// # Errors
     /// The first [`SettingsError`] found, in document order.
@@ -346,12 +365,15 @@ impl ProjectSettings {
             }
             repos.push(repo);
         }
+        let slots = slots::parse_slots(&document.slots, &repos, lists_repositories)
+            .map_err(|(slot, error)| SettingsError::Slot { slot, error })?;
         Ok(Self {
             stale_after,
             heartbeat_every,
             edit_policy: document.edit_policy.unwrap_or_default(),
             lists_repositories,
             repos,
+            slots,
         })
     }
 
@@ -373,6 +395,11 @@ impl ProjectSettings {
     /// Whether the settings list their repositories, rather than describing one implicit repository.
     pub fn lists_repositories(&self) -> bool {
         self.lists_repositories
+    }
+
+    /// The slots, in declaration order.
+    pub fn slots(&self) -> &SlotCatalog {
+        &self.slots
     }
 
     /// The repositories, in declaration order; never empty.
@@ -478,6 +505,7 @@ impl ProjectSettings {
             stale_after: Some(format_duration(self.stale_after)),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
             edit_policy: Some(self.edit_policy),
+            slots: slots::slot_documents(&self.slots),
             ..SettingsDocument::default()
         };
         if self.lists_repositories {

@@ -8,6 +8,7 @@ pub mod graph;
 pub mod hook;
 pub mod login;
 pub mod messages;
+pub mod slot;
 pub mod sync;
 pub mod work;
 
@@ -39,6 +40,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Ack(args) => messages::ack(args, ctx).await,
         Command::Thread(args) => messages::thread(args, ctx).await,
         Command::Read(args) => messages::read(args, ctx).await,
+        Command::Slot(command) => slot::run(command, ctx).await,
         Command::Sync(args) => sync::sync(args, ctx).await,
         Command::Mcp => crate::mcp::serve(ctx).await,
         Command::Admin(command) => admin::run(command, ctx).await,

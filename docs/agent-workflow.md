@@ -75,6 +75,35 @@ heartbeat for the project's `stale_after` becomes stale.
 Only a stale claim can be taken over, and only with a reason (`dibs_takeover`, `dibs takeover <item> --reason
 "..."`). The reason is sent to the member who held it. Never take over a live claim; message its holder instead.
 
+## Slots: shared actions one member does at a time
+
+A slot is a shared action — a deploy, a release, a migration of a shared database — that one member does at a time.
+`dibs_slots` (or `dibs slot list`) shows who holds each, why and until when, and who waits.
+
+- Take the slot before the action: `dibs_slot_take` with the slot and a purpose (or `dibs slot take <slot> --purpose
+  "..."`). Every member reads the purpose: never put a credential, a host name or a customer's data in it.
+- `taken` means it is yours until its expiry; taking it again renews it. Release it the moment the action is done
+  (`dibs_slot_release`, `dibs slot release <slot>`): someone may be waiting.
+- `queued` means another member holds it, or it is offered to someone ahead of you. Never run the action anyway.
+  Wait for it (`wait_seconds` up to 540, or `dibs slot take <slot> --purpose "..." --wait 9m`), or work on something
+  else and take it again later. Leave the queue when you no longer need it (`dibs_slot_leave`).
+- When the slot is offered to you, the session brief and `dibs_inbox` say so with a deadline; take it before then, or
+  it passes to the next member waiting.
+- Run manual deploys and migrations through `dibs slot run <slot> --purpose "..." -- <command>`: it takes the slot,
+  keeps it alive while the command runs and releases it with the command's exit status. Some slots let their commands
+  run no other way. A run that may outlast your shell tool's time limit is started in the tool's background mode; to
+  stop it, send it `SIGTERM`.
+- A hold whose `dibs slot run` stopped sending heartbeats is *stalled*: what it was doing may be half done, so nobody
+  may act as if the slot were free. If it is yours, the brief says so first: check what it left behind, then run it
+  again or release the slot. Another member's stalled hold is taken over only with `dibs slot takeover <slot>
+  --purpose "..." --reason "<what you checked>"`; the reason is sent to them.
+- A held slot may freeze branches: while another member holds it, do not push to them; wait for its release.
+- A hold is your member's, shared by every session of yours: it does not keep two of your own agents apart.
+
+A slot names the commands that need it by patterns over one simple command at a time; `dibs slot test <settings> --
+'<command line>'` shows what a line needs. Patterns cannot see an alias or a shell function, a script that calls the
+action's script, `eval`, or the branch of a `git push` that names none: do not use these to go around a slot.
+
 ## Hot files
 
 Some shared files follow a rule the project declares: regenerate them rather than merge them by hand, leave them to

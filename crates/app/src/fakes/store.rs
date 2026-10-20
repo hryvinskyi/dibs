@@ -22,11 +22,12 @@ use dibs_domain::item::{ExternalRef, ItemStatus};
 use dibs_domain::message::{Ack, Recipients, SessionLabel};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
+use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
 
 use crate::ports::{
     AckRows, ClaimRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows,
-    SessionRows, SettingsRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
+    SessionRows, SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
     UiSessionRows, WideAskRows,
 };
 use crate::records::{
@@ -54,6 +55,7 @@ struct State {
     reads: BTreeMap<(ProjectId, MemberId, MessageId), OffsetDateTime>,
     acks: BTreeMap<(ProjectId, MessageId, MemberId), Ack>,
     wide_asks: BTreeMap<(ProjectId, MessageId), WideAsk>,
+    slots: BTreeMap<ProjectId, SlotBoard>,
     events: Vec<Event>,
     last_event: u64,
     settings: BTreeMap<ProjectId, SettingsDocument>,
@@ -118,7 +120,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 17] = [
+        let checks: [(&'static str, bool); 18] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -198,6 +200,17 @@ impl State {
                         && item(*p, ask.item)
                         && member(*p, ask.from)
                         && member(*p, ask.to)
+                }),
+            ),
+            (
+                "a slot hold, waiter or offer",
+                self.slots.iter().all(|(p, board)| {
+                    board.holds.iter().all(|h| {
+                        member(*p, h.member)
+                            && self.sessions.contains_key(&(*p, h.session))
+                            && h.item.is_none_or(|i| item(*p, i))
+                    }) && board.waiters.iter().all(|w| member(*p, w.member))
+                        && board.offers.iter().all(|o| member(*p, o.member))
                 }),
             ),
             ("an event", self.events.iter().all(|e| project(&e.project))),
@@ -885,6 +898,44 @@ impl WideAskRows for MemoryTx {
             })
             .map(|(_, ask)| ask.clone())
             .collect())
+    }
+}
+
+#[async_trait]
+impl SlotRows for MemoryTx {
+    async fn slot_board(&mut self, project: ProjectId) -> StoreResult<SlotBoard> {
+        Ok(self.work.slots.get(&project).cloned().unwrap_or_default())
+    }
+
+    async fn put_slot_board(&mut self, project: ProjectId, board: &SlotBoard) -> StoreResult<()> {
+        let mut board = board.clone();
+        board.holds.sort_by(|a, b| a.slot.cmp(&b.slot));
+        board.offers.sort_by(|a, b| a.slot.cmp(&b.slot));
+        board.waiters.sort_by_key(|w| (w.since, w.id));
+        let unique_slots = |slots: Vec<&dibs_domain::slot::SlotName>| {
+            slots.windows(2).all(|pair| pair[0] != pair[1])
+        };
+        let mut places: Vec<_> = board.waiters.iter().map(|w| (w.member, &w.slot)).collect();
+        places.sort();
+        let mut ids: Vec<_> = board.waiters.iter().map(|w| w.id).collect();
+        ids.sort();
+        let unique = unique_slots(board.holds.iter().map(|h| &h.slot).collect())
+            && unique_slots(board.offers.iter().map(|o| &o.slot).collect())
+            && places.windows(2).all(|pair| pair[0] != pair[1])
+            && ids.windows(2).all(|pair| pair[0] != pair[1]);
+        if !unique {
+            return Err(StoreError::Duplicate);
+        }
+        if board.is_empty() {
+            self.work.slots.remove(&project);
+        } else {
+            self.work.slots.insert(project, board);
+        }
+        Ok(())
+    }
+
+    async fn busy_slot_projects(&mut self) -> StoreResult<Vec<ProjectId>> {
+        Ok(self.work.slots.keys().copied().collect())
     }
 }
 

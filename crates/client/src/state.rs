@@ -443,12 +443,13 @@ mod tests {
             holds: Vec::new(),
             wide: Vec::new(),
             ready: crate::api::ReadyList::default(),
+            slots: Vec::new(),
         };
         let earlier: Status =
             serde_json::from_str(r#"{"live": [], "stale": [], "holds": []}"#).unwrap();
         assert_eq!(
             earlier, status,
-            "a status cached before the ready list reads as empty"
+            "a status cached before the ready list and the slots reads as empty"
         );
         state.remember_status(&status, at).unwrap();
         assert_eq!(state.status().unwrap().fetched_at, at);
@@ -478,6 +479,7 @@ mod tests {
         let inbox = Inbox {
             threads: Vec::new(),
             unacked: Vec::new(),
+            offers: Vec::new(),
         };
         state.remember_inbox(&inbox, at).unwrap();
         assert_eq!(state.inbox().unwrap().fetched_at, at);

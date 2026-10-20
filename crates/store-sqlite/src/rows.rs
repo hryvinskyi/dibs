@@ -10,6 +10,7 @@ mod members;
 mod projects;
 mod sessions;
 mod settings;
+mod slots;
 mod threads;
 mod tokens;
 mod ui_sessions;

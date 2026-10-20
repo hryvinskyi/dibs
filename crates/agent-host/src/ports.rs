@@ -16,6 +16,7 @@ use dibs_domain::message::{Importance, Subject};
 use dibs_domain::paths::RelPath;
 use dibs_domain::repo::RepoId;
 use dibs_domain::settings::ProjectSettings;
+use dibs_domain::slot::{Purpose, SlotName};
 
 use crate::adapter::HostId;
 use crate::event::SessionKey;
@@ -122,6 +123,42 @@ pub struct WideAreaLine {
     pub granted: bool,
 }
 
+/// A slot as the brief shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotLine {
+    /// The slot.
+    pub slot: SlotName,
+    /// Its hold, when it is held through this slot.
+    pub hold: Option<SlotHoldLine>,
+    /// The members waiting for its group, first in line first, each with the slot they asked
+    /// for.
+    pub waiting: Vec<(Handle, SlotName)>,
+}
+
+/// A slot's hold as the brief shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotHoldLine {
+    /// The member holding it.
+    pub holder: Handle,
+    /// Why.
+    pub purpose: Purpose,
+    /// When it ends unless renewed.
+    pub expires_at: OffsetDateTime,
+    /// When what keeps it was last seen.
+    pub last_seen: OffsetDateTime,
+    /// Whether its run stopped sending heartbeats.
+    pub stalled: bool,
+}
+
+/// A slot offered to the member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferLine {
+    /// The slot.
+    pub slot: SlotName,
+    /// When the offer lapses.
+    pub until: OffsetDateTime,
+}
+
 /// The project's claims and holds, and the member's ready list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatusView {
@@ -139,6 +176,8 @@ pub struct StatusView {
     pub blocked: u64,
     /// How many open items nobody holds touch an area another member holds.
     pub area_held: u64,
+    /// The declared slots.
+    pub slots: Vec<SlotLine>,
 }
 
 /// A message that asks the member for an acknowledgement they have not given, as the brief shows
@@ -164,6 +203,8 @@ pub struct InboxView {
     pub subjects: Vec<Subject>,
     /// The messages that ask the member for an acknowledgement they have not given, newest first.
     pub unacked: Vec<UnackedLine>,
+    /// The slots on offer to the member.
+    pub offers: Vec<OfferLine>,
 }
 
 /// Another member who edited a shared file under a live claim, and the item they hold.

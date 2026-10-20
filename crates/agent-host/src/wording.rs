@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use time::Duration;
+use time::{Duration, OffsetDateTime};
 
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
@@ -14,7 +14,8 @@ use dibs_domain::paths::RelPath;
 use dibs_domain::settings::EditPolicy;
 
 use crate::ports::{
-    ClaimLine, HeldWay, InboxView, ReadyLine, StatusView, TouchedBy, UnackedLine, WideLine,
+    ClaimLine, HeldWay, InboxView, OfferLine, ReadyLine, SlotLine, StatusView, TouchedBy,
+    UnackedLine, WideLine,
 };
 
 /// How many unread subjects the brief names.
@@ -139,12 +140,17 @@ pub struct Brief<'a> {
     pub inbox: Option<&'a InboxView>,
     /// How old the status is, when it is not fresh.
     pub status_age: Option<Duration>,
+    /// Now, which the slots' expiries are counted from.
+    pub now: OffsetDateTime,
 }
 
 impl Brief<'_> {
     /// The brief as text.
     pub fn text(&self) -> String {
         let mut text = format!("dibs coordinates this checkout; you are {}.", self.member);
+        if let Some(status) = self.status {
+            self.stalled_lines(&status.slots, &mut text);
+        }
         text.push('\n');
         text.push_str(match self.policy {
             EditPolicy::RequireClaim => {
@@ -158,7 +164,11 @@ impl Brief<'_> {
             Some(status) => self.status_lines(status, &mut text),
             None => text.push_str("\nThe project's claims could not be read just now."),
         }
+        if let Some(status) = self.status {
+            self.slot_lines(&status.slots, &mut text);
+        }
         if let Some(inbox) = self.inbox {
+            offer_lines(&inbox.offers, &mut text);
             inbox_lines(inbox, &mut text);
             unacked_lines(&inbox.unacked, &mut text);
         }
@@ -192,6 +202,100 @@ impl Brief<'_> {
             );
         }
     }
+}
+
+impl Brief<'_> {
+    /// The member's own stalled holds, said first: what their run left behind needs a look.
+    fn stalled_lines(&self, slots: &[SlotLine], text: &mut String) {
+        for line in slots {
+            let Some(hold) = &line.hold else { continue };
+            if hold.stalled && hold.holder == *self.member {
+                let _ = write!(
+                    text,
+                    "\nYour hold on the slot {} stalled: the run doing \"{}\" sent no heartbeat for {}. Check what it left behind first, then run it again with dibs slot run {}, or release the slot with dibs slot release {}.",
+                    line.slot,
+                    hold.purpose,
+                    minutes(self.now - hold.last_seen),
+                    line.slot,
+                    line.slot
+                );
+            }
+        }
+    }
+
+    /// The held slots, and the queues the member waits in.
+    fn slot_lines(&self, slots: &[SlotLine], text: &mut String) {
+        let held: Vec<&SlotLine> = slots.iter().filter(|line| line.hold.is_some()).collect();
+        if !held.is_empty() {
+            text.push_str("\nSlots held (shared actions one member does at a time):");
+            for line in &held {
+                let Some(hold) = &line.hold else { continue };
+                let _ = write!(
+                    text,
+                    "\n- {} by {}: {}",
+                    line.slot, hold.holder, hold.purpose
+                );
+                if hold.stalled {
+                    let _ = write!(
+                        text,
+                        "; stalled, no heartbeat for {}",
+                        minutes(self.now - hold.last_seen)
+                    );
+                } else {
+                    let _ = write!(text, "; expires in {}", minutes(hold.expires_at - self.now));
+                }
+                if !line.waiting.is_empty() {
+                    let names: Vec<String> = line
+                        .waiting
+                        .iter()
+                        .map(|(member, _)| member.to_string())
+                        .collect();
+                    let _ = write!(text, "; waiting: {}", names.join(", "));
+                }
+            }
+        }
+        for line in slots {
+            let mine = |(member, slot): &(Handle, _)| member == self.member && *slot == line.slot;
+            if let Some(place) = line.waiting.iter().position(mine) {
+                let _ = write!(
+                    text,
+                    "\nYou wait for the slot {}: number {} in its queue. Wait with dibs slot take {} --wait, or work on something else; never run its command meanwhile.",
+                    line.slot,
+                    place + 1,
+                    line.slot
+                );
+            }
+        }
+    }
+}
+
+/// The offers to the member, which lapse to the next waiter unless taken.
+fn offer_lines(offers: &[OfferLine], text: &mut String) {
+    for offer in offers {
+        let _ = write!(
+            text,
+            "\nThe slot {} is offered to you until {}: take it with dibs_slot_take {} (or dibs slot take {}) now, or it passes to the next member waiting.",
+            offer.slot,
+            clock(offer.until),
+            offer.slot,
+            offer.slot
+        );
+    }
+}
+
+/// A length of time in whole minutes, `under a minute` below one.
+fn minutes(duration: Duration) -> String {
+    match duration.whole_minutes() {
+        n if n < 1 => "under a minute".to_owned(),
+        1 => "1 minute".to_owned(),
+        n => format!("{n} minutes"),
+    }
+}
+
+/// A time of day in UTC.
+fn clock(at: OffsetDateTime) -> String {
+    let at = at.to_offset(time::UtcOffset::UTC);
+    format!("{:02}:{:02} UTC", at.hour(), at.minute())
 }
 
 fn claim_lines(heading: &str, claims: &[&ClaimLine], text: &mut String) {
@@ -433,6 +537,7 @@ mod tests {
                 .map(|subject| subject.parse().unwrap())
                 .collect(),
             unacked: Vec::new(),
+            offers: Vec::new(),
         };
         let text = Brief {
             member: &me,
@@ -440,6 +545,7 @@ mod tests {
             status: Some(&status),
             inbox: Some(&inbox),
             status_age: None,
+            now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
         assert!(
@@ -482,6 +588,7 @@ mod tests {
                 unacked(17, "carol", "Old one", Importance::Normal),
                 unacked(16, "carol", "Oldest", Importance::Normal),
             ],
+            offers: Vec::new(),
         };
         let text = Brief {
             member: &me,
@@ -489,6 +596,7 @@ mod tests {
             status: None,
             inbox: Some(&inbox),
             status_age: None,
+            now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
         assert!(
@@ -568,6 +676,7 @@ mod tests {
             status: Some(&status),
             inbox: None,
             status_age: None,
+            now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
         assert!(
@@ -592,6 +701,7 @@ mod tests {
             status: Some(&StatusView::default()),
             inbox: None,
             status_age: None,
+            now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
         assert!(nothing.contains("Ready to pick up: nothing."), "{nothing}");
@@ -607,9 +717,94 @@ mod tests {
             status: None,
             inbox: None,
             status_age: None,
+            now: OffsetDateTime::UNIX_EPOCH,
         }
         .text();
         assert!(text.contains("advisory"), "{text}");
         assert!(text.contains("could not be read"), "{text}");
+    }
+
+    #[test]
+    fn the_brief_says_my_stalled_hold_first_then_the_held_slots_my_place_and_my_offer() {
+        use crate::ports::{OfferLine, SlotHoldLine, SlotLine};
+        use dibs_domain::slot::{Purpose, SlotName};
+
+        let me = handle("bob");
+        let at = |minutes: i64| OffsetDateTime::UNIX_EPOCH + Duration::minutes(minutes);
+        let slot = |name: &str| SlotName::parse(name).unwrap();
+        let hold = |holder: &str, purpose: &str, stalled: bool| SlotHoldLine {
+            holder: handle(holder),
+            purpose: Purpose::parse(purpose).unwrap(),
+            expires_at: at(42),
+            last_seen: at(4),
+            stalled,
+        };
+        let status = StatusView {
+            slots: vec![
+                SlotLine {
+                    slot: slot("migrate"),
+                    hold: Some(hold("bob", "invoices bigint", true)),
+                    waiting: Vec::new(),
+                },
+                SlotLine {
+                    slot: slot("db:staging"),
+                    hold: Some(hold("alice", "load test data", false)),
+                    waiting: vec![(handle("bob"), slot("deploy:staging"))],
+                },
+                SlotLine {
+                    slot: slot("deploy:staging"),
+                    hold: None,
+                    waiting: vec![(handle("bob"), slot("deploy:staging"))],
+                },
+                SlotLine {
+                    slot: slot("release"),
+                    hold: None,
+                    waiting: Vec::new(),
+                },
+            ],
+            ..StatusView::default()
+        };
+        let inbox = InboxView {
+            offers: vec![OfferLine {
+                slot: slot("release"),
+                until: at(17),
+            }],
+            ..InboxView::default()
+        };
+        let text = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: Some(&status),
+            inbox: Some(&inbox),
+            status_age: None,
+            now: at(12),
+        }
+        .text();
+        let stalled = text.find("Your hold on the slot migrate stalled").unwrap();
+        assert!(
+            stalled < text.find("Edit policy").unwrap(),
+            "said first: {text}"
+        );
+        assert!(text.contains("no heartbeat for 8 minutes"), "{text}");
+        assert!(
+            text.contains(
+                "- db:staging by alice: load test data; expires in 30 minutes; waiting: bob"
+            ),
+            "{text}"
+        );
+        assert!(
+            !text.contains("- deploy:staging by"),
+            "a group's hold is listed once: {text}"
+        );
+        assert_eq!(
+            text.matches("You wait for the slot deploy:staging: number 1")
+                .count(),
+            1,
+            "{text}"
+        );
+        assert!(
+            text.contains("The slot release is offered to you until 00:17 UTC: take it with dibs_slot_take release"),
+            "{text}"
+        );
     }
 }

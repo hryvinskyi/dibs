@@ -14,6 +14,7 @@ use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, Sessi
 use crate::item::{ExternalRef, Title};
 use crate::paths::RepoPath;
 use crate::session::HostName;
+use crate::slot::{Purpose, RunExit, SlotName};
 
 /// One entry of a project's log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +76,32 @@ pub enum EventKind {
     /// A holder acknowledged a wide claim's announcement, and that granted the wide claim's member
     /// edits in one of their areas.
     WideGrantedByAck(WideGrantedByAck),
+    /// A member took a free slot, or one offered to them.
+    SlotTaken(SlotTaken),
+    /// The holder took their slot again, moving its expiry.
+    SlotRenewed(SlotMember),
+    /// A member joined a slot group's queue.
+    SlotQueued(SlotQueued),
+    /// A waiter left a queue, gave up an offer, or was removed after waiting too long without a
+    /// sign of life.
+    SlotLeft(SlotMember),
+    /// A slot was offered to the first member of its group's queue.
+    SlotOffered(SlotMember),
+    /// An offer lapsed untaken; its member is out of the queue.
+    SlotOfferLapsed(SlotMember),
+    /// The holder released a slot.
+    SlotReleased(SlotReleased),
+    /// A hold reached its expiry.
+    SlotExpired(SlotMember),
+    /// An admin ended a hold, or a settings change removed a slot that had a hold, a waiter or an
+    /// offer.
+    SlotForceReleased(SlotForceReleased),
+    /// A hold kept by a run's heartbeats went without them too long.
+    SlotStalled(SlotMember),
+    /// A stalled hold's run sent a heartbeat again.
+    SlotResumed(SlotMember),
+    /// A member took over another member's stalled hold.
+    SlotStallTakenOver(SlotStallTakenOver),
 }
 
 impl EventKind {
@@ -100,6 +127,18 @@ impl EventKind {
             Self::Acked(_) => "acked",
             Self::WideClaimed(_) => "wide_claimed",
             Self::WideGrantedByAck(_) => "wide_granted_by_ack",
+            Self::SlotTaken(_) => "slot_taken",
+            Self::SlotRenewed(_) => "slot_renewed",
+            Self::SlotQueued(_) => "slot_queued",
+            Self::SlotLeft(_) => "slot_left",
+            Self::SlotOffered(_) => "slot_offered",
+            Self::SlotOfferLapsed(_) => "slot_offer_lapsed",
+            Self::SlotReleased(_) => "slot_released",
+            Self::SlotExpired(_) => "slot_expired",
+            Self::SlotForceReleased(_) => "slot_force_released",
+            Self::SlotStalled(_) => "slot_stalled",
+            Self::SlotResumed(_) => "slot_resumed",
+            Self::SlotStallTakenOver(_) => "slot_stall_taken_over",
         }
     }
 
@@ -125,6 +164,18 @@ impl EventKind {
             Self::Acked(e) => &[e.by],
             Self::WideClaimed(e) => &[e.member],
             Self::WideGrantedByAck(e) => &[e.by, e.to],
+            Self::SlotTaken(e) => &[e.member],
+            Self::SlotQueued(e) => &[e.member],
+            Self::SlotReleased(e) => &[e.member],
+            Self::SlotRenewed(e)
+            | Self::SlotLeft(e)
+            | Self::SlotOffered(e)
+            | Self::SlotOfferLapsed(e)
+            | Self::SlotExpired(e)
+            | Self::SlotStalled(e)
+            | Self::SlotResumed(e) => &[e.member],
+            Self::SlotForceReleased(e) => &[e.member, e.by],
+            Self::SlotStallTakenOver(e) => &[e.member, e.previous],
         };
         named.iter().copied().collect()
     }
@@ -150,7 +201,19 @@ impl EventKind {
             | Self::DependencyRemoved(_)
             | Self::Acked(_)
             | Self::WideClaimed(_)
-            | Self::WideGrantedByAck(_) => None,
+            | Self::WideGrantedByAck(_)
+            | Self::SlotTaken(_)
+            | Self::SlotRenewed(_)
+            | Self::SlotQueued(_)
+            | Self::SlotLeft(_)
+            | Self::SlotOffered(_)
+            | Self::SlotOfferLapsed(_)
+            | Self::SlotReleased(_)
+            | Self::SlotExpired(_)
+            | Self::SlotForceReleased(_)
+            | Self::SlotStalled(_)
+            | Self::SlotResumed(_)
+            | Self::SlotStallTakenOver(_) => None,
         }
     }
 
@@ -175,7 +238,38 @@ impl EventKind {
             | Self::DependencyAdded(_)
             | Self::DependencyRemoved(_)
             | Self::WideClaimed(_)
-            | Self::WideGrantedByAck(_) => None,
+            | Self::WideGrantedByAck(_)
+            | Self::SlotTaken(_)
+            | Self::SlotRenewed(_)
+            | Self::SlotQueued(_)
+            | Self::SlotLeft(_)
+            | Self::SlotOffered(_)
+            | Self::SlotOfferLapsed(_)
+            | Self::SlotReleased(_)
+            | Self::SlotExpired(_)
+            | Self::SlotForceReleased(_)
+            | Self::SlotStalled(_)
+            | Self::SlotResumed(_)
+            | Self::SlotStallTakenOver(_) => None,
+        }
+    }
+
+    /// The slot the event is about, for the kinds that are about one.
+    pub const fn slot(&self) -> Option<&SlotName> {
+        match self {
+            Self::SlotTaken(SlotTaken { slot, .. })
+            | Self::SlotQueued(SlotQueued { slot, .. })
+            | Self::SlotReleased(SlotReleased { slot, .. })
+            | Self::SlotForceReleased(SlotForceReleased { slot, .. })
+            | Self::SlotStallTakenOver(SlotStallTakenOver { slot, .. })
+            | Self::SlotRenewed(SlotMember { slot, .. })
+            | Self::SlotLeft(SlotMember { slot, .. })
+            | Self::SlotOffered(SlotMember { slot, .. })
+            | Self::SlotOfferLapsed(SlotMember { slot, .. })
+            | Self::SlotExpired(SlotMember { slot, .. })
+            | Self::SlotStalled(SlotMember { slot, .. })
+            | Self::SlotResumed(SlotMember { slot, .. }) => Some(slot),
+            _ => None,
         }
     }
 }
@@ -424,6 +518,84 @@ pub struct Acked {
     pub by: MemberId,
 }
 
+/// A slot event that names the slot and one member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotMember {
+    /// The slot.
+    pub slot: SlotName,
+    /// The member.
+    pub member: MemberId,
+}
+
+/// A member took a slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotTaken {
+    /// The slot.
+    pub slot: SlotName,
+    /// The member now holding it.
+    pub member: MemberId,
+    /// Why, as every member reads it.
+    pub purpose: Purpose,
+}
+
+/// A member joined a queue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotQueued {
+    /// The slot asked for.
+    pub slot: SlotName,
+    /// The member waiting.
+    pub member: MemberId,
+    /// Why they want it.
+    pub purpose: Purpose,
+}
+
+/// The holder released a slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotReleased {
+    /// The slot.
+    pub slot: SlotName,
+    /// The member who held it.
+    pub member: MemberId,
+    /// How the run held under it ended, when a run released it.
+    pub exit: Option<RunExit>,
+}
+
+/// Why a hold, a place or an offer was ended by someone other than its member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForceCause {
+    /// An admin ended the hold, giving the holder a reason.
+    Admin,
+    /// The settings no longer declare the slot.
+    SlotRemoved,
+}
+
+/// A hold, a place in a queue or an offer was ended by someone other than its member.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotForceReleased {
+    /// The slot.
+    pub slot: SlotName,
+    /// The member who held it, waited for it or was offered it.
+    pub member: MemberId,
+    /// The admin who ended it.
+    pub by: MemberId,
+    /// Why.
+    pub cause: ForceCause,
+}
+
+/// A member took over another member's stalled hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotStallTakenOver {
+    /// The slot.
+    pub slot: SlotName,
+    /// The member now holding it.
+    pub member: MemberId,
+    /// The member whose hold stalled.
+    pub previous: MemberId,
+    /// Why the new member holds it.
+    pub purpose: Purpose,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +702,87 @@ mod tests {
                 to: ALICE,
             }),
         ]
+    }
+
+    fn slot_kinds() -> Vec<EventKind> {
+        let slot = SlotName::parse("deploy:prod").unwrap();
+        let purpose = Purpose::parse("ship 2.4").unwrap();
+        let one = || SlotMember {
+            slot: slot.clone(),
+            member: ALICE,
+        };
+        vec![
+            EventKind::SlotTaken(SlotTaken {
+                slot: slot.clone(),
+                member: ALICE,
+                purpose: purpose.clone(),
+            }),
+            EventKind::SlotRenewed(one()),
+            EventKind::SlotQueued(SlotQueued {
+                slot: slot.clone(),
+                member: ALICE,
+                purpose: purpose.clone(),
+            }),
+            EventKind::SlotLeft(one()),
+            EventKind::SlotOffered(one()),
+            EventKind::SlotOfferLapsed(one()),
+            EventKind::SlotReleased(SlotReleased {
+                slot: slot.clone(),
+                member: ALICE,
+                exit: Some(RunExit::Code(3)),
+            }),
+            EventKind::SlotExpired(one()),
+            EventKind::SlotForceReleased(SlotForceReleased {
+                slot: slot.clone(),
+                member: ALICE,
+                by: BOB,
+                cause: ForceCause::SlotRemoved,
+            }),
+            EventKind::SlotStalled(one()),
+            EventKind::SlotResumed(one()),
+            EventKind::SlotStallTakenOver(SlotStallTakenOver {
+                slot,
+                member: BOB,
+                previous: ALICE,
+                purpose,
+            }),
+        ]
+    }
+
+    #[test]
+    fn slot_events_round_trip_and_carry_the_slot_its_members_and_purpose_only() {
+        let allowed = [
+            "slot", "member", "purpose", "exit", "by", "cause", "previous",
+        ];
+        for kind in slot_kinds() {
+            let value = serde_json::to_value(&kind).unwrap();
+            assert_eq!(value["kind"], kind.name());
+            assert!(kind.name().starts_with("slot_"));
+            assert_eq!(value["payload"]["slot"], "deploy:prod");
+            for field in value["payload"].as_object().unwrap().keys() {
+                assert!(
+                    allowed.contains(&field.as_str()),
+                    "{} carries {field}",
+                    kind.name()
+                );
+            }
+            assert_eq!(kind.slot().map(SlotName::as_str), Some("deploy:prod"));
+            assert_eq!((kind.message(), kind.thread()), (None, None));
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(back, kind);
+        }
+        let members: Vec<BTreeSet<MemberId>> =
+            slot_kinds().iter().map(EventKind::members).collect();
+        assert_eq!(members[8], BTreeSet::from([ALICE, BOB]));
+        assert_eq!(members[11], BTreeSet::from([ALICE, BOB]));
+        assert!(
+            members[..8]
+                .iter()
+                .all(|named| *named == BTreeSet::from([ALICE]))
+        );
+        let released = serde_json::to_value(&slot_kinds()[6]).unwrap();
+        assert_eq!(released["payload"]["exit"], serde_json::json!({"code": 3}));
+        assert_eq!(every_kind()[0].slot(), None);
     }
 
     #[test]

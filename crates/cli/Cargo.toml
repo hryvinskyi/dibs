@@ -21,7 +21,7 @@ dibs-agent-host = { path = "../agent-host" }
 dibs-host-claude-code = { path = "../host-claude-code" }
 dibs-domain = { path = "../domain" }
 clap = { version = "4.6.7", features = ["derive"] }
-tokio = { version = "1.54.0", features = ["rt", "sync", "time"] }
+tokio = { version = "1.54.0", features = ["process", "rt", "signal", "sync", "time"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.1.8"
@@ -47,3 +47,6 @@ harness = false
 [[test]]
 name = "claude-code"
 path = "../host-claude-code/cli-tests/main.rs"
+
+[target."cfg(unix)".dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["signal"] }

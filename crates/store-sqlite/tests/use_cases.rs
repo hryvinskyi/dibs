@@ -14,8 +14,8 @@ mod use_cases {
     use dibs_app::ports::Store;
     use dibs_app::use_cases::{
         Addressees, ClaimItemInput, ClaimMade, CreateItemInput, CreateMemberInput, EventCursor,
-        InitProjectInput, ItemQuery, NewMember, RegisterSessionInput, StartThreadInput,
-        TakeOverInput, UseCases,
+        HoldMode, InitProjectInput, ItemQuery, NewMember, RegisterSessionInput, ReleaseSlotInput,
+        StartThreadInput, TakeOverInput, TakeSlotInput, TookKind, TookSlot, UseCases,
     };
     use dibs_app::{Actor, AppError, Dependencies};
     use dibs_domain::claim::{ClaimOutcome, ClaimRefused, TakeoverRefused};
@@ -27,6 +27,7 @@ mod use_cases {
     use dibs_domain::project::ProjectSlug;
     use dibs_domain::session::{AgentLabel, HostName};
     use dibs_domain::settings::SettingsDocument;
+    use dibs_domain::slot::{Purpose, SlotName};
     use dibs_store_sqlite::SqliteStore;
 
     fn unread_only(unread_only: bool) -> dibs_app::use_cases::InboxQuery {
@@ -154,9 +155,11 @@ mod use_cases {
             let world = World::new().await;
             let app = &world.app;
             let admin = project(app, "widgets", "admin").await;
-            let document: SettingsDocument =
-                serde_json::from_str(r#"{"areas":[{"name":"billing","paths":["billing/**"]}]}"#)
-                    .unwrap();
+            let document: SettingsDocument = serde_json::from_str(
+                r#"{"areas":[{"name":"billing","paths":["billing/**"]}],
+                        "slots":[{"name":"deploy:prod","max_hold":"30m"}]}"#,
+            )
+            .unwrap();
             app.apply_settings.execute(&admin, document).await.unwrap();
             let mut racers = Vec::new();
             for n in 0..RACERS {
@@ -259,6 +262,161 @@ mod use_cases {
         assert_eq!(view.claim.map(|c| c.claim.member), Some(winner));
         let names = race.world.event_names(race.admin.project).await;
         assert_eq!(names.iter().filter(|n| **n == "claimed").count(), 1);
+    }
+
+    /// Racers `0..count` take the slot at once.
+    async fn take_all(
+        race: &Arc<Race>,
+        count: usize,
+    ) -> Vec<(MemberId, Result<TookSlot, AppError>)> {
+        let mut tasks = Vec::new();
+        for n in 0..count {
+            let race = race.clone();
+            tasks.push(tokio::spawn(async move {
+                let racer = &race.racers[n];
+                let input = TakeSlotInput {
+                    slot: SlotName::parse("deploy:prod").unwrap(),
+                    session: racer.session,
+                    purpose: Purpose::parse("ship it").unwrap(),
+                    item: None,
+                    mode: HoldMode::Session,
+                };
+                (
+                    racer.actor.member,
+                    race.world.app.take_slot.execute(&racer.actor, input).await,
+                )
+            }));
+        }
+        let mut results = Vec::new();
+        for task in tasks {
+            results.push(task.await.unwrap());
+        }
+        results
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn many_takers_of_one_slot_make_one_holder_and_a_queue_in_order() {
+        let race = Race::new().await;
+        let results = take_all(&race, RACERS).await;
+        let holders: Vec<MemberId> = results
+            .iter()
+            .filter(|(_, r)| {
+                matches!(
+                    r,
+                    Ok(TookSlot {
+                        kind: TookKind::Taken,
+                        ..
+                    })
+                )
+            })
+            .map(|(member, _)| *member)
+            .collect();
+        assert_eq!(holders.len(), 1, "{results:?}");
+        let mut places: Vec<(usize, MemberId)> = results
+            .iter()
+            .filter_map(|(member, r)| match r {
+                Ok(TookSlot {
+                    kind: TookKind::Queued { position },
+                    ..
+                }) => Some((*position, *member)),
+                _ => None,
+            })
+            .collect();
+        places.sort();
+        let positions: Vec<usize> = places.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            positions,
+            (1..RACERS).collect::<Vec<_>>(),
+            "each place once"
+        );
+        let line = race
+            .world
+            .app
+            .slots
+            .one(&race.admin, &SlotName::parse("deploy:prod").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(line.hold.map(|h| h.hold.member), Some(holders[0]));
+        let queue: Vec<MemberId> = line.queue.iter().map(|w| w.waiter.member).collect();
+        let answered: Vec<MemberId> = places.iter().map(|(_, m)| *m).collect();
+        assert_eq!(
+            queue, answered,
+            "the queue is in the order the places were answered"
+        );
+        let names = race.world.event_names(race.admin.project).await;
+        assert_eq!(names.iter().filter(|n| **n == "slot_taken").count(), 1);
+        assert_eq!(
+            names.iter().filter(|n| **n == "slot_queued").count(),
+            RACERS - 1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn two_takers_race_a_hundred_rounds_and_each_round_has_one_holder_and_one_waiter() {
+        let race = Race::new().await;
+        let slot = SlotName::parse("deploy:prod").unwrap();
+        for round in 0..100 {
+            let results = take_all(&race, 2).await;
+            let taken = results
+                .iter()
+                .filter(|(_, r)| {
+                    matches!(
+                        r,
+                        Ok(TookSlot {
+                            kind: TookKind::Taken,
+                            ..
+                        })
+                    )
+                })
+                .count();
+            let queued = results
+                .iter()
+                .filter(|(_, r)| {
+                    matches!(
+                        r,
+                        Ok(TookSlot {
+                            kind: TookKind::Queued { position: 1 },
+                            ..
+                        })
+                    )
+                })
+                .count();
+            assert_eq!((taken, queued), (1, 1), "round {round}: {results:?}");
+            for (n, (_, result)) in results.iter().enumerate() {
+                let racer = &race.racers[n];
+                let release = ReleaseSlotInput {
+                    slot: slot.clone(),
+                    run: None,
+                    exit: None,
+                };
+                match result {
+                    Ok(TookSlot {
+                        kind: TookKind::Taken,
+                        ..
+                    }) => {
+                        race.world
+                            .app
+                            .release_slot
+                            .execute(&racer.actor, release)
+                            .await
+                            .unwrap();
+                    }
+                    _ => {
+                        race.world
+                            .app
+                            .leave_slot_queue
+                            .execute(&racer.actor, &slot)
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            let line = race.world.app.slots.one(&race.admin, &slot).await.unwrap();
+            assert!(
+                line.hold.is_none() && line.queue.is_empty() && line.offer.is_none(),
+                "round {round}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

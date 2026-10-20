@@ -148,6 +148,17 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/inbox", get(routes::threads::inbox))
         .route("/v1/messages/{id}/ack", post(routes::messages::ack))
         .route("/v1/messages/{id}/status", get(routes::messages::status))
+        .route("/v1/slots", get(routes::slots::list))
+        .route("/v1/slots/{name}", get(routes::slots::get))
+        .route("/v1/slots/{name}/take", post(routes::slots::take))
+        .route("/v1/slots/{name}/release", post(routes::slots::release))
+        .route("/v1/slots/{name}/leave", post(routes::slots::leave))
+        .route("/v1/slots/{name}/heartbeat", post(routes::slots::heartbeat))
+        .route("/v1/slots/{name}/takeover", post(routes::slots::take_over))
+        .route(
+            "/v1/slots/{name}/run-finished",
+            post(routes::slots::run_finished),
+        )
         .route("/v1/events", get(routes::events::list))
         .route("/v1/events/stream", get(routes::events::stream))
         .route("/v1/admin/members", post(routes::admin::add_member))
@@ -163,6 +174,10 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route(
             "/v1/admin/items/{id}/force-release",
             post(routes::admin::force_release),
+        )
+        .route(
+            "/v1/admin/slots/{name}/force-release",
+            post(routes::slots::force_release),
         )
         .merge(ui::routes())
         .fallback(no_route)

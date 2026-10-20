@@ -124,6 +124,9 @@ mod contract {
         browser_sessions_are_found_by_hash_and_swept_when_ended,
         a_reference_to_a_missing_record_fails_the_commit_and_writes_nothing,
         the_largest_id_the_port_allows_is_kept,
+        slot_boards_are_replaced_whole_ordered_and_scoped,
+        a_slot_row_is_unique_per_slot_and_per_member_place,
+        a_slot_row_naming_a_missing_record_fails_the_commit,
     );
 
     const A: ProjectId = ProjectId(1);
@@ -1729,5 +1732,191 @@ mod contract {
         .await
         .unwrap();
         tx.commit().await.unwrap();
+    }
+
+    fn slot_name(text: &str) -> dibs_domain::slot::SlotName {
+        dibs_domain::slot::SlotName::parse(text).unwrap()
+    }
+
+    fn purpose(text: &str) -> dibs_domain::slot::Purpose {
+        dibs_domain::slot::Purpose::parse(text).unwrap()
+    }
+
+    fn slot_hold(
+        slot: &str,
+        member: MemberId,
+        session: SessionId,
+        liveness: dibs_domain::slot::Liveness,
+    ) -> dibs_domain::slot::SlotHold {
+        dibs_domain::slot::SlotHold {
+            slot: slot_name(slot),
+            member,
+            session,
+            host: HostName::parse("laptop").unwrap(),
+            purpose: purpose("ship 2.4"),
+            item: None,
+            liveness,
+            taken_at: at(10),
+            expires_at: at(1810),
+            last_seen: at(11),
+            stalled_at: None,
+        }
+    }
+
+    fn slot_waiter(
+        id: u64,
+        slot: &str,
+        member: MemberId,
+        since: i64,
+    ) -> dibs_domain::slot::SlotWaiter {
+        dibs_domain::slot::SlotWaiter {
+            id: dibs_domain::ids::WaiterId(id),
+            slot: slot_name(slot),
+            member,
+            purpose: purpose("next deploy"),
+            since: at(since),
+            last_seen: at(since + 1),
+        }
+    }
+
+    async fn slot_boards_are_replaced_whole_ordered_and_scoped(store: Arc<dyn Store>) {
+        use dibs_domain::slot::{CommitSha, Liveness, SlotBoard, SlotOffer, WorkflowName};
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        assert!(tx.slot_board(A).await.unwrap().is_empty());
+        assert!(tx.busy_slot_projects().await.unwrap().is_empty());
+        let stalled = dibs_domain::slot::SlotHold {
+            stalled_at: Some(at(200)),
+            item: Some(FIRST),
+            ..slot_hold(
+                "migrate",
+                BOB,
+                BOB_LAPTOP,
+                Liveness::Run {
+                    run: dibs_domain::ids::RunId(77),
+                },
+            )
+        };
+        let until = slot_hold(
+            "deploy:prod",
+            ALICE,
+            ALICE_LAPTOP,
+            Liveness::UntilRun {
+                workflow: WorkflowName::parse("deploy.yml").unwrap(),
+                sha: CommitSha::parse("abc1234").unwrap(),
+            },
+        );
+        let session = slot_hold("db:staging", ALICE, ALICE_LAPTOP, Liveness::Session);
+        let board = SlotBoard {
+            holds: vec![stalled.clone(), until.clone(), session.clone()],
+            waiters: vec![
+                slot_waiter(9, "deploy:prod", BOB, 30),
+                slot_waiter(3, "deploy:prod", ALICE, 30),
+                slot_waiter(5, "migrate", ALICE, 20),
+            ],
+            offers: vec![SlotOffer {
+                slot: slot_name("release"),
+                member: BOB,
+                purpose: purpose("cut 2.4"),
+                until: at(500),
+            }],
+        };
+        tx.put_slot_board(A, &board).await.unwrap();
+        let dave = SlotBoard {
+            holds: vec![slot_hold(
+                "deploy:prod",
+                DAVE,
+                DAVE_LAPTOP,
+                Liveness::Session,
+            )],
+            ..SlotBoard::default()
+        };
+        tx.put_slot_board(B, &dave).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let read = tx.slot_board(A).await.unwrap();
+        assert_eq!(read.holds, [session, until, stalled], "holds by slot");
+        let places: Vec<u64> = read.waiters.iter().map(|w| w.id.get()).collect();
+        assert_eq!(places, [5, 3, 9], "waiters by since, then id");
+        assert_eq!(read.offers, board.offers);
+        assert_eq!(tx.slot_board(B).await.unwrap(), dave);
+        assert_eq!(tx.busy_slot_projects().await.unwrap(), [A, B]);
+        tx.put_slot_board(A, &SlotBoard::default()).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert!(tx.slot_board(A).await.unwrap().is_empty());
+        assert_eq!(tx.busy_slot_projects().await.unwrap(), [B]);
+    }
+
+    async fn a_slot_row_is_unique_per_slot_and_per_member_place(store: Arc<dyn Store>) {
+        use dibs_domain::slot::{Liveness, SlotBoard};
+        seed(&store).await;
+        let twice = SlotBoard {
+            holds: vec![
+                slot_hold("deploy:prod", ALICE, ALICE_LAPTOP, Liveness::Session),
+                slot_hold("deploy:prod", BOB, BOB_LAPTOP, Liveness::Session),
+            ],
+            ..SlotBoard::default()
+        };
+        let mut tx = store.begin().await.unwrap();
+        assert!(is_duplicate(tx.put_slot_board(A, &twice).await));
+        drop(tx);
+        let queued_twice = SlotBoard {
+            waiters: vec![
+                slot_waiter(1, "deploy:prod", BOB, 1),
+                slot_waiter(2, "deploy:prod", BOB, 2),
+            ],
+            ..SlotBoard::default()
+        };
+        let mut tx = store.begin().await.unwrap();
+        assert!(is_duplicate(tx.put_slot_board(A, &queued_twice).await));
+    }
+
+    async fn a_slot_row_naming_a_missing_record_fails_the_commit(store: Arc<dyn Store>) {
+        use dibs_domain::slot::{Liveness, SlotBoard};
+        seed(&store).await;
+        let boards = [
+            (
+                "a hold of a member of another project",
+                SlotBoard {
+                    holds: vec![slot_hold(
+                        "deploy:prod",
+                        DAVE,
+                        ALICE_LAPTOP,
+                        Liveness::Session,
+                    )],
+                    ..SlotBoard::default()
+                },
+            ),
+            (
+                "a hold on a missing item",
+                SlotBoard {
+                    holds: vec![dibs_domain::slot::SlotHold {
+                        item: Some(ItemId(999)),
+                        ..slot_hold("deploy:prod", ALICE, ALICE_LAPTOP, Liveness::Session)
+                    }],
+                    ..SlotBoard::default()
+                },
+            ),
+            (
+                "a waiter who is no member",
+                SlotBoard {
+                    waiters: vec![slot_waiter(1, "deploy:prod", MemberId(999), 1)],
+                    ..SlotBoard::default()
+                },
+            ),
+        ];
+        for (what, board) in boards {
+            let mut tx = store.begin().await.unwrap();
+            tx.put_slot_board(A, &board).await.unwrap();
+            assert!(
+                matches!(tx.commit().await, Err(StoreError::Backend(_))),
+                "{what}"
+            );
+            let mut tx = store.begin().await.unwrap();
+            assert!(tx.slot_board(A).await.unwrap().is_empty(), "{what}");
+        }
     }
 }

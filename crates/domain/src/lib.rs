@@ -25,6 +25,7 @@ pub mod repo;
 pub mod reservation;
 pub mod session;
 pub mod settings;
+pub mod slot;
 mod text;
 pub mod wide;
 

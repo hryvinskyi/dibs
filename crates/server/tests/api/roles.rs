@@ -1,6 +1,6 @@
 //! What an integration may call: who it is, the members, the event feed, reading, creating and
-//! importing work items, and the ready list; never a conversation, a message or an
-//! acknowledgement. Every other route of the router answers it
+//! importing work items, the ready list, reading the slots and reporting a finished workflow run;
+//! never a conversation, a message, an acknowledgement or a slot hold. Every other route of the router answers it
 //! `forbidden`, and each refusal comes before the request is read, so a body that would be refused
 //! for its content still answers `forbidden`.
 
@@ -48,6 +48,19 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             StatusCode::OK,
         ),
         (Method::GET, "/v1/ready".into(), None, StatusCode::OK),
+        (Method::GET, "/v1/slots".into(), None, StatusCode::OK),
+        (
+            Method::GET,
+            "/v1/slots/deploy".into(),
+            None,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            Method::POST,
+            "/v1/slots/deploy/run-finished".into(),
+            Some(json!({"workflow": "deploy.yml", "sha": "abc1234", "conclusion": "success"})),
+            StatusCode::OK,
+        ),
     ];
     for (method, path, body, status) in allowed {
         let answer = world
@@ -138,6 +151,32 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             Method::POST,
             format!("/v1/admin/items/{item}/force-release"),
             None,
+        ),
+        (
+            Method::POST,
+            "/v1/slots/deploy/take".into(),
+            Some(json!({"session_id": session, "purpose": "ship"})),
+        ),
+        (
+            Method::POST,
+            "/v1/slots/deploy/release".into(),
+            Some(json!({})),
+        ),
+        (Method::POST, "/v1/slots/deploy/leave".into(), None),
+        (
+            Method::POST,
+            "/v1/slots/deploy/heartbeat".into(),
+            Some(json!({"run_id": 1})),
+        ),
+        (
+            Method::POST,
+            "/v1/slots/deploy/takeover".into(),
+            Some(json!({"session_id": session, "purpose": "x", "reason": "y"})),
+        ),
+        (
+            Method::POST,
+            "/v1/admin/slots/deploy/force-release".into(),
+            Some(json!({"session_id": session, "reason": "y"})),
         ),
     ];
     for (method, path, body) in refused {

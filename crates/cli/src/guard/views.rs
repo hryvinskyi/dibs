@@ -1,8 +1,8 @@
 //! The client's answers as the guard reads them.
 
 use dibs_agent_host::ports::{
-    ClaimLine, HeldWay, HoldLine, InboxView, PathAnswer, PortError, ReadyLine, StatusView,
-    TouchedBy, UnackedLine, WideAreaLine, WideLine,
+    ClaimLine, HeldWay, HoldLine, InboxView, OfferLine, PathAnswer, PortError, ReadyLine,
+    SlotHoldLine, SlotLine, StatusView, TouchedBy, UnackedLine, WideAreaLine, WideLine,
 };
 use dibs_client::ClientError;
 use dibs_client::api::{
@@ -74,6 +74,29 @@ pub fn status(status: &Status) -> StatusView {
             matches!(reason, NotReady::BlockedBy { .. })
         }),
         area_held: count(status, |reason| matches!(reason, NotReady::AreaHeld { .. })),
+        slots: status
+            .slots
+            .iter()
+            .map(|slot| SlotLine {
+                slot: slot.name.clone(),
+                hold: slot
+                    .hold
+                    .as_ref()
+                    .filter(|hold| hold.slot == slot.name)
+                    .map(|hold| SlotHoldLine {
+                        holder: hold.holder.clone(),
+                        purpose: hold.purpose.clone(),
+                        expires_at: hold.expires_at,
+                        last_seen: hold.last_seen,
+                        stalled: hold.stalled,
+                    }),
+                waiting: slot
+                    .queue
+                    .iter()
+                    .map(|waiter| (waiter.member.clone(), waiter.slot.clone()))
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
@@ -122,6 +145,14 @@ pub fn inbox(inbox: &Inbox) -> InboxView {
                 sender: unacked.message.author.clone(),
                 subject: unacked.thread.subject.clone(),
                 importance: unacked.message.importance,
+            })
+            .collect(),
+        offers: inbox
+            .offers
+            .iter()
+            .map(|offer| OfferLine {
+                slot: offer.slot.clone(),
+                until: offer.until,
             })
             .collect(),
     }

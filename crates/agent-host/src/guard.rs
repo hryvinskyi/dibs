@@ -211,6 +211,7 @@ impl Run<'_> {
             status: status.as_ref().map(|cached| &cached.value),
             inbox: inbox.as_ref().map(|cached| &cached.value),
             status_age,
+            now: self.now,
         };
         Ok(GuardOutcome::NoObjection {
             context: Some(Text::new(brief.text())),

@@ -8,7 +8,22 @@
   {% endfor %}
 </li>{% endmacro %}
 <template data-updated-template>{% call ui::time(board.updated) %}{% endcall %}</template>
-{% if !board.wide.is_empty() %}<section class="section" aria-labelledby="b-wide">
+{% if !board.slots.is_empty() %}<section class="section" aria-labelledby="b-slots">
+  <div class="section-head"><h2 id="b-slots">Slots</h2><p class="section-head__hint">Short holds for shared actions</p></div>
+  <ul class="slots">
+{% for slot in board.slots %}<li class="slot{% match slot.state %}{% when SlotState::Free %} slot--free{% when SlotState::Held %} slot--held{% when SlotState::Queued %} slot--queued{% when SlotState::Stalled with { silent } %} slot--stalled{% when SlotState::Offered with { member, until } %} slot--offered{% endmatch %}" data-slot="{{ slot.name }}">
+    <div class="slot__head"><span class="slot__name">{{ slot.name }}</span>{% match slot.state %}{% when SlotState::Free %}<span class="badge badge--neutral"><span class="badge__icon badge__icon--dash" aria-hidden="true"></span>Free</span>{% when SlotState::Held %}<span class="badge badge--info"><span class="badge__icon badge__icon--dot" aria-hidden="true"></span>Held</span>{% when SlotState::Queued %}<span class="badge badge--review"><span class="badge__icon badge__icon--half" aria-hidden="true"></span>Queued</span>{% when SlotState::Stalled with { silent } %}<span class="badge badge--danger"><span class="badge__icon badge__icon--tri" aria-hidden="true"></span>Stalled</span>{% when SlotState::Offered with { member, until } %}<span class="badge badge--warn"><span class="badge__icon badge__icon--ring-dashed" aria-hidden="true"></span>Offered</span>{% endmatch %}</div>
+    {% match slot.hold %}{% when Some with (hold) %}<p class="slot__detail"><span class="member">{{ hold.holder }}</span> · {{ hold.purpose }}{% match hold.through %}{% when Some with (other) %} · through {{ other }}{% when None %}{% endmatch %}</p>
+    {% match slot.state %}{% when SlotState::Stalled with { silent } %}<p class="slot__warn">No heartbeat for {% call ui::span(silent) %}{% endcall %}{% if silent.days == 0 && silent.hours == 0 && silent.minutes == 0 %}under a minute{% endif %} — check before taking over</p>
+    <p class="slot__detail">last heartbeat {% call ui::time(hold.seen) %}{% endcall %}</p>{% when _ %}<p class="slot__detail">expires in {% call ui::span(hold.left) %}{% endcall %}{% if hold.left.days == 0 && hold.left.hours == 0 && hold.left.minutes == 0 %}under a minute{% endif %} · <time datetime="{{ hold.until.iso }}" data-clock>{{ hold.until.clock }}</time></p>{% endmatch %}{% when None %}{% endmatch %}
+    {% match slot.state %}{% when SlotState::Offered with { member, until } %}<p class="slot__detail">offered to <span class="member">{{ member }}</span> until <time datetime="{{ until.iso }}" data-clock>{{ until.clock }}</time></p>{% when _ %}{% endmatch %}
+    {% if !slot.waiting.is_empty() %}<p class="slot__detail">{{ slot.waiting.len() }} waiting: {{ slot.waiting|join(", ") }}</p>{% endif %}
+    {% match slot.group %}{% when Some with (group) %}<p class="slot__detail">group {{ group }}</p>{% when None %}{% endmatch %}
+    {% match slot.note %}{% when Some with (note) %}<p class="slot__detail">{{ note }}</p>{% when None %}{% endmatch %}
+  </li>
+{% endfor %}</ul>
+</section>
+{% endif %}{% if !board.wide.is_empty() %}<section class="section" aria-labelledby="b-wide">
   <div class="section-head"><h2 id="b-wide">Wide claims</h2><p class="section-head__hint">Changes across many areas, and which holders have acknowledged them</p></div>
   {% call ui::wide_claims(board.wide) %}{% endcall %}
 </section>

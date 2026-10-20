@@ -1,6 +1,7 @@
 //! Why a command did not do what it was asked, and the exit status that says so: `1` refused
 //! (another member is in the way, a forbidden action), `2` usage or configuration, `3` the server
-//! could not be reached or gave no decision.
+//! could not be reached or gave no decision — or, for a command run under a slot, the status that
+//! command ended with.
 
 use std::process::ExitCode;
 
@@ -16,6 +17,8 @@ pub enum Kind {
     /// The server could not be reached, was too slow, or answered something this client does not
     /// understand.
     Unreachable,
+    /// A command dibs ran ended with this status, which dibs exits with.
+    Passed(u8),
 }
 
 /// A failure of a command: its class, a stable code, and a sentence for the person.
@@ -57,6 +60,18 @@ impl Failure {
         }
     }
 
+    /// A command dibs ran ended with a status other than success; `message` says what dibs did
+    /// about it.
+    pub fn passed(status: u8, message: impl Into<String>) -> Self {
+        Self {
+            kind: Kind::Passed(status),
+            code: "command_failed".to_owned(),
+            message: message.into(),
+            details: None,
+            answered: true,
+        }
+    }
+
     /// The same failure, marked as coming after the command printed its answer.
     #[must_use]
     pub fn after_answer(mut self) -> Self {
@@ -70,6 +85,7 @@ impl Failure {
             Kind::Refused => 1,
             Kind::Config => 2,
             Kind::Unreachable => 3,
+            Kind::Passed(status) => status,
         })
     }
 }

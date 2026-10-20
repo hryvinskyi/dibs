@@ -1055,6 +1055,7 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
                 subject: "Freeze main".parse().unwrap(),
                 importance: Importance::Urgent,
             }],
+            offers: Vec::new(),
         });
     });
     let answer = run(&world, "neutral", "session-started", &input(None));

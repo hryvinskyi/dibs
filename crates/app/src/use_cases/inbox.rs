@@ -2,13 +2,19 @@
 
 use std::sync::Arc;
 
+use time::OffsetDateTime;
+
+use dibs_domain::hot_rule::HotRuleRegistry;
+use dibs_domain::slot::SlotName;
+
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{NamedSummary, Names};
-use crate::ports::Store;
+use crate::ports::{Clock, EventNotifier, Store};
 use crate::use_cases::acks::{awaiting, awaiting_per_thread};
 use crate::use_cases::readable::readable_summaries;
+use crate::use_cases::slots::Scene;
 use crate::use_cases::unacked::{UnackedMessage, unacked};
 use crate::work::Work;
 
@@ -28,13 +34,28 @@ pub struct InboxView {
     pub threads: Vec<NamedSummary>,
     /// The messages awaiting the caller's acknowledgement, newest first, when they were asked for.
     pub unacked: Option<Vec<UnackedMessage>>,
+    /// The slots on offer to the caller now, ordered by slot.
+    pub offers: Vec<PendingOffer>,
+}
+
+/// A slot offered to the caller, which is theirs if they take it before `until`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOffer {
+    /// The slot.
+    pub slot: SlotName,
+    /// When the offer lapses.
+    pub until: OffsetDateTime,
 }
 
 /// Lists the threads the caller may read, newest activity first, with what they have not read and
 /// how many messages await their acknowledgement; only the ones with unread messages when asked;
-/// and, when asked, the messages awaiting their acknowledgement — all read in one transaction.
+/// when asked, the messages awaiting their acknowledgement; and the slots on offer to them, after
+/// applying and recording what time changed about the slots — all in one transaction.
 pub struct Inbox {
     store: Arc<dyn Store>,
+    clock: Arc<dyn Clock>,
+    notifier: Arc<dyn EventNotifier>,
+    hot_rules: Arc<HotRuleRegistry>,
 }
 
 impl Inbox {
@@ -42,6 +63,9 @@ impl Inbox {
     pub fn new(deps: &Dependencies) -> Self {
         Self {
             store: deps.store.clone(),
+            clock: deps.clock.clone(),
+            notifier: deps.notifier.clone(),
+            hot_rules: deps.hot_rules.clone(),
         }
     }
 
@@ -51,7 +75,20 @@ impl Inbox {
     /// [`AppError::Forbidden`] for an integration; [`AppError::Store`] when the store fails.
     pub async fn execute(&self, actor: &Actor, query: InboxQuery) -> Result<InboxView, AppError> {
         actor.require_person()?;
+        let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
+        scene.save(&mut work, now).await?;
+        let offers = scene
+            .board
+            .offers
+            .iter()
+            .filter(|offer| offer.member == actor.member)
+            .map(|offer| PendingOffer {
+                slot: offer.slot.clone(),
+                until: offer.until,
+            })
+            .collect();
         let summaries = work
             .thread_summaries(actor.project, actor.member, None)
             .await?;
@@ -70,7 +107,12 @@ impl Inbox {
         } else {
             None
         };
-        Ok(InboxView { threads, unacked })
+        work.commit(&*self.notifier).await?;
+        Ok(InboxView {
+            threads,
+            unacked,
+            offers,
+        })
     }
 }
 

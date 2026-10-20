@@ -134,6 +134,12 @@ through a password manager. With the Claude Code plugin, step 5 happens by itsel
   acknowledge it. An acknowledgement is the recipient's own record that they read it; the message never changes, and its
   author sees who has acknowledged and who has not. An acknowledgement says "I read this"; it authorises nothing, except
   that acknowledging a wide claim's announcement grants its member edits in your areas it names.
+- **Slot.** A named shared action one member does at a time — a deploy, a release, a migration. A claim says what
+  someone works on; a slot says who may act now. A slot hold is a member's time-boxed right to act (`max_hold`), with a
+  queue of waiters: when it ends, the first waiter is offered the slot for a few minutes, and anyone else who takes it
+  meanwhile waits behind them. Slots of one group exclude each other. A hold is kept by the member's heartbeats, by the
+  30-second heartbeats of `dibs slot run` (and shown *stalled*, not freed, when they stop), or until a forge workflow
+  run finishes. A held slot can freeze branches nobody else may push meanwhile.
 - **Session.** One running client of a member: a terminal, an agent. Claims are kept alive by their session's
   heartbeats.
 - **Event.** Everything above appends to the project's log, which the web pages and clients follow live.
@@ -304,6 +310,13 @@ dibs inbox [--unread] [--unacked]                 # conversations waiting for yo
 dibs thread 31                                    # read one, with each message's id and who acknowledged it
 dibs read 31                                      # mark it read
 dibs ack 57                                       # acknowledge message 57 once you have read it (for a wide claim's announcement, that grants)
+dibs slot take deploy:prod --purpose "ship 2.4" [--wait 9m] [--until-run deploy.yml@<sha>]   # exit 1 while queued
+dibs slot run deploy:prod --purpose "ship 2.4" -- ./deploy.sh prod   # hold it while the command runs, then release
+dibs slot release deploy:prod                     # the first member waiting is offered it
+dibs slot leave deploy:prod                       # stop waiting, or give up the offer to you
+dibs slot list                                    # every slot: who holds it and why, until when, who waits
+dibs slot test settings.toml -- 'cd ops && ./deploy.sh prod'   # what a command line needs, without a server
+dibs slot takeover deploy:prod --purpose "finish it" --reason "the deploy log stopped; checked the hosts"
 dibs sync [--force] [--quiet]                     # heartbeat and refresh what this machine remembers
 dibs mcp                                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook
@@ -312,9 +325,16 @@ dibs admin member add bob --name "Bob Example" [--login bob-gh] [--role admin|me
 dibs admin token rotate bob                       # revoke bob's tokens and print a new one
 dibs admin settings apply settings.toml
 dibs admin force-release 12                       # end anyone's claim on item 12
+dibs admin slot force-release deploy:prod --reason "the release is cancelled"
 ```
 
 An item is named by its local id (`12`) or its reference (`gh:acme/widgets#42`).
+
+`dibs slot run` passes `SIGTERM` and `SIGHUP` to the command, waits for it, and records the signal as the release's
+exit; it exits with the command's status. Ctrl-C reaches the command from the terminal: the wrapper does not send it
+again, waits for the command and releases with the command's own outcome. To stop a run from a script, send `SIGTERM`
+to `dibs slot run`. On Windows the console hands Ctrl-C and Ctrl-Break to the command itself. If the hold is taken over
+while the command runs, it says so once, lets the command finish and releases nothing.
 
 ## HTTP API
 
@@ -330,9 +350,10 @@ The server also serves pages for people at `/ui`, where you sign in with your to
 
 - **Status** (`/ui/`): live claims, stale claims with a take-over form, the areas held, and the wide claims with who
   has acknowledged each of their areas.
-- **Board** (`/ui/board`): the live wide claims with who has acknowledged them, your ready list with priorities, likely
+- **Board** (`/ui/board`): the slots with who holds each and why, until when, a stalled run in red and who waits, the
+  live wide claims with who has acknowledged them, your ready list with priorities, likely
   areas and links to the tracker, the open items that wait with their blockers, what is in progress, what went stale and
-  what was done today, filterable by area and member. The columns refresh by themselves when claims or items change;
+  what was done today, filterable by area and member. The columns refresh by themselves when claims, items or slots change;
   while you are typing a take-over reason they stay as they are and a banner offers a reload instead.
 - **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply. Each conversation
   shows its importance and whether a message in it awaits your acknowledgement; a message that asks for one lists who has

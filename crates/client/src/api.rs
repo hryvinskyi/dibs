@@ -23,6 +23,14 @@ use dibs_domain::settings::{ProjectSettings, SettingsDocument, SettingsError};
 
 use crate::token::Token;
 
+mod slots;
+
+pub use slots::{
+    ForceReleaseSlotRequest, HoldMode, PendingOffer, ReleaseSlotRequest, Slot, SlotAnswer,
+    SlotForced, SlotHold, SlotOffer, SlotReleased, SlotTakenOver, SlotWaiter, Slots, TakeOutcome,
+    TakeOverSlotRequest, TakeSlotRequest, Took,
+};
+
 /// A member of a project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Member {
@@ -498,6 +506,9 @@ pub struct Status {
     /// The caller's ready list.
     #[serde(default)]
     pub ready: ReadyList,
+    /// Every declared slot with its group's hold, queue and offer.
+    #[serde(default)]
+    pub slots: Vec<Slot>,
 }
 
 /// A live wide claim, its item, and where each area it names stands.
@@ -916,6 +927,9 @@ pub struct Inbox {
     /// The messages awaiting the caller's acknowledgement, newest first; empty unless asked for.
     #[serde(default)]
     pub unacked: Vec<Unacked>,
+    /// The slots on offer to the caller.
+    #[serde(default)]
+    pub offers: Vec<PendingOffer>,
 }
 
 /// An acknowledgement recorded.

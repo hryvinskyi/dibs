@@ -232,7 +232,7 @@ mod migrations {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     /// Two claims, a conversation with an acknowledged message and a grant, under the schema `0003`
@@ -335,5 +335,110 @@ mod migrations {
         .execute(&pool)
         .await;
         assert!(kept.is_ok());
+    }
+
+    /// The rows of [`CLAIMS_AT_ACKS`] with one claim made wide, under the schema `0004` left.
+    fn rows_at_wide() -> String {
+        format!(
+            "{CLAIMS_AT_ACKS}\n\
+             UPDATE claims SET wide_areas = '[\"default:search\"]', wide_reason = 'Rename' \
+             WHERE item_id = 52;\n\
+             INSERT INTO wide_asks (project_id, message_id, item_id, from_id, to_id, areas) \
+             VALUES (1, 91, 52, 12, 11, '[\"default:billing\"]');"
+        )
+    }
+
+    #[tokio::test]
+    async fn slots_start_empty_and_keep_every_row_of_before() {
+        use dibs_domain::ids::{RunId, SessionId};
+        use dibs_domain::session::HostName;
+        use dibs_domain::slot::{Liveness, Purpose, SlotBoard, SlotHold, SlotName};
+        use time::OffsetDateTime;
+
+        let (_dir, path) = database_at(4, &rows_at_wide()).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let claims = tx.claims(ProjectId(1)).await.unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(claims[1].wide.is_some(), "the wide claim is kept");
+        assert_eq!(
+            tx.open_wide_asks(ProjectId(1)).await.unwrap().len(),
+            1,
+            "still open"
+        );
+        assert_eq!(
+            tx.wide_ask(ProjectId(1), MessageId(91))
+                .await
+                .unwrap()
+                .map(|a| a.to),
+            Some(MemberId(11))
+        );
+        assert!(tx.slot_board(ProjectId(1)).await.unwrap().is_empty());
+        assert!(tx.busy_slot_projects().await.unwrap().is_empty());
+
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let board = SlotBoard {
+            holds: vec![SlotHold {
+                slot: SlotName::parse("deploy:prod").unwrap(),
+                member: MemberId(12),
+                session: SessionId(32),
+                host: HostName::parse("desktop").unwrap(),
+                purpose: Purpose::parse("ship it").unwrap(),
+                item: Some(ItemId(52)),
+                liveness: Liveness::Run { run: RunId(5) },
+                taken_at: at,
+                expires_at: at,
+                last_seen: at,
+                stalled_at: None,
+            }],
+            ..SlotBoard::default()
+        };
+        tx.put_slot_board(ProjectId(1), &board).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.slot_board(ProjectId(1)).await.unwrap(), board);
+    }
+
+    #[tokio::test]
+    async fn slots_refuse_a_hold_whose_liveness_columns_disagree() {
+        let (_dir, path) = database_at(4, &rows_at_wide()).await;
+        drop(open(&path).await.unwrap());
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        let insert = |liveness: &str, run: &str, workflow: &str, sha: &str, stalled: &str| {
+            format!(
+                "INSERT INTO slot_holds (project_id, slot, member_id, session_id, host, purpose, \
+                 item_id, liveness, run_id, workflow, sha, taken_at, expires_at, last_seen, \
+                 stalled_at) VALUES (1, 'deploy', 12, 32, 'desktop', 'ship', NULL, '{liveness}', \
+                 {run}, {workflow}, {sha}, 0, 0, 0, {stalled})"
+            )
+        };
+        for bad in [
+            insert("run", "NULL", "NULL", "NULL", "NULL"),
+            insert("session", "5", "NULL", "NULL", "NULL"),
+            insert("until_run", "NULL", "'deploy.yml'", "NULL", "NULL"),
+            insert("session", "NULL", "'deploy.yml'", "'abc1234'", "NULL"),
+            insert("session", "NULL", "NULL", "NULL", "7"),
+            insert("forever", "NULL", "NULL", "NULL", "NULL"),
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(bad.clone()))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        for good in [insert("run", "5", "NULL", "NULL", "7")] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(good.clone()))
+                    .execute(&pool)
+                    .await
+                    .is_ok(),
+                "{good}"
+            );
+        }
     }
 }

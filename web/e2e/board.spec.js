@@ -2,12 +2,13 @@
 /**
  * The board in a real browser: an item imported through the API shows in Ready, a claim made
  * through the API moves it to In progress without a reload and the page's updated time with it,
- * and a take-over reason the person is typing survives the events that arrive meanwhile, the board
- * catching up once the form is left.
+ * a take-over reason the person is typing survives the events that arrive meanwhile, the board
+ * catching up once the form is left, and a slot taken through the API shows as held in the Slots
+ * strip without a reload.
  */
 
 import { ageClaim } from './claim-age.js';
-import { claimItem, importItems, openSession } from './dibs-api.js';
+import { applySettings, claimItem, importItems, openSession, takeSlot } from './dibs-api.js';
 import { expect, test } from './fixtures.js';
 import { signIn } from './sign-in.js';
 
@@ -125,5 +126,25 @@ test('a half-typed take-over reason survives an event, and the board catches up 
   await expect(progress.getByText(`Claimed after the form ${number}`)).toBeVisible();
   await expect(progress.getByText(`Claimed while typing ${number}`)).toBeVisible();
   await expect(changed).toBeHidden();
+  await expectSameDocument(page);
+});
+
+test('a slot taken through the API shows as held in the Slots strip without a reload', async ({ page, dibs }) => {
+  const slot = `deploy:e2e-${Date.now()}`;
+  await applySettings(dibs.url, dibs.adminToken, { slots: [{ name: slot, max_hold: '30m' }] });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/board`);
+  const strip = page.getByRole('region', { name: 'Slots', exact: true });
+  const card = strip.locator(`[data-slot="${slot}"]`);
+  await expect(card).toContainText('Free');
+
+  await markDocument(page);
+  const session = await openSession(dibs.url, dibs.adminToken, 'laptop');
+  await takeSlot(dibs.url, dibs.adminToken, slot, session, 'ship the e2e build');
+  await expect(card).toContainText('Held');
+  await expect(card).toContainText('alice');
+  await expect(card).toContainText('ship the e2e build');
+  await expect(card.locator('time[data-clock]')).toHaveText(/^\d{2}:\d{2}$/);
   await expectSameDocument(page);
 });

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use dibs_domain::event::{EventKind, SettingsChanged};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::settings::{ProjectSettings, SettingsDocument};
+use dibs_domain::slot::decide_slots_removed;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -23,7 +24,9 @@ pub struct AppliedSettings {
 
 /// Validates a settings document — one repository's areas and rules at the top level, or several
 /// repositories under `repos` — and makes it the project's settings. The document is stored in its
-/// normal form, so applying the same settings again changes nothing and appends no event.
+/// normal form, so applying the same settings again changes nothing and appends no event. A slot
+/// the new settings no longer declare loses its hold, its queue and its offer in the same
+/// transaction, each recorded as ended by the admin.
 pub struct ApplySettings {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -59,12 +62,21 @@ impl ApplySettings {
         let before = work.settings(actor.project).await?;
         let changed = before.as_ref() != Some(&normal);
         if changed {
+            let now = self.clock.now();
             work.put_settings(actor.project, &normal).await?;
             work.record(
-                self.clock.now(),
+                now,
                 EventKind::SettingsChanged(SettingsChanged { by: actor.member }),
             )
             .await?;
+            let board = work.slot_board(actor.project).await?;
+            let removed = decide_slots_removed(&board, settings.slots(), actor.member, now);
+            if removed.board != board {
+                work.put_slot_board(actor.project, &removed.board).await?;
+            }
+            for event in removed.events {
+                work.record(now, event).await?;
+            }
         }
         work.commit(&*self.notifier).await?;
         Ok(AppliedSettings { settings, changed })

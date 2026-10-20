@@ -14,8 +14,9 @@ use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{ItemName, NamedClaim, NamedItem, Names};
-use crate::ports::{Clock, Store, StoreError};
+use crate::ports::{Clock, EventNotifier, Store, StoreError};
 use crate::use_cases::ready::{ReadyScope, ReadyView};
+use crate::use_cases::slots::{Scene, SlotLine, scene_lines};
 use crate::work::Work;
 
 /// A claim with its item, each member with their handle.
@@ -78,13 +79,17 @@ pub struct StatusView {
     pub wide: Vec<WideClaimStatus>,
     /// The work the caller can pick up now, and the open items that are not ready.
     pub ready: ReadyView,
+    /// Every declared slot with its group's hold, queue and offer.
+    pub slots: Vec<SlotLine>,
 }
 
 /// Shows the project's live and stale claims, the areas held, the live wide claims with where each
-/// of their areas stands, and the caller's ready list.
+/// of their areas stands, the caller's ready list, and where the slots stand — after applying, and
+/// recording, what time changed about them.
 pub struct Status {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
     ref_schemes: Arc<RefSchemeRegistry>,
 }
@@ -95,6 +100,7 @@ impl Status {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
             ref_schemes: deps.ref_schemes.clone(),
         }
@@ -108,7 +114,9 @@ impl Status {
         actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin(&*self.store, actor.project).await?;
-        let settings = work.project_settings(&self.hot_rules).await?;
+        let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
+        scene.save(&mut work, now).await?;
+        let settings = scene.settings.clone();
         let stale_after = settings.stale_after();
         let names = Names::load(&mut work).await?;
         let ready = ReadyScope {
@@ -125,6 +133,7 @@ impl Status {
             holds: Vec::new(),
             wide: Vec::new(),
             ready,
+            slots: scene_lines(&mut work, &scene).await?,
         };
         let claims = work.claims(actor.project).await?;
         let grants: Vec<Grant> = work
@@ -183,6 +192,7 @@ impl Status {
         }
         view.holds
             .sort_by(|a, b| (&a.area, a.item).cmp(&(&b.area, b.item)));
+        work.commit(&*self.notifier).await?;
         Ok(view)
     }
 }

@@ -21,7 +21,8 @@ pub struct HeartbeatOutcome {
 
 /// Refreshes the session and the caller's live claims taken from a session on the same machine. A
 /// claim taken on another machine is kept alive by that machine's heartbeat, or by an edit check
-/// here; a claim that already went stale is renewed only by claiming it again.
+/// here; a claim that already went stale is renewed only by claiming it again. The caller's places
+/// in slot queues, and the slot holds their heartbeats keep, are seen now too, from any machine.
 pub struct Heartbeat {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -63,6 +64,10 @@ impl Heartbeat {
                 work.save_claim(actor.project, &claim).await?;
                 refreshed.push(claim.item);
             }
+        }
+        let mut board = work.slot_board(actor.project).await?;
+        if board.refresh_member(actor.member, now) {
+            work.put_slot_board(actor.project, &board).await?;
         }
         work.commit_quietly().await?;
         Ok(HeartbeatOutcome { refreshed })

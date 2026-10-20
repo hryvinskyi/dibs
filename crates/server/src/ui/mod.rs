@@ -18,6 +18,7 @@ mod render;
 mod rows;
 mod session;
 mod sign_in;
+mod slots;
 mod status;
 mod takeover;
 mod threads;

@@ -58,6 +58,11 @@ impl Printer {
     pub fn warn(self, text: &str) {
         eprintln!("warning: {text}");
     }
+
+    /// Prints what dibs is doing on standard error, out of the way of a command's own output.
+    pub fn note(self, text: &str) {
+        eprintln!("dibs: {text}");
+    }
 }
 
 /// A failure as `--json` prints it: `{"error": {"code", "message", "details"?}}`, `details` being

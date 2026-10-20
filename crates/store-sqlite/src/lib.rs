@@ -7,7 +7,8 @@
 //!
 //! Every query is scoped by the project it is given; the lookups the port lets run without one
 //! (a token or a browser session by its hash, a project by its id or slug, the sweep of expired
-//! browser sessions) are the only ones that do not filter by it.
+//! browser sessions, the projects whose slots are in use) are the only ones that do not filter by
+//! it.
 
 mod codec;
 mod error;

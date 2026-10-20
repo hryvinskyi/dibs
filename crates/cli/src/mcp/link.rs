@@ -9,6 +9,9 @@ use dibs_client::api::{
     Items, MarkedRead, PostMessage, Posted, ReadyList, StartThread, Started, Status,
     TakeOverRequest, TakenOver, ThreadDetail,
 };
+use dibs_client::api::{
+    HoldMode, ReleaseSlotRequest, SlotAnswer, SlotReleased, Slots, TakeSlotRequest, Took,
+};
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::message::SessionLabel;
 
@@ -17,11 +20,14 @@ use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::mcp::inputs::{
     AckInput, CheckInput, ClaimInput, GrantInput, InboxInput, ItemsInput, KeyInput, NewInput,
-    SendInput, Sending, TakeoverInput, ThreadInput,
+    SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
 };
 
 /// The kind of agent the sessions of the tool server report.
 const AGENT: &str = "mcp";
+
+/// How often a waiting slot take asks again.
+const SLOT_POLL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Either a new conversation or a message in one: what `dibs_send` answers.
 #[derive(Debug, serde::Serialize)]
@@ -264,6 +270,66 @@ impl Link {
     pub async fn mark_read(&self, input: ThreadInput) -> Result<MarkedRead, Failure> {
         let thread = input.id()?;
         self.call(self.connection.client.mark_read(thread)).await
+    }
+
+    /// Takes a slot, renews the caller's hold, or queues them; with a wait, asks again every 10
+    /// seconds until it is theirs or the wait is over.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, or of the call.
+    pub async fn slot_take(&self, input: SlotTakeInput) -> Result<Took, Failure> {
+        let slot = input.slot()?;
+        let item = match &input.item {
+            Some(key) => Some(self.resolve(&key.key("item")?).await?),
+            None => None,
+        };
+        let request = TakeSlotRequest {
+            session_id: self.session,
+            purpose: input.purpose()?,
+            item,
+            mode: HoldMode::Session,
+            workflow: None,
+            sha: None,
+        };
+        self.call(crate::commands::slot::take_waiting(
+            &self.connection.client,
+            &slot,
+            &request,
+            input.wait()?,
+            SLOT_POLL,
+        ))
+        .await
+    }
+
+    /// Releases a slot the caller holds.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, or of the call.
+    pub async fn slot_release(&self, input: SlotInput) -> Result<SlotReleased, Failure> {
+        let slot = input.slot()?;
+        self.call(
+            self.connection
+                .client
+                .release_slot(&slot, &ReleaseSlotRequest::default()),
+        )
+        .await
+    }
+
+    /// Leaves a slot's queue, or gives up the offer to the caller.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, or of the call.
+    pub async fn slot_leave(&self, input: SlotInput) -> Result<SlotAnswer, Failure> {
+        let slot = input.slot()?;
+        self.call(self.connection.client.leave_slot(&slot)).await
+    }
+
+    /// Every slot and where it stands.
+    ///
+    /// # Errors
+    /// The [`Failure`] of the call.
+    pub async fn slots(&self) -> Result<Slots, Failure> {
+        self.call(self.connection.client.slots()).await
     }
 
     async fn resolve(&self, key: &dibs_domain::item::ItemKey) -> Result<ItemId, Failure> {

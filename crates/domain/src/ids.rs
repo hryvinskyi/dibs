@@ -61,6 +61,14 @@ id_type!(
     /// A stored grant.
     GrantId
 );
+id_type!(
+    /// One run of a command under a slot hold: what that run's heartbeats and its release name.
+    RunId
+);
+id_type!(
+    /// A member's place in a slot's queue; places taken at the same moment are ordered by it.
+    WaiterId
+);
 
 #[cfg(test)]
 mod tests {

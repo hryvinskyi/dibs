@@ -26,6 +26,8 @@ mod roles;
 #[cfg(test)]
 mod sessions;
 #[cfg(test)]
+mod slots;
+#[cfg(test)]
 mod stream;
 #[cfg(test)]
 mod tenancy;

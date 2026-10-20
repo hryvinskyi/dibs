@@ -42,6 +42,7 @@ mod revoke_grant;
 mod revoke_token;
 mod rotate_token;
 mod sent_status;
+mod slots;
 mod start_thread;
 mod status;
 mod take_over;
@@ -68,7 +69,7 @@ pub use force_release::ForceRelease;
 pub use get_item::{GetItem, ItemView};
 pub use grant::{Grant, GrantInput, GrantResult};
 pub use heartbeat::{Heartbeat, HeartbeatOutcome};
-pub use inbox::{Inbox, InboxQuery, InboxView};
+pub use inbox::{Inbox, InboxQuery, InboxView, PendingOffer};
 pub use init_project::{InitProject, InitProjectInput, InitializedProject};
 pub use list_completed::{CompletedItem, ListCompleted, MAX_COMPLETED};
 pub use list_events::{EventCursor, EventPage, ListEvents, MAX_PAGE};
@@ -90,6 +91,12 @@ pub use revoke_grant::RevokeGrant;
 pub use revoke_token::RevokeToken;
 pub use rotate_token::{RotateToken, RotatedToken};
 pub use sent_status::{RecipientStatus, SentStatus, SentStatusView};
+pub use slots::{
+    EndedHold, ForceReleaseSlot, ForceReleaseSlotInput, ForcedHold, HoldMode, LeaveSlotQueue,
+    NamedHold, NamedOffer, NamedWaiter, ReleaseSlot, ReleaseSlotInput, RunFinishedInput, SlotLine,
+    SlotRunBeat, SlotRunFinished, Slots, SweepReport, TakeOverSlot, TakeOverSlotInput, TakeSlot,
+    TakeSlotInput, TakenOverSlot, TickSlots, TookKind, TookSlot,
+};
 pub use start_thread::{Addressees, StartThread, StartThreadInput, StartedThread};
 pub use status::{AreaHold, HeldItem, Status, StatusView, WideAreaStanding, WideClaimStatus};
 pub use take_over::{TakeOver, TakeOverInput, TakenOverClaim};
@@ -185,6 +192,24 @@ pub struct UseCases {
     pub resolve_ui_session: ResolveUiSession,
     /// See [`CloseUiSession`].
     pub close_ui_session: CloseUiSession,
+    /// See [`TakeSlot`].
+    pub take_slot: TakeSlot,
+    /// See [`ReleaseSlot`].
+    pub release_slot: ReleaseSlot,
+    /// See [`LeaveSlotQueue`].
+    pub leave_slot_queue: LeaveSlotQueue,
+    /// See [`ForceReleaseSlot`].
+    pub force_release_slot: ForceReleaseSlot,
+    /// See [`SlotRunBeat`].
+    pub slot_run_beat: SlotRunBeat,
+    /// See [`TakeOverSlot`].
+    pub take_over_slot: TakeOverSlot,
+    /// See [`SlotRunFinished`].
+    pub slot_run_finished: SlotRunFinished,
+    /// See [`Slots`].
+    pub slots: Slots,
+    /// See [`TickSlots`].
+    pub tick_slots: TickSlots,
 }
 
 impl UseCases {
@@ -233,6 +258,15 @@ impl UseCases {
             open_ui_session: OpenUiSession::new(deps),
             resolve_ui_session: ResolveUiSession::new(deps),
             close_ui_session: CloseUiSession::new(deps),
+            take_slot: TakeSlot::new(deps),
+            release_slot: ReleaseSlot::new(deps),
+            leave_slot_queue: LeaveSlotQueue::new(deps),
+            force_release_slot: ForceReleaseSlot::new(deps),
+            slot_run_beat: SlotRunBeat::new(deps),
+            take_over_slot: TakeOverSlot::new(deps),
+            slot_run_finished: SlotRunFinished::new(deps),
+            slots: Slots::new(deps),
+            tick_slots: TickSlots::new(deps),
         }
     }
 }

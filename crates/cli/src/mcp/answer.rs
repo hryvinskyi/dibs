@@ -26,12 +26,14 @@ pub fn result<T: Serialize>(outcome: Result<T, Failure>) -> CallToolResult {
 pub fn failed(failure: &Failure) -> CallToolResult {
     let (code, message) = match failure.kind {
         Kind::Unreachable => (UNREACHABLE_CODE, UNREACHABLE_SENTENCE),
-        Kind::Refused | Kind::Config => (failure.code.as_str(), failure.message.as_str()),
+        Kind::Refused | Kind::Config | Kind::Passed(_) => {
+            (failure.code.as_str(), failure.message.as_str())
+        }
     };
     let mut result = CallToolResult::error(vec![ContentBlock::text(message)]);
     result.structured_content = Some(match failure.kind {
         Kind::Unreachable => json!({"error": {"code": code, "message": message}}),
-        Kind::Refused | Kind::Config => crate::output::failure_json(failure),
+        Kind::Refused | Kind::Config | Kind::Passed(_) => crate::output::failure_json(failure),
     });
     result
 }

@@ -30,10 +30,16 @@ use crate::api::{
     SettingsApplied, StartThread, StartThreadBody, Started, Status, TakeOverRequest, TakenOver,
     ThreadDetail, Threads, TokenRevoked,
 };
+use crate::api::{
+    ForceReleaseSlotRequest, ReleaseSlotRequest, SlotAnswer, SlotForced, SlotReleased,
+    SlotTakenOver, Slots, TakeOverSlotRequest, TakeSlotRequest, Took,
+};
 use crate::error::{ClientError, Response, decode};
 use crate::server_url::ServerUrl;
 use crate::sse::{Frame, FrameReader};
 use crate::token::Token;
+use dibs_domain::ids::RunId;
+use dibs_domain::slot::SlotName;
 
 /// The `User-Agent` of every request.
 pub const USER_AGENT: &str = concat!("dibs/", env!("CARGO_PKG_VERSION"));
@@ -104,6 +110,16 @@ struct EventsQuery {
 
 #[derive(Serialize)]
 struct Empty {}
+
+#[derive(Serialize)]
+struct RunBody {
+    run_id: RunId,
+}
+
+/// The path of a slot's route, its name kept one segment.
+fn slot_path(slot: &SlotName, rest: &str) -> String {
+    format!("/v1/slots/{}{rest}", percent_encode_segment(slot.as_str()))
+}
 
 impl Client {
     /// A client of `server` that signs in with `token`.
@@ -555,6 +571,116 @@ impl Client {
                 .json(&Empty {}),
         )
         .await
+    }
+
+    /// `GET /v1/slots`: every declared slot and where its group stands.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn slots(&self) -> Result<Slots, ClientError> {
+        self.send(self.request(Method::GET, "/v1/slots")).await
+    }
+
+    /// `GET /v1/slots/{name}`: one slot, fresh.
+    ///
+    /// # Errors
+    /// An `unknown_slot` refusal; [`ClientError`].
+    pub async fn slot(&self, slot: &SlotName) -> Result<SlotAnswer, ClientError> {
+        self.send(self.request(Method::GET, &slot_path(slot, "")))
+            .await
+    }
+
+    /// `POST /v1/slots/{name}/take`: takes the slot, renews the caller's hold, or queues them.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn take_slot(
+        &self,
+        slot: &SlotName,
+        take: &TakeSlotRequest,
+    ) -> Result<Took, ClientError> {
+        self.send(
+            self.request(Method::POST, &slot_path(slot, "/take"))
+                .json(take),
+        )
+        .await
+    }
+
+    /// `POST /v1/slots/{name}/release`: the holder releases the slot.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn release_slot(
+        &self,
+        slot: &SlotName,
+        release: &ReleaseSlotRequest,
+    ) -> Result<SlotReleased, ClientError> {
+        self.send(
+            self.request(Method::POST, &slot_path(slot, "/release"))
+                .json(release),
+        )
+        .await
+    }
+
+    /// `POST /v1/slots/{name}/leave`: the caller leaves the queue or gives up the offer.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn leave_slot(&self, slot: &SlotName) -> Result<SlotAnswer, ClientError> {
+        self.send(
+            self.request(Method::POST, &slot_path(slot, "/leave"))
+                .json(&Empty {}),
+        )
+        .await
+    }
+
+    /// `POST /v1/slots/{name}/heartbeat`: the run holding the slot is alive.
+    ///
+    /// # Errors
+    /// A `taken_over` or `run_ended` refusal when the run's hold is gone; [`ClientError`].
+    pub async fn slot_heartbeat(
+        &self,
+        slot: &SlotName,
+        run: RunId,
+    ) -> Result<SlotAnswer, ClientError> {
+        self.send(
+            self.request(Method::POST, &slot_path(slot, "/heartbeat"))
+                .json(&RunBody { run_id: run }),
+        )
+        .await
+    }
+
+    /// `POST /v1/slots/{name}/takeover`: takes over another member's stalled hold.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn take_over_slot(
+        &self,
+        slot: &SlotName,
+        takeover: &TakeOverSlotRequest,
+    ) -> Result<SlotTakenOver, ClientError> {
+        self.send(
+            self.request(Method::POST, &slot_path(slot, "/takeover"))
+                .json(takeover),
+        )
+        .await
+    }
+
+    /// `POST /v1/admin/slots/{name}/force-release`: an admin ends any member's hold.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn force_release_slot(
+        &self,
+        slot: &SlotName,
+        force: &ForceReleaseSlotRequest,
+    ) -> Result<SlotForced, ClientError> {
+        let path = format!(
+            "/v1/admin/slots/{}/force-release",
+            percent_encode_segment(slot.as_str())
+        );
+        self.send(self.request(Method::POST, &path).json(force))
+            .await
     }
 
     fn request(&self, method: Method, path: &str) -> RequestBuilder {

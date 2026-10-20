@@ -182,6 +182,47 @@ never deleted.
   directory off the host on a schedule. Do not copy the live `dibs.db`: it is in write-ahead-log mode, and a file copied
   while the server runs may miss what is still in the `-wal` file.
 
+## Slots
+
+A project declares its slots — the shared actions one member does at a time — in its settings, beside its areas, and
+applies them with `dibs admin settings apply <file>`; `docs/api.md` lists every field. A slot's command patterns live
+only there, never in a checkout's `.dibs.toml`:
+
+```toml
+[[slots]]
+name = "deploy:staging"
+max_hold = "30m"
+group = "staging"
+commands = [{ matches = '^deploy\.sh staging( |$)' }, { matches = '^make deploy', unless = '--dry-run' }]
+
+[[slots]]
+name = "db:staging"
+max_hold = "1h"
+group = "staging"
+run_only = true
+freezes = ["refs/heads/main"]
+commands = [{ matches = '^migrate( |$)' }]
+note = "a migration runs inside dibs slot run"
+```
+
+- **Prove the patterns before applying them.** `dibs slot test settings.toml -- '<command line>'` prints the simple
+  commands a line splits into and the slot it needs, without a server; run it over a table of the real command lines.
+- **`max_hold`** ends a hold its member forgot. While somebody waits, a holder can renew only up to twice `max_hold`
+  from the take.
+- **`group`** makes slots exclude each other: a deploy and a migration of the same environment in one group are never
+  held at once.
+- **`run_only`** slots are done through `dibs slot run <slot> --purpose … -- <command>`, which keeps the hold alive with
+  a heartbeat every 30 seconds and releases it with the command's exit status. To stop a run from a script, send
+  `SIGTERM` to `dibs slot run`: it passes the signal to the command and records it as the release's exit. A run whose heartbeats stop for 2
+  minutes is shown stalled, not freed; another member takes it over only with `dibs slot takeover <slot> --reason …`.
+- **`freezes`** names branches nobody but the holder may push while the slot is held.
+- Removing a slot from the settings ends its hold, its queue and its offer in the same change.
+
+The server sweeps the slots every 30 seconds — expiries, stalls, lapsed offers, silent waiters, and the offer to the
+next waiter — for every project with a hold, a waiter or an offer. The sweep stops when the server is told to stop,
+after the requests in flight, and finishes a sweep it is running before the write-ahead log is checkpointed. An admin
+ends any hold with `dibs admin slot force-release <slot> --reason …`; the holder is sent the reason.
+
 ## Restoring
 
 A restore is offline and never replaces a database: it writes a new file. It refuses while a server holds the target

@@ -12,6 +12,7 @@ use dibs_domain::import::BatchRefused;
 use dibs_domain::item::{CreateRefused, ItemStatus};
 use dibs_domain::message::{AckRefused, RecipientsError};
 use dibs_domain::settings::{AreaLookupError, SettingsError};
+use dibs_domain::slot::{BeatRefused, SlotRefused};
 use dibs_domain::wide::WideScopeError;
 
 use crate::named::Refusal;
@@ -104,6 +105,12 @@ pub enum AppError {
     /// The forced release was refused.
     #[error(transparent)]
     ForceRelease(#[from] ForceReleaseRefused),
+    /// A slot request was refused; the refusal carries the handle of the member in the way.
+    #[error(transparent)]
+    Slot(#[from] Refusal<SlotRefused>),
+    /// A run's heartbeat found its hold gone; the refusal carries the handle of who holds it now.
+    #[error(transparent)]
+    Beat(#[from] Refusal<BeatRefused>),
     /// The grant was refused.
     #[error(transparent)]
     Grant(#[from] GrantRefused),
@@ -182,6 +189,20 @@ impl AppError {
             Self::ForceRelease(refused) => match refused {
                 ForceReleaseRefused::NotAdmin => "forbidden",
                 ForceReleaseRefused::NoClaim => "no_claim",
+            },
+            Self::Slot(refused) => match refused.reason {
+                SlotRefused::UnknownSlot { .. } => "unknown_slot",
+                SlotRefused::HoldsOther { .. } => "holds_other_slot",
+                SlotRefused::NotHeld => "slot_not_held",
+                SlotRefused::NotHolder { .. } => "not_holder",
+                SlotRefused::RunEnded => "run_ended",
+                SlotRefused::NotWaiting => "not_waiting",
+                SlotRefused::OwnHold => "own_hold",
+                SlotRefused::NotStalled { .. } => "not_stalled",
+            },
+            Self::Beat(refused) => match refused.reason {
+                BeatRefused::TakenOver { .. } => "taken_over",
+                BeatRefused::Ended => "run_ended",
             },
             Self::Grant(refused) => match refused {
                 GrantRefused::SelfGrant => "self_grant",

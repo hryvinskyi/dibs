@@ -6,7 +6,7 @@
 # check at another workspace that holds a `dibs-domain` package.
 set -euo pipefail
 
-allowed=(thiserror globset time serde)
+allowed=(thiserror globset time serde regex)
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="${DIBS_MANIFEST_PATH:-$root/Cargo.toml}"

@@ -12,6 +12,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::message::{Body, Importance, Subject};
+use dibs_domain::slot::{Purpose, SlotName};
 use dibs_domain::wide::WideReason;
 
 use crate::failure::{Failure, sentence};
@@ -453,6 +454,79 @@ fn thread_id(field: &str, number: u64) -> Result<ThreadId, Failure> {
         ));
     }
     Ok(ThreadId(number))
+}
+
+/// `dibs_slot_take`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SlotTakeInput {
+    /// The slot (`deploy:prod`).
+    pub slot: String,
+    /// Why you take it, as every member reads it; never a credential, a host or a customer's data.
+    pub purpose: String,
+    /// The work item it is for: its local id or its reference.
+    pub item: Option<ItemKeyInput>,
+    /// When the slot is held, wait up to this many seconds (at most 540) for it to be offered to
+    /// you.
+    pub wait_seconds: Option<u64>,
+}
+
+/// The longest wait a take may ask for, in seconds.
+pub const MAX_WAIT_SECONDS: u64 = 540;
+
+impl SlotTakeInput {
+    /// The slot named.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it is no slot name.
+    pub fn slot(&self) -> Result<SlotName, Failure> {
+        slot_name("slot", &self.slot)
+    }
+
+    /// The purpose.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it is empty or too long.
+    pub fn purpose(&self) -> Result<Purpose, Failure> {
+        Purpose::parse(&self.purpose).map_err(|error| invalid("purpose", &error.to_string()))
+    }
+
+    /// The wait asked for.
+    ///
+    /// # Errors
+    /// A [`Failure`] for a wait longer than [`MAX_WAIT_SECONDS`].
+    pub fn wait(&self) -> Result<Option<std::time::Duration>, Failure> {
+        match self.wait_seconds {
+            Some(seconds) if seconds > MAX_WAIT_SECONDS => Err(invalid(
+                "wait_seconds",
+                "wait at most 540 seconds, under the time a tool call may take",
+            )),
+            Some(0) | None => Ok(None),
+            Some(seconds) => Ok(Some(std::time::Duration::from_secs(seconds))),
+        }
+    }
+}
+
+/// `dibs_slot_release` and `dibs_slot_leave`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SlotInput {
+    /// The slot (`deploy:prod`).
+    pub slot: String,
+}
+
+impl SlotInput {
+    /// The slot named.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it is no slot name.
+    pub fn slot(&self) -> Result<SlotName, Failure> {
+        slot_name("slot", &self.slot)
+    }
+}
+
+fn slot_name(field: &str, text: &str) -> Result<SlotName, Failure> {
+    SlotName::parse(text.trim()).map_err(|error| invalid(field, &format!("'{text}': {error}")))
 }
 
 fn body(field: &str, text: &str) -> Result<Body, Failure> {

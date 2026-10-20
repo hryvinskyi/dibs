@@ -16,7 +16,7 @@ use crate::failure::Failure;
 use crate::mcp::answer;
 use crate::mcp::inputs::{
     AckInput, CheckInput, ClaimInput, GrantInput, InboxInput, ItemsInput, KeyInput, NewInput,
-    SendInput, TakeoverInput, ThreadInput,
+    SendInput, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
 };
 use crate::mcp::link::Link;
 
@@ -192,6 +192,38 @@ impl Tools {
         self.perform(|link| async move { link.ack(input).await })
             .await
     }
+
+    #[tool(
+        description = "Take a slot before you do a shared action one member does at a time (a deploy, a release, a migration of a shared database): give the slot and a purpose every member may read (never a credential, a host or a customer's data). outcome taken means it is yours until slot.hold.expires_at; taking it again renews it. outcome queued means another member holds it or it is offered to someone first: position is your place. Then wait for it with wait_seconds (up to 540) or do other work and take it again later; never run the action meanwhile. When it is offered to you, dibs tells you, and your next take gets it. A hold is your member's, shared by all your sessions. Release it with dibs_slot_release as soon as you are done."
+    )]
+    async fn dibs_slot_take(&self, Parameters(input): Parameters<SlotTakeInput>) -> CallToolResult {
+        self.perform(|link| async move { link.slot_take(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Release a slot you hold, as soon as the shared action is done; the first member waiting for it is offered it."
+    )]
+    async fn dibs_slot_release(&self, Parameters(input): Parameters<SlotInput>) -> CallToolResult {
+        self.perform(|link| async move { link.slot_release(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Leave a slot's queue when you no longer need it, or give up the offer to you so the next member waiting gets it."
+    )]
+    async fn dibs_slot_leave(&self, Parameters(input): Parameters<SlotInput>) -> CallToolResult {
+        self.perform(|link| async move { link.slot_leave(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Show every slot of the project: who holds it and why, until when, whether its run stopped sending heartbeats (stalled), who waits for it, and to whom it is offered. Use it before a shared action and to see where you stand in a queue.",
+        annotations(read_only_hint = true)
+    )]
+    async fn dibs_slots(&self) -> CallToolResult {
+        self.perform(|link| async move { link.slots().await }).await
+    }
 }
 
 /// What the server tells a client about using its tools is the `instructions` below.
@@ -232,6 +264,10 @@ mod tests {
                 "dibs_ready",
                 "dibs_release",
                 "dibs_send",
+                "dibs_slot_leave",
+                "dibs_slot_release",
+                "dibs_slot_take",
+                "dibs_slots",
                 "dibs_status",
                 "dibs_takeover",
                 "dibs_thread",
@@ -262,7 +298,7 @@ mod tests {
         let tools = Tools::tool_router().list_all();
         for tool in tools
             .iter()
-            .filter(|tool| !["dibs_status", "dibs_ready"].contains(&&*tool.name))
+            .filter(|tool| !["dibs_status", "dibs_ready", "dibs_slots"].contains(&&*tool.name))
         {
             assert_eq!(
                 tool.input_schema.get("additionalProperties"),
@@ -293,6 +329,7 @@ mod tests {
                 "dibs_inbox",
                 "dibs_items",
                 "dibs_ready",
+                "dibs_slots",
                 "dibs_status",
                 "dibs_thread"
             ])

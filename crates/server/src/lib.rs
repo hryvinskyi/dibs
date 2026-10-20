@@ -20,5 +20,6 @@ pub mod routes;
 pub mod serve;
 pub mod snapshot;
 pub mod stream;
+pub mod sweep;
 pub mod ui;
 pub mod views;

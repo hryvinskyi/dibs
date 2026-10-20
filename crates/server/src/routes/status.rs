@@ -13,6 +13,7 @@ use dibs_domain::ids::ItemId;
 use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::http::AppState;
+use crate::views::slots::SlotView;
 use crate::views::{HeldItemView, ReadyView, reply};
 
 #[derive(Serialize)]
@@ -22,6 +23,7 @@ struct StatusAnswer {
     holds: Vec<HoldView>,
     wide: Vec<WideClaimView>,
     ready: ReadyView,
+    slots: Vec<SlotView>,
 }
 
 /// A live wide claim and where each area it names stands.
@@ -102,6 +104,7 @@ pub async fn status(
             .collect(),
         wide: view.wide.into_iter().map(WideClaimView::of).collect(),
         ready: ReadyView::of(view.ready),
+        slots: view.slots.into_iter().map(SlotView::of).collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

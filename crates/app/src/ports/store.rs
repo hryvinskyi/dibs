@@ -7,8 +7,9 @@
 //!
 //! Every method takes the project first, so tenancy is in the signature. The only exceptions find a
 //! record by a key unique across projects and return the project with it ([`TokenRows::token_by_hash`],
-//! [`UiSessionRows::ui_session`]), create or look up a project itself ([`ProjectRows`]), or sweep
-//! expired browser sessions of every project ([`UiSessionRows::delete_expired_ui_sessions`]).
+//! [`UiSessionRows::ui_session`]), create or look up a project itself ([`ProjectRows`]), sweep
+//! expired browser sessions of every project ([`UiSessionRows::delete_expired_ui_sessions`]), or
+//! find the projects whose slots are in use ([`SlotRows::busy_slot_projects`]).
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -25,6 +26,7 @@ use dibs_domain::item::{ExternalRef, ItemStatus};
 use dibs_domain::message::{Ack, SessionLabel};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
+use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
 
 use crate::records::{
@@ -81,6 +83,7 @@ pub trait Tx:
     + ThreadRows
     + AckRows
     + WideAskRows
+    + SlotRows
     + EventRows
     + SettingsRows
     + UiSessionRows
@@ -354,6 +357,17 @@ pub trait WideAskRows: Send {
     ) -> StoreResult<Option<WideAsk>>;
     /// Every announcement its holder has not acknowledged yet, ordered by message.
     async fn open_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>>;
+}
+
+/// The holds, waiters and offers of the project's slots.
+#[async_trait]
+pub trait SlotRows: Send {
+    /// Every hold, waiter and offer, holds and offers ordered by slot, waiters by place.
+    async fn slot_board(&mut self, project: ProjectId) -> StoreResult<SlotBoard>;
+    /// Replaces every hold, waiter and offer of the project with these.
+    async fn put_slot_board(&mut self, project: ProjectId, board: &SlotBoard) -> StoreResult<()>;
+    /// Every project with a hold, a waiter or an offer, ordered by id.
+    async fn busy_slot_projects(&mut self) -> StoreResult<Vec<ProjectId>>;
 }
 
 /// The project's append-only event log.

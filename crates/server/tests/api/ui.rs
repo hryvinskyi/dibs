@@ -1442,3 +1442,88 @@ async fn a_take_over_from_a_filtered_board_returns_to_it_and_never_to_another_si
     assert_eq!(kept.status, StatusCode::SEE_OTHER, "{}", kept.text);
     assert_eq!(kept.location(), "/ui/board?area=api%3Asearch&member=alice");
 }
+
+#[tokio::test]
+async fn the_board_shows_each_slot_its_holder_its_queue_and_a_stalled_run_from_real_holds() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    world
+        .settings(
+            &alice,
+            json!({"slots": [
+                {"name": "deploy:prod", "max_hold": "30m", "note": "say it in the channel"},
+                {"name": "db:staging", "max_hold": "1h", "group": "staging"},
+                {"name": "deploy:staging", "max_hold": "20m", "group": "staging"},
+                {"name": "release", "max_hold": "1h"}
+            ]}),
+        )
+        .await;
+    let alices = world.session(&alice, "laptop").await;
+    let bobs = world.session(&bob, "desktop").await;
+    let take = |who: &Person, session: u64, slot: &str, mode: &str, purpose: &str| {
+        let body = json!({"session_id": session, "purpose": purpose, "mode": mode});
+        let path = format!("/v1/slots/{slot}/take");
+        let world = &world;
+        let who = who.clone();
+        async move {
+            let answer = world.post(&who, &path, body).await;
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        }
+    };
+    take(&alice, alices, "deploy:prod", "run", "ship <b>2.4</b>").await;
+    take(&bob, bobs, "db:staging", "session", "migrate invoices").await;
+    take(&alice, alices, "deploy:staging", "session", "try the build").await;
+    world.fakes.clock.advance(Duration::minutes(3));
+
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/board").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    assert!(page.text.contains("slot_taken") && page.text.contains("slot_offered"));
+    let strip = page.column("b-slots");
+    let card = |name: &str| {
+        let start = strip.find(&format!(r#"data-slot="{name}""#)).unwrap();
+        let end = strip[start..].find("</li>").unwrap() + start;
+        &strip[start..end]
+    };
+    let prod = card("deploy:prod");
+    assert!(
+        prod.contains("Stalled") && prod.contains("No heartbeat for 3 min"),
+        "{prod}"
+    );
+    assert!(
+        prod.contains("ship &#60;b&#62;2.4&#60;/b&#62;") && !prod.contains("<b>"),
+        "{prod}"
+    );
+    assert!(prod.contains("say it in the channel"));
+    let db = card("db:staging");
+    assert!(
+        db.contains("Queued") && db.contains("bob") && db.contains("1 waiting: alice"),
+        "{db}"
+    );
+    assert!(db.contains("expires in 57 min"), "{db}");
+    let staging = card("deploy:staging");
+    assert!(
+        staging.contains("through db:staging") && staging.contains("group staging"),
+        "{staging}"
+    );
+    assert!(card("release").contains("Free"));
+    let fragment = browser.get(&world, "/ui/board/fragment").await;
+    assert!(fragment.text.contains(r#"data-slot="db:staging""#));
+    assert_eq!(fragment.text, region(&page));
+
+    world
+        .post(&bob, "/v1/slots/db:staging/release", json!({}))
+        .await;
+    let after = browser.get(&world, "/ui/board/fragment").await;
+    let offered = {
+        let start = after.text.find(r#"data-slot="deploy:staging""#).unwrap();
+        let end = after.text[start..].find("</li>").unwrap() + start;
+        after.text[start..end].to_owned()
+    };
+    assert!(
+        offered.contains("Offered")
+            && offered.contains("offered to <span class=\"member\">alice</span>"),
+        "{offered}"
+    );
+}

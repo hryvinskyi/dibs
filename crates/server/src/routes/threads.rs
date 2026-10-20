@@ -22,6 +22,7 @@ use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::fields::{item_in_body, parse, parse_required, record_id_text, switch, thread_in_path};
 use crate::http::AppState;
+use crate::views::slots::PendingOfferView;
 use crate::views::{MessageView, ThreadSummaryView, ThreadView, UnackedView, reply};
 
 /// The body of `POST /v1/threads`.
@@ -193,12 +194,14 @@ struct InboxAnswer {
     threads: Vec<ThreadSummaryView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     unacked: Option<Vec<UnackedView>>,
+    offers: Vec<PendingOfferView>,
 }
 
 /// Lists the threads waiting for the caller, newest activity first, each with how many of its
 /// messages they have not read and how many await their acknowledgement; with `unread=true`, only
 /// the threads that have unread messages. With `unacked=1` the answer also lists, under
 /// `unacked`, every message awaiting the caller's acknowledgement, newest first, with its thread.
+/// `offers` lists every slot on offer to the caller, with when the offer lapses.
 ///
 /// # Errors
 /// `forbidden` for an integration; `invalid_request` for an `unread` or `unacked` that is not a
@@ -229,6 +232,7 @@ pub async fn inbox(
         unacked: inbox
             .unacked
             .map(|messages| messages.into_iter().map(UnackedView::of).collect()),
+        offers: inbox.offers.into_iter().map(PendingOfferView::of).collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

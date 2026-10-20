@@ -1,7 +1,8 @@
-//! `GET /ui/board`: the board — the live wide claims, what is ready to pick up, what is in progress,
-//! what went stale with a take-over form, and what was done today — filtered by area and by member
-//! through the query string. `GET /ui/board/fragment` renders the same columns alone, for the page's
-//! script to swap in when the claims or the items change.
+//! `GET /ui/board`: the board — the slots, the live wide claims, what is ready to pick up, what is
+//! in progress, what went stale with a take-over form, and what was done today — filtered by area
+//! and by member through the query string; the slots are shown whole, whatever the filter.
+//! `GET /ui/board/fragment` renders the same columns alone, for the page's script to swap in when
+//! the claims, the items or the slots change.
 //!
 //! *Ready* lists the viewer's ready list, soonest first, each card with its priority, its hinted
 //! areas and its tracker's page, and below it the open items that are not ready with what holds
@@ -39,6 +40,7 @@ use crate::ui::render::html;
 use crate::ui::rows::{ClaimRow, NotReadyRow, PriorityMark, ReadyCard, WideRow, reference};
 use crate::ui::session::{PageSession, ScriptSession, UiSession};
 use crate::ui::signed_page;
+use crate::ui::slots::{SlotRow, SlotState};
 use crate::ui::status::STATUS_CHANGES;
 use crate::ui::zone::viewer_offset;
 
@@ -139,7 +141,10 @@ const FRAGMENT_HEADER: HeaderName = HeaderName::from_static("x-dibs-fragment");
 const BOARD_FRAGMENT: HeaderValue = HeaderValue::from_static("board");
 
 /// The kinds of event after which the board's columns are rendered again.
-const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependency_removed";
+const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependency_removed \
+     settings_changed slot_taken slot_renewed slot_queued slot_left slot_offered \
+     slot_offer_lapsed slot_released slot_expired slot_force_released slot_stalled slot_resumed \
+     slot_stall_taken_over";
 
 /// What the board shows below its filters, as the page and the fragment render it alike.
 #[derive(Debug, Clone)]
@@ -147,6 +152,7 @@ struct BoardColumns {
     csrf: String,
     back: String,
     updated: Moment,
+    slots: Vec<SlotRow>,
     wide: Vec<WideRow>,
     ready: Vec<ReadyCard>,
     waiting: Vec<ReadyCard>,
@@ -270,6 +276,11 @@ async fn columns(
         csrf: session.form_token(),
         back: address("/ui/board", filter),
         updated: moment(now, now),
+        slots: view
+            .slots
+            .iter()
+            .map(|line| SlotRow::of(line, now))
+            .collect(),
         wide: view
             .wide
             .iter()

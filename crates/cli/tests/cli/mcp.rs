@@ -15,7 +15,7 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 15] = [
+const TOOLS: [&str; 19] = [
     "dibs_ack",
     "dibs_check",
     "dibs_claim",
@@ -28,6 +28,10 @@ const TOOLS: [&str; 15] = [
     "dibs_ready",
     "dibs_release",
     "dibs_send",
+    "dibs_slot_leave",
+    "dibs_slot_release",
+    "dibs_slot_take",
+    "dibs_slots",
     "dibs_status",
     "dibs_takeover",
     "dibs_thread",
@@ -715,4 +719,73 @@ fn a_wide_claim_through_the_tools_is_announced_and_its_acknowledgement_grants() 
         "{}",
         blank.error()
     );
+}
+
+#[test]
+fn a_slot_taken_through_the_tools_is_the_members_and_a_second_member_waits_for_it() {
+    let setup = Setup::new();
+    let mut settings = dibs_test_server::two_repositories();
+    settings["slots"] = json!([{"name": "deploy:prod", "max_hold": "30m"}]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+
+    let taken = alice.tool(
+        "dibs_slot_take",
+        json!({"slot": "deploy:prod", "purpose": "ship 2.4"}),
+    );
+    assert_eq!(taken.ok()["outcome"], "taken");
+    assert_eq!(taken.ok()["slot"]["hold"]["holder"], "alice");
+    let renewed = setup
+        .dibs(&setup.alice, &api)
+        .args([
+            "--json",
+            "slot",
+            "take",
+            "deploy:prod",
+            "--purpose",
+            "ship 2.4",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        status(&renewed),
+        0,
+        "the command line's session holds it too"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&renewed.stdout).unwrap()["outcome"],
+        "renewed"
+    );
+
+    let queued = bob.tool(
+        "dibs_slot_take",
+        json!({"slot": "deploy:prod", "purpose": "hotfix"}),
+    );
+    assert_eq!(queued.ok()["outcome"], "queued");
+    assert_eq!(queued.ok()["position"], 1);
+    let too_long = bob.tool(
+        "dibs_slot_take",
+        json!({"slot": "deploy:prod", "purpose": "hotfix", "wait_seconds": 600}),
+    );
+    assert!(too_long.error().contains("540"), "{}", too_long.text);
+    let listed = bob.tool("dibs_slots", json!({}));
+    assert_eq!(listed.ok()["slots"][0]["queue"][0]["member"], "bob");
+
+    let released = alice.tool("dibs_slot_release", json!({"slot": "deploy:prod"}));
+    assert_eq!(released.ok()["slot"]["offer"]["member"], "bob");
+    let mine = bob.tool(
+        "dibs_slot_take",
+        json!({"slot": "deploy:prod", "purpose": "hotfix", "wait_seconds": 5}),
+    );
+    assert_eq!(mine.ok()["outcome"], "taken");
+    let not_waiting = alice.tool("dibs_slot_leave", json!({"slot": "deploy:prod"}));
+    assert!(
+        not_waiting.error().contains("not waiting"),
+        "{}",
+        not_waiting.text
+    );
+    let unknown = alice.tool("dibs_slot_release", json!({"slot": "Bad Name"}));
+    assert!(unknown.error().contains("`slot`"), "{}", unknown.text);
 }

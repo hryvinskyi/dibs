@@ -66,6 +66,9 @@ pub async fn run(command: AdminCommand, ctx: &Context) -> Result<(), Failure> {
                 }
             });
         }
+        AdminCommand::Slot(command) => {
+            crate::commands::slot::admin(command, &connection, ctx).await?;
+        }
         AdminCommand::ForceRelease(args) => {
             let item = connection.resolve(&args.key).await?;
             let ended = client

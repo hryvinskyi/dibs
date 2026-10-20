@@ -4,8 +4,9 @@
 //! A server holds its database file for as long as it runs (see [`crate::hold`]), so a second
 //! server, a restore or a migration refuses that file meanwhile. Stopping goes in this order: the
 //! listener closes, so no connection is accepted any more; the event streams end; the requests in
-//! flight are given [`SHUTDOWN_GRACE`] to finish; the snapshot schedule stops, finishing a snapshot
-//! it is writing; the write-ahead log is checkpointed into the database; the store closes.
+//! flight are given [`SHUTDOWN_GRACE`] to finish; the slot sweep stops, finishing a sweep it is
+//! running, and the snapshot schedule stops, finishing a snapshot it is writing; the write-ahead
+//! log is checkpointed into the database; the store closes.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use crate::hold::{DatabaseHold, HoldError};
 use crate::http::{HttpOptions, router};
 use crate::snapshot::{Snapshots, run_schedule};
 use crate::stream::{EventStreams, Shutdown, StreamOptions};
+use crate::sweep::{SWEEP_EVERY, run_sweeper};
 
 /// How many wake-ups a slow follower of the event log may fall behind before it misses some.
 const WAKEUP_BACKLOG: usize = 1024;
@@ -91,6 +93,7 @@ pub async fn serve(
     let notifier = Arc::new(BroadcastNotifier::new(WAKEUP_BACKLOG));
     let app = Arc::new(use_cases(store.clone(), notifier.clone()));
     let stopping = Shutdown::new();
+    let sweeper = tokio::spawn(run_sweeper(app.clone(), SWEEP_EVERY, stopping.signal()));
     let schedule = match &config.snapshots {
         Some(snapshots) => {
             let every = snapshots.every;
@@ -141,6 +144,9 @@ pub async fn serve(
         }
     };
     stopping.stop();
+    if let Err(error) = sweeper.await {
+        tracing::error!(error = %error, "the slot sweep ended abnormally");
+    }
     if let Some(schedule) = schedule
         && let Err(error) = schedule.await
     {

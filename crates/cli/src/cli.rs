@@ -1,6 +1,8 @@
 //! The command line as clap reads it.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
@@ -9,6 +11,9 @@ use dibs_domain::ids::{MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Importance, Subject};
+use dibs_domain::repo::RepoId;
+use dibs_domain::settings::parse_duration;
+use dibs_domain::slot::{Purpose, SlotName};
 
 /// Claim work, check edits and talk to the people and agents working on the same repositories.
 #[derive(Debug, Parser)]
@@ -85,6 +90,10 @@ pub enum Command {
     Read(ThreadArgs),
     /// Acknowledge a message that asks for it, once you have read it.
     Ack(AckArgs),
+    /// Take, wait for and release slots: short holds on shared actions (a deploy, a release, a
+    /// migration) that one member does at a time.
+    #[command(subcommand)]
+    Slot(SlotCommand),
     /// Send a heartbeat and refresh what this machine remembers about the project, as far as
     /// each is due.
     Sync(SyncArgs),
@@ -344,6 +353,150 @@ pub enum AdminCommand {
     Settings(SettingsCommand),
     /// End any member's claim on an item.
     ForceRelease(KeyArgs),
+    /// Manage slots.
+    #[command(subcommand)]
+    Slot(AdminSlotCommand),
+}
+
+/// `dibs admin slot`.
+#[derive(Debug, Subcommand)]
+pub enum AdminSlotCommand {
+    /// End any member's hold on a slot, telling them why; the first waiter is offered it.
+    ForceRelease(SlotReasonArgs),
+}
+
+/// A slot and the reason given for acting on it.
+#[derive(Debug, Args)]
+pub struct SlotReasonArgs {
+    /// The slot (`deploy:prod`).
+    #[arg(value_parser = SlotName::parse)]
+    pub slot: SlotName,
+    /// Why, sent to the member who holds it.
+    #[arg(long)]
+    pub reason: String,
+}
+
+/// The longest `--wait`: under the time an agent's shell tool lets a command run.
+pub const MAX_WAIT: Duration = Duration::from_secs(9 * 60);
+
+/// `dibs slot`.
+#[derive(Debug, Subcommand)]
+pub enum SlotCommand {
+    /// Take a slot, renew your hold, or join its queue; with --wait, wait for it to be offered
+    /// to you. Exits 0 when you hold it, 1 when you are still queued.
+    Take(SlotTakeArgs),
+    /// Take the slot (or wait for it with --wait), run the command while holding it with a
+    /// heartbeat every 30 seconds, and release it when the command ends, with its exit status.
+    Run(SlotRunArgs),
+    /// Release a slot you hold; the first member waiting is offered it.
+    Release(SlotArgs),
+    /// Leave a slot's queue, or give up the offer to you.
+    Leave(SlotArgs),
+    /// Show every slot: who holds it and why, until when, and who waits.
+    List,
+    /// Show what a command line needs according to a settings file, without asking a server.
+    Test(SlotTestArgs),
+    /// Take over another member's stalled hold, telling them what you checked.
+    Takeover(SlotTakeoverArgs),
+}
+
+/// A slot named on the command line.
+#[derive(Debug, Args)]
+pub struct SlotArgs {
+    /// The slot (`deploy:prod`).
+    #[arg(value_parser = SlotName::parse)]
+    pub slot: SlotName,
+}
+
+/// What a take asks for.
+#[derive(Debug, Args)]
+pub struct SlotAsk {
+    /// The slot (`deploy:prod`).
+    #[arg(value_parser = SlotName::parse)]
+    pub slot: SlotName,
+    /// Why you take it, as every member reads it; never a credential, a host or a customer's
+    /// data.
+    #[arg(long, value_parser = Purpose::parse)]
+    pub purpose: Purpose,
+    /// The work item it is for: its local id or its reference.
+    #[arg(long, value_parser = ItemKey::parse)]
+    pub item: Option<ItemKey>,
+    /// When the slot is held, wait this long (at most 9m) for it to be offered to you.
+    #[arg(long, value_parser = wait_duration)]
+    pub wait: Option<Duration>,
+    /// How often a waiting take asks again.
+    #[arg(long, hide = true, value_parser = interval, default_value = "10s")]
+    pub poll_every: Duration,
+}
+
+/// `dibs slot take`.
+#[derive(Debug, Args)]
+pub struct SlotTakeArgs {
+    /// The slot and why.
+    #[command(flatten)]
+    pub ask: SlotAsk,
+    /// Hold it until this forge workflow's run for this commit finishes (`deploy.yml@<sha>`),
+    /// whatever this machine does meanwhile.
+    #[arg(long, value_name = "WORKFLOW@SHA")]
+    pub until_run: Option<String>,
+}
+
+/// `dibs slot run`.
+#[derive(Debug, Args)]
+pub struct SlotRunArgs {
+    /// The slot and why.
+    #[command(flatten)]
+    pub ask: SlotAsk,
+    /// How often the run sends its heartbeat.
+    #[arg(long, hide = true, value_parser = interval, default_value = "30s")]
+    pub heartbeat_every: Duration,
+    /// The command and its arguments, after `--`.
+    #[arg(last = true, required = true, num_args = 1..)]
+    pub command: Vec<OsString>,
+}
+
+/// `dibs slot takeover`.
+#[derive(Debug, Args)]
+pub struct SlotTakeoverArgs {
+    /// The slot (`deploy:prod`).
+    #[arg(value_parser = SlotName::parse)]
+    pub slot: SlotName,
+    /// What you checked before taking it over, sent to the member whose hold stalled.
+    #[arg(long)]
+    pub reason: String,
+    /// Why you hold it now.
+    #[arg(long, value_parser = Purpose::parse)]
+    pub purpose: Purpose,
+}
+
+/// `dibs slot test`.
+#[derive(Debug, Args)]
+pub struct SlotTestArgs {
+    /// The settings file (TOML), as `dibs admin settings apply` takes it.
+    pub settings: PathBuf,
+    /// The repository the command runs in, for a project that lists several.
+    #[arg(long, value_parser = RepoId::parse)]
+    pub repo: Option<RepoId>,
+    /// The command line, after `--`; several words are joined by spaces.
+    #[arg(last = true, required = true, num_args = 1..)]
+    pub line: Vec<String>,
+}
+
+fn wait_duration(text: &str) -> Result<Duration, String> {
+    let wait = interval(text)?;
+    if wait > MAX_WAIT {
+        return Err("wait at most 9m, under the time a shell tool lets a command run".to_owned());
+    }
+    Ok(wait)
+}
+
+fn interval(text: &str) -> Result<Duration, String> {
+    let parsed = parse_duration(text).map_err(|error| error.to_string())?;
+    let seconds = u64::try_from(parsed.whole_seconds()).map_err(|_| "a duration is positive")?;
+    if seconds == 0 {
+        return Err("a duration is longer than 0s".to_owned());
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 /// `dibs admin member`.
