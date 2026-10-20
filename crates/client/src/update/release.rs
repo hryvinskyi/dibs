@@ -198,7 +198,9 @@ mod tests {
     #[test]
     fn only_https_and_a_directory_are_sources() {
         assert!(releases(DEFAULT_RELEASES).is_ok());
-        assert!(releases("file:///tmp/releases").is_ok());
+        let dir = tempfile::tempdir().unwrap();
+        let file_url = url::Url::from_directory_path(dir.path()).unwrap();
+        assert!(releases(file_url.as_str()).is_ok());
         for base in [
             "http://example.com/releases",
             "ftp://example.com",
