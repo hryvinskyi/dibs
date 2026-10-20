@@ -241,6 +241,7 @@ impl Link {
         let asked = InboxRequest {
             unread: input.unread.unwrap_or(false),
             unacked: input.unacked.unwrap_or(false),
+            deliverable: false,
         };
         self.call(self.connection.client.inbox(asked)).await
     }

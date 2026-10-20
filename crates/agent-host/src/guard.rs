@@ -6,9 +6,14 @@
 //! - **Failure is never a verdict.** A configuration that cannot be used, an unreadable input, an
 //!   unknown host or event, a server that cannot be reached: each becomes no objection with a
 //!   one-line notice. Only the server's own refusal of an edit denies.
-//! - **No upkeep is waited for.** Heartbeats and refreshed caches are started in the background
-//!   and used from the next event on. The only call a hook waits for is the verdict on a path the
-//!   cache cannot answer: a governed path in an area the member is not known to hold.
+//! - **No upkeep is waited for.** Heartbeats, refreshed caches and the claims of what is to be
+//!   delivered are made in the background and used from the next event on. The only calls a hook
+//!   waits for are the verdict on a path the cache cannot answer (a governed path in an area the
+//!   member is not known to hold) and the state of the slots a shell command needs.
+//! - **A command line never leaves the machine.** It is split and judged here; the server is asked
+//!   only where the slots it touches stand.
+//! - **What is delivered between tool calls** reaches the main thread only, of a host that carries
+//!   it, at most once a minute, never twice and never a member's own message.
 //! - **A server that failed is left alone for a minute**, and the person is warned at most once a
 //!   minute meanwhile.
 //! - **A checkout that governs no repository of the project** (its `repo` missing, unknown, or not
@@ -26,16 +31,21 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::repo::RepoId;
 use dibs_domain::settings::{EditPolicy, ProjectSettings};
+use dibs_domain::slot::{
+    CommandVerdict, SlotHold, command_verdict, slots_in_question, split_commands,
+};
 
 use crate::adapter::{HostAdapter, HostReply};
 use crate::capabilities::Capabilities;
-use crate::event::{EventKind, HostEvent, ToolCall};
+use crate::delivery;
+use crate::event::{EventKind, HostEvent, Thread, ToolCall};
 use crate::outcome::GuardOutcome;
 use crate::ports::{
     Cached, Clock, CoordinationGateway, KnownSettings, PathAnswer, PortError, SessionRef,
     Workspace, Workspaces,
 };
 use crate::registry::HostRegistry;
+use crate::slots::KnownBoard;
 use crate::text::Text;
 use crate::upkeep::{
     DEFAULT_HEARTBEAT, Due, Freshness, INBOX_FRESH, STATUS_FRESH, WARN_EVERY, circuit_open,
@@ -157,8 +167,11 @@ impl Run<'_> {
         let decided = match event {
             HostEvent::SessionStarted { .. } => self.session_started(),
             HostEvent::BeforeTool { cwd, call, .. } => self.before_tool(cwd, call),
-            HostEvent::AfterTool { .. } | HostEvent::PromptSubmitted { .. } => {
-                Ok(GuardOutcome::silent())
+            HostEvent::AfterTool { thread, .. } => {
+                Ok(self.deliver(*thread, self.capabilities.context_after_tool))
+            }
+            HostEvent::PromptSubmitted { thread, .. } => {
+                Ok(self.deliver(*thread, self.capabilities.context_at_prompt))
             }
         };
         let outcome = match decided {
@@ -222,6 +235,7 @@ impl Run<'_> {
     fn before_tool(&self, cwd: &Path, call: &ToolCall) -> Result<GuardOutcome, Problem> {
         match call {
             ToolCall::Edit { paths } if self.capabilities.deny_edit => self.edits(cwd, paths),
+            ToolCall::Shell { command } if self.capabilities.deny_shell => self.shell(command),
             ToolCall::Edit { .. } | ToolCall::Shell { .. } | ToolCall::Other => {
                 Ok(GuardOutcome::silent())
             }
@@ -275,6 +289,72 @@ impl Run<'_> {
         }
         let wide = self.wide_named_by_me(&known.value);
         Ok(self.verdicts(settings, &repo, &ask, &answers, &wide))
+    }
+
+    /// The command check: the line is split and judged on this machine, against the cached
+    /// settings and the fresh state of the few slots its verdict reads. The line itself never
+    /// leaves the machine; a line that touches no slot is answered without the server.
+    fn shell(&self, command: &str) -> Result<GuardOutcome, Problem> {
+        let known = self.settings()?;
+        let settings = &known.value.settings;
+        let catalog = settings.slots();
+        if catalog.slots().is_empty() {
+            return Ok(GuardOutcome::silent());
+        }
+        let repo = self
+            .workspace
+            .repo(settings)
+            .map_err(|error| Problem::Repository(error.to_string()))?;
+        let commands = split_commands(command);
+        let names = slots_in_question(&commands, &repo, catalog);
+        if names.is_empty() {
+            return Ok(GuardOutcome::silent());
+        }
+        let states = self.call(|gateway| gateway.slots(&names))?;
+        let known_board = KnownBoard::of(&states, &known.value.member);
+        let verdict = command_verdict(
+            &commands,
+            &repo,
+            catalog,
+            &known_board.board,
+            known_board.me,
+        );
+        Ok(command_outcome(&verdict, &known_board))
+    }
+
+    /// What a session may be shown between its tool calls or with a prompt: only on the main
+    /// thread of a host that carries it there, only what the background sync won for this session,
+    /// read from this machine without waiting for anything, once a minute at most and never twice.
+    fn deliver(&self, thread: Thread, carried: bool) -> GuardOutcome {
+        if !carried || thread != Thread::Main {
+            return GuardOutcome::silent();
+        }
+        let cache = self.workspace.cache();
+        let Some(inbox) = cache.inbox() else {
+            return GuardOutcome::silent();
+        };
+        let Some(member) = cache
+            .settings()
+            .ok()
+            .flatten()
+            .map(|known| known.value.member)
+        else {
+            return GuardOutcome::silent();
+        };
+        let won = delivery::won_by(&inbox.value, &self.session);
+        if won.is_empty() {
+            return GuardOutcome::silent();
+        }
+        let Some(entry) = self.workspace.ledger().open(&self.session) else {
+            return GuardOutcome::silent();
+        };
+        let Some((show, ledger)) = delivery::choose(&entry.read(), &won, &member, self.now) else {
+            return GuardOutcome::silent();
+        };
+        if !entry.write(&ledger) {
+            return GuardOutcome::silent();
+        }
+        GuardOutcome::context(wording::delivered(&show))
     }
 
     /// Answers the server gave for `paths`. An area an allowed edit lies in is remembered as held
@@ -478,6 +558,71 @@ impl Run<'_> {
         match self.workspace.upkeep().start(&self.session, self.now) {
             Ok(_) => outcome,
             Err(error) => with_notice(outcome, wording::upkeep_failed(&error.to_string())),
+        }
+    }
+}
+
+/// A hold as a refusal names it.
+fn shown<'a>(hold: &'a SlotHold, known: &'a KnownBoard) -> wording::HoldShown<'a> {
+    wording::HoldShown {
+        slot: &hold.slot,
+        holder: known.handle(hold.member),
+        purpose: &hold.purpose,
+        until: hold.expires_at,
+    }
+}
+
+/// The outcome of a command's verdict: a refusal naming the slot, its holder, the queue and the
+/// ways on, or no objection.
+fn command_outcome(verdict: &CommandVerdict, known: &KnownBoard) -> GuardOutcome {
+    match verdict {
+        CommandVerdict::Free | CommandVerdict::Holding { .. } => GuardOutcome::silent(),
+        CommandVerdict::NeedsSlot {
+            slot,
+            holder,
+            waiting,
+            offered_to_me,
+            run_only,
+        } => {
+            let theirs = holder.as_ref().filter(|hold| hold.member != known.me);
+            let offered_until = if *offered_to_me {
+                known
+                    .board
+                    .offers
+                    .iter()
+                    .find(|offer| offer.member == known.me)
+                    .map(|offer| offer.until)
+            } else {
+                None
+            };
+            let reason = wording::needs_slot(&wording::SlotNeeded {
+                slot,
+                hold: theirs.map(|hold| shown(hold, known)),
+                waiting: *waiting,
+                offered_until,
+                run_only: *run_only,
+                held_by_me: holder.as_ref().is_some_and(|hold| hold.member == known.me),
+            });
+            GuardOutcome::Deny {
+                reason: Text::new(reason),
+            }
+        }
+        CommandVerdict::Frozen {
+            slot,
+            holder,
+            purpose,
+            until,
+            target,
+        } => {
+            let hold = wording::HoldShown {
+                slot,
+                holder: known.handle(*holder),
+                purpose,
+                until: *until,
+            };
+            GuardOutcome::Deny {
+                reason: Text::new(wording::frozen(slot, &hold, &target.to_string())),
+            }
         }
     }
 }

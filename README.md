@@ -251,7 +251,7 @@ a host.
 
 | Host | Status | What its guard sees |
 |---|---|---|
-| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, every tool after it ran; edits another member holds are refused, and subagents are told apart |
+| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, each `Bash` command before it runs, every tool after it ran, each prompt; edits another member holds and commands that need a slot another member holds are refused, a teammate's pressing message or a slot offered to you arrives between tool calls, and subagents are told apart |
 | Codex CLI | planned | its command hooks |
 | OpenCode | planned | its in-process plugins, through a shim over `dibs hook neutral` |
 
@@ -261,8 +261,9 @@ machine: every hook answers without objection and contacts nobody.
 ### Claude Code
 
 The plugin gives Claude Code the brief at the start of a session, a check before every `Edit`, `Write`,
-`MultiEdit` and `NotebookEdit`, heartbeats after tools run, the `dibs_*` tools of `dibs mcp`, and a skill with the
-workflow. It needs the `dibs` command on the `PATH` and a `dibs login` for the project; without them its hooks say
+`MultiEdit` and `NotebookEdit`, a check of every `Bash` command against the project's slots, heartbeats after tools
+run, a teammate's `high` or `urgent` message (or one that asks for an acknowledgement) and a slot offered to you between
+tool calls and with your prompt, the `dibs_*` tools of `dibs mcp`, and a skill with the workflow. It needs the `dibs` command on the `PATH` and a `dibs login` for the project; without them its hooks say
 so and let everything through.
 
 1. Install `dibs` and sign in: `dibs login --server <url>` inside a checkout that has a `.dibs.toml`.
@@ -278,7 +279,12 @@ so and let everything through.
 
 The hooks never approve a tool call: a call dibs has no objection to goes through Claude Code's own permission
 settings as it would without the plugin. A refusal names the holder and the way on. When the server cannot be
-reached, the hooks say so once a minute and let edits through.
+reached, the hooks say so once a minute and let edits and commands through.
+
+A `Bash` command is split into simple commands and judged on your machine, from the settings dibs keeps there; the
+command line never reaches the server, which is asked only where the slots the command touches stand. A message
+between tool calls reaches only the main agent, never a subagent, at most once a minute, and once across all your
+sessions: the first session to claim it shows it. It is framed as a teammate's request that authorises nothing.
 
 On Windows, Claude Code runs a plugin's hooks with Git Bash, so the plugin needs
 [Git for Windows](https://git-scm.com/downloads/win). Without it the hooks cannot start, and they are declared so
@@ -303,6 +309,7 @@ dibs release 12                                   # give the item back
 dibs done 12                                      # the item is finished
 dibs check packages/billing/a.rs                  # may I edit these paths?
 dibs check --git-range origin/main..HEAD [--author me]   # warn about what a range of commits changed
+dibs check --push                                 # git's pre-push hook: refuse a push to a branch a held slot freezes
 dibs grant 14 --area api:billing --to bob         # let bob edit in an area you hold, for his item 14
 dibs send --to alice --subject "Rounding" "May I touch round.rs?"    # or --project; "-" reads stdin
 dibs send --project --subject "Freeze" --importance urgent --ack "No pushes to main until noon."
@@ -385,6 +392,14 @@ session cookie is `Secure`, so use them over HTTPS (or on `localhost`).
   is its complement: it looks at every path the commits of a range changed (merge commits left out, both sides of a
   rename) and warns about those someone else holds or that need a claim. It always succeeds, so a git `pre-push` hook
   can call it without ever stopping a push.
+- **Pushes during a freeze.** A slot may freeze branches (`freezes`): while another member holds it, nobody else
+  pushes there. The agents' command check refuses such a `git push`, and `dibs check --push`, called from a git
+  `pre-push` hook (`exec dibs check --push` in `.git/hooks/pre-push`), refuses it whoever typed it and whatever the
+  command line said, since git hands it the exact branches. It is silent otherwise; a server that cannot be reached
+  lets the push go with one warning, and `git push --no-verify` goes past it on purpose.
+- **Raised messages are limited.** A member may send ten `high` or `urgent` messages an hour (`raised_per_hour` in the
+  settings); the next is refused with `importance_limited` until the oldest is an hour old. What dibs sends itself is
+  not counted.
 - **Unsigned binaries.** See [Install](#install) for what that means on macOS and Windows.
 - **Reporting a vulnerability.** Use the repository's private vulnerability reporting (the *Security* tab, then *Report
   a vulnerability*) rather than a public issue.

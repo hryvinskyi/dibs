@@ -1,5 +1,6 @@
 //! Two processes take one slot at the same moment, over and over: one holds it and the other waits
-//! each time. A member waiting with `--wait` is handed the slot when its holder releases it.
+//! each time. A member waiting with `--wait` is handed the slot when its holder releases it. A
+//! member's agent running the slot's command while another member holds it is refused, naming them.
 
 use std::io::Read;
 use std::process::Stdio;
@@ -16,6 +17,9 @@ const SETTINGS: &str = r#"
 [[slots]]
 name = "deploy:prod"
 max_hold = "30m"
+
+[[slots.commands]]
+matches = "^deploy\\.sh prod"
 "#;
 
 struct Attempt {
@@ -124,4 +128,25 @@ fn a_member_waiting_is_handed_the_slot_when_its_holder_releases_it() {
         released.elapsed() < Duration::from_secs(30),
         "within its deadline"
     );
+}
+
+#[test]
+fn a_shell_command_needing_a_slot_another_member_holds_is_denied_naming_them() {
+    let team = Team::start(SETTINGS);
+    let work = team.checkout("work", None, "git@example.com:acme/widgets.git");
+    team.alice.ok(
+        &work,
+        &["slot", "take", "deploy:prod", "--purpose", "ship 2.4"],
+    );
+    let denied = team
+        .bob
+        .before_shell(&work, "bob-session", "cd ops && ./deploy.sh prod");
+    assert_eq!(denied["decision"], "deny", "{denied}");
+    let reason = denied["reason"].as_str().unwrap();
+    assert!(reason.contains("alice holds it"), "{reason}");
+    assert!(reason.contains("ship 2.4"), "{reason}");
+    let own = team
+        .alice
+        .before_shell(&work, "alice-session", "./deploy.sh prod");
+    assert_eq!(own["decision"], "no_objection", "{own}");
 }

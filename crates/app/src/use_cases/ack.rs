@@ -7,6 +7,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{MessageId, ThreadId};
 use dibs_domain::message::{Ack, AckOutcome, AckState, decide_ack};
+use dibs_domain::wide::ask_stands;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -34,6 +35,9 @@ pub struct Acknowledged {
     /// The grants this acknowledgement made: for the announcement of a wide claim, one per area it
     /// asked about that the caller still holds. Empty for any other message and for a repeat.
     pub granted: Vec<NamedGrant>,
+    /// Whether the message announced a wide claim that has ended, so the acknowledgement grants
+    /// nothing.
+    pub announcement_ended: bool,
 }
 
 /// Records that the caller acknowledged a message. Only a message that asks for it, and only by one
@@ -85,6 +89,10 @@ impl AckMessage {
         let state = AckState::derive(&reached(&thread, &message, &people), &acks);
         let outcome = decide_ack(message.id, message.ack_required, &state, actor.member, now)?;
         let member = Names::load(&mut work).await?.handle(actor.member)?;
+        let announcement_ended = match work.wide_ask(actor.project, message.id).await? {
+            Some(ask) => !ask_stands(&ask, &work.claims(actor.project).await?),
+            None => false,
+        };
         let mut granted = Vec::new();
         let created = match outcome {
             AckOutcome::Already(_) => false,
@@ -111,6 +119,7 @@ impl AckMessage {
             thread: thread.id,
             member,
             granted,
+            announcement_ended,
         })
     }
 }

@@ -85,6 +85,7 @@ pub async fn inbox(args: InboxArgs, ctx: &Context) -> Result<(), Failure> {
         .inbox(InboxRequest {
             unread: args.unread,
             unacked: args.unacked,
+            deliverable: false,
         })
         .await
         .map_err(|error| connection.failed(error))?;
@@ -209,7 +210,7 @@ pub async fn ack(args: AckArgs, ctx: &Context) -> Result<(), Failure> {
         .await
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&acked, || {
-        if acked.created {
+        let mut text = if acked.created {
             let mut text = format!(
                 "Acknowledged message {} in conversation #{}; its author can see it.",
                 acked.ack.message, acked.ack.thread
@@ -229,7 +230,13 @@ pub async fn ack(args: AckArgs, ctx: &Context) -> Result<(), Failure> {
                 acked.ack.thread,
                 acked.ack.at.format(&Rfc3339).unwrap_or_default()
             )
+        };
+        if acked.announcement_ended {
+            text.push_str(
+                " It announced a wide claim that has ended, so the acknowledgement grants nothing.",
+            );
         }
+        text
     });
     Ok(())
 }

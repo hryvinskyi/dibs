@@ -14,6 +14,8 @@ mod auth;
 #[cfg(test)]
 mod claims;
 #[cfg(test)]
+mod deliveries;
+#[cfg(test)]
 mod edit_check;
 #[cfg(test)]
 mod events;

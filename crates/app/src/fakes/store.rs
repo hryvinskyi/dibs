@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use time::OffsetDateTime;
 
 use dibs_domain::claim::Claim;
+use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
 use dibs_domain::event::{Event, EventKind};
 use dibs_domain::handle::Handle;
@@ -26,9 +27,9 @@ use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
 
 use crate::ports::{
-    AckRows, ClaimRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows,
-    SessionRows, SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
-    UiSessionRows, WideAskRows,
+    AckRows, ClaimRows, DeliveryRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows,
+    ProjectRows, RaisedRows, SessionRows, SettingsRows, SlotRows, Store, StoreError, StoreResult,
+    ThreadRows, TokenRows, Tx, UiSessionRows, WideAskRows,
 };
 use crate::records::{
     CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
@@ -56,6 +57,8 @@ struct State {
     acks: BTreeMap<(ProjectId, MessageId, MemberId), Ack>,
     wide_asks: BTreeMap<(ProjectId, MessageId), WideAsk>,
     slots: BTreeMap<ProjectId, SlotBoard>,
+    deliveries: BTreeMap<(ProjectId, MemberId, DeliverySubject), Delivery>,
+    raised: BTreeMap<(ProjectId, MessageId), (MemberId, OffsetDateTime)>,
     events: Vec<Event>,
     last_event: u64,
     settings: BTreeMap<ProjectId, SettingsDocument>,
@@ -120,7 +123,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 18] = [
+        let checks: [(&'static str, bool); 20] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -211,6 +214,18 @@ impl State {
                             && h.item.is_none_or(|i| item(*p, i))
                     }) && board.waiters.iter().all(|w| member(*p, w.member))
                         && board.offers.iter().all(|o| member(*p, o.member))
+                }),
+            ),
+            (
+                "a delivery",
+                self.deliveries.iter().all(|((p, m, _), d)| {
+                    member(*p, *m) && self.sessions.contains_key(&(*p, d.session))
+                }),
+            ),
+            (
+                "a counted message",
+                self.raised.iter().all(|((p, message), (m, _))| {
+                    member(*p, *m) && self.messages.contains_key(&(*p, *message))
                 }),
             ),
             ("an event", self.events.iter().all(|e| project(&e.project))),
@@ -936,6 +951,86 @@ impl SlotRows for MemoryTx {
 
     async fn busy_slot_projects(&mut self) -> StoreResult<Vec<ProjectId>> {
         Ok(self.work.slots.keys().copied().collect())
+    }
+}
+
+#[async_trait]
+impl DeliveryRows for MemoryTx {
+    async fn insert_delivery(
+        &mut self,
+        project: ProjectId,
+        delivery: &Delivery,
+    ) -> StoreResult<()> {
+        let key = (project, delivery.member, delivery.subject.clone());
+        if self.work.deliveries.contains_key(&key) {
+            return Err(StoreError::Duplicate);
+        }
+        self.work.deliveries.insert(key, delivery.clone());
+        Ok(())
+    }
+
+    async fn delivery(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        subject: &DeliverySubject,
+    ) -> StoreResult<Option<Delivery>> {
+        Ok(self
+            .work
+            .deliveries
+            .get(&(project, member, subject.clone()))
+            .cloned())
+    }
+
+    async fn deliveries(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        subjects: &[DeliverySubject],
+    ) -> StoreResult<Vec<Delivery>> {
+        Ok(subjects
+            .iter()
+            .filter_map(|subject| {
+                self.work
+                    .deliveries
+                    .get(&(project, member, subject.clone()))
+                    .cloned()
+            })
+            .collect())
+    }
+}
+
+#[async_trait]
+impl RaisedRows for MemoryTx {
+    async fn insert_raised(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        message: MessageId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        if self.work.raised.contains_key(&(project, message)) {
+            return Err(StoreError::Duplicate);
+        }
+        self.work.raised.insert((project, message), (member, at));
+        Ok(())
+    }
+
+    async fn raised_since(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        since: OffsetDateTime,
+    ) -> StoreResult<Vec<OffsetDateTime>> {
+        let mut times: Vec<OffsetDateTime> = self
+            .work
+            .raised
+            .iter()
+            .filter(|((p, _), (m, at))| *p == project && *m == member && *at >= since)
+            .map(|(_, (_, at))| *at)
+            .collect();
+        times.sort_unstable();
+        Ok(times)
     }
 }
 

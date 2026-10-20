@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
 use dibs_agent_host::ports::{
-    CoordinationGateway, LocalCache, PortError, Upkeep, Workspace, Workspaces,
+    CoordinationGateway, DeliveryLedger, LocalCache, PortError, Upkeep, Workspace, Workspaces,
 };
 use dibs_agent_host::upkeep::is_fresh;
 use dibs_client::checkout::Checkout;
@@ -23,6 +23,7 @@ use crate::failure::sentence;
 use crate::git::Git;
 use crate::guard::cache::StateCache;
 use crate::guard::gateway::HookGateway;
+use crate::guard::ledger::SessionLedgers;
 use crate::guard::remote::{Remote, RemoteError, checkout_of};
 use crate::guard::upkeep::DetachedSync;
 
@@ -65,6 +66,7 @@ pub struct ClientWorkspace {
     cache: StateCache,
     gateway: HookGateway,
     upkeep: DetachedSync,
+    ledger: SessionLedgers,
 }
 
 impl ClientWorkspace {
@@ -73,6 +75,7 @@ impl ClientWorkspace {
         Self {
             cache: StateCache::new(state.clone(), checkout.root()),
             upkeep: DetachedSync::new(state.clone(), checkout.root()),
+            ledger: SessionLedgers::new(state.clone()),
             gateway: HookGateway::new(remote, checkout.clone()),
             checkout,
             state,
@@ -137,5 +140,9 @@ impl Workspace for ClientWorkspace {
 
     fn upkeep(&self) -> &dyn Upkeep {
         &self.upkeep
+    }
+
+    fn ledger(&self) -> &dyn DeliveryLedger {
+        &self.ledger
     }
 }

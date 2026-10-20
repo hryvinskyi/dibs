@@ -15,6 +15,7 @@ use dibs_app::AppError;
 use dibs_app::error::Duplicate;
 use dibs_app::named::Refusal;
 use dibs_domain::claim::{ClaimRefused, ForceReleaseRefused, HolderOnly, TakeoverRefused};
+use dibs_domain::delivery::DeliveryRefused;
 use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
 use dibs_domain::grant::{GrantRefused, RevokeRefused};
@@ -359,6 +360,11 @@ fn status_of(error: &AppError) -> StatusCode {
         )
         | AppError::EditCheck(EditCheckRefused::UnknownRepo { .. })
         | AppError::Recipients(RecipientsError::Empty) => StatusCode::UNPROCESSABLE_ENTITY,
+        AppError::Delivery(DeliveryRefused::NotRecipient) => StatusCode::FORBIDDEN,
+        AppError::Delivery(DeliveryRefused::Delivered { .. } | DeliveryRefused::OfferGone) => {
+            StatusCode::CONFLICT
+        }
+        AppError::ImportanceLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         AppError::StoredSettings(_) | AppError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -410,6 +416,14 @@ fn details_of(error: &AppError) -> Map<String, Value> {
             if let Some(reference) = item_ref {
                 details.put("item_ref", reference);
             }
+        }
+        AppError::Delivery(DeliveryRefused::Delivered { session, at }) => {
+            details.put("session_id", session);
+            details.time("at", *at);
+        }
+        AppError::ImportanceLimited(limited) => {
+            details.put("limit", limited.limit);
+            details.time("frees_at", limited.frees_at);
         }
         AppError::Batch(BatchRefused::Duplicate { reference }) => details.put("ref", reference),
         AppError::Batch(BatchRefused::TooMany { max }) => details.put("max", max),

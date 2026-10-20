@@ -147,6 +147,7 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/threads/{id}/read", post(routes::threads::mark_read))
         .route("/v1/inbox", get(routes::threads::inbox))
         .route("/v1/messages/{id}/ack", post(routes::messages::ack))
+        .route("/v1/messages/{id}/deliver", post(routes::messages::deliver))
         .route("/v1/messages/{id}/status", get(routes::messages::status))
         .route("/v1/slots", get(routes::slots::list))
         .route("/v1/slots/{name}", get(routes::slots::get))
@@ -155,6 +156,10 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/slots/{name}/leave", post(routes::slots::leave))
         .route("/v1/slots/{name}/heartbeat", post(routes::slots::heartbeat))
         .route("/v1/slots/{name}/takeover", post(routes::slots::take_over))
+        .route(
+            "/v1/slots/{name}/offer/deliver",
+            post(routes::slots::deliver_offer),
+        )
         .route(
             "/v1/slots/{name}/run-finished",
             post(routes::slots::run_finished),

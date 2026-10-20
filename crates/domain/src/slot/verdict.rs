@@ -64,20 +64,14 @@ pub fn command_verdict(
     me: MemberId,
 ) -> CommandVerdict {
     let governed: Vec<&SimpleCommand> = commands.iter().filter(|c| !is_slot_wrapper(c)).collect();
-    for target in governed
+    let targets: Vec<RepoRef> = governed
         .iter()
         .filter_map(|command| push_targets(command, repo))
         .flatten()
-    {
-        if let Some((spec, hold)) = freezing(catalog, board, &target, me) {
-            return CommandVerdict::Frozen {
-                slot: spec.name.clone(),
-                holder: hold.member,
-                purpose: hold.purpose.clone(),
-                until: hold.expires_at,
-                target,
-            };
-        }
+        .collect();
+    let pushed = push_verdict(&targets, catalog, board, me);
+    if pushed != CommandVerdict::Free {
+        return pushed;
     }
     let Some(spec) = catalog
         .slots()
@@ -104,6 +98,62 @@ pub fn command_verdict(
             .is_some_and(|offer| offer.member == me),
         run_only: spec.run_only,
     }
+}
+
+/// The slots whose state [`command_verdict`] reads for these commands: each slot that freezes a ref
+/// a push among them targets, then the first slot whose pattern matches one of them, each named
+/// once. Empty when the line touches no slot: its verdict is then `Free` whatever the slots' state,
+/// so nobody needs to be asked about it.
+pub fn slots_in_question(
+    commands: &[SimpleCommand],
+    repo: &RepoId,
+    catalog: &SlotCatalog,
+) -> Vec<SlotName> {
+    let governed: Vec<&SimpleCommand> = commands.iter().filter(|c| !is_slot_wrapper(c)).collect();
+    let targets: Vec<RepoRef> = governed
+        .iter()
+        .filter_map(|command| push_targets(command, repo))
+        .flatten()
+        .collect();
+    let mut names: Vec<SlotName> = catalog
+        .slots()
+        .iter()
+        .filter(|spec| targets.iter().any(|target| spec.freezes.contains(target)))
+        .map(|spec| spec.name.clone())
+        .collect();
+    if let Some(spec) = catalog
+        .slots()
+        .iter()
+        .find(|spec| governed.iter().any(|command| spec.matches(&command.text)))
+        && !names.contains(&spec.name)
+    {
+        names.push(spec.name.clone());
+    }
+    names
+}
+
+/// What a push of `targets` needs from `me`: [`CommandVerdict::Frozen`] for the first target a slot
+/// held by another member freezes, [`CommandVerdict::Free`] otherwise. A hold of `me` never freezes
+/// their own push. The agent's command check and git's pre-push check both decide here, so a push
+/// is judged the same whoever typed it.
+pub fn push_verdict(
+    targets: &[RepoRef],
+    catalog: &SlotCatalog,
+    board: &SlotBoard,
+    me: MemberId,
+) -> CommandVerdict {
+    for target in targets {
+        if let Some((spec, hold)) = freezing(catalog, board, target, me) {
+            return CommandVerdict::Frozen {
+                slot: spec.name.clone(),
+                holder: hold.member,
+                purpose: hold.purpose.clone(),
+                until: hold.expires_at,
+                target: target.clone(),
+            };
+        }
+    }
+    CommandVerdict::Free
 }
 
 /// The slot held by another member that freezes `target`, with its hold.

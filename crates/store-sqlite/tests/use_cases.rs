@@ -13,9 +13,10 @@ mod use_cases {
     use dibs_app::named::Refusal;
     use dibs_app::ports::Store;
     use dibs_app::use_cases::{
-        Addressees, ClaimItemInput, ClaimMade, CreateItemInput, CreateMemberInput, EventCursor,
-        HoldMode, InitProjectInput, ItemQuery, NewMember, RegisterSessionInput, ReleaseSlotInput,
-        StartThreadInput, TakeOverInput, TakeSlotInput, TookKind, TookSlot, UseCases,
+        Addressees, ClaimItemInput, ClaimMade, CreateItemInput, CreateMemberInput, DeliveryAsk,
+        EventCursor, HoldMode, InitProjectInput, ItemQuery, NewMember, RegisterSessionInput,
+        ReleaseSlotInput, StartThreadInput, TakeOverInput, TakeSlotInput, TookKind, TookSlot,
+        UseCases,
     };
     use dibs_app::{Actor, AppError, Dependencies};
     use dibs_domain::claim::{ClaimOutcome, ClaimRefused, TakeoverRefused};
@@ -34,6 +35,7 @@ mod use_cases {
         dibs_app::use_cases::InboxQuery {
             unread_only,
             unacked: false,
+            deliverable: false,
         }
     }
 
@@ -798,5 +800,83 @@ mod use_cases {
             world.event_names(alice.project).await.last(),
             Some(&"acked")
         );
+    }
+
+    /// One member's sessions all claim the delivery of one urgent message at once, over `store`:
+    /// exactly one delivers it, and every other one is told it was delivered.
+    async fn one_delivery_wins_a_race_of_sessions(store: Arc<dyn Store>) {
+        let fakes = Fakes::new(OffsetDateTime::UNIX_EPOCH);
+        let deps = Dependencies {
+            store,
+            ..fakes.dependencies()
+        };
+        let app = Arc::new(UseCases::new(&deps));
+        let admin = project(&app, "widgets", "alice").await;
+        let token = app
+            .create_member
+            .execute(
+                &admin,
+                CreateMemberInput {
+                    member: member("bob"),
+                    role: Role::Member,
+                },
+            )
+            .await
+            .unwrap()
+            .token;
+        let bob = app.authenticate.execute(token.expose()).await.unwrap();
+        let mut sessions = Vec::new();
+        for n in 0..RACERS {
+            sessions.push(register(&app, &bob, n).await);
+        }
+        let sent = app
+            .start_thread
+            .execute(
+                &admin,
+                StartThreadInput {
+                    subject: Subject::parse("Staging is down").unwrap(),
+                    to: Addressees::Members(vec![Handle::parse("bob").unwrap()]),
+                    item: None,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("Hold every deploy.").unwrap(),
+                    importance: dibs_domain::message::Importance::Urgent,
+                    ack_required: false,
+                },
+            )
+            .await
+            .unwrap()
+            .message
+            .record
+            .id;
+        let mut tasks = Vec::new();
+        for session in sessions {
+            let app = app.clone();
+            let bob = bob.clone();
+            tasks.push(tokio::spawn(async move {
+                app.claim_delivery
+                    .execute(&bob, session, DeliveryAsk::Message(sent))
+                    .await
+            }));
+        }
+        let mut won = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(_) => won += 1,
+                Err(error) => assert_eq!(error.code(), "delivered", "{error:?}"),
+            }
+        }
+        assert_eq!(won, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn one_delivery_wins_a_race_of_sessions_on_the_sqlite_store() {
+        let world = World::new().await;
+        one_delivery_wins_a_race_of_sessions(world.store.clone()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn one_delivery_wins_a_race_of_sessions_on_the_memory_store() {
+        one_delivery_wins_a_race_of_sessions(Arc::new(dibs_app::fakes::MemoryStore::default()))
+            .await;
     }
 }

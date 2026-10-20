@@ -23,6 +23,10 @@ pub struct SettingsDocument {
     /// (`advise`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edit_policy: Option<EditPolicy>,
+    /// How many high or urgent messages one member may write within an hour (1 to 1000; default
+    /// 10). What dibs itself writes is not counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raised_per_hour: Option<u32>,
     /// The areas of the project's only repository.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub areas: Vec<AreaDocument>,

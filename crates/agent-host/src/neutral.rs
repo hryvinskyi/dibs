@@ -10,8 +10,8 @@
 //!  "tool": {"kind": "edit", "paths": ["src/billing/a.rs"]}}
 //! ```
 //!
-//! `thread` (`main`, `subagent` or `unknown`, the default) belongs to `before-tool` and
-//! `after-tool`; `tool` to `before-tool`, where it is required: `{"kind": "edit", "paths": [...]}`,
+//! `thread` (`main`, `subagent` or `unknown`, the default) belongs to `before-tool`, `after-tool`
+//! and `prompt-submitted`; `tool` to `before-tool`, where it is required: `{"kind": "edit", "paths": [...]}`,
 //! `{"kind": "shell", "command": "..."}`, or any other kind, which is a tool the guard has no say
 //! about. The reply on standard output is one JSON object, and the exit status is always `0`:
 //!
@@ -132,7 +132,11 @@ impl HostAdapter for Neutral {
                 cwd,
                 thread,
             },
-            EventName::PromptSubmitted => HostEvent::PromptSubmitted { session_key, cwd },
+            EventName::PromptSubmitted => HostEvent::PromptSubmitted {
+                session_key,
+                cwd,
+                thread,
+            },
         })
     }
 
@@ -275,6 +279,28 @@ pub fn fixtures() -> crate::conformance::Fixtures {
             HostEvent::PromptSubmitted {
                 session_key: key("s-1"),
                 cwd: PathBuf::from("/work"),
+                thread: Thread::Unknown,
+            },
+        ),
+        EventFixture::parses(
+            "prompt-submitted",
+            br#"{"protocol":1,"session":"s-1","cwd":"/work","thread":"main"}"#,
+            HostEvent::PromptSubmitted {
+                session_key: key("s-1"),
+                cwd: PathBuf::from("/work"),
+                thread: Thread::Main,
+            },
+        ),
+        EventFixture::parses(
+            "before-tool",
+            br#"{"protocol":1,"session":"s-1","cwd":"/work","thread":"main","tool":{"kind":"shell","command":"git push origin main"}}"#,
+            HostEvent::BeforeTool {
+                session_key: key("s-1"),
+                cwd: PathBuf::from("/work"),
+                call: ToolCall::Shell {
+                    command: "git push origin main".to_owned(),
+                },
+                thread: Thread::Main,
             },
         ),
         EventFixture::refuses(
@@ -291,6 +317,15 @@ pub fn fixtures() -> crate::conformance::Fixtures {
         ReplyFixture::outcome(GuardOutcome::context("the brief"))
             .allows()
             .carries_context("the brief"),
+        ReplyFixture::outcome(GuardOutcome::context("dibs delivers, while you work:"))
+            .on("after-tool")
+            .allows()
+            .carries_context("dibs delivers, while you work:"),
+        ReplyFixture::outcome(GuardOutcome::Deny {
+            reason: Text::new("This command needs the slot deploy:prod"),
+        })
+        .on("before-tool")
+        .denies("This command needs the slot deploy:prod"),
         ReplyFixture::outcome(GuardOutcome::notice("server away"))
             .allows()
             .carries_notice("server away"),

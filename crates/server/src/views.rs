@@ -15,10 +15,11 @@ use dibs_app::named::{
 };
 use dibs_app::records::{MemberRecord, SessionRecord};
 use dibs_app::use_cases::{
-    Acknowledged, ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady, ReadyEntry,
-    ReadyView as ReadyList, RecipientAck, RecipientStatus, UnackedMessage,
+    Acknowledged, DeliverableMessage, ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady,
+    ReadyEntry, ReadyView as ReadyList, RecipientAck, RecipientStatus, UnackedMessage,
 };
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::delivery::Delivery;
 use dibs_domain::edit::Verdict;
 use dibs_domain::event::EventKind;
 use dibs_domain::handle::Handle;
@@ -694,6 +695,51 @@ impl UnackedView {
         Self {
             thread: ThreadView::of(unacked.thread),
             message: MessageView::of(unacked.message),
+        }
+    }
+}
+
+/// A message still to be delivered to the caller's agent, with its thread.
+#[derive(Debug, Serialize)]
+pub struct DeliverableView {
+    /// The thread.
+    pub thread: ThreadView,
+    /// The message.
+    pub message: MessageView,
+    /// Whether it awaits the caller's acknowledgement.
+    pub awaiting_ack: bool,
+}
+
+impl DeliverableView {
+    /// The view of a deliverable message.
+    pub fn of(entry: DeliverableMessage) -> Self {
+        Self {
+            thread: ThreadView::of(entry.thread),
+            message: MessageView::of(entry.message),
+            awaiting_ack: entry.awaiting_ack,
+        }
+    }
+}
+
+/// One delivery claimed: what, by which session, and when.
+#[derive(Debug, Serialize)]
+pub struct DeliveryView {
+    /// The subject's key: a message id, or `offer:<slot>:<deadline>`.
+    pub subject: String,
+    /// The session that delivers it.
+    pub session_id: SessionId,
+    /// When it was claimed.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub at: OffsetDateTime,
+}
+
+impl DeliveryView {
+    /// The view of a delivery.
+    pub fn of(delivery: &Delivery) -> Self {
+        Self {
+            subject: delivery.subject.key(),
+            session_id: delivery.session,
+            at: delivery.at,
         }
     }
 }

@@ -35,6 +35,7 @@ mod scenario {
         dibs_app::use_cases::InboxQuery {
             unread_only,
             unacked: false,
+            deliverable: false,
         }
     }
 

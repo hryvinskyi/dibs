@@ -184,6 +184,21 @@ pub fn asks_due(
         .collect()
 }
 
+/// Whether an announcement still stands: its member holds a wide claim on its item. Once that
+/// claim ends (released, completed, taken over), the announcement asks for nothing: it is no
+/// longer delivered or listed as awaiting an acknowledgement, and acknowledging it grants nothing.
+pub fn ask_stands(ask: &WideAsk, claims: &[Claim]) -> bool {
+    announced_scope(ask, claims).is_some()
+}
+
+/// The scope of the wide claim an announcement announced, while its member holds it.
+fn announced_scope<'a>(ask: &WideAsk, claims: &'a [Claim]) -> Option<&'a WideScope> {
+    claims
+        .iter()
+        .find(|claim| claim.item == ask.item && claim.member == ask.from)
+        .and_then(|claim| claim.wide.as_ref())
+}
+
 /// The grants an acknowledgement of `ask` by its holder makes: one per area it named that the
 /// wide claim still names, decided by the rules of every grant — the holder holds the area through
 /// a live claim, and the wide claim's member holds a live claim on its item. An area those rules
@@ -195,11 +210,7 @@ pub fn grants_by_ack(
     now: OffsetDateTime,
     settings: &ProjectSettings,
 ) -> Vec<Grant> {
-    let Some(scope) = claims
-        .iter()
-        .find(|claim| claim.item == ask.item && claim.member == ask.from)
-        .and_then(|claim| claim.wide.as_ref())
-    else {
+    let Some(scope) = announced_scope(ask, claims) else {
         return Vec::new();
     };
     ask.areas
@@ -423,6 +434,31 @@ mod tests {
             claim(2, ALICE, &["api:billing"], 0),
         ];
         assert!(asks_due(&stale_holder, &[], &[], late, settings.stale_after()).is_empty());
+    }
+
+    #[test]
+    fn an_announcement_stands_while_its_member_holds_the_wide_claim_on_its_item() {
+        let settings = two_repo_settings();
+        let asked = ask(9, 1, BOB, ALICE, &["api:billing"]);
+        let holder = claim(2, ALICE, &["api:billing"], 0);
+        let live = [wide(1, BOB, &["api:billing"], 0), holder.clone()];
+        assert!(ask_stands(&asked, &live));
+        let ended = [holder.clone()];
+        assert!(!ask_stands(&asked, &ended), "the wide claim was released");
+        let taken_over = [wide(1, CAROL, &["api:billing"], 0), holder.clone()];
+        assert!(
+            !ask_stands(&asked, &taken_over),
+            "another member holds the item"
+        );
+        let narrowed = [claim(1, BOB, &["api:search"], 0), holder];
+        assert!(
+            !ask_stands(&asked, &narrowed),
+            "the claim is no longer wide"
+        );
+        assert!(
+            grants_by_ack(&asked, &[], &ended, at(1), &settings).is_empty(),
+            "an ended announcement grants nothing"
+        );
     }
 
     #[test]

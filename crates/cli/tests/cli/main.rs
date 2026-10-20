@@ -21,6 +21,10 @@ mod mcp;
 #[cfg(test)]
 mod messages;
 #[cfg(test)]
+mod push;
+#[cfg(test)]
+mod shell;
+#[cfg(test)]
 mod slots;
 #[cfg(test)]
 mod work;

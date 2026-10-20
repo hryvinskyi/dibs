@@ -6,6 +6,6 @@ path = "skills/dibs/SKILL.md"
 header = """
 ---
 name: dibs
-description: How to work in a checkout that dibs coordinates with the rest of the team. Use it when the dibs brief appears at the start of a session, before the first edit of a governed path, when dibs refuses an edit or adds a note to one, and when a teammate's message arrives.
+description: How to work in a checkout that dibs coordinates with the rest of the team. Use it when the dibs brief appears at the start of a session, before the first edit of a governed path, when dibs refuses an edit or a shell command or adds a note to one, when a slot is offered to you, and when a teammate's message arrives.
 ---
 """

@@ -14,6 +14,7 @@ use dibs_domain::slot::{SlotBoard, SlotCatalog, Transition, decide_tick};
 use crate::error::AppError;
 use crate::ports::{IdGen, StoreError};
 use crate::records::{MessageRecord, ThreadRecord};
+use crate::use_cases::writing::{Authorship, write_message};
 use crate::work::Work;
 
 /// The settings and the slots' board, and the events its changes record.
@@ -119,7 +120,7 @@ impl Notice<'_> {
             created_at: now,
         };
         work.insert_thread(project, &thread).await?;
-        work.insert_message(project, &message).await?;
+        write_message(work, &message, Authorship::Dibs, now).await?;
         work.record(
             now,
             EventKind::ThreadStarted(ThreadStarted {

@@ -908,6 +908,40 @@ pub struct InboxRequest {
     pub unread: bool,
     /// The messages awaiting the caller's acknowledgement too.
     pub unacked: bool,
+    /// The messages still to be delivered to the caller's agent too.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub deliverable: bool,
+}
+
+/// A message still to be delivered to the caller's agent, with its thread.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deliverable {
+    /// The thread.
+    pub thread: Thread,
+    /// The message.
+    pub message: Message,
+    /// Whether it awaits the caller's acknowledgement.
+    #[serde(default)]
+    pub awaiting_ack: bool,
+}
+
+/// A delivery claimed for one of the caller's sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryRecord {
+    /// What: a message's id, or `offer:<slot>:<deadline>`.
+    pub subject: String,
+    /// The session that delivers it.
+    pub session_id: SessionId,
+    /// When it was claimed.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+}
+
+/// The answer of `POST /v1/messages/{id}/deliver` and `POST /v1/slots/{name}/offer/deliver`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delivered {
+    /// The delivery.
+    pub delivery: DeliveryRecord,
 }
 
 /// A message awaiting the caller's acknowledgement, with its thread.
@@ -930,6 +964,10 @@ pub struct Inbox {
     /// The slots on offer to the caller.
     #[serde(default)]
     pub offers: Vec<PendingOffer>,
+    /// The messages still to be delivered to the caller's agent, newest first; empty unless asked
+    /// for.
+    #[serde(default)]
+    pub deliverable: Vec<Deliverable>,
 }
 
 /// An acknowledgement recorded.
@@ -957,6 +995,10 @@ pub struct Acked {
     /// caller still holds.
     #[serde(default)]
     pub granted: Vec<Grant>,
+    /// Whether the message announced a wide claim that has ended, so the acknowledgement granted
+    /// nothing.
+    #[serde(default)]
+    pub announcement_ended: bool,
 }
 
 /// One recipient of a message the caller sent.

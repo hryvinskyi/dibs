@@ -11,12 +11,14 @@ pub mod adapter;
 pub mod capabilities;
 #[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
+pub mod delivery;
 pub mod event;
 pub mod guard;
 pub mod neutral;
 pub mod outcome;
 pub mod ports;
 pub mod registry;
+pub mod slots;
 pub mod text;
 pub mod timing;
 pub mod upkeep;

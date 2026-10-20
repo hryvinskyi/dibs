@@ -1,5 +1,5 @@
 {
-  "description": "dibs: the brief at the start of a session, a check before each file edit, heartbeats after tools run.",
+  "description": "dibs: the brief at the start of a session, a check before each file edit and each shell command, heartbeats after tools run, and a teammate's pressing message or a slot offered to you between tool calls and with your prompt.",
   "hooks": {
     "SessionStart": [
       {
@@ -21,7 +21,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           {
             "type": "command",
@@ -38,6 +38,18 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" post-tool-use",
+            "timeout": 5,
+            "onFailure": "continue"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" user-prompt-submit",
             "timeout": 5,
             "onFailure": "continue"
           }

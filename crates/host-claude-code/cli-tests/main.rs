@@ -6,6 +6,8 @@
 //! source lives beside the adapter, so that only the adapter's directory names the host.
 
 #[cfg(test)]
+mod between;
+#[cfg(test)]
 mod hooks;
 #[cfg(test)]
 mod support;

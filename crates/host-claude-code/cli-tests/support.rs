@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use dibs_domain::member::Role;
-use dibs_test_server::{TestServer, two_repositories};
+use dibs_test_server::{Person, TestServer, two_repositories};
 
 pub const API_REMOTE: &str = "https://github.com/acme/api.git";
 
@@ -22,6 +22,7 @@ pub const SESSION: &str = "5b9c0e1a-7f3d-4c2e-9a61-0d4e8f2b7c19";
 pub struct Setup {
     pub server: TestServer,
     pub root: TempDir,
+    pub alice: Person,
     pub bob_token: String,
 }
 
@@ -35,6 +36,7 @@ impl Setup {
         let setup = Self {
             server,
             root: tempfile::tempdir().unwrap(),
+            alice: alice.clone(),
             bob_token: bob.token.clone(),
         };
         for (handle, token) in [("alice", &alice.token), ("bob", &bob.token)] {

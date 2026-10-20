@@ -85,6 +85,7 @@ pub struct ProjectSettings {
     stale_after: Duration,
     heartbeat_every: Duration,
     edit_policy: EditPolicy,
+    raised_per_hour: u32,
     lists_repositories: bool,
     repos: Vec<RepoSpec>,
     slots: SlotCatalog,
@@ -105,6 +106,9 @@ pub enum SettingsError {
     /// `heartbeat_every` is outside 1 to 15 minutes.
     #[error("heartbeat_every is between 1 and 15 minutes")]
     HeartbeatEveryOutOfRange,
+    /// `raised_per_hour` is outside 1 to 1000.
+    #[error("raised_per_hour is between 1 and 1000")]
+    RaisedPerHourOutOfRange,
     /// Top-level areas or hot rules sit beside a `repos` list.
     #[error(
         "areas and hot rules are declared either at the top level, for a project with one repository, or inside each entry of repos, never both"
@@ -284,6 +288,11 @@ const DEFAULT_HEARTBEAT_EVERY: Duration = Duration::minutes(1);
 const STALE_AFTER_RANGE: (Duration, Duration) = (Duration::hours(1), Duration::days(30));
 const HEARTBEAT_EVERY_RANGE: (Duration, Duration) = (Duration::minutes(1), Duration::minutes(15));
 
+/// How many high or urgent messages one member may write within an hour, unless the settings say.
+pub const DEFAULT_RAISED_PER_HOUR: u32 = 10;
+
+const RAISED_PER_HOUR_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
+
 /// The parts of one repository as written, before validation.
 struct RepoInput<'a> {
     id: &'a str,
@@ -296,7 +305,8 @@ impl ProjectSettings {
     /// Validates a settings document.
     ///
     /// The rules: `stale_after` between 1 hour and 30 days (default 24 hours); `heartbeat_every`
-    /// between 1 and 15 minutes (default 1 minute); either top-level areas and rules or a `repos`
+    /// between 1 and 15 minutes (default 1 minute); `raised_per_hour` between 1 and 1000 (default
+    /// 10); either top-level areas and rules or a `repos`
     /// list, never both; repository ids and remotes unique; area names unique within their
     /// repository, each area with at least one glob; each hot rule with at least one glob, a kind
     /// the registry knows, and, for kinds that take one, an area its repository declares; slot
@@ -325,6 +335,10 @@ impl ProjectSettings {
             SettingsError::HeartbeatEvery,
             SettingsError::HeartbeatEveryOutOfRange,
         )?;
+        let raised_per_hour = document.raised_per_hour.unwrap_or(DEFAULT_RAISED_PER_HOUR);
+        if !RAISED_PER_HOUR_RANGE.contains(&raised_per_hour) {
+            return Err(SettingsError::RaisedPerHourOutOfRange);
+        }
         let lists_repositories = !document.repos.is_empty();
         if lists_repositories && !(document.areas.is_empty() && document.hot.is_empty()) {
             return Err(SettingsError::MixedLayout);
@@ -371,6 +385,7 @@ impl ProjectSettings {
             stale_after,
             heartbeat_every,
             edit_policy: document.edit_policy.unwrap_or_default(),
+            raised_per_hour,
             lists_repositories,
             repos,
             slots,
@@ -390,6 +405,11 @@ impl ProjectSettings {
     /// The edit policy.
     pub fn edit_policy(&self) -> EditPolicy {
         self.edit_policy
+    }
+
+    /// How many high or urgent messages one member may write within an hour.
+    pub fn raised_per_hour(&self) -> u32 {
+        self.raised_per_hour
     }
 
     /// Whether the settings list their repositories, rather than describing one implicit repository.
@@ -505,6 +525,8 @@ impl ProjectSettings {
             stale_after: Some(format_duration(self.stale_after)),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
             edit_policy: Some(self.edit_policy),
+            raised_per_hour: (self.raised_per_hour != DEFAULT_RAISED_PER_HOUR)
+                .then_some(self.raised_per_hour),
             slots: slots::slot_documents(&self.slots),
             ..SettingsDocument::default()
         };
@@ -737,11 +759,31 @@ mod tests {
                 r#"{"heartbeat_every":"1"}"#,
                 Some(SettingsError::HeartbeatEvery(DurationError::Malformed)),
             ),
+            (r#"{"raised_per_hour":1}"#, None),
+            (r#"{"raised_per_hour":1000}"#, None),
+            (
+                r#"{"raised_per_hour":0}"#,
+                Some(SettingsError::RaisedPerHourOutOfRange),
+            ),
+            (
+                r#"{"raised_per_hour":1001}"#,
+                Some(SettingsError::RaisedPerHourOutOfRange),
+            ),
         ];
         for (json, expected) in cases {
             let got = ProjectSettings::parse(&document(json), &HotRuleRegistry::standard()).err();
             assert_eq!(&got, expected, "{json}");
         }
+    }
+
+    #[test]
+    fn the_limit_on_raised_messages_defaults_to_ten_and_is_written_only_when_changed() {
+        let default = settings("{}");
+        assert_eq!(default.raised_per_hour(), DEFAULT_RAISED_PER_HOUR);
+        assert_eq!(default.to_document().raised_per_hour, None);
+        let set = settings(r#"{"raised_per_hour":25}"#);
+        assert_eq!(set.raised_per_hour(), 25);
+        assert_eq!(set.to_document().raised_per_hour, Some(25));
     }
 
     #[test]

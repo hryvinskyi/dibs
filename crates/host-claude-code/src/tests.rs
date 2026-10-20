@@ -200,7 +200,35 @@ fn fixtures() -> Fixtures {
             HostEvent::PromptSubmitted {
                 session_key: key(),
                 cwd: PathBuf::from("/work/api"),
+                thread: Thread::Main,
             },
+        ),
+        EventFixture::parses(
+            "user-prompt-submit",
+            &hook_input(
+                "UserPromptSubmit",
+                "/work/api",
+                &json!({"prompt": "the review is done", "agent_id": "a4d2c8f1e0b3a297", "agent_type": "reviewer"}),
+            ),
+            HostEvent::PromptSubmitted {
+                session_key: key(),
+                cwd: PathBuf::from("/work/api"),
+                thread: Thread::Subagent,
+            },
+        ),
+        EventFixture::parses(
+            "pre-tool-use",
+            &pre(tool(
+                "Bash",
+                &json!({"command": "cd ops && ./deploy.sh prod", "description": "Deploy", "timeout": 120000, "run_in_background": false}),
+            )),
+            before(
+                "/work/api",
+                ToolCall::Shell {
+                    command: "cd ops && ./deploy.sh prod".to_owned(),
+                },
+                Thread::Main,
+            ),
         ),
         EventFixture::parses(
             "session-start",
@@ -280,6 +308,21 @@ fn fixtures() -> Fixtures {
         })
         .on("pre-tool-use")
         .denies("src/billing/a.rs is in the area api:billing, which alice holds."),
+        ReplyFixture::outcome(GuardOutcome::Deny {
+            reason: Text::new("This command needs the slot deploy:prod; alice holds it."),
+        })
+        .on("pre-tool-use")
+        .denies("This command needs the slot deploy:prod; alice holds it."),
+        ReplyFixture::outcome(GuardOutcome::NoObjection {
+            context: Some(Text::new(
+                "dibs delivers, while you work: a message from alice",
+            )),
+            notice: Some(Text::new("dibs: the server could not be reached.")),
+        })
+        .on("user-prompt-submit")
+        .allows()
+        .carries_context("dibs delivers, while you work: a message from alice")
+        .carries_notice("dibs: the server could not be reached."),
     ];
     Fixtures { events, replies }
 }
@@ -452,4 +495,17 @@ fn the_capabilities_are_what_claude_code_hooks_carry() {
     assert!(capabilities.context_at_prompt && capabilities.tells_subagent);
     assert!(!capabilities.push_to_idle);
     assert_eq!(ClaudeCode.id().as_str(), "claude-code");
+}
+
+#[test]
+fn text_between_tool_calls_and_with_a_prompt_is_additional_context_naming_its_event() {
+    for (event, name) in [
+        ("post-tool-use", "PostToolUse"),
+        ("user-prompt-submit", "UserPromptSubmit"),
+    ] {
+        assert_eq!(
+            rendered(event, &GuardOutcome::context("a message from alice")),
+            json!({"hookSpecificOutput": {"hookEventName": name, "additionalContext": "a message from alice"}})
+        );
+    }
 }

@@ -76,6 +76,7 @@ fn failed<E: std::fmt::Debug>(what: &'static str) -> impl FnOnce(E) -> SetupErro
 #[derive(Default)]
 struct Traffic {
     paths: Mutex<Vec<String>>,
+    whole: Mutex<Vec<String>>,
     delay_ms: AtomicU64,
 }
 
@@ -85,11 +86,38 @@ impl Traffic {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    fn whole(&self) -> MutexGuard<'_, Vec<String>> {
+        self.whole
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
-/// Logs the request's path, waits the delay, then lets the router answer.
+/// The most of a request body the log keeps.
+const LOGGED_BODY: usize = 1024 * 1024;
+
+/// Logs the request's path, and the whole of it — method, path, query, headers and body — waits
+/// the delay, then lets the router answer.
 async fn record(State(traffic): State<Arc<Traffic>>, request: Request, next: Next) -> Response {
     traffic.paths().push(request.uri().path().to_owned());
+    let (parts, body) = request.into_parts();
+    let bytes = axum::body::to_bytes(body, LOGGED_BODY)
+        .await
+        .unwrap_or_default();
+    let headers: Vec<String> = parts
+        .headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {}", String::from_utf8_lossy(value.as_bytes())))
+        .collect();
+    traffic.whole().push(format!(
+        "{} {}\n{}\n\n{}",
+        parts.method,
+        parts.uri,
+        headers.join("\n"),
+        String::from_utf8_lossy(&bytes)
+    ));
+    let request = Request::from_parts(parts, axum::body::Body::from(bytes));
     let delay = traffic.delay_ms.load(Ordering::SeqCst);
     if delay > 0 {
         tokio::time::sleep(StdDuration::from_millis(delay)).await;
@@ -198,6 +226,12 @@ impl TestServer {
     /// The paths of every request received, oldest first.
     pub fn request_paths(&self) -> Vec<String> {
         self.traffic.paths().clone()
+    }
+
+    /// Every request received as text, oldest first: its method, path and query, its headers and
+    /// its body.
+    pub fn request_log(&self) -> Vec<String> {
+        self.traffic.whole().clone()
     }
 
     /// Holds back every answer from now on by `delay`; zero answers at once again.

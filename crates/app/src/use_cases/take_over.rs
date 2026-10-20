@@ -21,6 +21,7 @@ use crate::use_cases::claim_item::widened;
 use crate::use_cases::common::{existing_item, own_session, remove_claim, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::use_cases::wide_asks::{Announced, Announcer};
+use crate::use_cases::writing::{Authorship, write_message};
 use crate::work::Work;
 
 const SUBJECT_PREFIX: &str = "Taken over: ";
@@ -157,7 +158,7 @@ impl TakeOver {
             created_at: now,
         };
         work.insert_thread(project, &thread).await?;
-        work.insert_message(project, &message).await?;
+        write_message(&mut work, &message, Authorship::Dibs, now).await?;
         work.record(
             now,
             EventKind::ThreadStarted(ThreadStarted {
@@ -327,6 +328,7 @@ mod tests {
                 crate::use_cases::InboxQuery {
                     unread_only: true,
                     unacked: false,
+                    deliverable: false,
                 },
             )
             .await

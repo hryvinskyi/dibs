@@ -1,13 +1,18 @@
 //! The client's answers as the guard reads them.
 
+use dibs_agent_host::SessionKey;
 use dibs_agent_host::ports::{
-    ClaimLine, HeldWay, HoldLine, InboxView, OfferLine, PathAnswer, PortError, ReadyLine,
-    SlotHoldLine, SlotLine, StatusView, TouchedBy, UnackedLine, WideAreaLine, WideLine,
+    ClaimLine, ClaimedDelivery as GuardClaim, HeldWay, HoldLine, InboxView, OfferLine, PathAnswer,
+    Pending, PendingMessage, PortError, ReadyLine, SlotHoldLine, SlotHoldState, SlotLine,
+    SlotOfferState, SlotState, SlotWaiterState, StatusView, TouchedBy, UnackedLine, WideAreaLine,
+    WideLine,
 };
 use dibs_client::ClientError;
 use dibs_client::api::{
-    HeldItem, HeldReason, Inbox, InboxRequest, NotReady, Status, Verdict, WideAreaState,
+    Deliverable, HeldItem, HeldReason, Inbox, InboxRequest, NotReady, PendingOffer, Slot, Status,
+    Verdict, WideAreaState,
 };
+use dibs_client::state::{ClaimedDelivery, RememberedMessage};
 
 use crate::failure::sentence;
 
@@ -117,15 +122,18 @@ fn count(status: &Status, of: impl Fn(&NotReady) -> bool) -> u64 {
 }
 
 /// What the guard asks the inbox for, and keeps on this machine: the conversations with unread
-/// messages and the messages awaiting the member's acknowledgement.
+/// messages, the messages awaiting the member's acknowledgement, and the messages still to be
+/// delivered to one of the member's sessions.
 pub const GUARD_INBOX: InboxRequest = InboxRequest {
     unread: true,
     unacked: true,
+    deliverable: true,
 };
 
-/// The conversations with unread messages, and the messages awaiting an acknowledgement, as the
-/// guard reads them.
-pub fn inbox(inbox: &Inbox) -> InboxView {
+/// The conversations with unread messages, the messages awaiting an acknowledgement or still to be
+/// delivered, and the deliveries this machine claimed, as the guard reads them. A claim this dibs
+/// cannot read back is left out.
+pub fn inbox(inbox: &Inbox, claims: &[ClaimedDelivery]) -> InboxView {
     let unread: Vec<_> = inbox
         .threads
         .iter()
@@ -155,6 +163,127 @@ pub fn inbox(inbox: &Inbox) -> InboxView {
                 until: offer.until,
             })
             .collect(),
+        deliverable: inbox.deliverable.iter().map(pending_message).collect(),
+        claims: claims.iter().filter_map(claimed).collect(),
+    }
+}
+
+/// A message still to be delivered, as the guard reads it.
+pub fn pending_message(entry: &Deliverable) -> PendingMessage {
+    remembered_message(&RememberedMessage {
+        id: entry.message.id,
+        thread: entry.thread.id,
+        author: entry.message.author.clone(),
+        subject: entry.thread.subject.clone(),
+        importance: entry.message.importance,
+        awaiting_ack: entry.awaiting_ack,
+        body: entry.message.body.as_str().to_owned(),
+    })
+}
+
+/// A remembered message, as the guard reads it.
+fn remembered_message(message: &RememberedMessage) -> PendingMessage {
+    PendingMessage {
+        message: message.id,
+        thread: message.thread,
+        sender: message.author.clone(),
+        subject: message.subject.clone(),
+        importance: message.importance,
+        awaiting_ack: message.awaiting_ack,
+        body: message.body.clone(),
+    }
+}
+
+/// A claim this machine remembers, as the guard reads it.
+fn claimed(claim: &ClaimedDelivery) -> Option<GuardClaim> {
+    let pending = match (&claim.message, &claim.offer) {
+        (Some(message), _) => Pending::Message(remembered_message(message)),
+        (None, Some(offer)) => Pending::Offer(OfferLine {
+            slot: offer.slot.clone(),
+            until: offer.until,
+        }),
+        (None, None) => return None,
+    };
+    Some(GuardClaim {
+        pending,
+        host: claim.host.clone(),
+        session: SessionKey::parse(&claim.session)?,
+        won: claim.won,
+        at: claim.at,
+    })
+}
+
+/// A claim made for the guard, as this machine remembers it.
+pub fn remembered(claim: &GuardClaim) -> ClaimedDelivery {
+    let (message, offer) = match &claim.pending {
+        Pending::Message(message) => (Some(deliverable(message)), None),
+        Pending::Offer(offer) => (
+            None,
+            Some(PendingOffer {
+                slot: offer.slot.clone(),
+                until: offer.until,
+            }),
+        ),
+    };
+    ClaimedDelivery {
+        subject: claim.pending.subject().key(),
+        host: claim.host.clone(),
+        session: claim.session.as_str().to_owned(),
+        won: claim.won,
+        at: claim.at,
+        message,
+        offer,
+    }
+}
+
+/// What a remembered claim keeps of a message: enough to show it once the server no longer lists
+/// it.
+fn deliverable(message: &PendingMessage) -> RememberedMessage {
+    RememberedMessage {
+        id: message.message,
+        thread: message.thread,
+        author: message.sender.clone(),
+        subject: message.subject.clone(),
+        importance: message.importance,
+        awaiting_ack: message.awaiting_ack,
+        body: message.body.clone(),
+    }
+}
+
+/// Where each slot asked about stands, as the guard reads it.
+pub fn slot_state(slot: &Slot) -> SlotState {
+    SlotState {
+        slot: slot.name.clone(),
+        hold: slot.hold.as_ref().map(|hold| SlotHoldState {
+            slot: hold.slot.clone(),
+            holder: hold.holder.clone(),
+            purpose: hold.purpose.clone(),
+            session: hold.session_id,
+            host: hold.host.clone(),
+            item: hold.item,
+            liveness: hold.liveness.clone(),
+            taken_at: hold.taken_at,
+            expires_at: hold.expires_at,
+            last_seen: hold.last_seen,
+            stalled: hold.stalled,
+        }),
+        queue: slot
+            .queue
+            .iter()
+            .map(|waiter| SlotWaiterState {
+                member: waiter.member.clone(),
+                slot: waiter.slot.clone(),
+                purpose: waiter.purpose.clone(),
+                since: waiter.since,
+                last_seen: waiter.last_seen,
+            })
+            .collect(),
+        offer: slot.offer.as_ref().map(|offer| SlotOfferState {
+            member: offer.member.clone(),
+            slot: offer.slot.clone(),
+            purpose: offer.purpose.clone(),
+            until: offer.until,
+        }),
     }
 }
 

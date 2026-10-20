@@ -20,6 +20,7 @@ mod contract {
     use dibs_app::token::{TokenHash, TokenPrefix};
     use dibs_domain::area::QualifiedArea;
     use dibs_domain::claim::Claim;
+    use dibs_domain::delivery::{Delivery, DeliverySubject};
     use dibs_domain::dependency::{Dependency, DependencySource};
     use dibs_domain::event::{
         Claimed, Completed, Event, EventKind, GrantEnd, GrantRevoked, ItemCreated, MessagePosted,
@@ -127,6 +128,9 @@ mod contract {
         slot_boards_are_replaced_whole_ordered_and_scoped,
         a_slot_row_is_unique_per_slot_and_per_member_place,
         a_slot_row_naming_a_missing_record_fails_the_commit,
+        a_delivery_is_one_per_member_and_subject_and_scoped,
+        a_delivery_naming_a_missing_session_fails_the_commit,
+        raised_messages_are_counted_per_member_from_a_time,
     );
 
     const A: ProjectId = ProjectId(1);
@@ -1561,6 +1565,132 @@ mod contract {
         assert!(
             matches!(tx.commit().await, Err(StoreError::Backend(_))),
             "an announcement no message carries"
+        );
+    }
+
+    fn delivery(
+        member: MemberId,
+        subject: &DeliverySubject,
+        session: SessionId,
+        seconds: i64,
+    ) -> Delivery {
+        Delivery {
+            member,
+            subject: subject.clone(),
+            session,
+            at: at(seconds),
+        }
+    }
+
+    async fn a_delivery_is_one_per_member_and_subject_and_scoped(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let message = DeliverySubject::Message(MessageId(91));
+        let offer = DeliverySubject::Offer {
+            slot: slot_name("deploy:prod"),
+            until: at(300) + Duration::nanoseconds(7),
+        };
+        let mut tx = store.begin().await.unwrap();
+        let first = delivery(BOB, &message, BOB_LAPTOP, 10);
+        tx.insert_delivery(A, &first).await.unwrap();
+        tx.insert_delivery(A, &delivery(ALICE, &message, ALICE_LAPTOP, 11))
+            .await
+            .unwrap();
+        tx.insert_delivery(A, &delivery(BOB, &offer, BOB_LAPTOP, 12))
+            .await
+            .unwrap();
+        assert!(
+            is_duplicate(
+                tx.insert_delivery(A, &delivery(BOB, &message, BOB_LAPTOP, 13))
+                    .await
+            ),
+            "a member is delivered a subject once, whichever session claims it"
+        );
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.delivery(A, BOB, &message).await.unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(
+            tx.delivery(A, BOB, &offer)
+                .await
+                .unwrap()
+                .map(|d| d.subject),
+            Some(offer.clone()),
+            "the deadline survives to the nanosecond"
+        );
+        assert_eq!(tx.delivery(B, BOB, &message).await.unwrap(), None);
+        let lapsed = DeliverySubject::Offer {
+            slot: slot_name("deploy:prod"),
+            until: at(900),
+        };
+        assert_eq!(tx.delivery(A, BOB, &lapsed).await.unwrap(), None);
+        let found = tx
+            .deliveries(A, BOB, &[lapsed, offer.clone(), message.clone()])
+            .await
+            .unwrap();
+        let subjects: Vec<DeliverySubject> = found.into_iter().map(|d| d.subject).collect();
+        assert_eq!(subjects, [offer, message], "in the order asked");
+    }
+
+    async fn a_delivery_naming_a_missing_session_fails_the_commit(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_delivery(
+            A,
+            &delivery(
+                BOB,
+                &DeliverySubject::Message(MessageId(91)),
+                SessionId(999),
+                10,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(tx.commit().await, Err(StoreError::Backend(_))));
+    }
+
+    async fn raised_messages_are_counted_per_member_from_a_time(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, None, 60))
+            .await
+            .unwrap();
+        for (id, author) in [(91, ALICE), (92, ALICE), (93, BOB), (94, ALICE)] {
+            tx.insert_message(A, &message(id, ThreadId(81), author, 60))
+                .await
+                .unwrap();
+        }
+        for (id, member, seconds) in [
+            (94, ALICE, 300),
+            (91, ALICE, 100),
+            (92, ALICE, 200),
+            (93, BOB, 150),
+        ] {
+            tx.insert_raised(A, member, MessageId(id), at(seconds))
+                .await
+                .unwrap();
+        }
+        assert!(is_duplicate(
+            tx.insert_raised(A, ALICE, MessageId(91), at(400)).await
+        ));
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.raised_since(A, ALICE, at(150)).await.unwrap(),
+            [at(200), at(300)],
+            "oldest first, from the time given"
+        );
+        assert_eq!(tx.raised_since(A, BOB, at(0)).await.unwrap(), [at(150)]);
+        assert!(tx.raised_since(B, ALICE, at(0)).await.unwrap().is_empty());
+        drop(tx);
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_raised(A, ALICE, MessageId(999), at(500))
+            .await
+            .unwrap();
+        assert!(
+            matches!(tx.commit().await, Err(StoreError::Backend(_))),
+            "a counted message that does not exist"
         );
     }
 

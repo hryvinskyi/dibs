@@ -86,7 +86,7 @@ impl LocalCache for StateCache {
 
     fn inbox(&self) -> Option<Cached<InboxView>> {
         self.state.inbox().map(|cached| Cached {
-            value: views::inbox(&cached.inbox),
+            value: views::inbox(&cached.inbox, &cached.claims),
             at: cached.fetched_at,
         })
     }

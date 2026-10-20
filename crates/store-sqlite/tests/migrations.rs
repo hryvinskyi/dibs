@@ -232,7 +232,7 @@ mod migrations {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     /// Two claims, a conversation with an acknowledged message and a grant, under the schema `0003`
@@ -440,5 +440,82 @@ mod migrations {
                 "{good}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn deliveries_start_empty_and_keep_every_row_of_before() {
+        use dibs_domain::delivery::{Delivery, DeliverySubject};
+        use dibs_domain::ids::SessionId;
+        use dibs_domain::slot::SlotName;
+        use time::{Duration, OffsetDateTime};
+
+        let rows = format!(
+            "{}\n\
+             INSERT INTO slot_holds (project_id, slot, member_id, session_id, host, purpose, \
+             item_id, liveness, run_id, workflow, sha, taken_at, expires_at, last_seen, \
+             stalled_at) VALUES (1, 'deploy:prod', 12, 32, 'desktop', 'ship it', NULL, \
+             'session', NULL, NULL, NULL, 0, 600000000000, 0, NULL);\n\
+             INSERT INTO slot_offers (project_id, slot, member_id, purpose, until) \
+             VALUES (1, 'release', 11, 'tag 2.4', 300000000000);",
+            rows_at_wide()
+        );
+        let (_dir, path) = database_at(5, &rows).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let board = tx.slot_board(ProjectId(1)).await.unwrap();
+        assert_eq!(board.holds.len(), 1, "the hold is kept");
+        assert_eq!(board.offers.len(), 1, "the offer is kept");
+        assert_eq!(tx.claims(ProjectId(1)).await.unwrap().len(), 2);
+        let message = DeliverySubject::Message(MessageId(91));
+        let offer = DeliverySubject::Offer {
+            slot: SlotName::parse("release").unwrap(),
+            until: OffsetDateTime::UNIX_EPOCH + Duration::minutes(5),
+        };
+        assert_eq!(
+            tx.deliveries(
+                ProjectId(1),
+                MemberId(11),
+                &[message.clone(), offer.clone()]
+            )
+            .await
+            .unwrap(),
+            [],
+            "nothing was delivered before"
+        );
+        assert!(
+            tx.raised_since(ProjectId(1), MemberId(12), OffsetDateTime::UNIX_EPOCH)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let delivered = Delivery {
+            member: MemberId(11),
+            subject: offer.clone(),
+            session: SessionId(32),
+            at: OffsetDateTime::UNIX_EPOCH,
+        };
+        tx.insert_delivery(ProjectId(1), &delivered).await.unwrap();
+        tx.insert_raised(
+            ProjectId(1),
+            MemberId(12),
+            MessageId(91),
+            OffsetDateTime::UNIX_EPOCH,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.delivery(ProjectId(1), MemberId(11), &offer)
+                .await
+                .unwrap(),
+            Some(delivered)
+        );
+        assert_eq!(
+            tx.raised_since(ProjectId(1), MemberId(12), OffsetDateTime::UNIX_EPOCH)
+                .await
+                .unwrap(),
+            [OffsetDateTime::UNIX_EPOCH]
+        );
     }
 }

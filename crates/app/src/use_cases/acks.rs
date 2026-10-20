@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dibs_domain::ids::{MemberId, ThreadId};
 use dibs_domain::message::{Person, message_recipients};
+use dibs_domain::wide::ask_stands;
 
 use crate::actor::Actor;
 use crate::error::AppError;
@@ -44,8 +45,9 @@ pub(crate) fn reached(
 }
 
 /// The messages that ask the actor for an acknowledgement they have not given, each with its
-/// thread, newest first: only messages of threads the actor may read, and only those the actor is
-/// a recipient of.
+/// thread, newest first: only messages of threads the actor may read, only those the actor is a
+/// recipient of, and no announcement of a wide claim that has ended, which asks for nothing any
+/// more.
 pub(crate) async fn awaiting(
     work: &mut Work,
     actor: &Actor,
@@ -74,7 +76,23 @@ pub(crate) async fn awaiting(
             awaiting.push((message, thread.clone()));
         }
     }
-    Ok(awaiting)
+    let mut claims = None;
+    let mut standing = Vec::with_capacity(awaiting.len());
+    for (message, thread) in awaiting {
+        if let Some(ask) = work.wide_ask(project, message.id).await? {
+            if claims.is_none() {
+                claims = Some(work.claims(project).await?);
+            }
+            if !claims
+                .as_deref()
+                .is_some_and(|claims| ask_stands(&ask, claims))
+            {
+                continue;
+            }
+        }
+        standing.push((message, thread));
+    }
+    Ok(standing)
 }
 
 /// How many messages of each thread await the actor's acknowledgement.

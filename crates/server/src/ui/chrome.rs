@@ -80,6 +80,7 @@ pub async fn load(
             InboxQuery {
                 unread_only: true,
                 unacked: false,
+                deliverable: false,
             },
         )
         .await?

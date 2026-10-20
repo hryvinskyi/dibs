@@ -100,12 +100,15 @@ pub enum HostEvent {
         /// The thread that ran it.
         thread: Thread,
     },
-    /// The person submitted a prompt.
+    /// A prompt was submitted: by the person, or by the host on a subagent's behalf when one
+    /// reports back.
     PromptSubmitted {
         /// The session.
         session_key: SessionKey,
         /// Its working directory.
         cwd: PathBuf,
+        /// The thread it reaches.
+        thread: Thread,
     },
 }
 

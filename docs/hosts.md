@@ -11,7 +11,7 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
 
 | Host | Status | What its guard sees |
 |---|---|---|
-| Claude Code | supported: `crates/host-claude-code`, the plugin in `integrations/claude-code/` | session start, before each file edit, after every tool; blocks edits; tells subagents apart. Its adapter also reads prompts and shell commands, which its plugin does not send yet |
+| Claude Code | supported: `crates/host-claude-code`, the plugin in `integrations/claude-code/` | session start, before each file edit and each `Bash` command, after every tool, each prompt; blocks edits and shell commands; carries text to the agent at start, after a tool and with a prompt; tells subagents apart |
 | Codex CLI | planned | command hooks from its hook configuration (project hooks only in a trusted project) |
 | OpenCode | planned | an in-process plugin; a small shim calls `dibs hook neutral <event>` |
 
@@ -24,7 +24,8 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
   never exits with status `2`, which hosts read as a block.
 - **A hook never waits for upkeep.** Heartbeats and refreshed caches run in a detached `dibs sync`; a hook answers
   from the cache and starts one when something is due. The only call a hook waits for is the verdict on a governed
-  path in an area the member is not known to hold, bounded to two seconds.
+  path in an area the member is not known to hold, and the state of the slots a shell command needs, each bounded to
+  two seconds.
   On Windows the detached sync still inherits the hook's own output pipe (the standard library has no stable way
   yet to stop that), so a host that waits for the hook's output to close waits for the sync too: up to a few
   seconds, at most once per refresh interval.
@@ -34,6 +35,15 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
 - **A checkout that governs no repository of the project** — its `.dibs.toml` names no `repo`, an unknown one, or
   one whose remote is not the checkout's `origin` — lets every edit through and says so at most once a minute per
   checkout.
+- **A command line never leaves the machine.** A shell command is split into simple commands and judged locally,
+  from the cached settings; the server is asked only where the slots it touches stand, and a line no slot governs asks
+  nothing.
+- **Delivery only where it lands.** A teammate's pressing message, or a slot offered to the member, is shown to the
+  agent after a tool runs or with a prompt — only on a host that carries text there and says which thread an event
+  comes from, and only on the main thread, since what reaches a subagent ends with it. The background sync claims
+  each one from the server for its session (the first of a member's sessions to claim it wins, so a member hears of it
+  once); the session's next main-thread event shows it, at most once a minute, never twice, never a member's own
+  message. The text is framed as a named teammate's request and ends with the rule that it authorises nothing.
 - **`DIBS_OFF=1`** makes every hook, on every host, a silent "no objection" with no network call.
 
 ## Capabilities
@@ -48,6 +58,18 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
 | `tells_subagent` | events say whether they come from the main agent or a subagent |
 | `push_to_idle` | the host can wake an idle session with a pushed message |
 
+What the guard does with each:
+
+| Capability | What the guard uses it for |
+|---|---|
+| `deny_edit` | the edit check before a file-writing tool; without it, no edit is checked |
+| `deny_shell` | the command check of a shell command against the slots; without it, no command is checked |
+| `context_at_start` | the brief |
+| `context_after_tool` | delivery between tool calls |
+| `context_at_prompt` | delivery with a prompt |
+| `tells_subagent` | delivery at all: on a host whose thread is always `Unknown`, nothing is claimed or shown |
+| `push_to_idle` | nothing yet |
+
 `dibs doctor` prints the capabilities of every host this binary links, and what the machine has installed for each.
 
 ## Neutral events and outcomes
@@ -57,7 +79,7 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
 | `SessionStarted` | session key, working directory |
 | `BeforeTool` | session key, working directory, the tool (`Edit { paths }`, `Shell { command }`, `Other`), thread |
 | `AfterTool` | session key, working directory, thread |
-| `PromptSubmitted` | session key, working directory |
+| `PromptSubmitted` | session key, working directory, thread |
 
 The thread is `Main`, `Subagent` or `Unknown`. The outcome is `NoObjection { context, notice }` — text for the agent
 and a line for the person, each optional — or `Deny { reason }`.
@@ -82,7 +104,7 @@ Input:
 | `protocol` | always | `1` |
 | `session` | always | the host's id of the session, 1 to 256 characters without control characters |
 | `cwd` | always | the session's working directory |
-| `thread` | no | `main`, `subagent` or `unknown` (the default); read for `before-tool` and `after-tool` |
+| `thread` | no | `main`, `subagent` or `unknown` (the default); read for `before-tool`, `after-tool` and `prompt-submitted`; only `main` is delivered to |
 | `tool` | for `before-tool` | `{"kind": "edit", "paths": [...]}` (absolute, or relative to `cwd`), `{"kind": "shell", "command": "..."}`, or any other `kind`, which is a tool the guard has no say about |
 
 Output:

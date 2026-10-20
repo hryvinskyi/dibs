@@ -23,12 +23,12 @@ use dibs_domain::item::{ExternalRef, ItemKey};
 use dibs_domain::settings::SettingsDocument;
 
 use crate::api::{
-    Acked, AddDependency, ClaimRequest, Claimed, CreatedItem, DependencyChange, EditCheck,
-    EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest, Granted, Heartbeat, Inbox,
-    InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me, Member, MessageStatus,
-    NewItem, NewMember, PostMessage, Posted, ReadyList, RegisterSession, Revoked, Session,
-    SettingsApplied, StartThread, StartThreadBody, Started, Status, TakeOverRequest, TakenOver,
-    ThreadDetail, Threads, TokenRevoked,
+    Acked, AddDependency, ClaimRequest, Claimed, CreatedItem, Delivered, DependencyChange,
+    EditCheck, EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest, Granted,
+    Heartbeat, Inbox, InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me, Member,
+    MessageStatus, NewItem, NewMember, PostMessage, Posted, ReadyList, RegisterSession, Revoked,
+    Session, SettingsApplied, StartThread, StartThreadBody, Started, Status, TakeOverRequest,
+    TakenOver, ThreadDetail, Threads, TokenRevoked,
 };
 use crate::api::{
     ForceReleaseSlotRequest, ReleaseSlotRequest, SlotAnswer, SlotForced, SlotReleased,
@@ -40,6 +40,7 @@ use crate::sse::{Frame, FrameReader};
 use crate::token::Token;
 use dibs_domain::ids::RunId;
 use dibs_domain::slot::SlotName;
+use time::OffsetDateTime;
 
 /// The `User-Agent` of every request.
 pub const USER_AGENT: &str = concat!("dibs/", env!("CARGO_PKG_VERSION"));
@@ -110,6 +111,16 @@ struct EventsQuery {
 
 #[derive(Serialize)]
 struct Empty {}
+
+#[derive(Serialize)]
+struct DeliverBody {
+    session_id: SessionId,
+    #[serde(
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    until: Option<OffsetDateTime>,
+}
 
 #[derive(Serialize)]
 struct RunBody {
@@ -443,6 +454,48 @@ impl Client {
         self.send(
             self.request(Method::POST, &format!("/v1/messages/{message}/ack"))
                 .json(&Empty {}),
+        )
+        .await
+    }
+
+    /// `POST /v1/messages/{id}/deliver`: claims the delivery of a message to the agent of the
+    /// caller's session `session`; the first of their sessions to claim it wins.
+    ///
+    /// # Errors
+    /// A `delivered` refusal when one of the caller's sessions claimed it before; [`ClientError`].
+    pub async fn deliver_message(
+        &self,
+        message: MessageId,
+        session: SessionId,
+    ) -> Result<Delivered, ClientError> {
+        self.send(
+            self.request(Method::POST, &format!("/v1/messages/{message}/deliver"))
+                .json(&DeliverBody {
+                    session_id: session,
+                    until: None,
+                }),
+        )
+        .await
+    }
+
+    /// `POST /v1/slots/{name}/offer/deliver`: claims the delivery of the slot's offer to the
+    /// caller, ending at `until`, to the agent of their session `session`.
+    ///
+    /// # Errors
+    /// A `delivered` refusal when it was claimed before, `offer_gone` when the offer no longer
+    /// stands; [`ClientError`].
+    pub async fn deliver_offer(
+        &self,
+        slot: &SlotName,
+        until: OffsetDateTime,
+        session: SessionId,
+    ) -> Result<Delivered, ClientError> {
+        self.send(
+            self.request(Method::POST, &slot_path(slot, "/offer/deliver"))
+                .json(&DeliverBody {
+                    session_id: session,
+                    until: Some(until),
+                }),
         )
         .await
     }

@@ -86,7 +86,11 @@ pub fn parse(hook: HookEvent, input: &[u8]) -> Result<HostEvent, ParseError> {
             cwd,
             thread,
         },
-        EventKind::PromptSubmitted => HostEvent::PromptSubmitted { session_key, cwd },
+        EventKind::PromptSubmitted => HostEvent::PromptSubmitted {
+            session_key,
+            cwd,
+            thread,
+        },
     })
 }
 

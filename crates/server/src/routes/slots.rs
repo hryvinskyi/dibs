@@ -1,6 +1,7 @@
 //! `GET /v1/slots`, `GET /v1/slots/{name}` and `POST /v1/slots/{name}/take`, `/release`,
-//! `/leave`, `/heartbeat`, `/takeover`, `/run-finished`, and the admin's
-//! `POST /v1/admin/slots/{name}/force-release`: taking, keeping and ending holds on shared actions.
+//! `/leave`, `/heartbeat`, `/takeover`, `/run-finished`, `/offer/deliver`, and the admin's
+//! `POST /v1/admin/slots/{name}/force-release`: taking, keeping and ending holds on shared actions,
+//! and claiming the delivery of an offer to one of the caller's sessions.
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -8,10 +9,12 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use dibs_app::use_cases::{
-    ForceReleaseSlotInput, HoldMode, ReleaseSlotInput, RunFinishedInput, TakeOverSlotInput,
-    TakeSlotInput, TookKind,
+    DeliveryAsk, ForceReleaseSlotInput, HoldMode, ReleaseSlotInput, RunFinishedInput,
+    TakeOverSlotInput, TakeSlotInput, TookKind,
 };
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{RunId, ThreadId};
@@ -24,8 +27,8 @@ use crate::fields::{
     item_in_body, parse, parse_required, record_id_text, required, session_in_body,
 };
 use crate::http::AppState;
-use crate::views::reply;
 use crate::views::slots::{HoldView, SlotView};
+use crate::views::{DeliveryView, reply};
 
 /// The slot a path segment names. Text that is no slot name names no declared slot.
 fn slot_in_path(path: Result<Path<String>, PathRejection>) -> Result<SlotName, ApiError> {
@@ -412,4 +415,47 @@ pub async fn force_release(
 fn run_id(number: u64) -> Result<RunId, ApiError> {
     let text = number.to_string();
     parse("run_id", &text, record_id_text).map(RunId)
+}
+
+/// The body of `POST /v1/slots/{name}/offer/deliver`.
+#[derive(Deserialize)]
+pub struct OfferDeliverBody {
+    session_id: Option<u64>,
+    until: Option<String>,
+}
+
+/// Claims the delivery of the slot's offer to the caller, ending at `until` (RFC 3339, as the
+/// inbox gave it), to the agent of their session `session_id`: the first of the caller's sessions
+/// to claim it shows it, answered `201` with the delivery; every later claim is refused. A new
+/// offer after one lapsed has another deadline and is claimed anew.
+///
+/// # Errors
+/// `forbidden` for an integration; `not_found` for a session that is not the caller's;
+/// `offer_gone` (`409`) when the slot is not on offer to the caller until that time, after what
+/// time changed is applied; `delivered` (`409`) when it was claimed before; `invalid_request` for
+/// a missing `session_id` or a missing or invalid `until`.
+pub async fn deliver_offer(
+    State(state): State<AppState>,
+    Authed(actor): Authed,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<OfferDeliverBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    actor.require_person()?;
+    let slot = slot_in_path(path)?;
+    let Json(body) = body?;
+    let session = session_in_body("session_id", body.session_id)?;
+    let until = parse_required("until", body.until.as_deref(), |text| {
+        OffsetDateTime::parse(text, &Rfc3339).map_err(|_| "it is a time in RFC 3339")
+    })?;
+    let delivery = state
+        .app
+        .claim_delivery
+        .execute(&actor, session, DeliveryAsk::Offer { slot, until })
+        .await?;
+    Ok(reply(
+        StatusCode::CREATED,
+        &crate::routes::messages::DeliveredAnswer {
+            delivery: DeliveryView::of(&delivery),
+        },
+    ))
 }

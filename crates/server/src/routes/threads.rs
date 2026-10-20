@@ -23,7 +23,9 @@ use crate::error::ApiError;
 use crate::fields::{item_in_body, parse, parse_required, record_id_text, switch, thread_in_path};
 use crate::http::AppState;
 use crate::views::slots::PendingOfferView;
-use crate::views::{MessageView, ThreadSummaryView, ThreadView, UnackedView, reply};
+use crate::views::{
+    DeliverableView, MessageView, ThreadSummaryView, ThreadView, UnackedView, reply,
+};
 
 /// The body of `POST /v1/threads`.
 #[derive(Deserialize)]
@@ -187,6 +189,7 @@ pub async fn list(
 pub struct InboxParams {
     unread: Option<String>,
     unacked: Option<String>,
+    deliverable: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -195,17 +198,23 @@ struct InboxAnswer {
     #[serde(skip_serializing_if = "Option::is_none")]
     unacked: Option<Vec<UnackedView>>,
     offers: Vec<PendingOfferView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deliverable: Option<Vec<DeliverableView>>,
 }
 
 /// Lists the threads waiting for the caller, newest activity first, each with how many of its
 /// messages they have not read and how many await their acknowledgement; with `unread=true`, only
 /// the threads that have unread messages. With `unacked=1` the answer also lists, under
 /// `unacked`, every message awaiting the caller's acknowledgement, newest first, with its thread.
-/// `offers` lists every slot on offer to the caller, with when the offer lapses.
+/// With `deliverable=1` it lists, under `deliverable`, the messages still to be delivered to the
+/// caller's agent while it works, newest first: written by someone else within the last day, high
+/// or urgent and unread, or awaiting the caller's acknowledgement, and not yet delivered to any of
+/// the caller's sessions. `offers` lists every slot on offer to the caller, with when the offer
+/// lapses.
 ///
 /// # Errors
-/// `forbidden` for an integration; `invalid_request` for an `unread` or `unacked` that is not a
-/// switch; `invalid_query` for a malformed query string.
+/// `forbidden` for an integration; `invalid_request` for an `unread`, `unacked` or `deliverable`
+/// that is not a switch; `invalid_query` for a malformed query string.
 pub async fn inbox(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -221,6 +230,7 @@ pub async fn inbox(
     let asked = InboxQuery {
         unread_only: flag("unread", query.unread.as_deref())?,
         unacked: flag("unacked", query.unacked.as_deref())?,
+        deliverable: flag("deliverable", query.deliverable.as_deref())?,
     };
     let inbox = state.app.inbox.execute(&actor, asked).await?;
     let answer = InboxAnswer {
@@ -233,6 +243,9 @@ pub async fn inbox(
             .unacked
             .map(|messages| messages.into_iter().map(UnackedView::of).collect()),
         offers: inbox.offers.into_iter().map(PendingOfferView::of).collect(),
+        deliverable: inbox
+            .deliverable
+            .map(|messages| messages.into_iter().map(DeliverableView::of).collect()),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

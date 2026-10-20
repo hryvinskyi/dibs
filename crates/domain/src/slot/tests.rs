@@ -847,3 +847,93 @@ fn push_targets_read_refspecs() {
     assert_eq!(targets("git status"), None);
     assert_eq!(targets("git push origin 'feat*'"), None);
 }
+
+#[test]
+fn a_push_is_judged_by_its_targets_alone_for_the_pre_push_check() {
+    let mut run = Run::new();
+    let main = RepoRef::of(RepoId::implicit(), "refs/heads/main").unwrap();
+    let feature = RepoRef::of(RepoId::implicit(), "refs/heads/feature").unwrap();
+    assert_eq!(
+        push_verdict(std::slice::from_ref(&main), &run.catalog, &run.board, BOB),
+        CommandVerdict::Free
+    );
+    run.take("deploy:prod", ALICE, 0);
+    assert!(matches!(
+        push_verdict(&[feature.clone(), main.clone()], &run.catalog, &run.board, BOB),
+        CommandVerdict::Frozen { holder: ALICE, ref target, .. } if *target == main
+    ));
+    assert_eq!(
+        push_verdict(&[feature], &run.catalog, &run.board, BOB),
+        CommandVerdict::Free
+    );
+    assert_eq!(
+        push_verdict(&[main], &run.catalog, &run.board, ALICE),
+        CommandVerdict::Free,
+        "my own hold never freezes me"
+    );
+}
+
+#[test]
+fn the_slots_in_question_are_the_ones_a_verdict_reads() {
+    let mut run = Run::new();
+    let asked = |line: &str| {
+        slots_in_question(&split_commands(line), &RepoId::implicit(), &run.catalog)
+            .into_iter()
+            .map(|slot| slot.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert!(asked("cargo test && git push origin feature").is_empty());
+    assert!(asked("dibs slot run deploy:prod -- ./deploy.sh prod").is_empty());
+    assert_eq!(asked("git push origin main"), ["deploy:prod"]);
+    assert_eq!(asked("./deploy.sh prod"), ["deploy:prod"]);
+    assert_eq!(
+        asked("git push origin main && ./deploy.sh prod"),
+        ["deploy:prod"]
+    );
+    run.take("deploy:prod", ALICE, 0);
+    run.take("deploy:prod", CAROL, 1);
+    for line in [
+        "git push origin main",
+        "./deploy.sh prod",
+        "migrate up",
+        "echo hi",
+        "git push origin feature",
+    ] {
+        let names = slots_in_question(&split_commands(line), &RepoId::implicit(), &run.catalog);
+        let only = SlotBoard {
+            holds: run
+                .board
+                .holds
+                .iter()
+                .filter(|hold| {
+                    names.iter().any(|name| {
+                        run.catalog
+                            .in_group(&hold.slot, &run.catalog.get(name).unwrap().group_key())
+                    })
+                })
+                .cloned()
+                .collect(),
+            waiters: run
+                .board
+                .waiters
+                .iter()
+                .filter(|waiter| {
+                    names.iter().any(|name| {
+                        run.catalog
+                            .in_group(&waiter.slot, &run.catalog.get(name).unwrap().group_key())
+                    })
+                })
+                .cloned()
+                .collect(),
+            offers: Vec::new(),
+        };
+        let partial = command_verdict(
+            &split_commands(line),
+            &RepoId::implicit(),
+            &run.catalog,
+            &only,
+            BOB,
+        );
+        assert_eq!(partial, verdict(&run, line, BOB), "{line}");
+    }
+}

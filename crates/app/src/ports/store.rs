@@ -16,6 +16,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use dibs_domain::claim::Claim;
+use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
 use dibs_domain::event::{Event, EventKind};
 use dibs_domain::handle::Handle;
@@ -84,6 +85,8 @@ pub trait Tx:
     + AckRows
     + WideAskRows
     + SlotRows
+    + DeliveryRows
+    + RaisedRows
     + EventRows
     + SettingsRows
     + UiSessionRows
@@ -357,6 +360,51 @@ pub trait WideAskRows: Send {
     ) -> StoreResult<Option<WideAsk>>;
     /// Every announcement its holder has not acknowledged yet, ordered by message.
     async fn open_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>>;
+}
+
+/// What reached a member while they worked, one delivery per member and subject.
+#[async_trait]
+pub trait DeliveryRows: Send {
+    /// Stores a delivery. A second one of the same subject to the same member fails with
+    /// [`StoreError::Duplicate`], whichever session claims it.
+    async fn insert_delivery(&mut self, project: ProjectId, delivery: &Delivery)
+    -> StoreResult<()>;
+    /// The member's delivery of the subject, if one was claimed.
+    async fn delivery(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        subject: &DeliverySubject,
+    ) -> StoreResult<Option<Delivery>>;
+    /// The member's deliveries of any of these subjects, in the order of `subjects`.
+    async fn deliveries(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        subjects: &[DeliverySubject],
+    ) -> StoreResult<Vec<Delivery>>;
+}
+
+/// The high and urgent messages members wrote themselves, which the project limits per hour.
+#[async_trait]
+pub trait RaisedRows: Send {
+    /// Records that `member` wrote `message`, counted toward their limit, at `at`. A message is
+    /// recorded once; a second record of it fails with [`StoreError::Duplicate`].
+    async fn insert_raised(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        message: MessageId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
+    /// When the member's counted messages written at or after `since` were written, oldest
+    /// first.
+    async fn raised_since(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        since: OffsetDateTime,
+    ) -> StoreResult<Vec<OffsetDateTime>>;
 }
 
 /// The holds, waiters and offers of the project's slots.

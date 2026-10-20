@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use dibs_domain::event::{EventKind, MessagePosted, ThreadStarted};
 use dibs_domain::handle::Handle;
+use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
 
@@ -15,6 +16,7 @@ use crate::named::{NamedMessage, NamedThread, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::{MessageRecord, ThreadRecord};
 use crate::use_cases::common::{existing_item, member_by_handle};
+use crate::use_cases::writing::{Authorship, write_message};
 use crate::work::Work;
 
 /// Whom a new thread is addressed to, as the caller names them.
@@ -61,6 +63,7 @@ pub struct StartThread {
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
+    hot_rules: Arc<HotRuleRegistry>,
 }
 
 impl StartThread {
@@ -71,6 +74,7 @@ impl StartThread {
             clock: deps.clock.clone(),
             ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
+            hot_rules: deps.hot_rules.clone(),
         }
     }
 
@@ -79,7 +83,8 @@ impl StartThread {
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for an unknown recipient
     /// or item; [`AppError::NotARecipient`] for an integration named as recipient;
-    /// [`AppError::Recipients`] when no member is named; [`AppError::Store`] when the store fails.
+    /// [`AppError::Recipients`] when no member is named; [`AppError::ImportanceLimited`] for a high
+    /// or urgent message past the project's hourly limit; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
@@ -124,8 +129,12 @@ impl StartThread {
             ack_required: input.ack_required,
             created_at: now,
         };
+        let limit = work
+            .project_settings(&self.hot_rules)
+            .await?
+            .raised_per_hour();
         work.insert_thread(project, &thread).await?;
-        work.insert_message(project, &message).await?;
+        write_message(&mut work, &message, Authorship::Member { limit }, now).await?;
         work.record(
             now,
             EventKind::ThreadStarted(ThreadStarted {

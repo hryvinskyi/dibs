@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::ids::{MemberId, MessageId};
 use crate::member::Role;
@@ -224,6 +224,74 @@ impl fmt::Display for Importance {
 /// look: a raised importance, or an acknowledgement asked of them.
 pub const fn interrupts(importance: Importance, ack_required: bool) -> bool {
     importance.is_raised() || ack_required
+}
+
+/// Who wrote a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Writer {
+    /// A member, through the message routes: what they or their agent typed, at the importance
+    /// they chose.
+    Member,
+    /// dibs itself: an announcement, a notice or a yield request it sends when something happens,
+    /// in the project's name or in the name of the member whose action caused it.
+    Dibs,
+}
+
+/// How far back the limit on raised messages looks.
+pub const RAISED_WINDOW: Duration = Duration::hours(1);
+
+/// Whether a message counts toward its writer's limit on raised messages: one a member wrote at a
+/// raised importance. A message dibs writes never counts, so the announcements a wide claim over
+/// many held areas sends never refuse the claim. This is the one place that says so.
+pub const fn counts_toward_limit(writer: Writer, importance: Importance) -> bool {
+    matches!(writer, Writer::Member) && importance.is_raised()
+}
+
+/// That a member wrote as many raised messages within [`RAISED_WINDOW`] as the project allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error(
+    "you sent {limit} high or urgent messages within the last hour, as many as this project allows"
+)]
+pub struct ImportanceLimited {
+    /// How many the project allows within the window.
+    pub limit: u32,
+    /// When the oldest of them leaves the window, so that one more may be sent.
+    pub frees_at: OffsetDateTime,
+}
+
+/// Decides whether a message of `importance` by `writer` may be written at `now`, given when the
+/// writer's counted messages were written (in any order; those older than [`RAISED_WINDOW`] are
+/// ignored) and the project's `limit`. Answers whether the message counts, so it is recorded with
+/// the others.
+///
+/// # Errors
+/// [`ImportanceLimited`] when the writer already wrote `limit` counted messages within the window,
+/// with when the next one is allowed.
+pub fn decide_raised(
+    writer: Writer,
+    importance: Importance,
+    written: &[OffsetDateTime],
+    limit: u32,
+    now: OffsetDateTime,
+) -> Result<bool, ImportanceLimited> {
+    if !counts_toward_limit(writer, importance) {
+        return Ok(false);
+    }
+    let mut recent: Vec<OffsetDateTime> = written
+        .iter()
+        .copied()
+        .filter(|at| *at <= now && now - *at < RAISED_WINDOW)
+        .collect();
+    recent.sort_unstable();
+    let allowed = usize::try_from(limit).unwrap_or(usize::MAX);
+    if recent.len() < allowed {
+        return Ok(true);
+    }
+    let oldest_counting = recent.len() - allowed;
+    let frees_at = recent
+        .get(oldest_counting)
+        .map_or(now, |at| *at + RAISED_WINDOW);
+    Err(ImportanceLimited { limit, frees_at })
 }
 
 /// A member of a project as the recipients of a message are told from: their role, and when they
@@ -584,6 +652,52 @@ mod tests {
         assert_eq!(
             decide_ack(MessageId(7), false, &state, BOB, at(9)),
             Err(AckRefused::NotRequired)
+        );
+    }
+
+    #[test]
+    fn a_members_eleventh_raised_message_within_the_hour_is_refused_until_the_oldest_ages_out() {
+        let start = OffsetDateTime::UNIX_EPOCH + Duration::days(1);
+        let written: Vec<OffsetDateTime> =
+            (0..10).map(|n| start + Duration::minutes(n * 5)).collect();
+        let now = start + Duration::minutes(50);
+        assert_eq!(
+            decide_raised(Writer::Member, Importance::Urgent, &written[..9], 10, now),
+            Ok(true)
+        );
+        assert_eq!(
+            decide_raised(Writer::Member, Importance::High, &written, 10, now),
+            Err(ImportanceLimited {
+                limit: 10,
+                frees_at: start + Duration::hours(1)
+            })
+        );
+        assert_eq!(
+            decide_raised(
+                Writer::Member,
+                Importance::High,
+                &written,
+                10,
+                start + Duration::hours(1)
+            ),
+            Ok(true),
+            "the oldest left the window"
+        );
+        assert_eq!(
+            decide_raised(Writer::Member, Importance::Normal, &written, 10, now),
+            Ok(false),
+            "an ordinary message is never limited"
+        );
+    }
+
+    #[test]
+    fn what_dibs_writes_never_counts_or_is_refused() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::days(1);
+        let written = vec![now; 50];
+        assert!(!counts_toward_limit(Writer::Dibs, Importance::Urgent));
+        assert_eq!(
+            decide_raised(Writer::Dibs, Importance::Urgent, &written, 10, now),
+            Ok(false)
         );
     }
 }

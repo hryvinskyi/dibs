@@ -6,6 +6,7 @@
 
 pub mod area;
 pub mod claim;
+pub mod delivery;
 pub mod dependency;
 pub mod edit;
 pub mod event;

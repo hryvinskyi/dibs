@@ -1,5 +1,6 @@
 //! `dibs sync`: what a hook leaves to the background, done now — the heartbeat when it is due,
-//! and the settings, status and inbox caches refreshed when they are old.
+//! the settings, status and inbox caches refreshed when they are old, and, with a fresh inbox, the
+//! deliveries it owes claimed for the session of a host that can show them.
 //!
 //! One runs at a time per project (it holds the project's sync lock for its whole run), every
 //! call is bounded to two seconds, and while the server counted as unreachable within the last
@@ -11,7 +12,8 @@ use std::time::Duration as StdDuration;
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use dibs_agent_host::ports::{LocalCache, SessionRef};
+use dibs_agent_host::delivery;
+use dibs_agent_host::ports::{ClaimedDelivery as GuardClaim, LocalCache, Pending, SessionRef};
 use dibs_agent_host::upkeep::{DEFAULT_HEARTBEAT, Due, Freshness, circuit_open};
 use dibs_agent_host::{HostId, SessionKey};
 use dibs_client::Client;
@@ -23,6 +25,7 @@ use crate::failure::{Failure, Kind};
 use crate::guard::cache::StateCache;
 use crate::guard::remote::{Remote, RemoteError};
 use crate::guard::upkeep::take_lock;
+use crate::guard::views;
 use crate::hosts;
 
 /// How long a sync waits for the hook that started it to let go of the lock.
@@ -35,6 +38,9 @@ struct Synced {
     heartbeat: bool,
     status: bool,
     inbox: bool,
+    /// How many deliveries it claimed for the session, and how many of them it won.
+    claimed: usize,
+    won: usize,
 }
 
 /// Runs `dibs sync`.
@@ -130,13 +136,78 @@ async fn run(
         synced.status = true;
     }
     if due.inbox {
-        let inbox = client.inbox(crate::guard::views::GUARD_INBOX).await?;
+        let inbox = client.inbox(views::GUARD_INBOX).await?;
         if let Err(error) = remote.state.remember_inbox(&inbox, now) {
             tracing::debug!(error = %error, "the inbox could not be cached");
         }
         synced.inbox = true;
+        if let Some(session) = session.filter(|session| delivers_to(session)) {
+            claim_deliveries(remote, client, session, now, &mut synced).await?;
+        }
     }
     Ok(synced)
+}
+
+/// Whether the session's host can be shown what is delivered between its tool calls.
+fn delivers_to(session: &SessionRef) -> bool {
+    hosts::registry()
+        .get(session.host.as_str())
+        .is_some_and(|adapter| delivery::can_deliver(adapter.capabilities()))
+}
+
+/// Claims, for `session`, the deliveries the freshly cached inbox owes the member that this machine
+/// has not claimed yet, and remembers each one won or lost beside the inbox, so the session's next
+/// hook on its main thread shows what it won. A server that stops answering ends the claims; what
+/// was claimed until then is remembered.
+async fn claim_deliveries(
+    remote: &Remote,
+    client: &Client,
+    session: &SessionRef,
+    now: OffsetDateTime,
+    synced: &mut Synced,
+) -> Result<(), RemoteError> {
+    let (Some(cached), Some(member)) = (remote.state.inbox(), remote.state.member()) else {
+        return Ok(());
+    };
+    let view = views::inbox(&cached.inbox, &cached.claims);
+    let picks = delivery::to_claim(&view, &member);
+    if picks.is_empty() {
+        return Ok(());
+    }
+    let mut claims = delivery::kept_claims(view.claims, now);
+    let id = remote.session(client, session).await?;
+    let mut failure = None;
+    for pending in picks {
+        let answer = match &pending {
+            Pending::Message(message) => client.deliver_message(message.message, id).await,
+            Pending::Offer(offer) => client.deliver_offer(&offer.slot, offer.until, id).await,
+        };
+        let won = match answer {
+            Ok(_) => true,
+            Err(error) if error.is_unavailable() => {
+                failure = Some(error);
+                break;
+            }
+            Err(error) => {
+                tracing::debug!(code = error.code(), "a delivery went to another session");
+                false
+            }
+        };
+        synced.claimed += 1;
+        synced.won += usize::from(won);
+        claims.push(GuardClaim {
+            pending,
+            host: session.host.as_str().to_owned(),
+            session: session.key.clone(),
+            won,
+            at: now,
+        });
+    }
+    let remembered: Vec<_> = claims.iter().map(views::remembered).collect();
+    if let Err(error) = remote.state.remember_claims(&remembered) {
+        tracing::debug!(error = %error, "the claimed deliveries could not be remembered");
+    }
+    failure.map_or(Ok(()), |error| Err(RemoteError::Client(error)))
 }
 
 /// When each cache was filled, the heartbeat interval from the cached settings.
@@ -209,9 +280,15 @@ fn report(args: &SyncArgs, ctx: &Context, synced: &Synced) {
     .collect();
     ctx.printer.show(synced, || {
         if done.is_empty() {
-            "Nothing was due.".to_owned()
-        } else {
-            format!("Synced: {}.", done.join(", "))
+            return "Nothing was due.".to_owned();
         }
+        let mut text = format!("Synced: {}.", done.join(", "));
+        if synced.claimed > 0 {
+            text.push_str(&format!(
+                " Claimed {} deliveries for the session, {} of them its own to show.",
+                synced.claimed, synced.won
+            ));
+        }
+        text
     });
 }

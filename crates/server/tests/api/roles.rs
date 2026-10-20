@@ -178,6 +178,17 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             "/v1/admin/slots/deploy/force-release".into(),
             Some(json!({"session_id": session, "reason": "y"})),
         ),
+        (
+            Method::POST,
+            "/v1/messages/999/deliver".into(),
+            Some(json!({"session_id": session})),
+        ),
+        (
+            Method::POST,
+            "/v1/slots/deploy/offer/deliver".into(),
+            Some(json!({"session_id": session, "until": "2026-03-02T09:05:00Z"})),
+        ),
+        (Method::GET, "/v1/inbox?deliverable=1".into(), None),
     ];
     for (method, path, body) in refused {
         let answer = world

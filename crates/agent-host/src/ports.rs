@@ -8,15 +8,17 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::delivery::DeliverySubject;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::Note;
-use dibs_domain::ids::{ItemId, MessageId};
+use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, Priority, Title};
 use dibs_domain::message::{Importance, Subject};
 use dibs_domain::paths::RelPath;
 use dibs_domain::repo::RepoId;
+use dibs_domain::session::HostName;
 use dibs_domain::settings::ProjectSettings;
-use dibs_domain::slot::{Purpose, SlotName};
+use dibs_domain::slot::{Liveness, Purpose, SlotName};
 
 use crate::adapter::HostId;
 use crate::event::SessionKey;
@@ -205,6 +207,144 @@ pub struct InboxView {
     pub unacked: Vec<UnackedLine>,
     /// The slots on offer to the member.
     pub offers: Vec<OfferLine>,
+    /// The messages the server still has to deliver to one of the member's sessions, newest
+    /// first.
+    pub deliverable: Vec<PendingMessage>,
+    /// The deliveries this machine claimed, for any of its sessions, won or lost.
+    pub claims: Vec<ClaimedDelivery>,
+}
+
+/// A message that should reach the member's agent while it works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingMessage {
+    /// The message.
+    pub message: MessageId,
+    /// Its thread.
+    pub thread: ThreadId,
+    /// Who wrote it.
+    pub sender: Handle,
+    /// The subject of its thread.
+    pub subject: Subject,
+    /// How much it asks for the member's attention.
+    pub importance: Importance,
+    /// Whether it awaits the member's acknowledgement.
+    pub awaiting_ack: bool,
+    /// Its text, whole.
+    pub body: String,
+}
+
+/// What a delivery puts in front of the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    /// A message.
+    Message(PendingMessage),
+    /// A slot offered to the member.
+    Offer(OfferLine),
+}
+
+impl Pending {
+    /// What is delivered, as the server names it.
+    pub fn subject(&self) -> DeliverySubject {
+        match self {
+            Self::Message(message) => DeliverySubject::Message(message.message),
+            Self::Offer(offer) => DeliverySubject::Offer {
+                slot: offer.slot.clone(),
+                until: offer.until,
+            },
+        }
+    }
+}
+
+/// A delivery this machine claimed from the server for one session of a host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedDelivery {
+    /// What it delivers.
+    pub pending: Pending,
+    /// The host of the session it was claimed for.
+    pub host: String,
+    /// That host's id of the session.
+    pub session: SessionKey,
+    /// Whether the session won it; otherwise another session of the member had it first.
+    pub won: bool,
+    /// When it was claimed.
+    pub at: OffsetDateTime,
+}
+
+/// A slot's group as the server stands it now: its hold, its queue and its offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotState {
+    /// The slot asked about.
+    pub slot: SlotName,
+    /// The hold of its group, when one stands: of this slot or of another of the group.
+    pub hold: Option<SlotHoldState>,
+    /// Its group's queue, first in line first.
+    pub queue: Vec<SlotWaiterState>,
+    /// Its group's offer, when one stands.
+    pub offer: Option<SlotOfferState>,
+}
+
+/// A slot's hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotHoldState {
+    /// The slot held.
+    pub slot: SlotName,
+    /// The member holding it.
+    pub holder: Handle,
+    /// Why.
+    pub purpose: Purpose,
+    /// The session that took or last renewed it.
+    pub session: SessionId,
+    /// That session's machine.
+    pub host: HostName,
+    /// The work item, when one was named.
+    pub item: Option<ItemId>,
+    /// How it stays alive.
+    pub liveness: Liveness,
+    /// When it was taken.
+    pub taken_at: OffsetDateTime,
+    /// When it ends unless renewed.
+    pub expires_at: OffsetDateTime,
+    /// The last sign of life of what keeps it.
+    pub last_seen: OffsetDateTime,
+    /// Whether its run stopped sending heartbeats.
+    pub stalled: bool,
+}
+
+/// A place in a slot group's queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotWaiterState {
+    /// The member waiting.
+    pub member: Handle,
+    /// The slot they asked for.
+    pub slot: SlotName,
+    /// Why they want it.
+    pub purpose: Purpose,
+    /// When they joined the queue.
+    pub since: OffsetDateTime,
+    /// Their last sign of life.
+    pub last_seen: OffsetDateTime,
+}
+
+/// A slot group's offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotOfferState {
+    /// The member it is offered to.
+    pub member: Handle,
+    /// The slot they asked for.
+    pub slot: SlotName,
+    /// Why they want it.
+    pub purpose: Purpose,
+    /// When it lapses.
+    pub until: OffsetDateTime,
+}
+
+/// What one session was shown between its tool calls.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionLedger {
+    /// When something was last put in front of its agent.
+    pub last_injection: Option<OffsetDateTime>,
+    /// What was put there, newest last, as the server names it.
+    pub shown: Vec<String>,
 }
 
 /// Another member who edited a shared file under a live claim, and the item they hold.
@@ -310,6 +450,9 @@ pub trait Workspace {
 
     /// The background upkeep of the caches.
     fn upkeep(&self) -> &dyn Upkeep;
+
+    /// What each session was shown.
+    fn ledger(&self) -> &dyn DeliveryLedger;
 }
 
 /// What this machine remembers about the project between hook runs. Reading never touches the
@@ -379,6 +522,13 @@ pub trait CoordinationGateway {
     /// [`PortError`].
     fn inbox(&self) -> Result<InboxView, PortError>;
 
+    /// Where each of these slots stands now, in the order asked, read fresh from the server: a
+    /// state from a cache could let two members act at once.
+    ///
+    /// # Errors
+    /// [`PortError`].
+    fn slots(&self, names: &[SlotName]) -> Result<Vec<SlotState>, PortError>;
+
     /// The answers for `paths` of `repo`, one per path in the order asked, recording the edits as
     /// being made by `session`.
     ///
@@ -390,6 +540,24 @@ pub trait CoordinationGateway {
         repo: &RepoId,
         paths: &[RelPath],
     ) -> Result<Vec<PathAnswer>, PortError>;
+}
+
+/// What each session of this machine was shown. Reading and writing one session's ledger happens
+/// under that session's lock, so two hooks of one session running at once never both show the
+/// same thing.
+pub trait DeliveryLedger {
+    /// The session's ledger, its lock taken until the answer is dropped; `None` when another
+    /// process holds the lock or it cannot be taken, in which case nothing is shown.
+    fn open(&self, session: &SessionRef) -> Option<Box<dyn LedgerEntry + '_>>;
+}
+
+/// One session's ledger, locked.
+pub trait LedgerEntry {
+    /// What was shown so far; empty when nothing was or the file cannot be read.
+    fn read(&self) -> SessionLedger;
+
+    /// Replaces it in one step; answers whether it was written.
+    fn write(&self, ledger: &SessionLedger) -> bool;
 }
 
 /// The upkeep the guard never waits for: heartbeats and refreshed caches.

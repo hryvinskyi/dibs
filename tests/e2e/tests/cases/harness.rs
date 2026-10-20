@@ -341,12 +341,30 @@ impl Person {
     /// The reply of `dibs hook neutral before-tool` for an edit of `paths` (relative to `cwd`) in
     /// `cwd`, by an agent session `session` of this person.
     pub fn before_edit(&self, cwd: &Path, session: &str, paths: &[&str]) -> Value {
+        self.before_tool(
+            cwd,
+            session,
+            &serde_json::json!({"kind": "edit", "paths": paths}),
+        )
+    }
+
+    /// `dibs hook neutral before-tool` for a shell command in `cwd`, as an agent host would call
+    /// it; answers the reply.
+    pub fn before_shell(&self, cwd: &Path, session: &str, command: &str) -> Value {
+        self.before_tool(
+            cwd,
+            session,
+            &serde_json::json!({"kind": "shell", "command": command}),
+        )
+    }
+
+    fn before_tool(&self, cwd: &Path, session: &str, tool: &Value) -> Value {
         let input = serde_json::json!({
             "protocol": 1,
             "session": session,
             "cwd": cwd,
             "thread": "main",
-            "tool": {"kind": "edit", "paths": paths},
+            "tool": tool,
         });
         let mut hook = self
             .dibs(cwd)

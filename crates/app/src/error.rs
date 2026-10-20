@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 use dibs_domain::claim::{ClaimRefused, ForceReleaseRefused, HolderOnly, TakeoverRefused};
+use dibs_domain::delivery::DeliveryRefused;
 use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
 use dibs_domain::grant::{GrantRefused, RevokeRefused};
@@ -10,7 +11,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::ids::{GrantId, ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::import::BatchRefused;
 use dibs_domain::item::{CreateRefused, ItemStatus};
-use dibs_domain::message::{AckRefused, RecipientsError};
+use dibs_domain::message::{AckRefused, ImportanceLimited, RecipientsError};
 use dibs_domain::settings::{AreaLookupError, SettingsError};
 use dibs_domain::slot::{BeatRefused, SlotRefused};
 use dibs_domain::wide::WideScopeError;
@@ -93,6 +94,16 @@ pub enum AppError {
     /// The acknowledgement was refused.
     #[error(transparent)]
     Ack(#[from] AckRefused),
+    /// A delivery of a message or an offer was refused.
+    #[error(transparent)]
+    Delivery(#[from] DeliveryRefused),
+    /// The member wrote as many high or urgent messages within the hour as the project allows.
+    #[error(
+        "{0}; send this one as normal, or send it as {importance} after {frees}",
+        importance = "high or urgent",
+        frees = utc_clock(.0.frees_at)
+    )]
+    ImportanceLimited(#[from] ImportanceLimited),
     /// The claim was refused; the refusal carries the handle of the member in the way.
     #[error(transparent)]
     Claim(#[from] Refusal<ClaimRefused>),
@@ -165,6 +176,12 @@ impl AppError {
                 AckRefused::NotRequired => "ack_not_required",
                 AckRefused::NotRecipient => "not_a_recipient",
             },
+            Self::Delivery(refused) => match refused {
+                DeliveryRefused::NotRecipient => "not_a_recipient",
+                DeliveryRefused::OfferGone => "offer_gone",
+                DeliveryRefused::Delivered { .. } => "delivered",
+            },
+            Self::ImportanceLimited(_) => "importance_limited",
             Self::Claim(refused) => match refused.reason {
                 ClaimRefused::HeldBy { .. } => "held",
                 ClaimRefused::Stale { .. } => "stale",
@@ -235,9 +252,31 @@ impl AppError {
     }
 }
 
+/// A time as a sentence names it: `14:05 UTC`.
+fn utc_clock(at: time::OffsetDateTime) -> String {
+    let at = at.to_offset(time::UtcOffset::UTC);
+    format!("{:02}:{:02} UTC", at.hour(), at.minute())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_importance_limit_says_when_it_frees_up() {
+        let frees_at = time::OffsetDateTime::UNIX_EPOCH
+            + time::Duration::hours(10)
+            + time::Duration::seconds(42 * 60 + 7);
+        let error = AppError::from(ImportanceLimited {
+            limit: 10,
+            frees_at,
+        });
+        assert_eq!(error.code(), "importance_limited");
+        assert_eq!(
+            error.to_string(),
+            "you sent 10 high or urgent messages within the last hour, as many as this project allows; send this one as normal, or send it as high or urgent after 10:42 UTC"
+        );
+    }
 
     #[test]
     fn a_store_failure_tells_nothing_of_its_cause() {

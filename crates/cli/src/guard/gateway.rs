@@ -7,13 +7,15 @@ use time::OffsetDateTime;
 use tokio::runtime::Runtime;
 
 use dibs_agent_host::ports::{
-    CoordinationGateway, InboxView, KnownSettings, PathAnswer, PortError, SessionRef, StatusView,
+    CoordinationGateway, InboxView, KnownSettings, PathAnswer, PortError, SessionRef, SlotState,
+    StatusView,
 };
 use dibs_client::Client;
 use dibs_client::api::EditCheckRequest;
 use dibs_client::checkout::Checkout;
 use dibs_domain::paths::RelPath;
 use dibs_domain::repo::RepoId;
+use dibs_domain::slot::SlotName;
 
 use crate::failure::sentence;
 use crate::guard::remote::{Remote, RemoteError};
@@ -108,7 +110,22 @@ impl CoordinationGateway for HookGateway {
         if let Err(error) = self.remote.state.remember_inbox(&inbox, Self::now()) {
             tracing::debug!(error = %error, "the inbox could not be cached");
         }
-        Ok(views::inbox(&inbox))
+        Ok(views::inbox(&inbox, &[]))
+    }
+
+    fn slots(&self, names: &[SlotName]) -> Result<Vec<SlotState>, PortError> {
+        let client = self.client()?;
+        self.runtime()?.block_on(async {
+            let mut states = Vec::with_capacity(names.len());
+            for name in names {
+                let answer = client
+                    .slot(name)
+                    .await
+                    .map_err(|error| views::port_error(&error))?;
+                states.push(views::slot_state(&answer.slot));
+            }
+            Ok(states)
+        })
     }
 
     fn edit_check(

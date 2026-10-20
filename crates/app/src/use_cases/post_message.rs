@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use dibs_domain::event::{EventKind, MessagePosted};
+use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{MessageId, ThreadId};
 use dibs_domain::message::{Body, Importance, SessionLabel};
 
@@ -13,6 +14,7 @@ use crate::named::{NamedMessage, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::MessageRecord;
 use crate::use_cases::readable::readable_thread;
+use crate::use_cases::writing::{Authorship, write_message};
 use crate::work::Work;
 
 /// The message to post.
@@ -37,6 +39,7 @@ pub struct PostMessage {
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
+    hot_rules: Arc<HotRuleRegistry>,
 }
 
 impl PostMessage {
@@ -47,6 +50,7 @@ impl PostMessage {
             clock: deps.clock.clone(),
             ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
+            hot_rules: deps.hot_rules.clone(),
         }
     }
 
@@ -54,7 +58,8 @@ impl PostMessage {
     ///
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for a thread that does not
-    /// exist or that the caller may not read; [`AppError::Store`] when the store fails.
+    /// exist or that the caller may not read; [`AppError::ImportanceLimited`] for a high or urgent
+    /// message past the project's hourly limit; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
@@ -74,7 +79,11 @@ impl PostMessage {
             ack_required: input.ack_required,
             created_at: now,
         };
-        work.insert_message(actor.project, &message).await?;
+        let limit = work
+            .project_settings(&self.hot_rules)
+            .await?
+            .raised_per_hour();
+        write_message(&mut work, &message, Authorship::Member { limit }, now).await?;
         work.record(
             now,
             EventKind::MessagePosted(MessagePosted {
@@ -203,5 +212,136 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(integration.code(), "forbidden");
+    }
+
+    #[tokio::test]
+    async fn a_members_eleventh_raised_message_within_the_hour_is_refused_saying_when() {
+        let env = crate::use_cases::testing::Env::with_settings(r#"{"raised_per_hour": 3}"#).await;
+        let started = StartThread::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                StartThreadInput {
+                    subject: Subject::parse("Deploy").unwrap(),
+                    to: Addressees::Members(vec![Handle::parse("bob").unwrap()]),
+                    item: None,
+                    label: label(),
+                    body: Body::parse("Hold on.").unwrap(),
+                    importance: dibs_domain::message::Importance::Urgent,
+                    ack_required: true,
+                },
+            )
+            .await
+            .unwrap();
+        let first_at = env.now();
+        let post = PostMessage::new(&env.deps);
+        let reply = |importance| PostMessageInput {
+            thread: started.thread.record.id,
+            label: label(),
+            body: Body::parse("Still holding.").unwrap(),
+            importance,
+            ack_required: false,
+        };
+        for _ in 0..2 {
+            env.advance(time::Duration::minutes(10));
+            post.execute(
+                &env.alice.actor,
+                reply(dibs_domain::message::Importance::High),
+            )
+            .await
+            .unwrap();
+        }
+        env.advance(time::Duration::minutes(10));
+        let refused = post
+            .execute(
+                &env.alice.actor,
+                reply(dibs_domain::message::Importance::High),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "importance_limited");
+        let crate::AppError::ImportanceLimited(limited) = &refused else {
+            panic!("{refused:?}");
+        };
+        assert_eq!(limited.frees_at, first_at + time::Duration::hours(1));
+        post.execute(
+            &env.alice.actor,
+            reply(dibs_domain::message::Importance::Normal),
+        )
+        .await
+        .unwrap();
+        post.execute(
+            &env.bob.actor,
+            reply(dibs_domain::message::Importance::Urgent),
+        )
+        .await
+        .unwrap();
+        env.advance(time::Duration::minutes(31));
+        post.execute(
+            &env.alice.actor,
+            reply(dibs_domain::message::Importance::High),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_announcements_dibs_sends_for_a_wide_claim_are_not_counted() {
+        use crate::use_cases::{ClaimItem, ClaimItemInput, WideInput};
+        use dibs_domain::wide::WideReason;
+
+        let env = crate::use_cases::testing::Env::with_settings(
+            r#"{"raised_per_hour": 1, "areas": [{"name": "billing", "paths": ["b/**"]}, {"name": "search", "paths": ["s/**"]}]}"#,
+        )
+        .await;
+        let claim = ClaimItem::new(&env.deps);
+        for (reference, area) in [
+            ("gh:acme/widgets#1", "billing"),
+            ("gh:acme/widgets#2", "search"),
+        ] {
+            let item = env.item(reference).await;
+            claim
+                .execute(
+                    &env.alice.actor,
+                    ClaimItemInput {
+                        item,
+                        session: env.alice.session,
+                        areas: vec![area.to_owned()],
+                        wide: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let wide = env.item("gh:acme/widgets#3").await;
+        claim
+            .execute(
+                &env.bob.actor,
+                ClaimItemInput {
+                    item: wide,
+                    session: env.bob.session,
+                    areas: Vec::new(),
+                    wide: Some(WideInput {
+                        areas: vec!["billing".to_owned(), "search".to_owned()],
+                        reason: WideReason::parse("Rename the client").unwrap(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        StartThread::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                StartThreadInput {
+                    subject: Subject::parse("Rename").unwrap(),
+                    to: Addressees::Project,
+                    item: None,
+                    label: label(),
+                    body: Body::parse("Heads up.").unwrap(),
+                    importance: dibs_domain::message::Importance::High,
+                    ack_required: false,
+                },
+            )
+            .await
+            .expect("the announcements sent in bob's name did not count toward his limit");
     }
 }

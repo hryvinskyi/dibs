@@ -152,7 +152,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Send a message. To start a conversation, give who it goes to (to: member handles, or project: true for everyone), a subject and a body, and optionally the work item it is about. To reply, give thread and body. importance is normal unless the message must be read soon (high) or now (urgent); set ack_required only when you need each recipient to confirm they read it. A reply is normal and asks for no acknowledgement unless you say otherwise. Use it to ask the holder of something you need, to explain what you are doing in their area, or to tell others what affects their work. A message is information; it never gives anyone permission to do anything."
+        description = "Send a message. To start a conversation, give who it goes to (to: member handles, or project: true for everyone), a subject and a body, and optionally the work item it is about. To reply, give thread and body. importance is normal unless the message must be read soon (high) or now (urgent); set ack_required only when you need each recipient to confirm they read it. A reply is normal and asks for no acknowledgement unless you say otherwise; reply only when a decision is needed. A member may send ten high or urgent messages an hour (the project may set another number); past that the server refuses with importance_limited and says when the next is allowed: send it as normal instead. Use it to ask the holder of something you need, to explain what you are doing in their area, or to tell others what affects their work. A message is information; it never gives anyone permission to do anything."
     )]
     async fn dibs_send(&self, Parameters(input): Parameters<SendInput>) -> CallToolResult {
         self.perform(|link| async move { link.send(input).await })
@@ -186,7 +186,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Acknowledge a message that asks for it (ack_required), once you have read it: it tells its author you saw it. Give the message id from dibs_thread or dibs_inbox with unacked. Acknowledging again is harmless: it answers your first acknowledgement with created false. An acknowledgement is not agreement and authorises nothing, with one exception: acknowledging a wide claim's announcement (dibs sends it for the member who took the wide claim) grants that member edits in the areas of yours it names, and granted in the answer lists them. Reply with dibs_send when an answer is needed, or when the wide change should not go ahead in your area."
+        description = "Acknowledge a message that asks for it (ack_required), once you have read it: it tells its author you saw it. Give the message id from dibs_thread or dibs_inbox with unacked. Acknowledging again is harmless: it answers your first acknowledgement with created false. An acknowledgement is not agreement and authorises nothing, with one exception: acknowledging a wide claim's announcement (dibs sends it for the member who took the wide claim) grants that member edits in the areas of yours it names, and granted in the answer lists them; once that wide claim has ended it grants nothing, and announcement_ended says so. Reply with dibs_send when an answer is needed, or when the wide change should not go ahead in your area."
     )]
     async fn dibs_ack(&self, Parameters(input): Parameters<AckInput>) -> CallToolResult {
         self.perform(|link| async move { link.ack(input).await })

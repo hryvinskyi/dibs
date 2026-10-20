@@ -66,14 +66,14 @@ cause of an internal failure and answers `internal`.
 |---|---|
 | `400` | `invalid_json` (the body is not JSON of the shape the route expects), `invalid_query` |
 | `401` | `unauthorized` |
-| `403` | `forbidden`, `not_holder` (details: `holder`; for a slot too), `not_grantor`, `not_a_recipient` (an acknowledgement by somebody a message did not reach), `not_author` |
+| `403` | `forbidden`, `not_holder` (details: `holder`; for a slot too), `not_grantor`, `not_a_recipient` (an acknowledgement or a delivery for somebody a message did not reach), `not_author` |
 | `404` | `not_found` (also: a record of another project, and a conversation the caller may not read), `unknown_slot` (`slot`) |
 | `405` | `method_not_allowed` |
-| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`) |
+| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `offer_gone` |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
 | `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`) |
-| `429` | `too_many_attempts` (details: `retry_after`) |
+| `429` | `too_many_attempts` (details: `retry_after`), `importance_limited` (`limit`, `frees_at`) |
 | `500` | `internal` |
 | `503` | `timeout`, `too_many_streams` |
 
@@ -108,8 +108,9 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/threads/{id}` | people | A conversation with its messages. |
 | `POST /v1/threads/{id}/messages` | people | Post a message. |
 | `POST /v1/threads/{id}/read` | people | Mark a conversation read. |
-| `GET /v1/inbox` | people | Conversations waiting for you, the messages awaiting your acknowledgement, and the slots offered to you. |
+| `GET /v1/inbox` | people | Conversations waiting for you, the messages awaiting your acknowledgement or still to be delivered to you, and the slots offered to you. |
 | `POST /v1/messages/{id}/ack` | people | Acknowledge a message you were sent. |
+| `POST /v1/messages/{id}/deliver` | people | Claim the delivery of a message to one of your sessions; the first claim wins. |
 | `GET /v1/messages/{id}/status` | people | Who read and acknowledged a message you wrote. |
 | `GET /v1/slots` | any | Every declared slot: its group's hold, queue and offer. |
 | `GET /v1/slots/{name}` | any | One slot, fresh. |
@@ -118,6 +119,7 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/slots/{name}/leave` | people | Leave a slot's queue, or give up the offer to you. |
 | `POST /v1/slots/{name}/heartbeat` | people | The heartbeat of the run that holds a slot. |
 | `POST /v1/slots/{name}/takeover` | people | Take over another member's stalled hold. |
+| `POST /v1/slots/{name}/offer/deliver` | people | Claim the delivery of the slot's offer to you to one of your sessions; the first claim wins. |
 | `POST /v1/slots/{name}/run-finished` | import | A forge workflow run finished: end the hold that waited for it. |
 | `GET /v1/events` | any | A page of the project's event log. |
 | `GET /v1/events/stream` | people | The event log as server-sent events. |
@@ -420,7 +422,11 @@ naming both, or neither, is `invalid_request`. `item` (optional) is the work ite
 label it is signed with. `importance` is `normal` (the default), `high` or `urgent`; `ack_required` (default `false`)
 asks each recipient to acknowledge the message. Answers `201 { "thread": thread, "message": message }`. Refusals:
 `not_found` for an unknown recipient or item, `not_a_recipient` for an integration, `no_recipients` for an empty `to`,
-`invalid_request` for an importance that is none of the three.
+`invalid_request` for an importance that is none of the three, and `importance_limited` (`429`) for a member's `high`
+or `urgent` message past the project's `raised_per_hour` (ten unless the settings say otherwise) within the last hour:
+its sentence and `frees_at` say when the next one is allowed, and the same message at `normal` goes through. Only what a
+member writes through these routes counts; what dibs sends itself (a wide claim's announcements, a slot's notices)
+never does.
 
 `GET /v1/threads?item=12` answers `{ "threads": [summary, …] }`, the conversations the caller may read, newest activity
 first. `GET /v1/inbox` answers the same shape for the conversations waiting for the caller; with `unread=true` (or `1`)
@@ -429,12 +435,36 @@ only those with messages they have not read. With `unacked=1` (or `true`) the an
 acknowledgement they have not given. A conversation the caller may not read is reported as missing, the same as one that
 does not exist. Every inbox answer carries `"offers": [{ "slot": "deploy:prod", "until": "…" }, …]`: the slots offered
 to the caller now, each theirs if they take it before `until` (what time changed about the slots is applied first).
+With `deliverable=1` the answer also carries `"deliverable": [{ "thread": thread, "message": message, "awaiting_ack":
+true }, …]`, newest first, at most 20: the messages still to be delivered to the caller's agent while it works — written
+by someone else within the last day, reaching the caller, `high` or `urgent` and unread or awaiting the caller's
+acknowledgement, and not yet delivered to any of the caller's sessions. A wide claim's announcement whose wide claim has
+ended is in neither `unacked` nor `deliverable`, and is not counted as awaiting an acknowledgement: it asks for nothing
+any more.
 
 `GET /v1/threads/{id}` answers `{ "thread": thread, "messages": [message, …] }`, oldest first; a message that asks to be
 acknowledged carries `acks`, each recipient ordered by handle with when they acknowledged it (`null` while they have
 not). Reading does not mark it read. `POST /v1/threads/{id}/messages`, body
 `{ "label": "laptop/cli", "body": "…", "importance": "normal", "ack_required": false }` (the last two optional, as when
-starting a thread), answers `201 { "message": message }`. `POST /v1/threads/{id}/read` answers `{ "newly_read": 2 }`.
+starting a thread, and held to the same hourly limit), answers `201 { "message": message }`.
+`POST /v1/threads/{id}/read` answers `{ "newly_read": 2 }`.
+
+### Delivery to a running session
+
+A pressing message or a slot offered to a member reaches their agent between its tool calls (the guard's hooks show it).
+A member runs several sessions, so each subject is delivered once per member: the first of their sessions to claim it
+delivers it, and every later claim, from any session, is refused. Claiming appends no event.
+
+`POST /v1/messages/{id}/deliver`, body `{ "session_id": 9 }`, claims a message for the caller's session `session_id`.
+Answers `201 { "delivery": { "subject": "41", "session_id": 9, "at": "…" } }`. Refusals: `delivered` (`409`, details
+the `session_id` that claimed it and `at`), `not_a_recipient` (`403`) for a message the caller wrote or was not sent,
+`not_found` for a message in a conversation the caller may not read or a session that is not theirs.
+
+`POST /v1/slots/{name}/offer/deliver`, body `{ "session_id": 9, "until": "2026-03-02T09:05:00Z" }`, claims the offer of
+the slot to the caller that lapses at `until`, as the inbox gave it; its `subject` is `offer:<slot>:<until in unix
+nanoseconds>`, so a new offer after one lapsed is claimed anew. Refusals: `delivered` (`409`), `offer_gone` (`409`) when
+the slot is not on offer to the caller until that time (taken, lapsed, or never theirs; what time changed is applied
+first), `invalid_request` for a missing `session_id` or an `until` that is no RFC 3339 time.
 
 ### Acknowledgements
 
@@ -447,7 +477,9 @@ never a recipient. A message never changes; an acknowledgement is a record of it
 Acknowledging a wide claim's announcement also grants its member edits, for the wide claim's item, in each area it asked
 about that the caller still holds through a live claim: `granted` lists those grants, and each appends
 `wide_granted_by_ack`. Acknowledging again is harmless, so a client may retry after a lost answer: it answers `200` with
-the first acknowledgement (its original `at`), `"created": false` and `"granted": []`, and records and appends nothing. Refusals: `not_a_recipient` (`403`: the message did not
+the first acknowledgement (its original `at`), `"created": false` and `"granted": []`, and records and appends nothing.
+An announcement whose wide claim has ended (released, completed or taken over) grants nothing when acknowledged; the
+answer then carries `"announcement_ended": true`. Refusals: `not_a_recipient` (`403`: the message did not
 reach the caller, or the caller wrote it), `ack_not_required` (`409`: the message asks for none), `not_found` for a
 message in a conversation the caller may not read.
 
@@ -617,6 +649,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | `stale_after` | How long a claim stays live without a sign of life: `24h`; 1 hour to 30 days; default 24 hours. |
 | `heartbeat_every` | How often a session sends a heartbeat: `1m`; 1 to 15 minutes; default 1 minute. |
 | `edit_policy` | `require-claim` (default): a governed path needs a live claim. `advise`: it does not. |
+| `raised_per_hour` | How many `high` or `urgent` messages one member may write within an hour: 1 to 1000; default 10. What dibs writes itself is not counted. |
 | `areas` | For a project with one repository: `[{ "name": "billing", "paths": ["packages/billing/**"] }]`. |
 | `hot` | For a project with one repository: hot-file rules, first match wins. |
 | `repos` | For a project with several: `[{ "id", "remote", "areas", "hot" }]`. The two layouts are never mixed. |
@@ -653,6 +686,11 @@ look-around (`unless` is the exclusion). A command line is split into simple com
 `time`, `command`, `exec` and a leading `./`, and with the script of `sh -c` split too — so `^deploy\.sh prod` matches
 `cd ops && ./deploy.sh prod` and not `echo "./deploy.sh prod"`. `dibs slot test <settings.toml> -- <command line>`
 shows what a line needs without a server.
+
+The command line itself never leaves the member's machine: the guard splits and judges it there, against the settings
+it keeps, and asks the server only `GET /v1/slots/{name}` for the few slots its verdict reads — the one whose pattern
+matches, and those that freeze a ref a `git push` in the line names. A line no slot governs asks the server nothing.
+`dibs check --push`, run from git's `pre-push` hook, judges the refs git says a push goes to by the same rule.
 
 ### Admin routes
 

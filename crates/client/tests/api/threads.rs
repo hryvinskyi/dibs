@@ -25,6 +25,7 @@ fn start(to: Recipients, body: &str) -> StartThread {
 const UNREAD: InboxRequest = InboxRequest {
     unread: true,
     unacked: false,
+    deliverable: false,
 };
 
 #[test]
@@ -107,6 +108,7 @@ fn a_message_that_asks_is_acked_once_and_its_author_sees_it() {
         let asked = InboxRequest {
             unread: false,
             unacked: true,
+            deliverable: false,
         };
         let inbox = bob.inbox(asked).await.unwrap();
         assert_eq!(inbox.unacked.len(), 1);
@@ -238,5 +240,55 @@ fn a_stream_resumed_after_an_event_replays_what_followed_it() {
             matches!(first.kind, EventKind::ThreadStarted(_)),
             "{first:?}"
         );
+    });
+}
+
+#[test]
+fn a_pressing_message_is_listed_for_delivery_and_claimed_by_one_session() {
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    run(async {
+        let started = alice
+            .start_thread(&StartThread {
+                importance: Importance::Urgent,
+                ..start(
+                    Recipients::Members(vec!["bob".parse().unwrap()]),
+                    "Hold every deploy.",
+                )
+            })
+            .await
+            .unwrap();
+        let asked = InboxRequest {
+            unread: true,
+            unacked: true,
+            deliverable: true,
+        };
+        let inbox = bob.inbox(asked).await.unwrap();
+        assert_eq!(inbox.deliverable.len(), 1);
+        assert_eq!(inbox.deliverable[0].message.id, started.message.id);
+        assert!(!inbox.deliverable[0].awaiting_ack);
+        let first = crate::support::session(&bob, "laptop/hook-1").await;
+        let second = crate::support::session(&bob, "laptop/hook-2").await;
+        let won = bob
+            .deliver_message(started.message.id, first.session_id)
+            .await
+            .unwrap();
+        assert_eq!(won.delivery.session_id, first.session_id);
+        let lost = bob
+            .deliver_message(started.message.id, second.session_id)
+            .await
+            .unwrap_err();
+        assert_eq!(lost.code(), "delivered");
+        assert!(bob.inbox(asked).await.unwrap().deliverable.is_empty());
+        let gone = bob
+            .deliver_offer(
+                &"deploy:prod".parse().unwrap(),
+                time::OffsetDateTime::UNIX_EPOCH,
+                first.session_id,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(gone.code(), "offer_gone");
     });
 }

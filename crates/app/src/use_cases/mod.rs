@@ -12,6 +12,7 @@ mod common;
 mod complete;
 mod create_item;
 mod create_member;
+mod deliver;
 mod edit_check;
 mod follow_events;
 mod force_release;
@@ -49,6 +50,7 @@ mod take_over;
 mod unacked;
 mod upsert_items;
 mod wide_asks;
+mod writing;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -63,13 +65,17 @@ pub use common::NewMember;
 pub use complete::Complete;
 pub use create_item::{CreateItem, CreateItemInput, CreatedItem};
 pub use create_member::{CreateMember, CreateMemberInput, CreatedMember};
+pub use deliver::{ClaimDelivery, DeliveryAsk};
 pub use edit_check::{EditCheck, EditCheckInput, EditVerdicts};
 pub use follow_events::{FollowEvents, FollowPage, FollowedEvent};
 pub use force_release::ForceRelease;
 pub use get_item::{GetItem, ItemView};
 pub use grant::{Grant, GrantInput, GrantResult};
 pub use heartbeat::{Heartbeat, HeartbeatOutcome};
-pub use inbox::{Inbox, InboxQuery, InboxView, PendingOffer};
+pub use inbox::{
+    DELIVERABLE_FOR, DeliverableMessage, Inbox, InboxQuery, InboxView, MAX_DELIVERABLE,
+    PendingOffer,
+};
 pub use init_project::{InitProject, InitProjectInput, InitializedProject};
 pub use list_completed::{CompletedItem, ListCompleted, MAX_COMPLETED};
 pub use list_events::{EventCursor, EventPage, ListEvents, MAX_PAGE};
@@ -156,6 +162,8 @@ pub struct UseCases {
     pub post_message: PostMessage,
     /// See [`Inbox`].
     pub inbox: Inbox,
+    /// See [`ClaimDelivery`].
+    pub claim_delivery: ClaimDelivery,
     /// See [`ListThreads`].
     pub list_threads: ListThreads,
     /// See [`ReadThread`].
@@ -240,6 +248,7 @@ impl UseCases {
             start_thread: StartThread::new(deps),
             post_message: PostMessage::new(deps),
             inbox: Inbox::new(deps),
+            claim_delivery: ClaimDelivery::new(deps),
             list_threads: ListThreads::new(deps),
             read_thread: ReadThread::new(deps),
             mark_read: MarkRead::new(deps),

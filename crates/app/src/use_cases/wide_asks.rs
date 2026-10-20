@@ -26,6 +26,7 @@ use crate::named::{ItemName, NamedGrant, Names};
 use crate::ports::{IdGen, StoreError};
 use crate::records::{GrantRecord, MessageRecord, ThreadRecord};
 use crate::use_cases::common::existing_item;
+use crate::use_cases::writing::{Authorship, write_message};
 use crate::work::Work;
 
 /// The session label announcements are written under.
@@ -125,7 +126,7 @@ impl Announcer<'_> {
             created_at: self.now,
         };
         work.insert_thread(project, &thread).await?;
-        work.insert_message(project, &message).await?;
+        write_message(work, &message, Authorship::Dibs, self.now).await?;
         let ask = WideAsk {
             message: message_id,
             item: due.item,

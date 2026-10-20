@@ -243,7 +243,7 @@ pub struct TakeoverArgs {
 
 /// `dibs check`.
 #[derive(Debug, Args)]
-#[command(group(ArgGroup::new("what").required(true).args(["paths", "git_range"])))]
+#[command(group(ArgGroup::new("what").required(true).args(["paths", "git_range", "push"])))]
 pub struct CheckArgs {
     /// The paths you are about to change, relative to the current directory or absolute.
     pub paths: Vec<PathBuf>,
@@ -254,6 +254,12 @@ pub struct CheckArgs {
     /// With `--git-range`, only the commits of this author; `me` is the author git is set up as.
     #[arg(long, requires = "git_range", conflicts_with = "paths")]
     pub author: Option<String>,
+    /// Check the push git describes on standard input, as its pre-push hook receives it
+    /// (`<local ref> <local sha> <remote ref> <remote sha>` per line): refused while a slot another
+    /// member holds freezes a ref it pushes to, silent otherwise. A server that cannot be reached,
+    /// or anything else that keeps it from deciding, lets the push go with one warning.
+    #[arg(long, conflicts_with_all = ["paths", "git_range"])]
+    pub push: bool,
 }
 
 /// `dibs grant`.

@@ -1,11 +1,12 @@
-//! `dibs check`: the verdict on paths about to change, or warnings about the paths a range of
-//! commits changed.
+//! `dibs check`: the verdict on paths about to change, warnings about the paths a range of commits
+//! changed, or the verdict on a push git is about to make.
 //!
 //! Both work inside a checkout only: the nearest `.dibs.toml` names the repository, which must be
 //! the checkout's `origin`. A path no area or hot-file rule governs is answered without the server.
 //! With paths, a path that may not be edited makes the command fail as refused. With a range, every
 //! problem is a warning and the command succeeds, so a git hook calling it never stops a push.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use dibs_client::api::{EditCheck, EditCheckRequest, Me, PathVerdict, Verdict};
@@ -22,11 +23,20 @@ use crate::failure::{Failure, sentence};
 use crate::git::Git;
 use crate::output::verdict_line;
 
+mod push;
+
 /// Runs `dibs check`.
 ///
 /// # Errors
 /// With paths, a [`Failure`]: refused when a path may not be edited now. With a range, none.
 pub async fn check(args: CheckArgs, ctx: &Context) -> Result<(), Failure> {
+    if args.push {
+        let mut stdin = String::new();
+        if let Err(error) = std::io::stdin().read_to_string(&mut stdin) {
+            tracing::debug!(error = %error, "the push could not be read from standard input");
+        }
+        return push::check_push(&stdin, ctx).await;
+    }
     match args.git_range {
         Some(range) => {
             range_warnings(&range, args.author.as_deref(), ctx).await;
@@ -76,6 +86,16 @@ impl Governed {
             settings,
             repo,
         })
+    }
+
+    /// The project's settings as they stood when the command asked.
+    pub fn settings(&self) -> &ProjectSettings {
+        &self.settings
+    }
+
+    /// The repository the checkout is.
+    pub fn repo(&self) -> &RepoId {
+        &self.repo
     }
 
     /// The path as the checkout names it, whether it was given relative to `cwd` or absolute.

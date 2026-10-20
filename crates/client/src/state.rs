@@ -7,7 +7,9 @@
 //! - `cache/<scope>/unreachable` — when a call last found the server unreachable;
 //! - `cache/<scope>/member.json` — the handle the token signs in as;
 //! - `cache/<scope>/inbox.json` — the conversations with unread messages, the messages awaiting the
-//!   member's acknowledgement, and when they were fetched;
+//!   member's acknowledgement and those still to be delivered, the slots offered to them, when they
+//!   were fetched, and the deliveries this machine claimed;
+//! - `sessions/<scope>/delivery-<digest>.{json,lock}` — what one agent session was shown, and when;
 //! - `cache/<scope>/held.json` — areas edit checks found the member holding, each with when;
 //! - `cache/<scope>/heartbeat`, `warned`, `sync-started` — when the last heartbeat was sent, when
 //!   the person was last warned about an unreachable server, when a background sync was last
@@ -30,11 +32,11 @@ use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::SessionId;
-use dibs_domain::message::SessionLabel;
+use dibs_domain::ids::{MessageId, SessionId, ThreadId};
+use dibs_domain::message::{Importance, SessionLabel, Subject};
 use dibs_domain::settings::SettingsDocument;
 
-use crate::api::{Inbox, Session, Status};
+use crate::api::{Inbox, PendingOffer, Session, Status};
 use crate::credentials::CredentialKey;
 
 /// The state of one project on one server.
@@ -72,6 +74,52 @@ pub struct CachedInbox {
     pub fetched_at: OffsetDateTime,
     /// The conversations with unread messages, and the messages awaiting an acknowledgement.
     pub inbox: Inbox,
+    /// The deliveries this machine claimed from the server, won or lost; kept across refreshes of
+    /// the inbox.
+    #[serde(default)]
+    pub claims: Vec<ClaimedDelivery>,
+}
+
+/// A delivery this machine claimed for one session of an agent host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimedDelivery {
+    /// What: a message's id, or `offer:<slot>:<deadline>`.
+    pub subject: String,
+    /// The host of the session it was claimed for.
+    pub host: String,
+    /// That host's id of the session.
+    pub session: String,
+    /// Whether the session won it; otherwise another session of the member had it first.
+    pub won: bool,
+    /// When it was claimed.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    /// The message it delivers, when it is one: kept, because the server stops listing a message
+    /// once it was delivered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<RememberedMessage>,
+    /// The offer it delivers, when it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<PendingOffer>,
+}
+
+/// What a claimed delivery keeps of its message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RememberedMessage {
+    /// The message.
+    pub id: MessageId,
+    /// Its thread.
+    pub thread: ThreadId,
+    /// Who wrote it.
+    pub author: Handle,
+    /// Its thread's subject.
+    pub subject: Subject,
+    /// How much it asks for attention.
+    pub importance: Importance,
+    /// Whether it awaits the member's acknowledgement.
+    pub awaiting_ack: bool,
+    /// Its text.
+    pub body: String,
 }
 
 /// An area an edit check found the member holding.
@@ -225,13 +273,47 @@ impl StateDir {
     /// # Errors
     /// The file system's failure.
     pub fn remember_inbox(&self, inbox: &Inbox, at: OffsetDateTime) -> io::Result<()> {
+        let claims = self.inbox().map(|cached| cached.claims).unwrap_or_default();
         write_json(
             &self.cache.join("inbox.json"),
             &CachedInbox {
                 fetched_at: at,
                 inbox: inbox.clone(),
+                claims,
             },
         )
+    }
+
+    /// Replaces the deliveries remembered beside the inbox with `claims`, keeping the inbox as it
+    /// was. Nothing is written while no inbox is cached.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn remember_claims(&self, claims: &[ClaimedDelivery]) -> io::Result<()> {
+        let Some(mut cached) = self.inbox() else {
+            return Ok(());
+        };
+        cached.claims = claims.to_vec();
+        write_json(&self.cache.join("inbox.json"), &cached)
+    }
+
+    /// The file of what one session of a host was shown, and the lock file a hook takes before it
+    /// reads or writes it: `sessions/<scope>/delivery-<digest>.json` and `.lock`, the digest of the
+    /// host and its session id, so any id makes one file name. The directory is made.
+    ///
+    /// # Errors
+    /// The file system's failure to make the directory.
+    pub fn delivery_files(&self, host: &str, session: &str) -> io::Result<(PathBuf, PathBuf)> {
+        fs::create_dir_all(&self.sessions)?;
+        let digest = Sha256::digest(format!("{host}\n{session}").as_bytes());
+        let name: String = digest[..12]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok((
+            self.sessions.join(format!("delivery-{name}.json")),
+            self.sessions.join(format!("delivery-{name}.lock")),
+        ))
     }
 
     /// The areas edit checks found the member holding.
@@ -480,6 +562,7 @@ mod tests {
             threads: Vec::new(),
             unacked: Vec::new(),
             offers: Vec::new(),
+            deliverable: Vec::new(),
         };
         state.remember_inbox(&inbox, at).unwrap();
         assert_eq!(state.inbox().unwrap().fetched_at, at);
@@ -567,5 +650,58 @@ mod tests {
     fn a_label_is_one_file_name() {
         assert_eq!(file_name("laptop/cli"), "laptop%2Fcli");
         assert_eq!(file_name("a b:c\\d"), "a%20b%3Ac%5Cd");
+    }
+
+    #[test]
+    fn claimed_deliveries_survive_a_refresh_of_the_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path(), &key("acme"));
+        let inbox = Inbox {
+            threads: Vec::new(),
+            unacked: Vec::new(),
+            offers: Vec::new(),
+            deliverable: Vec::new(),
+        };
+        let claim = ClaimedDelivery {
+            subject: "42".to_owned(),
+            host: "neutral".to_owned(),
+            session: "s-1".to_owned(),
+            won: true,
+            at: OffsetDateTime::UNIX_EPOCH,
+            message: None,
+            offer: None,
+        };
+        state.remember_claims(std::slice::from_ref(&claim)).unwrap();
+        assert_eq!(state.inbox(), None, "nothing is written without an inbox");
+        state
+            .remember_inbox(&inbox, OffsetDateTime::UNIX_EPOCH)
+            .unwrap();
+        state.remember_claims(std::slice::from_ref(&claim)).unwrap();
+        let later = OffsetDateTime::UNIX_EPOCH + Duration::minutes(1);
+        state.remember_inbox(&inbox, later).unwrap();
+        let cached = state.inbox().unwrap();
+        assert_eq!(cached.fetched_at, later);
+        assert_eq!(cached.claims, [claim]);
+    }
+
+    #[test]
+    fn every_session_id_names_one_delivery_file_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path(), &key("acme"));
+        let (file, lock) = state.delivery_files("an-agent", "a/../b c:*").unwrap();
+        assert!(file.starts_with(dir.path().join("sessions")));
+        assert_eq!(file.parent(), lock.parent());
+        let (other, _) = state.delivery_files("neutral", "a/../b c:*").unwrap();
+        assert_ne!(file, other);
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("delivery-") && name.ends_with(".json"),
+            "{name}"
+        );
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-.".contains(c)),
+            "{name}"
+        );
     }
 }

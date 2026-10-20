@@ -32,4 +32,4 @@ pub use state::{
     CommitSha, CommitShaError, EndWord, EndWordError, Liveness, RunExit, STALL_AFTER, SlotBoard,
     SlotHold, SlotOffer, SlotStanding, SlotWaiter, WorkflowName, WorkflowNameError,
 };
-pub use verdict::{CommandVerdict, command_verdict, push_targets};
+pub use verdict::{CommandVerdict, command_verdict, push_targets, push_verdict, slots_in_question};
