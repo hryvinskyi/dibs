@@ -120,8 +120,13 @@ fn put_in_place(temp: tempfile::NamedTempFile, binary: &Path) -> io::Result<()> 
     if !binary.exists() {
         return new.persist(binary).map_err(|error| error.error);
     }
-    swap_by_rename(binary, &new, &aside_path(binary))?;
-    new.keep().map(drop).map_err(|error| error.error)
+    // Keeping the file has to come before it moves: on Windows it touches the file at its path.
+    let kept = new.keep().map_err(|error| error.error)?;
+    swap_by_rename(binary, &kept, &aside_path(binary)).inspect_err(|_| {
+        if let Err(error) = fs::remove_file(&kept) {
+            tracing::debug!(error = %error, "the unused new binary could not be deleted");
+        }
+    })
 }
 
 #[cfg(unix)]
@@ -159,6 +164,7 @@ mod tests {
         fs::write(&binary, b"old").unwrap();
         replace(&binary, b"new").unwrap();
         assert_eq!(fs::read(&binary).unwrap(), b"new");
+        remove_previous(&binary);
         let names: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name())

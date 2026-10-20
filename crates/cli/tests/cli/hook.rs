@@ -195,6 +195,7 @@ fn a_warm_cache_answers_without_a_single_request() {
         &[
             "sync",
             "--force",
+            "--update",
             "--host",
             "neutral",
             "--session",
