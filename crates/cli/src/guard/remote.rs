@@ -18,9 +18,9 @@ use dibs_client::state::StateDir;
 use dibs_client::{Client, ClientError, ClientOptions};
 use dibs_domain::ids::SessionId;
 use dibs_domain::message::SessionLabel;
-use dibs_domain::session::AgentLabel;
+use dibs_domain::session::{AgentLabel, HostName};
 
-use crate::context::host_name;
+use crate::context::{host_name, label_on};
 use crate::failure::sentence;
 
 /// How long a call of a hook or of the background sync may take: to connect, and in all.
@@ -162,12 +162,20 @@ impl Remote {
 /// # Errors
 /// [`RemoteError::Config`] when the machine's name cannot be used.
 pub fn session_label(session: &SessionRef) -> Result<SessionLabel, RemoteError> {
-    let machine: String = host_name()
-        .map_err(|failure| RemoteError::Config(failure.message))?
-        .as_str()
-        .chars()
-        .take(50)
-        .collect();
+    let machine = host_name().map_err(|failure| RemoteError::Config(failure.message))?;
+    session_label_on(&machine, session)
+}
+
+/// The label of a host's session on the machine `host`, made as every label this binary
+/// registers is made ([`label_on`]): the command line's own session reached through a sync is
+/// then the session its commands registered, so its claims are the sync's own.
+///
+/// # Errors
+/// [`RemoteError::Config`] when the machine's name cannot be used.
+pub fn session_label_on(
+    host: &HostName,
+    session: &SessionRef,
+) -> Result<SessionLabel, RemoteError> {
     let mut short: String = session
         .key
         .as_str()
@@ -178,8 +186,9 @@ pub fn session_label(session: &SessionRef) -> Result<SessionLabel, RemoteError> 
     if short.is_empty() {
         short.push_str("session");
     }
-    SessionLabel::parse(&format!("{machine}/{short}"))
-        .map_err(|_| RemoteError::Config("This machine's name cannot label a session.".to_owned()))
+    label_on(host, &short).ok_or_else(|| {
+        RemoteError::Config("This machine's name cannot label a session.".to_owned())
+    })
 }
 
 /// The checkout governing `cwd`, its configuration refused with a sentence.
@@ -201,6 +210,37 @@ mod tests {
             host: HostId::new("neutral"),
             key: SessionKey::parse(key).unwrap(),
         }
+    }
+
+    #[test]
+    fn a_sync_names_the_command_lines_session_as_its_commands_do_however_long_the_machines_name() {
+        let long =
+            HostName::parse("sat12-bq155-4f09aa34-7c25-4994-a100-c10c44779306-DA09624ED7EE.local")
+                .unwrap();
+        let command_line = SessionRef {
+            host: HostId::new(crate::context::AGENT),
+            key: SessionKey::parse(crate::context::AGENT).unwrap(),
+        };
+        let synced = session_label_on(&long, &command_line).unwrap();
+        assert_eq!(
+            Some(synced.clone()),
+            label_on(&long, crate::context::AGENT),
+            "one session under one label, or a heartbeat keeps the claims of another"
+        );
+        assert!(synced.as_str().ends_with("/cli"), "{synced}");
+        for host in [
+            "laptop",
+            "a-very-long-machine-name-of-a-build-runner-that-goes-on-and-on",
+        ] {
+            let host = HostName::parse(host).unwrap();
+            assert_eq!(
+                Some(session_label_on(&host, &command_line).unwrap()),
+                label_on(&host, crate::context::AGENT)
+            );
+        }
+        let hooked = session_label_on(&long, &session("3f2a9c-b1e7d0")).unwrap();
+        assert!(hooked.as_str().ends_with("/3f2a9c-b"), "{hooked}");
+        assert!(hooked.as_str().chars().count() <= 64);
     }
 
     #[test]

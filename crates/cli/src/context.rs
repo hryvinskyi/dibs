@@ -248,11 +248,20 @@ pub fn host_name() -> Result<HostName, Failure> {
         .map_err(|_| unnamed_machine())
 }
 
-/// The label `<host>/<name>`, the host cut short enough for the whole to be a valid label.
+/// The label `<host>/<name>` of this machine, the host cut short enough for the whole to be a
+/// valid label.
 fn label_named(name: &str) -> Result<SessionLabel, Failure> {
+    label_on(&host_name()?, name).ok_or_else(unnamed_machine)
+}
+
+/// The label `<host>/<name>`, the host cut short enough for the whole to be a valid label. Every
+/// session this binary registers is labelled by it, so that one session of a machine — the
+/// command line's, say — is found under one label whichever command registers it, however long
+/// the machine's name.
+pub fn label_on(host: &HostName, name: &str) -> Option<SessionLabel> {
     let room = MAX_LABEL.saturating_sub(name.chars().count() + 1);
-    let host: String = host_name()?.as_str().chars().take(room).collect();
-    SessionLabel::parse(&format!("{host}/{name}")).map_err(|_| unnamed_machine())
+    let host: String = host.as_str().chars().take(room).collect();
+    SessionLabel::parse(&format!("{host}/{name}")).ok()
 }
 
 fn unnamed_machine() -> Failure {
