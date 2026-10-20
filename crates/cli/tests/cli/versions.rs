@@ -184,16 +184,14 @@ fn a_newer_client_the_build_cannot_trust_is_not_installed_and_the_brief_names_it
     );
 }
 
-/// A release directory whose newest release is signed by a key made for this test.
+/// A release directory whose release `version`, also its newest, is signed by a key made for this
+/// test.
 fn signed_release(root: &Path, version: &str) -> String {
     let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
-    let dir = root.join("latest/download");
-    fs::create_dir_all(&dir).unwrap();
     let sums = format!(
         "{}  dibs-{version}-x86_64-unknown-linux-gnu.tar.gz\n",
         "0".repeat(64)
     );
-    fs::write(dir.join("SHA256SUMS"), &sums).unwrap();
     let signature = minisign::sign(
         Some(&pair.pk),
         &pair.sk,
@@ -202,7 +200,14 @@ fn signed_release(root: &Path, version: &str) -> String {
         None,
     )
     .unwrap();
-    fs::write(dir.join("SHA256SUMS.minisig"), signature.to_string()).unwrap();
+    for dir in [
+        root.join("latest/download"),
+        root.join(format!("download/v{version}")),
+    ] {
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SHA256SUMS"), &sums).unwrap();
+        fs::write(dir.join("SHA256SUMS.minisig"), signature.to_string()).unwrap();
+    }
     url::Url::from_directory_path(root).unwrap().to_string()
 }
 
