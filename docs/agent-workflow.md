@@ -49,6 +49,13 @@ When dibs refuses an edit, the area belongs to another member's live claim. Do n
 A claim that is refused because the item or an area is held names the holder and the item they hold it for. Ask them;
 do not claim around them.
 
+Every refusal of the guard ends with its id (`refusal r-7f3a51`). When dibs refused something it should not have — the
+area was free, your claim was there — say so, once, with that id: `dibs_feedback` with `kind: "false_refusal"`, the
+`refusal` and a `reason`, or `dibs feedback false-refusal r-7f3a51 --reason "…"`. It goes to the project's admins, who
+judge the trial of dibs by it; it changes nothing and answers nobody, so still pick other work or message the holder.
+The reason is one line of at most 280 characters, kept as you wrote it for 90 days and read by your person and the
+admins: say what was wrong in words, and never quote a path, a command line or a secret in it.
+
 ## Feature work takes an area from debt work
 
 A feature claim that declares an area other members hold only for debt work is not refused: the area is **pending** on
@@ -136,6 +143,10 @@ serve many teams:
   on again.
 - An edit refused with "their claim is in review" waits for that merge: pick other work, or message the holder if you
   cannot wait.
+- When you resolve a conflict by hand while rebasing, say so once the rebase is done: `dibs_feedback` with
+  `kind: "conflict"`, the file's `path` and a `reason`, or `dibs feedback conflict <file> --reason "…"`. A rebase leaves
+  no trace dibs could count afterwards; only the area of the file is kept, never its path. The reason follows the same
+  rule: one line, no path, command line, credential or customer's data.
 
 ## Overlaps
 
@@ -273,4 +284,6 @@ unless you say otherwise; do not raise a reply's importance to answer one that w
 
 If the server cannot be reached, dibs says so in one line and lets your edits through; it is a coordination aid,
 not a lock. It does not ask the server again for a minute. `DIBS_OFF=1` switches the guard off on this machine:
-every hook answers without objection and contacts nobody.
+every hook answers without objection and contacts nobody, and `dibs check --push` lets every push go. It is not
+hidden: the machine counts each session that runs with it on, and the next report shows that to the project's admins.
+Switch it on only when your person asks, and tell them it shows.

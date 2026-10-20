@@ -11,20 +11,21 @@ use dibs_client::api::{
     ThreadDetail,
 };
 use dibs_client::api::{
-    Escalated, EscalationRequest, HoldMode, ReleaseSlotRequest, SlotAnswer, SlotReleased, Slots,
-    TakeSlotRequest, Took,
+    Escalated, EscalationRequest, FeedbackGiven, HoldMode, ReleaseSlotRequest, SlotAnswer,
+    SlotReleased, Slots, TakeSlotRequest, Took,
 };
 use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::message::SessionLabel;
 
 use crate::commands::check::Governed;
+use crate::commands::feedback;
 use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::mcp::inputs::{
-    AckInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget, GrantInput, InboxInput,
-    ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, Sending, SlotInput,
-    SlotTakeInput, TakeoverInput, ThreadInput,
+    AckInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget, FeedbackInput, GrantInput,
+    InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, Sending,
+    SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
 };
 
 /// The kind of agent the sessions of the tool server report.
@@ -312,6 +313,17 @@ impl Link {
                 .escalate(&EscalationRequest::about(subject, reason)),
         )
         .await
+    }
+
+    /// Tells the project's admins that a refusal was wrong, or that a rebase conflict was resolved
+    /// by hand.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, a file outside the checkout, or of the call.
+    pub async fn feedback(&self, input: FeedbackInput) -> Result<FeedbackGiven, Failure> {
+        let on = input.on()?;
+        let reason = input.reason()?;
+        feedback::give(&self.connection, &self.cwd, on, reason).await
     }
 
     /// A conversation and its messages. Showing it does not mark it read.

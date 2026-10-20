@@ -4,6 +4,7 @@
 pub mod admin;
 pub mod check;
 pub mod doctor;
+pub mod feedback;
 pub mod graph;
 pub mod hook;
 pub mod login;
@@ -40,6 +41,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Inbox(args) => messages::inbox(args, ctx).await,
         Command::Ack(args) => messages::ack(args, ctx).await,
         Command::Escalate(args) => messages::escalate(args, ctx).await,
+        Command::Feedback(command) => feedback::feedback(command, ctx).await,
         Command::Thread(args) => messages::thread(args, ctx).await,
         Command::Read(args) => messages::read(args, ctx).await,
         Command::Slot(command) => slot::run(command, ctx).await,

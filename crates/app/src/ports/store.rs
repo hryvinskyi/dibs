@@ -1,9 +1,10 @@
 //! The store: one unit of work at a time over every record of every project.
 //!
-//! A [`Tx`] is a transaction that writes exclusively from its start: while one is open, no other
-//! writer runs, so a use case that loads rows, decides and writes inside one `Tx` decides against
+//! A [`Tx`] from [`Store::begin`] is a transaction that writes exclusively from its start: while one
+//! is open, no other writer runs, so a use case that loads rows, decides and writes inside one `Tx` decides against
 //! state nobody else changes — that is what makes every compare-and-set of the domain true. Dropping
-//! a `Tx` without [`Tx::commit`] discards everything it wrote.
+//! a `Tx` without [`Tx::commit`] discards everything it wrote. A transaction from [`Store::read`]
+//! only reads, from the state committed when it started, and runs beside the writer.
 //!
 //! Every method takes the project first, so tenancy is in the signature. The only exceptions find a
 //! record by a key unique across projects and return the project with it ([`TokenRows::token_by_hash`],
@@ -31,7 +32,9 @@ use dibs_domain::message::{Ack, SessionLabel};
 use dibs_domain::paths::RelPath;
 use dibs_domain::radar::{Footprint, FootprintDigest, FootprintEntry, Overlap, OverlapKey};
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::{DayCounts, HookReport, MachineId, ReportDay};
 use dibs_domain::reservation::SharedPath;
+use dibs_domain::review::PrRef;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
@@ -71,9 +74,15 @@ pub trait Store: Send + Sync {
     ///
     /// While another transaction is open it waits for the write lock, but only for a bounded time
     /// the adapter sets; when that runs out it fails with
-    /// [`StoreError::Backend`]. There is one kind of transaction, so a use case that only reads
-    /// takes the same lock as one that writes.
+    /// [`StoreError::Backend`]. A use case that decides and writes opens this one, even for what it
+    /// only reads.
     async fn begin(&self) -> StoreResult<Box<dyn Tx>>;
+
+    /// Opens a transaction for reading only: it sees the records as they were committed when it
+    /// started, takes no write lock, and neither waits for a writer nor holds one up. Its
+    /// [`Tx::commit`] fails with [`StoreError::Backend`]; a write inside it is a mistake the store
+    /// may refuse, and nothing it wrote is ever kept.
+    async fn read(&self) -> StoreResult<Box<dyn Tx>>;
 }
 
 /// One unit of work over every kind of record.
@@ -96,6 +105,7 @@ pub trait Tx:
     + DeliveryRows
     + RaisedRows
     + EventRows
+    + ReportRows
     + SettingsRows
     + UiSessionRows
     + Send
@@ -584,6 +594,70 @@ pub trait EventRows: Send {
         since: OffsetDateTime,
         limit: usize,
     ) -> StoreResult<Vec<CompletionRecord>>;
+    /// Up to `limit` events of the kinds named (by [`EventKind::name`]) appended at or after
+    /// `from` and before `to`, after the event `after` when one is given, in log order: read page
+    /// by page, the last event of a page being the next page's `after`. The cost follows how many
+    /// such events there are, not the length of the log.
+    async fn events_of_kinds(
+        &mut self,
+        project: ProjectId,
+        names: &[&str],
+        window: (OffsetDateTime, OffsetDateTime),
+        after: Option<EventId>,
+        limit: usize,
+    ) -> StoreResult<Vec<Event>>;
+}
+
+/// What members' machines reported, one report per member, machine and day, and whether each pull
+/// request an integration reported merges cleanly.
+#[async_trait]
+pub trait ReportRows: Send {
+    /// The counts kept for the member's machine on the day.
+    async fn hook_report(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        machine: &MachineId,
+        day: ReportDay,
+    ) -> StoreResult<Option<DayCounts>>;
+    /// Stores the report, replacing the one of the same member, machine and day, the machine's
+    /// name included.
+    async fn save_hook_report(
+        &mut self,
+        project: ProjectId,
+        report: &HookReport,
+    ) -> StoreResult<()>;
+    /// The reports of the days from `from` to `to`, both included, ordered by day, member and
+    /// machine id.
+    async fn hook_reports(
+        &mut self,
+        project: ProjectId,
+        from: ReportDay,
+        to: ReportDay,
+    ) -> StoreResult<Vec<HookReport>>;
+    /// Removes the reports of the days before `day`; answers how many went.
+    async fn delete_hook_reports_before(
+        &mut self,
+        project: ProjectId,
+        day: ReportDay,
+    ) -> StoreResult<u64>;
+    /// Whether the pull request merged cleanly when it was last reported, if it ever was.
+    async fn pr_mergeable(&mut self, project: ProjectId, pr: &PrRef) -> StoreResult<Option<bool>>;
+    /// Records whether the pull request merges cleanly, as reported at `at`, in place of what was
+    /// reported before.
+    async fn save_pr_mergeable(
+        &mut self,
+        project: ProjectId,
+        pr: &PrRef,
+        mergeable: bool,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
+    /// Removes what was last reported before `before` about pull requests; answers how many went.
+    async fn delete_pr_states_before(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<u64>;
 }
 
 /// The project's settings document.

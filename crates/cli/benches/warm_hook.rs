@@ -1,13 +1,15 @@
 //! How long `dibs hook neutral <event>` takes on a warm cache, process start included: the
 //! settings, status and inbox fetched a moment ago, the heartbeat sent, so the hook asks the
-//! server nothing. Reported, not gated: shared machines are too noisy to gate on milliseconds.
+//! server nothing — and an edit another member holds, which the hook asks the server about and
+//! refuses, counting the refusal. Each case also prints the 95th percentile of 100 runs. Reported,
+//! not gated: shared machines are too noisy to gate on milliseconds.
 
 use std::error::Error;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use serde_json::{Value, json};
@@ -65,6 +67,7 @@ fn world() -> Setup<World> {
     server.settings(&alice, two_repositories())?;
     let root = tempfile::tempdir()?;
     let home = root.path().join("home");
+    let alices = root.path().join("alice");
     let api = root.path().join("api");
     fs::create_dir_all(&api)?;
     git(&api, &["init", "-q", "-b", "main"])?;
@@ -76,14 +79,24 @@ fn world() -> Setup<World> {
             server.url()
         ),
     )?;
-    let login = dibs(
-        &home,
-        root.path(),
-        &["login", "--server", &server.url()],
-        Some(&format!("{}\n", bob.token)),
-    )?;
-    if !login.status.success() {
-        return Err("dibs login failed".into());
+    for (who, token) in [(&home, &bob.token), (&alices, &alice.token)] {
+        let login = dibs(
+            who,
+            root.path(),
+            &["login", "--server", &server.url()],
+            Some(&format!("{token}\n")),
+        )?;
+        if !login.status.success() {
+            return Err("dibs login failed".into());
+        }
+    }
+    for args in [
+        &["new", "gh:acme/api#1", "--title", "Billing"][..],
+        &["claim", "gh:acme/api#1", "--area", "billing"],
+    ] {
+        if !dibs(&alices, &api, args, None)?.status.success() {
+            return Err(format!("dibs {args:?} failed").into());
+        }
     }
     Ok(World {
         server,
@@ -141,6 +154,23 @@ fn edit_readme() -> Value {
     json!({"kind": "edit", "paths": ["README.md"]})
 }
 
+fn edit_held() -> Value {
+    json!({"kind": "edit", "paths": ["src/billing/rates.rs"]})
+}
+
+/// The 95th percentile of `runs` runs of the hook, in milliseconds.
+fn p95(world: &World, event: &str, input: &str, runs: usize) -> Setup<f64> {
+    let mut took = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let started = Instant::now();
+        world.hook(event, input)?;
+        took.push(started.elapsed().as_secs_f64() * 1_000.0);
+    }
+    took.sort_by(f64::total_cmp);
+    let at = (runs * 95).div_ceil(100).saturating_sub(1);
+    took.get(at).copied().ok_or_else(|| "no runs".into())
+}
+
 fn warm_hook(c: &mut Criterion) {
     let world = match world() {
         Ok(world) => world,
@@ -159,6 +189,11 @@ fn warm_hook(c: &mut Criterion) {
             world.input(Some(edit_readme())),
         ),
         ("after-tool", "after-tool", world.input(None)),
+        (
+            "before-tool, refused edit",
+            "before-tool",
+            world.input(Some(edit_held())),
+        ),
     ];
     for (name, event, input) in &cases {
         if let Err(error) = world.warm() {
@@ -171,6 +206,10 @@ fn warm_hook(c: &mut Criterion) {
             "{name}: {} requests reached the server while it ran",
             world.server.requests() - before
         );
+        match p95(&world, event, input, 100) {
+            Ok(ms) => println!("{name}: p95 of 100 runs {ms:.2} ms"),
+            Err(error) => eprintln!("{name}: the runs failed: {error}"),
+        }
     }
     group.finish();
 }

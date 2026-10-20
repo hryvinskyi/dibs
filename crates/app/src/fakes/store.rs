@@ -25,15 +25,19 @@ use dibs_domain::message::{Ack, Recipients, SessionLabel, speaks_for};
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::radar::{Footprint, FootprintDigest, FootprintEntry, Overlap, OverlapKey};
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::{DayCounts, DayReport, HookReport, MachineId, ReportDay};
 use dibs_domain::reservation::SharedPath;
+use dibs_domain::review::PrRef;
+use dibs_domain::session::HostName;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
 
 use crate::ports::{
     AckRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows, GrantRows,
-    ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, SessionRows, SettingsRows, SlotRows,
-    Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx, UiSessionRows, WideAskRows,
+    ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
+    SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
+    UiSessionRows, WideAskRows,
 };
 use crate::records::{
     CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
@@ -71,6 +75,8 @@ struct State {
     last_event: u64,
     pruned_through: BTreeMap<ProjectId, EventId>,
     settings: BTreeMap<ProjectId, SettingsDocument>,
+    hook_reports: BTreeMap<(ProjectId, ReportDay, MemberId, MachineId), (HostName, DayCounts)>,
+    pr_states: BTreeMap<(ProjectId, PrRef), (bool, OffsetDateTime)>,
     ui_sessions: BTreeMap<TokenHash, InProject<UiSessionRecord>>,
 }
 
@@ -99,16 +105,26 @@ impl Store for MemoryStore {
         let guard = self.state.lock_arc().await;
         let work = guard.clone();
         Ok(Box::new(MemoryTx {
-            guard,
+            guard: Some(guard),
+            work,
+            fail_commit: self.fail_next_commit.clone(),
+        }))
+    }
+
+    async fn read(&self) -> StoreResult<Box<dyn Tx>> {
+        let work = self.state.lock().await.clone();
+        Ok(Box::new(MemoryTx {
+            guard: None,
             work,
             fail_commit: self.fail_next_commit.clone(),
         }))
     }
 }
 
-/// A transaction of the in-memory store.
+/// A transaction of the in-memory store: one that writes holds the store's lock until it ends; one
+/// that reads holds a copy of the state it started from and no lock.
 struct MemoryTx {
-    guard: MutexGuardArc<State>,
+    guard: Option<MutexGuardArc<State>>,
     work: State,
     fail_commit: Arc<AtomicBool>,
 }
@@ -132,7 +148,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 24] = [
+        let checks: [(&'static str, bool); 26] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -265,6 +281,14 @@ impl State {
             ("an event", self.events.iter().all(|e| project(&e.project))),
             ("a settings document", self.settings.keys().all(project)),
             (
+                "a hook report",
+                self.hook_reports.keys().all(|(p, _, m, _)| member(*p, *m)),
+            ),
+            (
+                "a pull request's state",
+                self.pr_states.keys().all(|(p, _)| project(p)),
+            ),
+            (
                 "a browser session",
                 self.ui_sessions.values().all(|s| {
                     member(s.project, s.record.member)
@@ -285,14 +309,19 @@ impl State {
 #[async_trait]
 impl Tx for MemoryTx {
     async fn commit(self: Box<Self>) -> StoreResult<()> {
-        let mut this = *self;
+        let this = *self;
+        let Some(mut guard) = this.guard else {
+            return Err(StoreError::Backend(Box::new(std::io::Error::other(
+                "a transaction for reading commits nothing",
+            ))));
+        };
         if this.fail_commit.swap(false, Ordering::SeqCst) {
             return Err(outage());
         }
         if let Some(what) = this.work.dangling_reference() {
             return Err(dangling(what));
         }
-        *this.guard = this.work;
+        *guard = this.work;
         Ok(())
     }
 }
@@ -1481,6 +1510,132 @@ impl EventRows for MemoryTx {
         found.sort_by(|(a_id, a), (b_id, b)| (b.at, b_id).cmp(&(a.at, a_id)));
         found.truncate(limit);
         Ok(found.into_iter().map(|(_, record)| record).collect())
+    }
+
+    async fn events_of_kinds(
+        &mut self,
+        project: ProjectId,
+        names: &[&str],
+        (from, to): (OffsetDateTime, OffsetDateTime),
+        after: Option<EventId>,
+        limit: usize,
+    ) -> StoreResult<Vec<Event>> {
+        Ok(self
+            .work
+            .events
+            .iter()
+            .filter(|e| {
+                e.project == project
+                    && after.is_none_or(|after| e.id > after)
+                    && from <= e.at
+                    && e.at < to
+                    && names.contains(&e.kind.name())
+            })
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
+
+#[async_trait]
+impl ReportRows for MemoryTx {
+    async fn hook_report(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        machine: &MachineId,
+        day: ReportDay,
+    ) -> StoreResult<Option<DayCounts>> {
+        Ok(self
+            .work
+            .hook_reports
+            .get(&(project, day, member, machine.clone()))
+            .map(|(_, counts)| counts.clone()))
+    }
+
+    async fn save_hook_report(
+        &mut self,
+        project: ProjectId,
+        report: &HookReport,
+    ) -> StoreResult<()> {
+        self.work.hook_reports.insert(
+            (
+                project,
+                report.report.day,
+                report.member,
+                report.machine.clone(),
+            ),
+            (report.host.clone(), report.report.counts.clone()),
+        );
+        Ok(())
+    }
+
+    async fn hook_reports(
+        &mut self,
+        project: ProjectId,
+        from: ReportDay,
+        to: ReportDay,
+    ) -> StoreResult<Vec<HookReport>> {
+        Ok(self
+            .work
+            .hook_reports
+            .iter()
+            .filter(|((p, day, _, _), _)| *p == project && from <= *day && *day <= to)
+            .map(|((_, day, member, machine), (host, counts))| HookReport {
+                member: *member,
+                machine: machine.clone(),
+                host: host.clone(),
+                report: DayReport {
+                    day: *day,
+                    counts: counts.clone(),
+                },
+            })
+            .collect())
+    }
+
+    async fn delete_hook_reports_before(
+        &mut self,
+        project: ProjectId,
+        day: ReportDay,
+    ) -> StoreResult<u64> {
+        let before = self.work.hook_reports.len();
+        self.work
+            .hook_reports
+            .retain(|(p, kept, _, _), _| !(*p == project && *kept < day));
+        Ok(u64::try_from(before - self.work.hook_reports.len()).unwrap_or(u64::MAX))
+    }
+
+    async fn pr_mergeable(&mut self, project: ProjectId, pr: &PrRef) -> StoreResult<Option<bool>> {
+        Ok(self
+            .work
+            .pr_states
+            .get(&(project, pr.clone()))
+            .map(|(mergeable, _)| *mergeable))
+    }
+
+    async fn save_pr_mergeable(
+        &mut self,
+        project: ProjectId,
+        pr: &PrRef,
+        mergeable: bool,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        self.work
+            .pr_states
+            .insert((project, pr.clone()), (mergeable, at));
+        Ok(())
+    }
+
+    async fn delete_pr_states_before(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<u64> {
+        let count = self.work.pr_states.len();
+        self.work
+            .pr_states
+            .retain(|(p, _), (_, at)| !(*p == project && *at < before));
+        Ok(u64::try_from(count - self.work.pr_states.len()).unwrap_or(u64::MAX))
     }
 }
 

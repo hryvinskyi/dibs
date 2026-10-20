@@ -11,6 +11,7 @@ mod items;
 mod members;
 mod projects;
 mod radar;
+mod reports;
 mod sessions;
 mod settings;
 mod slots;

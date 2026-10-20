@@ -3,7 +3,9 @@
 //! It always ends the way the host's adapter says "no objection" unless the guard denies, and it
 //! never exits with status `2`: an unknown host or event, input it cannot read, a command line
 //! clap refuses, a checkout or credential that cannot be used — each is an answer of no objection
-//! with a notice. `DIBS_OFF` makes every answer a silent no objection without any network call.
+//! with a notice. `DIBS_OFF` makes every answer a silent no objection without any network call;
+//! the session is counted, on this machine, as one that ran switched off, and the run is left out
+//! of the hook timings.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -28,6 +30,7 @@ pub fn hook(host: &str, event: &str, env: &HashMap<String, String>, started: Ins
     if let Err(error) = std::io::stdin().take(MAX_INPUT).read_to_end(&mut input) {
         tracing::debug!(error = %error, "the hook's input could not be read");
     }
+    let off = switched_off(env.get(OFF_VAR).map(String::as_str));
     let registry = hosts::registry();
     let workspaces = ClientWorkspaces::new(env.clone());
     let clock = SystemClock;
@@ -38,7 +41,7 @@ pub fn hook(host: &str, event: &str, env: &HashMap<String, String>, started: Ins
             host,
             event,
             input: &input,
-            switched_off: switched_off(env.get(OFF_VAR).map(String::as_str)),
+            switched_off: off,
         },
     );
     let mut stdout = std::io::stdout().lock();
@@ -51,7 +54,7 @@ pub fn hook(host: &str, event: &str, env: &HashMap<String, String>, started: Ins
     if let Some(diagnostic) = &answer.diagnostic {
         eprintln!("{}", diagnostic.one_line());
     }
-    if let Some(kind) = answer.kind {
+    if let Some(kind) = answer.kind.filter(|_| !off) {
         record(env, host, kind, started);
     }
     ExitCode::from(exit_status(answer.reply.exit))
@@ -63,6 +66,9 @@ fn exit_status(exit: u8) -> u8 {
     if exit == 2 { 0 } else { exit }
 }
 
+/// Records how long the run took into the machine's hook timings, the one histogram the reports
+/// send: measured from the start of the process to its last step, every reply and count already
+/// written, so only this one write is left out.
 fn record(
     env: &HashMap<String, String>,
     host: &str,

@@ -251,6 +251,8 @@ checkpointed.
 |---|---|
 | A conversation and its messages | 180 days after its last message; while it is about a work item that is still open (not done, not dropped), as long as the item is; while it carries an escalation no arbiter has settled, until one does |
 | An event of the log | 90 days |
+| A day's report of a member's machine | as long as the events of that day (90 days) |
+| What an integration last said of a pull request | 90 days after it last reported the pull request |
 | A browser session | 12 hours after it was last used |
 | A snapshot | the newest `DIBS_SNAPSHOT_KEEP`, and of those none older than 30 days, but the newest always |
 
@@ -351,7 +353,9 @@ describe_holder = false
   that protects none) completes it.
 - **An integration closes the loop.** dibs speaks no forge API. A worker holding an `importer` token
   (`dibs admin member add worker --name "Integration" --role importer`) watches the forge and calls
-  `GET /v1/review-claims`, `POST /v1/prs/merged`, `POST /v1/prs/closed` and `GET /v1/pr-status`, then writes the status
+  `GET /v1/review-claims`, `POST /v1/prs/merged`, `POST /v1/prs/closed` and `GET /v1/pr-status` (and reports a pull
+  request the forge says does not merge cleanly on `POST /v1/prs/state`, for the [pilot figures](#a-pilots-figures)),
+  then writes the status
   on each open pull request's head commit — only when its state or description changed since it last wrote one for that
   commit, since a forge keeps a bounded number of statuses per commit and counts each write against its limits. On
   **every pass** it reconciles every pull request `GET /v1/review-claims` lists — asking the forge where each stands and
@@ -442,6 +446,63 @@ waiting areas of a project could not be swept*) and the other projects are swept
 
 The rule that only a feature claim waits for an area is kept by the service; the database keeps one waiting claim per
 area of a project, but cannot check the kind, which lives in another table than the waits.
+
+## A pilot's figures
+
+Before a whole team works with dibs, a few people try it for a while, and their admin reads `GET /v1/stats` (`docs/api.md`
+lists every field): claims, takeovers, stalled slot holds, escalations and slot waits from the log; the refusals,
+answers without the server and sessions run switched off that members' machines counted; how long each hook took on
+each person's machine; and what agents and the integration reported. The figures are read in a transaction that only
+reads, page by page, so reading them holds up no heartbeat or edit check.
+
+- **What each machine counts.** The guard counts, per project and per day (UTC), every refusal by its kind (another
+  member's area, a missing claim, a slot needed, a frozen ref, a protected branch — of a shell command and of
+  `dibs check --push` apart), every answer it gave without the server, and every session that ran with `DIBS_OFF` set,
+  once, on the day it was first seen so. A hook never waits to count: it writes each count as one small file of its
+  own in the project's state on the machine (`cache/<scope>/report.spool/`), with no lock and without syncing it to the
+  disk, and marks a session counted as switched off with a file in `report.spool/sessions/`. The spool holds at most
+  5000 counts; a count past that is dropped, so a machine that never syncs cannot fill its disk. `dibs sync`, and a
+  command that reads the refusals (`dibs feedback`), folds the spool into `report.json` beside it, under that file's
+  lock, writes it durably in one step, and then deletes the files it counted; a fold that stops between the two counts
+  nothing twice, as `report.json` names the files it counted. The counts are kept for a week, as counts and kinds only:
+  never a path, a command line or a work item; the sessions counted stay on the machine. A part of `report.json` this
+  dibs cannot read — a kind or a shape a newer one wrote — is kept and written back; a file that is not JSON at all is
+  moved aside as `report.json.unread`.
+- **How long hooks take** is the machine's own timing record (`hooks/timings.json` in the state directory, which
+  `dibs doctor` reads too), one histogram per hook adapter that ran (`neutral`, or the host's adapter) and hook event,
+  measured from the start of the hook's process to its last step. A run switched off is left out of it. A hook that
+  finds another one writing it leaves its own run out rather than wait, and the file is not synced to the disk. Every
+  report the machine sends carries it.
+- **The machine's id.** The first report makes a random 128-bit id for the machine and keeps it in the state directory
+  as `machine-id`; the server keeps each report by member, machine id and day, so a renamed machine keeps one report a
+  day and two machines of one name keep two. The id travels with the reports only and nobody is shown it. Deleting the
+  file makes the machine a new one.
+- **Refusal ids and feedback.** Each refusal is shown with a short id of six hexadecimal digits (`refusal r-7f3a51`),
+  so the agent can say it was wrong: `dibs feedback false-refusal r-7f3a51 --reason …` (MCP `dibs_feedback`). A
+  conflict an agent resolved by hand while rebasing is told the same way, `dibs feedback conflict <file> --reason …`;
+  the server keeps the area the file lies in, never its path. The server checks nothing about a refusal's id: the
+  figures count what members report. A reason is one line of at most 280 characters (`--reason -` reads it from
+  standard input); it is kept as written for 90 days, with the events, and shown to its member and the admins.
+- **How the counts travel.** A heartbeat of the background sync carries every day whose counts changed since they were
+  last sent, and a day whose hook durations alone changed once that day is over or an hour after it was last sent; a
+  day the server does not answer as accepted is sent again later, and one not sent within the week its machine keeps is
+  not reported. A hook never waits for it, and a hook switched off makes no call at all; so after a refusal or a
+  switched-off session, the next command of the command line starts a sync that sends it: `login`, `whoami`, `status`,
+  `items`, `ready`, `dep`, `new`, `claim`, `takeover`, `release`, `done`, `check` (the pre-push check only while the
+  guard is on), `grant`, `send`, `inbox`, `thread`, `read`, `ack`, `escalate`, `feedback`, `slot` and `admin`. `sync`,
+  `mcp`, `self-update`, `hook` and `doctor` start none. Such a sync that fails for another reason than an unreachable
+  server holds the next one back for ten minutes, until one succeeds; it does not count as the start the hooks space
+  theirs from.
+- **Switching the guard off.** `DIBS_OFF=1` in the environment of an agent's session makes every hook answer with no
+  objection and no call, and makes `dibs check --push` let every push go without a word; the command line keeps
+  working. The session is counted on the machine, once, and shows in the next report as `switched_off`, so a switch
+  left on is seen rather than hidden.
+- **Who reads what.** The figures are the admins'. A member reads their own `hook_reported` and `feedback_given` events
+  on the log and the streams, nobody else's. Feedback carries the reason its member wrote; ask the team to keep paths,
+  command lines, credentials and customers' data out of it.
+- **A report the server cannot read** is left out and logged as a warning (*a report of a heartbeat was left out*, with
+  the member's id and why); the heartbeat is applied all the same, so a client of another version never loses its
+  presence over its reports.
 
 ## Restoring
 

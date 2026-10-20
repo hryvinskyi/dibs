@@ -31,6 +31,7 @@ time = "0.3.55"
 tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
 rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
 semver = "1.0.28"
+rand = "0.10.3"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

@@ -18,6 +18,7 @@ use dibs_domain::paths::RelPath;
 use dibs_domain::push::GitFacts;
 use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::{RefusalId, ReportDay, Tally};
 use dibs_domain::review::PrRef;
 use dibs_domain::session::HostName;
 use dibs_domain::settings::ProjectSettings;
@@ -511,6 +512,25 @@ pub trait Workspace {
 
     /// What each session was shown.
     fn ledger(&self) -> &dyn DeliveryLedger;
+
+    /// What this machine counts for the project's reports.
+    fn tallies(&self) -> &dyn Tallies;
+}
+
+/// What this machine counts for the project's reports: kinds and counts only, never a path, a
+/// command line or a work item. A count that cannot be written is lost, which is not the caller's
+/// concern.
+pub trait Tallies {
+    /// Counts one refusal of `kinds` (each kind once) on `day`, and answers the id it is shown
+    /// with; `None` when it could not be counted, or no id was free for it.
+    fn refused(&self, day: ReportDay, kinds: &[Tally]) -> Option<RefusalId>;
+
+    /// Counts one answer given without the server on `day`.
+    fn unreachable(&self, day: ReportDay);
+
+    /// Counts `session` as one that ran with the guard switched off, on `day`, unless it was
+    /// counted before: a session is counted once, on the day it was first seen switched off.
+    fn switched_off(&self, day: ReportDay, session: &SessionRef);
 }
 
 /// What this machine remembers about the project between hook runs. Reading never touches the

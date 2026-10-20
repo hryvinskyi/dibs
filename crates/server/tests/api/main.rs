@@ -30,6 +30,8 @@ mod radar;
 #[cfg(test)]
 mod ready;
 #[cfg(test)]
+mod reports;
+#[cfg(test)]
 mod review;
 #[cfg(test)]
 mod roles;

@@ -783,6 +783,7 @@ dependencies = [
  "gethostname",
  "minisign",
  "nix",
+ "rand",
  "rmcp",
  "semver",
  "serde",

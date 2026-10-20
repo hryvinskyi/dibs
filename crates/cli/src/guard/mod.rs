@@ -4,7 +4,9 @@
 pub mod cache;
 pub mod gateway;
 pub mod ledger;
+pub mod machine;
 pub mod remote;
+pub mod report;
 pub mod timing;
 pub mod upkeep;
 pub mod views;

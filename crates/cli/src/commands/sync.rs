@@ -9,6 +9,14 @@
 //! counts as unreachable, as that is how a client the server no longer serves learns what to
 //! update to.
 //!
+//! Before a heartbeat it folds what the hooks spooled into the project's report; the heartbeat
+//! carries the days of the report that are due
+//! ([`report::pending`]), with the machine's hook timings and the id of the machine; a day the
+//! server does not answer as accepted stays to be sent again. With `--report`, a heartbeat is sent
+//! whenever a day's counts were not sent yet, due or not, so a command of the command line can send
+//! what the hooks counted; such a sync that fails for another reason than an unreachable server
+//! holds the next one back for ten minutes.
+//!
 //! One runs at a time per project (it holds the project's sync lock for its whole run), every
 //! call is bounded to two seconds, and while the server counted as unreachable within the last
 //! minute nothing is tried. Each answer is written to its cache in one step, so a hook reading
@@ -22,6 +30,7 @@ use time::OffsetDateTime;
 
 use dibs_agent_host::delivery;
 use dibs_agent_host::ports::{ClaimedDelivery as GuardClaim, LocalCache, Pending, SessionRef};
+use dibs_agent_host::timing::HookTimings;
 use dibs_agent_host::upkeep::{DEFAULT_HEARTBEAT, Due, Freshness, circuit_open};
 use dibs_agent_host::{HostId, SessionKey};
 use dibs_client::Client;
@@ -30,6 +39,7 @@ use dibs_client::branch::current_branch;
 use dibs_client::checkout::Checkout;
 use dibs_client::update::{Updated, Wanted};
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::{DayReport, MachineId};
 use semver::Version;
 
 use crate::cli::SyncArgs;
@@ -37,8 +47,11 @@ use crate::commands::self_update;
 use crate::context::{AGENT, Context};
 use crate::failure::{Failure, Kind};
 use crate::guard::cache::StateCache;
+use crate::guard::machine::machine_id;
 use crate::guard::remote::{Remote, RemoteError};
-use crate::guard::upkeep::take_lock;
+use crate::guard::report;
+use crate::guard::timing;
+use crate::guard::upkeep::{DetachedSync, take_lock};
 use crate::guard::views;
 use crate::guard::workspace::GIT_DIR;
 use crate::hosts;
@@ -54,6 +67,8 @@ struct Synced {
     heartbeat: bool,
     status: bool,
     inbox: bool,
+    /// How many days of the project's report the heartbeat carried.
+    reported: usize,
     /// How many deliveries it claimed for the session, and how many of them it won.
     claimed: usize,
     won: usize,
@@ -68,6 +83,20 @@ struct Synced {
 /// A configuration [`Failure`] outside a checkout or without a token; an unreachable one when the
 /// server could not be reached, now or within the last minute.
 pub async fn sync(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
+    let reporting = args.report;
+    let result = sync_now(args, ctx).await;
+    if reporting && let (Ok(Some(checkout)), Ok(locations)) = (ctx.checkout(), ctx.locations()) {
+        let state = Remote::new(&checkout, &locations, ctx.env()).state;
+        match &result {
+            Ok(()) => report::note_report_sync_ended(&state, None),
+            Err(failure) if failure.kind == Kind::Unreachable => {}
+            Err(_) => report::note_report_sync_ended(&state, Some(OffsetDateTime::now_utc())),
+        }
+    }
+    result
+}
+
+async fn sync_now(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
     let Some(checkout) = ctx.checkout()? else {
         return Err(Failure::config(
             "no_checkout",
@@ -124,14 +153,21 @@ pub async fn sync(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
             update: false,
         }
     } else {
-        Due::at(now, &freshness(&cache))
+        let mut due = Due::at(now, &freshness(&cache));
+        due.heartbeat |= args.report && report::counts_unsent(&remote.state);
+        due
     };
     let session = session(&args);
     let client = remote.client().map_err(config)?;
     let on = checkout_branch(&checkout, ctx.env().get(GIT_DIR).map(Path::new));
+    let locations = ctx.locations()?;
+    let timings = timing::load(locations.state_dir());
+    let machine = machine_id(locations.state_dir());
     let checked = Checked {
         checkout: &checkout,
         on: on.as_ref(),
+        timings: &timings,
+        machine: machine.as_ref(),
     };
     let result = run(&remote, &client, &checked, session.as_ref(), due, now).await;
     let recommended = if update_due {
@@ -159,6 +195,26 @@ pub async fn sync(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
         }
         Err(RemoteError::Client(error)) => Err(Failure::from(error)),
         Err(RemoteError::Config(text)) => Err(Failure::config("sync", text)),
+    }
+}
+
+/// Starts, in the background, the sync that sends what the hooks of the checkout's project counted
+/// and no heartbeat carried yet. Nothing happens outside a checkout, when everything was sent, or
+/// within ten minutes of the start of such a sync that then failed, until one succeeds.
+pub fn report_later(ctx: &Context) {
+    let (Ok(Some(checkout)), Ok(locations)) = (ctx.checkout(), ctx.locations()) else {
+        return;
+    };
+    let remote = Remote::new(&checkout, &locations, ctx.env());
+    let now = OffsetDateTime::now_utc();
+    if !report::counts_unsent(&remote.state) || !report::report_sync_may_start(&remote.state, now) {
+        return;
+    }
+    let sync = DetachedSync::new(remote.state.clone(), checkout.root());
+    match sync.start_reporting(now) {
+        Ok(true) => report::note_report_sync_started(&remote.state, now),
+        Ok(false) => {}
+        Err(error) => tracing::debug!(error = %error, "the sync that reports could not start"),
     }
 }
 
@@ -213,10 +269,12 @@ fn notify_only(latest: &Version) -> String {
     format!("dibs {latest} is recommended; run dibs self-update in a terminal to install it.")
 }
 
-/// The checkout a sync runs in and the branch it is on.
+/// The checkout a sync runs in, the branch it is on, the machine's hook timings and its id.
 struct Checked<'a> {
     checkout: &'a Checkout,
     on: Option<&'a OnBranch>,
+    timings: &'a HookTimings,
+    machine: Option<&'a MachineId>,
 }
 
 async fn run(
@@ -234,7 +292,18 @@ async fn run(
     }
     if let Some(session) = session.filter(|_| due.heartbeat) {
         let id = remote.session(client, session).await?;
-        client.heartbeat(id, checked.on).await?;
+        report::fold(&remote.state, now);
+        let reports = report::pending(&remote.state, checked.timings, now);
+        let carried = checked.machine.map_or(&[][..], |_| &reports[..]);
+        let answer = client
+            .heartbeat(id, checked.on, checked.machine, carried)
+            .await?;
+        let accepted: Vec<DayReport> = reports
+            .into_iter()
+            .filter(|report| answer.reports_accepted.contains(&report.day))
+            .collect();
+        report::mark_sent(&remote.state, &accepted, now);
+        synced.reported = accepted.len();
         if let Err(error) = remote.state.remember_heartbeat(now) {
             tracing::debug!(error = %error, "the heartbeat could not be remembered");
         }
@@ -410,6 +479,9 @@ fn report(args: &SyncArgs, ctx: &Context, synced: &Synced) {
         } else {
             format!("Synced: {}.", done.join(", "))
         };
+        if synced.reported > 0 {
+            text.push_str(&format!(" Reported {} days of counts.", synced.reported));
+        }
         if synced.claimed > 0 {
             text.push_str(&format!(
                 " Claimed {} deliveries for the session, {} of them its own to show.",

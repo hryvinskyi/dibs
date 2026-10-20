@@ -426,10 +426,22 @@ impl StateDir {
         Ok(self.cache.join(format!("{}.lock", file_name(name))))
     }
 
-    /// A file of this project's cache that a caller keeps itself (`origin.json`); the name is
-    /// written so it is one file name on every platform.
+    /// A file of this project's cache that a caller keeps itself (`origin`); the name is written so
+    /// it is one file name on every platform.
     pub fn file(&self, name: &str) -> PathBuf {
         self.cache.join(file_name(name))
+    }
+
+    /// A directory of this project's cache where a caller spools files of its own: `report` →
+    /// `cache/<scope>/report.spool`.
+    pub fn spool_dir(&self, name: &str) -> PathBuf {
+        self.cache.join(format!("{}.spool", file_name(name)))
+    }
+
+    /// A JSON file of this project's cache that a caller keeps itself: `report` →
+    /// `cache/<scope>/report.json`.
+    pub fn json_file(&self, name: &str) -> PathBuf {
+        self.cache.join(format!("{}.json", file_name(name)))
     }
 
     fn moment(&self, name: &str) -> Option<OffsetDateTime> {
@@ -491,6 +503,40 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
     temp.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
+
+/// Writes `value` as JSON to `path` in one step, as [`write_json`] does, and makes it durable
+/// before it replaces the file: the written file is synced to the disk before it is renamed over
+/// the old one, and the directory after, where the platform lets a directory be synced. A crash
+/// leaves the old file or the new one, never a torn one.
+///
+/// # Errors
+/// The file system's failure.
+pub fn write_json_durably<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    fs::create_dir_all(dir)?;
+    let text = serde_json::to_vec(value).map_err(io::Error::other)?;
+    let mut temp = tempfile::Builder::new().prefix(".dibs-").tempfile_in(dir)?;
+    temp.write_all(&text)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    sync_dir(dir);
+    Ok(())
+}
+
+/// Syncs the directory's entries to the disk, so a rename in it survives a crash.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) {
+    if let Err(error) = fs::File::open(dir).and_then(|dir| dir.sync_all()) {
+        tracing::debug!(error = %error, "the state directory could not be synced");
+    }
+}
+
+/// A directory cannot be opened to be synced on this platform; its rename is made durable by the
+/// file system itself.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) {}
 
 #[cfg(test)]
 mod tests {

@@ -12,6 +12,7 @@ use dibs_domain::hot_rule::Note;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ExternalRef;
 use dibs_domain::paths::RelPath;
+use dibs_domain::report::RefusalId;
 use dibs_domain::review::PrRef;
 use dibs_domain::settings::EditPolicy;
 
@@ -152,6 +153,13 @@ pub fn needs_claim(path: &RelPath, area: Option<&QualifiedArea>) -> String {
     );
     format!(
         "{path} is coordinated by dibs and you hold no live claim. Claim the work item you are doing first (dibs_claim, or {how}), then edit."
+    )
+}
+
+/// The line a refusal ends with: the id this machine shows it with, and how to say it is wrong.
+pub fn refusal_named(id: &RefusalId) -> String {
+    format!(
+        "(refusal {id}; if dibs is wrong here, say so with dibs_feedback, or dibs feedback false-refusal {id} --reason \"…\")"
     )
 }
 

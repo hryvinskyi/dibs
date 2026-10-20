@@ -31,6 +31,7 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::push::{GitFacts, PushProtection, git_pushes};
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::{ReportDay, Tally};
 use dibs_domain::settings::{EditPolicy, ProjectSettings};
 use dibs_domain::slot::{
     CommandVerdict, SimpleCommand, SlotHold, command_verdict, slots_in_question, split_commands,
@@ -123,6 +124,10 @@ impl<'a> Guard<'a> {
         let event = adapter.parse(request.event, request.input);
         let kind = event.as_ref().ok().map(HostEvent::kind);
         let outcome = match event {
+            Ok(event) if request.switched_off => {
+                self.count_switched_off(adapter, &event);
+                GuardOutcome::silent()
+            }
             _ if request.switched_off => GuardOutcome::silent(),
             Ok(event) => self.decide(adapter, &event),
             Err(error) => GuardOutcome::notice(wording::unreadable(&error.to_string())),
@@ -131,6 +136,20 @@ impl<'a> Guard<'a> {
             reply: adapter.render(request.event, &outcome),
             diagnostic: None,
             kind,
+        }
+    }
+
+    /// Counts, on this machine and without the server, that the event's session runs with the
+    /// guard switched off, in the checkout the event happens in.
+    fn count_switched_off(&self, adapter: &dyn HostAdapter, event: &HostEvent) {
+        if let Ok(Some(workspace)) = self.workspaces.open(event.cwd()) {
+            let session = SessionRef {
+                host: adapter.id(),
+                key: event.session_key().clone(),
+            };
+            workspace
+                .tallies()
+                .switched_off(ReportDay::of(self.clock.now()), &session);
         }
     }
 
@@ -166,17 +185,17 @@ struct Run<'w> {
 impl Run<'_> {
     fn event(&self, event: &HostEvent) -> GuardOutcome {
         let decided = match event {
-            HostEvent::SessionStarted { .. } => self.session_started(),
+            HostEvent::SessionStarted { .. } => self.session_started().map(Judged::plain),
             HostEvent::BeforeTool { cwd, call, .. } => self.before_tool(cwd, call),
-            HostEvent::AfterTool { thread, .. } => {
-                Ok(self.deliver(*thread, self.capabilities.context_after_tool))
-            }
-            HostEvent::PromptSubmitted { thread, .. } => {
-                Ok(self.deliver(*thread, self.capabilities.context_at_prompt))
-            }
+            HostEvent::AfterTool { thread, .. } => Ok(Judged::plain(
+                self.deliver(*thread, self.capabilities.context_after_tool),
+            )),
+            HostEvent::PromptSubmitted { thread, .. } => Ok(Judged::plain(
+                self.deliver(*thread, self.capabilities.context_at_prompt),
+            )),
         };
         let outcome = match decided {
-            Ok(outcome) => outcome,
+            Ok(judged) => self.counted(judged),
             Err(problem) => self.no_decision(problem),
         };
         if matches!(event, HostEvent::BeforeTool { .. }) {
@@ -235,17 +254,44 @@ impl Run<'_> {
         })
     }
 
-    fn before_tool(&self, cwd: &Path, call: &ToolCall) -> Result<GuardOutcome, Problem> {
+    fn before_tool(&self, cwd: &Path, call: &ToolCall) -> Result<Judged, Problem> {
         match call {
             ToolCall::Edit { paths } if self.capabilities.deny_edit => self.edits(cwd, paths),
             ToolCall::Shell { command } if self.capabilities.deny_shell => self.shell(cwd, command),
             ToolCall::Edit { .. } | ToolCall::Shell { .. } | ToolCall::Other => {
-                Ok(GuardOutcome::silent())
+                Ok(Judged::plain(GuardOutcome::silent()))
             }
         }
     }
 
-    fn edits(&self, cwd: &Path, paths: &[PathBuf]) -> Result<GuardOutcome, Problem> {
+    /// The outcome of a judgement, a refusal counted on this machine and ending with the id it is
+    /// counted under.
+    fn counted(&self, judged: Judged) -> GuardOutcome {
+        let Judged {
+            outcome,
+            mut refused,
+        } = judged;
+        refused.sort_unstable();
+        refused.dedup();
+        let GuardOutcome::Deny { reason } = outcome else {
+            return outcome;
+        };
+        if refused.is_empty() {
+            return GuardOutcome::Deny { reason };
+        }
+        match self
+            .workspace
+            .tallies()
+            .refused(ReportDay::of(self.now), &refused)
+        {
+            Some(id) => GuardOutcome::Deny {
+                reason: Text::new(format!("{reason}\n{}", wording::refusal_named(&id))),
+            },
+            None => GuardOutcome::Deny { reason },
+        }
+    }
+
+    fn edits(&self, cwd: &Path, paths: &[PathBuf]) -> Result<Judged, Problem> {
         let mut inside: Vec<RelPath> = Vec::new();
         for path in paths {
             if let Some(relative) = self.workspace.relative(cwd, path)
@@ -255,7 +301,7 @@ impl Run<'_> {
             }
         }
         if inside.is_empty() {
-            return Ok(GuardOutcome::silent());
+            return Ok(Judged::plain(GuardOutcome::silent()));
         }
         let known = self.settings()?;
         let settings = &known.value.settings;
@@ -273,7 +319,7 @@ impl Run<'_> {
             })
             .collect();
         if governed.is_empty() {
-            return Ok(GuardOutcome::silent());
+            return Ok(Judged::plain(GuardOutcome::silent()));
         }
         let held = self.held_by_me(&known.value);
         let ask: Vec<RelPath> = governed
@@ -281,7 +327,7 @@ impl Run<'_> {
             .filter(|path| !answered_by_hold(settings, &repo, path, &held))
             .collect();
         if ask.is_empty() {
-            return Ok(GuardOutcome::silent());
+            return Ok(Judged::plain(GuardOutcome::silent()));
         }
         let branch = self.workspace.branch();
         let answers =
@@ -303,7 +349,7 @@ impl Run<'_> {
     /// pushes, in a project that protects a branch, and a line that touches no slot is answered
     /// without the server. A line that neither pushes nor touches a slot needs nothing from the
     /// checkout, so it never draws a warning about it.
-    fn shell(&self, cwd: &Path, command: &str) -> Result<GuardOutcome, Problem> {
+    fn shell(&self, cwd: &Path, command: &str) -> Result<Judged, Problem> {
         let known = self.settings()?;
         let settings = &known.value.settings;
         let catalog = settings.slots();
@@ -328,13 +374,13 @@ impl Run<'_> {
             here: &here,
         };
         if judged && let Some(refusal) = protection.refusal(&pushes) {
-            return Ok(command_outcome(
+            return Ok(command_judged(
                 &refusal,
                 &KnownBoard::of(&[], &known.value.member),
             ));
         }
         if catalog.slots().is_empty() {
-            return Ok(GuardOutcome::silent());
+            return Ok(Judged::plain(GuardOutcome::silent()));
         }
         let repo = self
             .workspace
@@ -342,7 +388,7 @@ impl Run<'_> {
             .map_err(|error| Problem::Repository(error.to_string()))?;
         let names = slots_in_question(&commands, &repo, catalog);
         if names.is_empty() {
-            return Ok(GuardOutcome::silent());
+            return Ok(Judged::plain(GuardOutcome::silent()));
         }
         let states = self.call(|gateway| gateway.slots(&names))?;
         let known_board = KnownBoard::of(&states, &known.value.member);
@@ -354,7 +400,7 @@ impl Run<'_> {
             known_board.me,
             judged.then_some(&protection),
         );
-        Ok(command_outcome(&verdict, &known_board))
+        Ok(command_judged(&verdict, &known_board))
     }
 
     /// What a session may be shown between its tool calls or with a prompt: only on the main
@@ -403,8 +449,9 @@ impl Run<'_> {
         paths: &[RelPath],
         answers: &[PathAnswer],
         wide: &BTreeSet<QualifiedArea>,
-    ) -> GuardOutcome {
+    ) -> Judged {
         let mut refusals = Vec::new();
+        let mut refused = Vec::new();
         let mut notes = Vec::new();
         let mut now_held = Vec::new();
         for (path, answer) in paths.iter().zip(answers) {
@@ -419,7 +466,10 @@ impl Run<'_> {
                     note,
                     touched_by,
                 } => notes.push(wording::noted(path, rule, note.as_ref(), touched_by)),
-                PathAnswer::NeedsClaim => refusals.push(wording::needs_claim(path, area.as_ref())),
+                PathAnswer::NeedsClaim => {
+                    refusals.push(wording::needs_claim(path, area.as_ref()));
+                    refused.push(Tally::NeedsClaim);
+                }
                 PathAnswer::HeldBy {
                     holder,
                     item,
@@ -434,6 +484,7 @@ impl Run<'_> {
                         area,
                         way,
                     ));
+                    refused.push(Tally::HeldBy);
                 }
             }
         }
@@ -441,14 +492,17 @@ impl Run<'_> {
             self.workspace.cache().note_holds(&now_held, self.now);
         }
         if !refusals.is_empty() {
-            return GuardOutcome::Deny {
-                reason: Text::new(refusals.join("\n")),
+            return Judged {
+                outcome: GuardOutcome::Deny {
+                    reason: Text::new(refusals.join("\n")),
+                },
+                refused,
             };
         }
         if notes.is_empty() {
-            GuardOutcome::silent()
+            Judged::plain(GuardOutcome::silent())
         } else {
-            GuardOutcome::context(notes.join("\n"))
+            Judged::plain(GuardOutcome::context(notes.join("\n")))
         }
     }
 
@@ -556,6 +610,9 @@ impl Run<'_> {
                 Some(Text::new(wording::failed(&sentence)))
             }
             Problem::Unreachable(sentence) => {
+                self.workspace
+                    .tallies()
+                    .unreachable(ReportDay::of(self.now));
                 let cache = self.workspace.cache();
                 if cache
                     .last_warning()
@@ -609,6 +666,40 @@ fn shown<'a>(hold: &'a SlotHold, known: &'a KnownBoard) -> wording::HoldShown<'a
         holder: known.handle(hold.member),
         purpose: &hold.purpose,
         until: hold.expires_at,
+    }
+}
+
+/// An outcome and the kinds of refusal it carries, each counted once.
+struct Judged {
+    outcome: GuardOutcome,
+    refused: Vec<Tally>,
+}
+
+impl Judged {
+    /// An outcome that refuses nothing.
+    fn plain(outcome: GuardOutcome) -> Self {
+        Self {
+            outcome,
+            refused: Vec::new(),
+        }
+    }
+}
+
+/// The kind a command's verdict is counted as, when it refuses.
+const fn command_tally(verdict: &CommandVerdict) -> Option<Tally> {
+    match verdict {
+        CommandVerdict::Free | CommandVerdict::Holding { .. } => None,
+        CommandVerdict::NeedsSlot { .. } => Some(Tally::NeedsSlot),
+        CommandVerdict::NeedsPermission { .. } => Some(Tally::NeedsPermission),
+        CommandVerdict::Frozen { .. } => Some(Tally::Frozen),
+    }
+}
+
+/// The outcome of a command's verdict, with the kind it is counted as.
+fn command_judged(verdict: &CommandVerdict, known: &KnownBoard) -> Judged {
+    Judged {
+        outcome: command_outcome(verdict, known),
+        refused: command_tally(verdict).into_iter().collect(),
     }
 }
 

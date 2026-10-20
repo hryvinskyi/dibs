@@ -6,64 +6,16 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use time::{Date, Duration};
 
-use crate::event::EventKind;
+pub use dibs_domain::report::BUCKET_BOUNDS_MS;
+use dibs_domain::report::DurationBuckets;
 
-/// The upper bounds of the buckets, in milliseconds; a run longer than the last falls in one more
-/// bucket after them.
-pub const BUCKET_BOUNDS_MS: [u64; 6] = [10, 30, 100, 300, 1_000, 2_000];
+use crate::event::EventKind;
 
 /// How many days a histogram keeps.
 pub const KEEP_DAYS: usize = 7;
 
-/// The number of buckets: one per bound and one for longer runs.
-const BUCKETS: usize = BUCKET_BOUNDS_MS.len() + 1;
-
-/// Run counts per bucket.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Buckets([u64; BUCKETS]);
-
-impl Buckets {
-    /// Counts one run of this length.
-    pub fn record(&mut self, took: Duration) {
-        let millis = u64::try_from(took.whole_milliseconds()).unwrap_or(0);
-        let index = BUCKET_BOUNDS_MS
-            .iter()
-            .position(|bound| millis <= *bound)
-            .unwrap_or(BUCKET_BOUNDS_MS.len());
-        if let Some(count) = self.0.get_mut(index) {
-            *count = count.saturating_add(1);
-        }
-    }
-
-    /// The counts, one per bucket.
-    pub fn counts(&self) -> [u64; BUCKETS] {
-        self.0
-    }
-
-    /// How many runs were counted.
-    pub fn total(&self) -> u64 {
-        self.0.iter().sum()
-    }
-
-    /// The upper bound, in milliseconds, of the bucket the 95th percentile falls in; `None` for
-    /// no runs, or when it falls past the last bound.
-    pub fn p95_bound_ms(&self) -> Option<u64> {
-        let total = self.total();
-        if total == 0 {
-            return None;
-        }
-        let needed = total.saturating_mul(95).div_ceil(100);
-        let mut seen = 0_u64;
-        for (index, count) in self.0.iter().enumerate() {
-            seen = seen.saturating_add(*count);
-            if seen >= needed {
-                return BUCKET_BOUNDS_MS.get(index).copied();
-            }
-        }
-        None
-    }
-}
+/// Run counts per bucket of [`BUCKET_BOUNDS_MS`].
+pub type Buckets = DurationBuckets;
 
 /// The histograms of the last days, per host and event kind.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,34 +70,6 @@ mod tests {
 
     fn day(n: u8) -> Date {
         Date::from_calendar_date(2026, Month::March, n).unwrap()
-    }
-
-    #[test]
-    fn a_run_falls_in_the_first_bucket_that_holds_it() {
-        let mut buckets = Buckets::default();
-        for millis in [0, 10, 11, 30, 31, 300, 1_000, 2_000, 2_001, 60_000] {
-            buckets.record(Duration::milliseconds(millis));
-        }
-        assert_eq!(buckets.counts(), [2, 2, 1, 1, 1, 1, 2]);
-        assert_eq!(buckets.total(), 10);
-    }
-
-    #[test]
-    fn the_95th_percentile_names_its_bucket() {
-        let mut buckets = Buckets::default();
-        assert_eq!(buckets.p95_bound_ms(), None);
-        for _ in 0..95 {
-            buckets.record(Duration::milliseconds(5));
-        }
-        for _ in 0..5 {
-            buckets.record(Duration::milliseconds(250));
-        }
-        assert_eq!(buckets.p95_bound_ms(), Some(10));
-        buckets.record(Duration::milliseconds(250));
-        assert_eq!(buckets.p95_bound_ms(), Some(300));
-        let mut slow = Buckets::default();
-        slow.record(Duration::seconds(5));
-        assert_eq!(slow.p95_bound_ms(), None);
     }
 
     #[test]

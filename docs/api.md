@@ -98,7 +98,7 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/me` | any | The caller, their project and its settings. |
 | `GET /v1/members` | any | The project's members. |
 | `POST /v1/sessions` | people | Register a session, or update the one of the same label. |
-| `POST /v1/heartbeat` | people | A session's sign of life, and the branch its checkout is on. |
+| `POST /v1/heartbeat` | people | A session's sign of life, the branch its checkout is on, and what its machine counted. |
 | `GET /v1/items` | any | List work items. |
 | `POST /v1/items` | any | Create a work item, or return the one a reference names. |
 | `PUT /v1/items` | import | Create and update the items an outside source lists, and their imported dependencies. |
@@ -115,6 +115,7 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/items/{id}/review/drop` | people | Remove a pull request you recorded by mistake. |
 | `POST /v1/prs/merged` | import | A pull request was merged: the claim that recorded it moves on, or completes. |
 | `POST /v1/prs/closed` | import | A pull request was closed unmerged: the claim that recorded it moves on. |
+| `POST /v1/prs/state` | import | Whether a pull request merges cleanly into its base. |
 | `GET /v1/review-claims` | import | The claims in review and the pull requests they wait for. |
 | `GET /v1/claims` | any | The live claims, with where each one's work stands and the branch it is on in each repository. |
 | `GET /v1/pr-status` | import | The status a forge shows on a repository's pull requests into a base branch. |
@@ -131,6 +132,8 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/inbox` | people | Conversations waiting for you, the messages awaiting your acknowledgement or still to be delivered to you, and the slots offered to you. |
 | `POST /v1/messages/{id}/ack` | people | Acknowledge a message you were sent. |
 | `POST /v1/escalations` | people | Ask the project's arbiters to settle a dispute about an item, a slot or a conversation. |
+| `POST /v1/feedback` | people | Tell the admins a refusal was wrong, or that a rebase conflict was resolved by hand. |
+| `GET /v1/stats` | admin | The figures of a pilot over a range of days. |
 | `POST /v1/messages/{id}/deliver` | people | Claim the delivery of a message to one of your sessions; the first claim wins. |
 | `GET /v1/messages/{id}/status` | people | Who read and acknowledged a message you wrote. |
 | `GET /v1/slots` | any | Every declared slot: its group's hold, queue and offer. |
@@ -244,6 +247,37 @@ branch, and its claims are left alone. A claim whose branch changes loses its fo
 [Branches and overlaps](#branches-and-overlaps)). A repository the project does not list records nothing. Refusals add
 `invalid_request` for a malformed `repo` (whether or not a `branch` comes with it) or `branch`, or a `branch` without
 `repo`.
+
+`reports`, optional, carries what the session's machine counted, at most 7 days, each day once, and `machine` the id
+the member's dibs gave that machine once (32 lowercase hexadecimal digits, 128 random bits; see
+[Pilot figures](#pilot-figures)):
+
+```json
+{ "session_id": 7,
+  "machine": "9f86d081884c7d659a2feaa0c55ad015",
+  "reports": [
+    { "day": "2026-03-02",
+      "counts": { "held_by": 2, "unreachable": 1 },
+      "durations": [ { "agent": "neutral", "event": "before_tool", "buckets": [40, 10, 0, 0, 0, 0, 0] } ] }
+  ] }
+```
+
+Each day is kept for the caller and the machine — by its id, whatever the machine is called, so a renamed machine keeps
+one report a day and two machines of one name keep two — replacing what was kept for that member, machine and day; the
+`host` the session reported is kept beside it. A report that differs from the one kept appends `hook_reported`, one that
+does not changes nothing. A day more than 7 days before the day the heartbeat arrives (UTC), or after the day following
+it, is not kept. The answer adds `reported`, the days whose report changed what was kept, and `reports_accepted`, every
+day whose report was read and is kept, changed or not:
+`{ "refreshed": [12], "reported": ["2026-03-02"], "reports_accepted": ["2026-03-02"] }`. A client sends the days that
+are not accepted again with a later heartbeat.
+
+**A report never fails its heartbeat.** What the server cannot read is left out, and the heartbeat is applied all the
+same: a report without a `day` that is one, whose `counts` are not an object or whose `durations` are not a list, a day
+given twice (the first is kept), a day past the seventh, or every report when `machine` is missing or not an id or
+`reports` is not a list. Within a report, a count of a kind this server does not know or that is not a whole number, and
+a duration whose `agent`, `event` or `buckets` (7 whole numbers) it cannot read, or past the 64th, are left out and the
+rest is kept. The server logs each report left out as a warning naming the member and why, never what it held. The
+machine's id is shown to nobody: not on the log, not in the figures.
 
 ### Items
 
@@ -940,6 +974,9 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `claim_narrowed` | `item`, `member`, `areas` (what the claim no longer holds or waits for) |
 | `wait_withdrawn` | `area`, `from` (the debt claim's item), `to` (the waiting claim's item), `reason` (`stale`, `narrowed`, `ended`, `holder_changed`) |
 | `yield_unescalated` | `area`, `from`, `to`, `reason` (`no_arbiters`) |
+| `hook_reported` | `member`, `host`, `day`, `counts`, `durations` (the day's report as its machine sent it) |
+| `feedback_given` | `member`, `about` (`{"kind": "false_refusal", "refusal", "tally"}` or `{"kind": "conflict", "repo", "area"}`), `reason` |
+| `pr_state_reported` | `pr`, `mergeable` |
 
 `item_updated` is appended when one of an item's reported facts actually changed; read the item for what it says now.
 `wide_claimed` is appended when a claim becomes wide or its scope grows; a renewal that names nothing new appends none.
@@ -948,6 +985,8 @@ A grant an acknowledgement made ends like any grant, with `grant_revoked` naming
 does not see it, and so is `escalated` of a conversation. A deleted conversation's events are shown to nobody; its
 `thread_deleted` names its id alone. Removing a member appends a `force_released` for each claim of theirs and a
 `slot_force_released` (cause `member_removed`) for each hold, place and offer, then `member_removed`.
+`hook_reported` and `feedback_given` are seen only by the member they name and by admins, on the log and on the stream
+alike; every other reader's cursor moves past them.
 
 ### The event stream
 
@@ -1108,6 +1147,102 @@ token changes nothing.
 
 `POST /v1/admin/items/{id}/force-release` ends any member's claim on the item and answers
 `{ "claim": claim, "item": item ref }` (`no_claim`, `409`, when nobody holds it).
+
+### Pilot figures
+
+What a team needs to judge a trial of dibs comes from three places: the event log, what members' machines count and
+report, and what agents and integrations say.
+
+**What a machine counts.** The guard keeps, per project and per day (UTC), counts of these kinds on the member's
+machine, and the heartbeats of the background sync carry them (see [Sessions](#sessions)):
+
+| Kind | Counted when |
+|---|---|
+| `held_by` | an edit was refused because another member holds the area |
+| `needs_claim` | an edit was refused because it needs a claim first |
+| `needs_slot` | a shell command was refused because it needs a slot |
+| `frozen` | a shell command was refused because a slot another member holds freezes what it pushes to |
+| `needs_permission` | a shell command was refused because it pushes to a protected branch |
+| `unreachable` | a hook answered without a decision because the server could not be reached |
+| `push_needs_permission`, `push_frozen` | `dibs check --push` refused a push, for the same reasons |
+| `switched_off` | a session ran with `DIBS_OFF` set: each session once, on the day it was first seen switched off |
+
+A refusal of several paths counts once per kind. `durations` gives how long the machine's hooks took, per hook adapter
+that ran them (`agent`: the adapter's id, such as `neutral`) and hook event, as runs that took at most 10, 30, 100, 300,
+1000 and 2000 ms, and longer, measured from the start of the hook's process to its last step; it is the machine's own
+timing record, every hook run on it in any checkout but those switched off, and goes with the report of each project the
+machine works in. A report holds counts and kinds only: never a path, a command line, a work item or a session's id.
+Each refusal is shown with a short id the machine made for it (`refusal r-7f3a51`, six hexadecimal digits), which
+feedback names it by. The server checks nothing about that id: the figures count what members report.
+
+`POST /v1/feedback` (people), one of
+
+```json
+{ "kind": "false_refusal", "refusal": "r-7f3a51", "tally": "held_by", "reason": "billing was released an hour ago" }
+{ "kind": "conflict", "repo": "api", "path": "src/billing/rates.rs", "reason": "rebased over a rounding change" }
+```
+
+records what a member's agent says: a refusal it found wrong, by its id and, when the machine still knows it, its kind
+(`tally`, a kind this server does not know left out); or a conflict it resolved by hand while rebasing. A conflict is kept
+as its repository and the area its file lies in (`null` outside every area); the path is not kept. `reason` is one line
+of 1 to 280 characters, line breaks and tabs folded to spaces; it is kept **as written** in the event for as long as the
+log keeps events (90 days) and is shown to the member and to the project's admins, so it should quote no path, command
+line or secret. `refusal` is 4 to 8 lowercase hexadecimal digits after `r-`, not checked against anything. Answers `201 { "feedback": { "kind": "conflict", "repo": "api", "area": "api:billing" } }` and appends
+`feedback_given`. Refusals: `invalid_request` naming `kind`, `refusal`, `repo`, `path` or `reason`; `unknown_repo` for a
+repository the project does not list.
+
+`POST /v1/prs/state` (import), body `{ "pr": "acme/widgets#7", "mergeable": false }`: whether the pull request merges
+cleanly into its base, as the forge says. A pull request reported as not merging cleanly, or merging cleanly again after
+that, appends `pr_state_reported`; the same report again appends nothing, and one first reported as merging cleanly is
+only remembered. Every report, a repeat included, is kept as the integration's last word on the pull request, so the
+retention removes it 90 days after the integration last reported it. Any pull request may be reported, not only one a
+claim recorded. Answers `{ "recorded": true }` when it appended the event. Refusals: `invalid_request` for a missing or malformed `pr` or a missing `mergeable`.
+
+`GET /v1/stats?from=2026-03-02&to=2026-03-08` (admin): the figures of the days from `from` to `to`, both included, at
+most 92; `to` is today (UTC) when absent, `from` six days before `to`. Answers
+
+```json
+{ "from": "2026-03-02", "to": "2026-03-08", "truncated": false,
+  "claims": 14, "takeovers": 1, "stalls": 0, "escalations": 1,
+  "slot_waits": { "count": 3, "median_seconds": 240, "max_seconds": 900 },
+  "reported": { "held_by": 4, "needs_claim": 1, "needs_slot": 2, "frozen": 0, "needs_permission": 0,
+                "unreachable": 0, "push_needs_permission": 1, "push_frozen": 0, "switched_off": 0 },
+  "reported_days": [ { "member": "bob", "day": "2026-03-02", "counts": { "held_by": 2 } } ],
+  "hook_durations": [ { "agent": "neutral", "event": "before_tool", "runs": 120, "p95_ms": 30,
+                        "buckets": [100, 15, 5, 0, 0, 0, 0] } ],
+  "hook_durations_by_member": [ { "member": "bob", "agent": "neutral", "event": "before_tool", "runs": 120,
+                                  "p95_ms": 30, "buckets": [100, 15, 5, 0, 0, 0, 0] } ],
+  "feedback": { "false_refusals": 1, "conflicts": 1,
+                "entries": [ { "at": "2026-03-03T10:00:00Z", "member": "bob", "kind": "false_refusal",
+                               "refusal": "r-7f3a51", "tally": "held_by", "reason": "…" } ] },
+  "conflicting_prs": { "reports": 2, "prs": ["acme/widgets#7"] } }
+```
+
+| Field | What it is |
+|---|---|
+| `claims`, `takeovers` | `claimed` and `taken_over` events of the range |
+| `stalls` | `slot_stalled` events: holds whose run stopped sending heartbeats |
+| `escalations` | `escalated` events |
+| `slot_waits` | from a member joining a slot's queue (`slot_queued`) to their taking it (`slot_taken`, or a takeover of a stalled hold), for waits that end in the range and began in it; a wait given up counts nothing; seconds, `null` with no wait |
+| `reported` | every kind of the table above, the reports of every member and machine of the range's days added up, `0` for a kind that did not happen |
+| `reported_days` | the same per member and day, every machine of theirs added up; only the kinds that happened |
+| `hook_durations` | per agent and hook event, every member together: `runs`, `buckets`, and `p95_ms`, the upper bound of the bucket the 95th percentile of the runs falls in (`null` when it lies beyond 2000 ms) |
+| `hook_durations_by_member` | the same per member |
+| `feedback` | `false_refusals` and `conflicts` counted, and the entries, newest first, at most 500 |
+| `conflicting_prs` | how often an integration reported a pull request as not merging cleanly, and which |
+| `truncated` | `true` when the range held more than 100 000 of the events read, of which the first were |
+
+Refusals: `invalid_request` naming `from` or `to` for a day that is not `YYYY-MM-DD`, or `to` for a range that ends
+before it starts or is longer than 92 days; `forbidden` for anyone but an admin.
+
+The figures are read in a transaction that only reads, a page of events at a time, so reading them holds up no
+heartbeat and no edit check.
+
+**Who sees what.** The figures are the admins' alone. A member sees their own `hook_reported` and `feedback_given` events
+on the log and on the event streams (`/v1/events/stream` and the browser's `/ui/events/stream`), nobody else's; an
+integration sees none. The figures and the events name members by handle, areas,
+repositories and pull requests, which every member sees already; feedback carries the `reason` its member wrote, which
+only they and the admins read.
 
 ## The web pages
 

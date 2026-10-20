@@ -156,6 +156,10 @@ mod contract {
         old_events_go_and_the_newest_gone_is_remembered,
         a_members_browser_sessions_are_removed_together,
         every_project_is_listed,
+        a_report_is_one_per_member_machine_and_day_and_read_by_days,
+        a_reading_transaction_sees_what_was_committed_holds_no_writer_up_and_cannot_commit,
+        a_pull_requests_state_is_replaced_and_goes_by_age,
+        events_are_read_by_kind_and_time_in_log_order,
     );
 
     const A: ProjectId = ProjectId(1);
@@ -3000,5 +3004,241 @@ mod contract {
         seed(&store).await;
         let mut tx = store.begin().await.unwrap();
         assert_eq!(tx.project_ids().await.unwrap(), [A, B]);
+    }
+
+    fn day(text: &str) -> dibs_domain::report::ReportDay {
+        dibs_domain::report::ReportDay::parse(text).unwrap()
+    }
+
+    /// The id of the machine of this name, one per name.
+    fn machine(host: &str) -> dibs_domain::report::MachineId {
+        let bits = match host {
+            "laptop" => 1,
+            "desk" => 2,
+            _ => 3,
+        };
+        dibs_domain::report::MachineId::from_bits(bits)
+    }
+
+    fn hook_report(
+        member: MemberId,
+        host: &str,
+        on: &str,
+        held: u64,
+    ) -> dibs_domain::report::HookReport {
+        use dibs_domain::report::{
+            DayCounts, DayReport, DurationBuckets, HookDurations, HookEventName, Tally,
+        };
+        dibs_domain::report::HookReport {
+            member,
+            machine: machine(host),
+            host: HostName::parse(host).unwrap(),
+            report: DayReport {
+                day: day(on),
+                counts: DayCounts::new(
+                    std::collections::BTreeMap::from([(Tally::HeldBy, held)]),
+                    vec![HookDurations {
+                        agent: AgentLabel::parse("neutral").unwrap(),
+                        event: HookEventName::parse("before_tool").unwrap(),
+                        buckets: DurationBuckets::new([held, 1, 0, 0, 0, 0, 0]),
+                    }],
+                )
+                .unwrap(),
+            },
+        }
+    }
+
+    async fn a_report_is_one_per_member_machine_and_day_and_read_by_days(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let laptop = machine("laptop");
+        assert_eq!(
+            tx.hook_report(A, ALICE, &laptop, day("2026-03-02"))
+                .await
+                .unwrap(),
+            None
+        );
+        for report in [
+            hook_report(BOB, "laptop", "2026-03-02", 1),
+            hook_report(ALICE, "laptop", "2026-03-02", 2),
+            hook_report(ALICE, "desk", "2026-03-02", 3),
+            hook_report(ALICE, "laptop", "2026-03-03", 4),
+            hook_report(ALICE, "laptop", "2026-03-02", 5),
+        ] {
+            tx.save_hook_report(A, &report).await.unwrap();
+        }
+        tx.save_hook_report(B, &hook_report(DAVE, "laptop", "2026-03-02", 6))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.hook_report(A, ALICE, &laptop, day("2026-03-02"))
+                .await
+                .unwrap(),
+            Some(hook_report(ALICE, "laptop", "2026-03-02", 5).report.counts),
+            "the second report of a day replaced the first"
+        );
+        assert_eq!(
+            tx.hook_reports(A, day("2026-03-02"), day("2026-03-02"))
+                .await
+                .unwrap(),
+            [
+                hook_report(ALICE, "laptop", "2026-03-02", 5),
+                hook_report(ALICE, "desk", "2026-03-02", 3),
+                hook_report(BOB, "laptop", "2026-03-02", 1),
+            ],
+            "by day, member and machine id, in its project only"
+        );
+        assert_eq!(
+            tx.hook_reports(A, day("2026-03-01"), day("2026-03-09"))
+                .await
+                .unwrap()
+                .len(),
+            4
+        );
+        assert_eq!(
+            tx.delete_hook_reports_before(A, day("2026-03-03"))
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            tx.hook_reports(A, day("2026-03-01"), day("2026-03-09"))
+                .await
+                .unwrap(),
+            [hook_report(ALICE, "laptop", "2026-03-03", 4)]
+        );
+        assert_eq!(
+            tx.hook_reports(B, day("2026-03-02"), day("2026-03-02"))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "another project keeps its own"
+        );
+    }
+
+    async fn a_pull_requests_state_is_replaced_and_goes_by_age(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let first = PrRef::parse("acme/widgets#1").unwrap();
+        let second = PrRef::parse("acme/widgets#2").unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.pr_mergeable(A, &first).await.unwrap(), None);
+        tx.save_pr_mergeable(A, &first, false, at(10))
+            .await
+            .unwrap();
+        tx.save_pr_mergeable(A, &first, true, at(30)).await.unwrap();
+        tx.save_pr_mergeable(A, &second, false, at(20))
+            .await
+            .unwrap();
+        tx.save_pr_mergeable(B, &second, true, at(5)).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.pr_mergeable(A, &first).await.unwrap(), Some(true));
+        assert_eq!(tx.pr_mergeable(A, &second).await.unwrap(), Some(false));
+        assert_eq!(tx.pr_mergeable(B, &second).await.unwrap(), Some(true));
+        assert_eq!(tx.delete_pr_states_before(A, at(25)).await.unwrap(), 1);
+        assert_eq!(tx.pr_mergeable(A, &second).await.unwrap(), None);
+        assert_eq!(tx.pr_mergeable(A, &first).await.unwrap(), Some(true));
+        assert_eq!(tx.pr_mergeable(B, &second).await.unwrap(), Some(true));
+    }
+
+    async fn events_are_read_by_kind_and_time_in_log_order(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let done = |item: ItemId| {
+            EventKind::Completed(Completed {
+                item,
+                member: ALICE,
+            })
+        };
+        let changed = EventKind::SettingsChanged(SettingsChanged { by: BOB });
+        let mut tx = store.begin().await.unwrap();
+        tx.append_event(A, at(10), &done(FIRST)).await.unwrap();
+        tx.append_event(A, at(20), &changed).await.unwrap();
+        tx.append_event(A, at(5), &done(SECOND)).await.unwrap();
+        tx.append_event(A, at(40), &done(THIRD)).await.unwrap();
+        tx.append_event(B, at(20), &done(GADGET)).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let read = tx
+            .events_of_kinds(
+                A,
+                &["completed", "settings_changed"],
+                (at(5), at(40)),
+                None,
+                10,
+            )
+            .await
+            .unwrap();
+        let kinds: Vec<EventKind> = read.iter().map(|event| event.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            [done(FIRST), changed.clone(), done(SECOND)],
+            "in log order, from the first time on and before the last"
+        );
+        assert!(read.windows(2).all(|pair| pair[0].id < pair[1].id));
+        let only = tx
+            .events_of_kinds(A, &["settings_changed"], (at(0), at(100)), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(only.len(), 1);
+        let few = tx
+            .events_of_kinds(A, &["completed"], (at(0), at(100)), None, 2)
+            .await
+            .unwrap();
+        assert_eq!(few.len(), 2);
+        let rest = tx
+            .events_of_kinds(
+                A,
+                &["completed"],
+                (at(0), at(100)),
+                few.last().map(|event| event.id),
+                2,
+            )
+            .await
+            .unwrap();
+        let rest: Vec<EventKind> = rest.into_iter().map(|event| event.kind).collect();
+        assert_eq!(
+            rest,
+            [done(THIRD)],
+            "the next page starts after the last one read"
+        );
+        assert!(
+            tx.events_of_kinds(A, &[], (at(0), at(100)), None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    async fn a_reading_transaction_sees_what_was_committed_holds_no_writer_up_and_cannot_commit(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let mut reading = store.read().await.unwrap();
+        assert!(reading.project(A).await.unwrap().is_some());
+        let mut writer = tokio::time::timeout(std::time::Duration::from_secs(2), store.begin())
+            .await
+            .expect("a writer opens while a reader is open")
+            .unwrap();
+        writer
+            .insert_project(&project(ProjectId(3), "tools"))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), writer.commit())
+            .await
+            .expect("and commits while it is open")
+            .unwrap();
+        assert!(
+            reading.project(ProjectId(3)).await.unwrap().is_none(),
+            "the reader keeps the state it started from"
+        );
+        assert!(matches!(
+            reading.commit().await,
+            Err(StoreError::Backend(_))
+        ));
+        let mut later = store.read().await.unwrap();
+        assert!(later.project(ProjectId(3)).await.unwrap().is_some());
     }
 }

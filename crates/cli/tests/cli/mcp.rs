@@ -15,12 +15,13 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 22] = [
+const TOOLS: [&str; 23] = [
     "dibs_ack",
     "dibs_check",
     "dibs_claim",
     "dibs_done",
     "dibs_escalate",
+    "dibs_feedback",
     "dibs_grant",
     "dibs_inbox",
     "dibs_items",
@@ -534,6 +535,39 @@ fn messages_are_sent_read_and_answered_under_the_sessions_label() {
     assert_eq!(everyone.ok()["thread"]["to_project"], true);
     assert_eq!(everyone.ok()["message"]["importance"], "normal");
     assert_eq!(everyone.ok()["message"]["ack_required"], false);
+}
+
+#[test]
+fn feedback_through_the_tools_names_a_refusal_or_the_area_of_a_conflict() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    let conflict = bob.tool(
+        "dibs_feedback",
+        json!({"kind": "conflict", "path": "src/billing/rates.rs", "reason": "rebased over alice's change"}),
+    );
+    assert_eq!(
+        conflict.ok()["feedback"],
+        json!({"kind": "conflict", "repo": "api", "area": "api:billing"}),
+        "{}",
+        conflict.text
+    );
+    let refusal = bob.tool(
+        "dibs_feedback",
+        json!({"kind": "false_refusal", "refusal": "r-7f3a", "reason": "billing was free"}),
+    );
+    assert_eq!(
+        refusal.ok()["feedback"],
+        json!({"kind": "false_refusal", "refusal": "r-7f3a", "tally": null}),
+        "a refusal this machine never showed has no kind"
+    );
+    let wrong = bob.tool("dibs_feedback", json!({"kind": "praise", "reason": "nice"}));
+    assert!(wrong.error().contains("`kind`"), "{}", wrong.text);
+    let log = setup.server.request_log().join("\n");
+    assert!(
+        log.contains("src/billing/rates.rs"),
+        "the file goes to the server, which keeps only its area"
+    );
 }
 
 #[test]

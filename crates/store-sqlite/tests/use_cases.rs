@@ -1458,4 +1458,139 @@ mod use_cases {
             "no message lands after the removal"
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_same_report_sent_by_racing_heartbeats_on_the_file_is_kept_once_and_read_back() {
+        use std::collections::BTreeMap;
+
+        use dibs_domain::report::stats::StatsRange;
+        use dibs_domain::report::{DayCounts, DayReport, HeartbeatReports, ReportDay, Tally};
+
+        let world = Arc::new(World::new().await);
+        world.fakes.clock.advance(Duration::days(40));
+        let alice = project(&world.app, "widgets", "alice").await;
+        let session = register(&world.app, &alice, 1).await;
+        let today = ReportDay::of(dibs_app::ports::Clock::now(&*world.fakes.clock));
+        let reports = HeartbeatReports::new(
+            dibs_domain::report::MachineId::from_bits(1),
+            vec![DayReport {
+                day: today,
+                counts: DayCounts::new(BTreeMap::from([(Tally::NeedsSlot, 4)]), Vec::new())
+                    .unwrap(),
+            }],
+        )
+        .unwrap();
+        let mut tasks = Vec::new();
+        for _ in 0..RACERS {
+            let world = world.clone();
+            let alice = alice.clone();
+            let reports = reports.clone();
+            tasks.push(tokio::spawn(async move {
+                world
+                    .app
+                    .heartbeat
+                    .execute_reporting(&alice, session, None, Some(&reports))
+                    .await
+                    .unwrap()
+                    .reported
+                    .len()
+            }));
+        }
+        let mut kept = 0;
+        for task in tasks {
+            kept += task.await.unwrap();
+        }
+        assert_eq!(
+            kept, 1,
+            "one heartbeat kept it; the others found it unchanged"
+        );
+        let names = world.event_names(alice.project).await;
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| **name == "hook_reported")
+                .count(),
+            1
+        );
+        let view = world
+            .app
+            .read_stats
+            .execute(&alice, StatsRange::week_to(today))
+            .await
+            .unwrap();
+        assert_eq!(view.stats.reported, BTreeMap::from([(Tally::NeedsSlot, 4)]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reading_the_figures_on_the_file_holds_no_heartbeat_up() {
+        use std::collections::BTreeSet;
+
+        use dibs_domain::event::{Claimed, EventKind};
+        use dibs_domain::report::ReportDay;
+        use dibs_domain::report::stats::StatsRange;
+
+        let world = Arc::new(World::new().await);
+        world.fakes.clock.advance(Duration::days(40));
+        let alice = project(&world.app, "widgets", "alice").await;
+        let session = register(&world.app, &alice, 1).await;
+        let now = dibs_app::ports::Clock::now(&*world.fakes.clock);
+        let mut tx = world.store.begin().await.unwrap();
+        for n in 0..20_000_u64 {
+            tx.append_event(
+                alice.project,
+                now,
+                &EventKind::Claimed(Claimed {
+                    item: ItemId(n + 1),
+                    member: alice.member,
+                    session,
+                    host: HostName::parse("host-1").unwrap(),
+                    areas: BTreeSet::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let held = world.store.read().await.unwrap();
+        let beat = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            world.app.heartbeat.execute(&alice, session, None),
+        )
+        .await;
+        assert!(
+            matches!(beat, Ok(Ok(_))),
+            "a reader open on the file holds no writer up"
+        );
+        drop(held);
+
+        let reader = {
+            let world = world.clone();
+            let alice = alice.clone();
+            tokio::spawn(async move {
+                world
+                    .app
+                    .read_stats
+                    .execute(&alice, StatsRange::week_to(ReportDay::of(now)))
+                    .await
+                    .unwrap()
+            })
+        };
+        for _ in 0..10 {
+            let started = std::time::Instant::now();
+            world
+                .app
+                .heartbeat
+                .execute(&alice, session, None)
+                .await
+                .unwrap();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(1),
+                "a heartbeat beside the reading takes its usual time"
+            );
+        }
+        let view = reader.await.unwrap();
+        assert_eq!(view.stats.claims, 20_000);
+        assert!(!view.truncated);
+    }
 }

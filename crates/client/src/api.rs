@@ -20,6 +20,7 @@ use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::radar::{BranchName, OverlapKind};
 use dibs_domain::repo::{RemoteUrl, RepoId};
+use dibs_domain::report::{Feedback, FeedbackReason, RefusalId, ReportDay, Tally};
 use dibs_domain::review::PrRef;
 use dibs_domain::session::{AgentLabel, HostName};
 use dibs_domain::settings::{ProjectSettings, SettingsDocument, SettingsError};
@@ -134,11 +135,18 @@ pub struct RegisterSession {
     pub push: bool,
 }
 
-/// `POST /v1/heartbeat`'s answer: the claims the heartbeat kept alive.
+/// `POST /v1/heartbeat`'s answer: the claims the heartbeat kept alive, the days whose report it
+/// carried changed what the server kept, and the days it accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Heartbeat {
     /// Their items.
     pub refreshed: Vec<ItemId>,
+    /// The days.
+    #[serde(default)]
+    pub reported: Vec<ReportDay>,
+    /// The days whose report the server read and keeps; the others are to be sent again.
+    #[serde(default)]
+    pub reports_accepted: Vec<ReportDay>,
 }
 
 /// A work item.
@@ -739,6 +747,44 @@ pub struct OpenEscalation {
     /// When.
     #[serde(with = "time::serde::rfc3339")]
     pub at: OffsetDateTime,
+}
+
+/// What `POST /v1/feedback` is about.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FeedbackAbout {
+    /// A refusal the agent found wrong.
+    FalseRefusal {
+        /// The id it was shown with.
+        refusal: RefusalId,
+        /// Its kind, when this machine still remembers it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tally: Option<Tally>,
+    },
+    /// A rebase conflict the agent resolved by hand.
+    Conflict {
+        /// The repository.
+        repo: RepoId,
+        /// The file, relative to the repository's root.
+        path: RelPath,
+    },
+}
+
+/// `POST /v1/feedback`'s body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FeedbackRequest {
+    /// What it is about.
+    #[serde(flatten)]
+    pub about: FeedbackAbout,
+    /// Why.
+    pub reason: FeedbackReason,
+}
+
+/// `POST /v1/feedback`'s answer: the feedback as the server kept it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedbackGiven {
+    /// It.
+    pub feedback: Feedback,
 }
 
 /// `POST /v1/escalations`'s body: one subject and the reason.

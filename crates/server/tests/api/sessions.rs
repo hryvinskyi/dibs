@@ -169,7 +169,10 @@ async fn a_heartbeat_keeps_the_claims_of_its_machine_alive() {
         .post(&alice, "/v1/heartbeat", json!({"session_id": session}))
         .await;
     assert_eq!(beat.status, StatusCode::OK);
-    assert_eq!(beat.body, json!({"refreshed": [item]}));
+    assert_eq!(
+        beat.body,
+        json!({"refreshed": [item], "reported": [], "reports_accepted": []})
+    );
     let shown = world.get(&alice, &format!("/v1/items/{item}")).await;
     assert_eq!(shown.body["claim"]["last_seen"], "2026-03-02T09:05:00Z");
 }

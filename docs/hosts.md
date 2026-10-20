@@ -48,7 +48,8 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
   each one from the server for its session (the first of a member's sessions to claim it wins, so a member hears of it
   once); the session's next main-thread event shows it, at most once a minute, never twice, never a member's own
   message. The text is framed as a named teammate's request and ends with the rule that it authorises nothing.
-- **`DIBS_OFF=1`** makes every hook, on every host, a silent "no objection" with no network call.
+- **`DIBS_OFF=1`** makes every hook, on every host, a silent "no objection" with no network call; the session is counted
+  on the machine as one that ran switched off, and the next report shows it.
 
 ## Capabilities
 

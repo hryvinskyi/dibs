@@ -3,7 +3,8 @@
 //! One database file holds every project. The file runs in WAL mode with foreign keys on, its schema
 //! comes from the migrations embedded in this crate and is brought up to date on every open, and
 //! every unit of work is a transaction opened with `BEGIN IMMEDIATE`: it takes the write lock at its
-//! start, so a use case decides against state no other writer changes until it commits or drops.
+//! start, so a use case decides against state no other writer changes until it commits or drops. A
+//! transaction for reading is opened with `BEGIN DEFERRED` and takes no write lock.
 //!
 //! Every query is scoped by the project it is given; the lookups the port lets run without one
 //! (a token or a browser session by its hash, a project by its id or slug, the sweep of expired
@@ -85,19 +86,35 @@ impl Store for SqliteStore {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(error::store_error)?;
-        Ok(Box::new(SqliteTx { tx }))
+        Ok(Box::new(SqliteTx { tx, reading: false }))
+    }
+
+    async fn read(&self) -> StoreResult<Box<dyn Tx>> {
+        let tx = self
+            .pool
+            .begin_with("BEGIN DEFERRED")
+            .await
+            .map_err(error::store_error)?;
+        Ok(Box::new(SqliteTx { tx, reading: true }))
     }
 }
 
 /// A transaction of the SQLite store. Dropping it uncommitted rolls it back before its connection
-/// serves anyone else.
+/// serves anyone else. One opened for reading is a deferred transaction: in the write-ahead log a
+/// reader keeps the snapshot it started from while the writer goes on.
 pub(crate) struct SqliteTx {
     tx: Transaction<'static, Sqlite>,
+    reading: bool,
 }
 
 #[async_trait]
 impl Tx for SqliteTx {
     async fn commit(self: Box<Self>) -> StoreResult<()> {
+        if self.reading {
+            return Err(dibs_app::ports::StoreError::Backend(Box::new(
+                std::io::Error::other("a transaction for reading commits nothing"),
+            )));
+        }
         self.tx.commit().await.map_err(error::store_error)
     }
 }

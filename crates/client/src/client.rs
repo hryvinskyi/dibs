@@ -20,6 +20,7 @@ use serde::de::DeserializeOwned;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey};
+use dibs_domain::report::{DayReport, MachineId};
 use dibs_domain::settings::SettingsDocument;
 
 use crate::api::{
@@ -32,9 +33,9 @@ use crate::api::{
     Threads, TokenRevoked, Versions,
 };
 use crate::api::{
-    Escalated, EscalationRequest, ForceReleaseSlotRequest, MemberRemoved, ReleaseSlotRequest,
-    SlotAnswer, SlotForced, SlotReleased, SlotTakenOver, Slots, TakeOverSlotRequest,
-    TakeSlotRequest, ThreadDeleted, Took,
+    Escalated, EscalationRequest, FeedbackGiven, FeedbackRequest, ForceReleaseSlotRequest,
+    MemberRemoved, ReleaseSlotRequest, SlotAnswer, SlotForced, SlotReleased, SlotTakenOver, Slots,
+    TakeOverSlotRequest, TakeSlotRequest, ThreadDeleted, Took,
 };
 use crate::error::{ClientError, Response, decode};
 use crate::server_url::ServerUrl;
@@ -98,6 +99,10 @@ struct HeartbeatBody<'a> {
     session_id: SessionId,
     #[serde(flatten)]
     on: Option<&'a OnBranch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine: Option<&'a MachineId>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    reports: &'a [DayReport],
 }
 
 #[derive(Serialize)]
@@ -219,7 +224,7 @@ impl Client {
     }
 
     /// `POST /v1/heartbeat`: a session's sign of life, from a checkout on a branch when `on` names
-    /// one.
+    /// one, carrying what the machine `machine` counted on the days of `reports`.
     ///
     /// # Errors
     /// [`ClientError`].
@@ -227,10 +232,14 @@ impl Client {
         &self,
         session: SessionId,
         on: Option<&OnBranch>,
+        machine: Option<&MachineId>,
+        reports: &[DayReport],
     ) -> Result<Heartbeat, ClientError> {
         let body = HeartbeatBody {
             session_id: session,
             on,
+            machine,
+            reports,
         };
         self.send(self.request(Method::POST, "/v1/heartbeat").json(&body))
             .await
@@ -671,6 +680,16 @@ impl Client {
     /// [`ClientError`].
     pub async fn delete_thread(&self, thread: ThreadId) -> Result<ThreadDeleted, ClientError> {
         self.send(self.request(Method::DELETE, &format!("/v1/admin/threads/{thread}")))
+            .await
+    }
+
+    /// `POST /v1/feedback`: what the member's agent says of a refusal, or of a conflict it resolved
+    /// by hand.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn feedback(&self, feedback: &FeedbackRequest) -> Result<FeedbackGiven, ClientError> {
+        self.send(self.request(Method::POST, "/v1/feedback").json(feedback))
             .await
     }
 

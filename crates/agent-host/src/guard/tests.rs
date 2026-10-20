@@ -14,6 +14,7 @@ use dibs_domain::message::Importance;
 use dibs_domain::paths::RelPath;
 use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::{ReportDay, Tally};
 use dibs_domain::settings::{ProjectSettings, SettingsDocument};
 
 use super::*;
@@ -87,6 +88,10 @@ struct State {
     git_reads: u32,
     branch: Option<BranchName>,
     branch_reads: u32,
+    refusals: Vec<(String, Vec<Tally>)>,
+    unreachable_counted: Vec<String>,
+    switched_off_sessions: Vec<(String, String)>,
+    tallies_unwritable: bool,
 }
 
 impl State {
@@ -149,6 +154,10 @@ impl State {
             git_reads: 0,
             branch: None,
             branch_reads: 0,
+            refusals: Vec::new(),
+            unreachable_counted: Vec::new(),
+            switched_off_sessions: Vec::new(),
+            tallies_unwritable: false,
         }
     }
 }
@@ -240,6 +249,36 @@ impl Workspace for World {
 
     fn ledger(&self) -> &dyn crate::ports::DeliveryLedger {
         self
+    }
+
+    fn tallies(&self) -> &dyn crate::ports::Tallies {
+        self
+    }
+}
+
+impl crate::ports::Tallies for World {
+    fn refused(&self, day: ReportDay, kinds: &[Tally]) -> Option<dibs_domain::report::RefusalId> {
+        let mut state = self.0.borrow_mut();
+        if state.tallies_unwritable {
+            return None;
+        }
+        state.refusals.push((day.to_string(), kinds.to_vec()));
+        let n = u32::try_from(state.refusals.len()).unwrap();
+        Some(dibs_domain::report::RefusalId::from_bits(0x7f_3a00 + n))
+    }
+
+    fn unreachable(&self, day: ReportDay) {
+        self.0
+            .borrow_mut()
+            .unreachable_counted
+            .push(day.to_string());
+    }
+
+    fn switched_off(&self, day: ReportDay, session: &SessionRef) {
+        self.0.borrow_mut().switched_off_sessions.push((
+            day.to_string(),
+            format!("{} {}", session.host.as_str(), session.key.as_str()),
+        ));
     }
 }
 
@@ -529,7 +568,7 @@ fn an_unknown_event_or_unreadable_input_is_no_objection_with_a_notice() {
 }
 
 #[test]
-fn switched_off_every_event_is_silent_and_touches_no_port() {
+fn switched_off_every_event_is_silent_asks_the_server_nothing_and_counts_its_session() {
     let world = World::new().with(|state| state.last_heartbeat = None);
     for (event, input) in [
         ("session-started", input(None)),
@@ -547,8 +586,103 @@ fn switched_off_every_event_is_silent_and_touches_no_port() {
     let silent = run_switched(&world, "elsewhere", "before-tool", &input(None), true);
     assert_eq!(silent.diagnostic, None);
     let state = world.0.borrow();
-    assert_eq!((state.opened, state.upkeep_starts), (0, 0));
-    assert!(state.calls.is_empty());
+    assert_eq!(
+        (state.opened, state.upkeep_starts),
+        (4, 0),
+        "each event read opens its checkout to be counted, and nothing more"
+    );
+    assert!(state.calls.is_empty(), "no call to the server");
+    let day = ReportDay::of(at(0)).to_string();
+    assert_eq!(
+        state.switched_off_sessions,
+        vec![(day, "neutral s-1".to_owned()); 4],
+        "the machine counts the session once a day, however often it is told"
+    );
+    assert!(state.refusals.is_empty() && state.unreachable_counted.is_empty());
+}
+
+#[test]
+fn a_refusal_is_counted_by_kind_and_ends_with_the_id_it_is_counted_under() {
+    let world = World::new().with(|state| {
+        state.answers = Ok(vec![
+            held_by_alice(),
+            PathAnswer::NeedsClaim,
+            held_by_alice(),
+        ])
+    });
+    let answer = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs", "src/billing/b.rs", "src/billing/c.rs"]),
+    );
+    let value = reply(&answer);
+    assert_eq!(value["decision"], "deny");
+    let reason = value["reason"].as_str().unwrap();
+    assert!(
+        reason.ends_with(
+            "(refusal r-7f3a01; if dibs is wrong here, say so with dibs_feedback, or dibs feedback false-refusal r-7f3a01 --reason \"…\")"
+        ),
+        "{reason}"
+    );
+    assert_eq!(
+        world.0.borrow().refusals,
+        [(
+            ReportDay::of(at(0)).to_string(),
+            vec![Tally::HeldBy, Tally::NeedsClaim]
+        )]
+    );
+
+    let unwritable = World::new().with(|state| {
+        state.answers = Ok(vec![held_by_alice()]);
+        state.tallies_unwritable = true;
+    });
+    let answer = run(
+        &unwritable,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    let reason = reply(&answer)["reason"].as_str().unwrap().to_owned();
+    assert!(!reason.contains("refusal r-"), "{reason}");
+    assert!(reason.contains("alice holds"), "{reason}");
+
+    let allowed = World::new().with(|state| state.answers = Ok(vec![PathAnswer::Allowed]));
+    run(
+        &allowed,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    assert!(
+        allowed.0.borrow().refusals.is_empty(),
+        "nothing refused, nothing counted"
+    );
+}
+
+#[test]
+fn every_answer_given_without_the_server_is_counted() {
+    let world = World::new().with(|state| {
+        state.answers = Err(PortError::Unavailable(
+            "the dibs server could not be reached.".to_owned(),
+        ));
+    });
+    for seconds in [0, 10] {
+        world.set(|state| state.now = at(seconds));
+        run(
+            &world,
+            "neutral",
+            "before-tool",
+            &edit(&["src/billing/a.rs"]),
+        );
+    }
+    let state = world.0.borrow();
+    assert_eq!(
+        state.unreachable_counted.len(),
+        2,
+        "the second answered from the open circuit, without a call, and counts too"
+    );
+    assert!(state.refusals.is_empty());
 }
 
 #[test]
@@ -1493,10 +1627,12 @@ fn a_command_that_needs_a_slot_another_member_holds_is_denied_naming_them_and_th
         "dibs_slot_take deploy:prod",
         "wait_seconds",
         "dibs send --to alice --ack",
+        "(refusal r-7f3a01;",
     ] {
         assert!(reason.contains(part), "{part}: {reason}");
     }
     assert_eq!(world.calls(), ["slots deploy:prod"]);
+    assert_eq!(world.0.borrow().refusals[0].1, [Tally::NeedsSlot]);
 }
 
 #[test]
@@ -1601,6 +1737,7 @@ fn a_push_to_a_ref_another_members_slot_freezes_is_denied_and_my_own_hold_never_
     ] {
         assert!(reason.contains(part), "{part}: {reason}");
     }
+    assert_eq!(world.0.borrow().refusals[0].1, [Tally::Frozen]);
     world.set(|state| {
         state.slot_states = Ok(vec![held(
             "deploy:prod",

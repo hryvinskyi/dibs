@@ -15,6 +15,7 @@ pub mod members;
 pub mod messages;
 pub mod radar;
 pub mod ready;
+pub mod reports;
 pub mod review;
 pub mod sessions;
 pub mod slots;

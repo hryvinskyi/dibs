@@ -13,10 +13,12 @@ use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::message::{Body, Importance, Subject};
+use dibs_domain::report::{FeedbackReason, RefusalId};
 use dibs_domain::review::PrRef;
 use dibs_domain::slot::{Purpose, SlotName};
 use dibs_domain::wide::WideReason;
 
+use crate::commands::feedback::FeedbackOn;
 use crate::failure::{Failure, sentence};
 
 /// A work item: its local id or its reference.
@@ -498,6 +500,61 @@ impl AckInput {
             ));
         }
         Ok(MessageId(self.message))
+    }
+}
+
+/// `dibs_feedback`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackInput {
+    /// `false_refusal` for a refusal of dibs that was wrong, `conflict` for a rebase conflict you
+    /// resolved by hand.
+    pub kind: String,
+    /// For `false_refusal`: the refusal's id, as its reason ends with it (`r-7f3a`).
+    pub refusal: Option<String>,
+    /// For `conflict`: the file, relative to the working directory or absolute. Only the area it
+    /// lies in is kept.
+    pub path: Option<String>,
+    /// Why, one line of at most 280 characters. It is kept as written for 90 days and read by your
+    /// member and the project's admins: never quote a path, a command line, a credential or a
+    /// customer's data in it.
+    pub reason: String,
+}
+
+impl FeedbackInput {
+    /// What it is about.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an unknown kind, or a missing or invalid field of it.
+    pub fn on(&self) -> Result<FeedbackOn, Failure> {
+        match self.kind.trim() {
+            "false_refusal" => {
+                let text = self
+                    .refusal
+                    .as_deref()
+                    .ok_or_else(|| invalid("refusal", "name the refusal, such as r-7f3a"))?;
+                RefusalId::parse(text)
+                    .map(FeedbackOn::FalseRefusal)
+                    .map_err(|error| invalid("refusal", &error.to_string()))
+            }
+            "conflict" => match self.path.as_deref().map(str::trim) {
+                Some(path) if !path.is_empty() => Ok(FeedbackOn::Conflict(PathBuf::from(path))),
+                _ => Err(invalid("path", "name the file that conflicted")),
+            },
+            _ => Err(invalid(
+                "kind",
+                "a kind of feedback is false_refusal or conflict",
+            )),
+        }
+    }
+
+    /// The reason.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it is empty or longer than a reason may be.
+    pub fn reason(&self) -> Result<FeedbackReason, Failure> {
+        FeedbackReason::parse(&self.reason)
+            .map_err(|error| invalid("reason", &format!("the reason is not valid ({error})")))
     }
 }
 
@@ -988,5 +1045,41 @@ mod tests {
         );
         assert!(serde_json::from_value::<ThreadInput>(json!({"thread": -1})).is_err());
         assert!(serde_json::from_value::<ThreadInput>(json!({"thread": "4"})).is_err());
+    }
+
+    #[test]
+    fn feedback_names_a_refusal_or_a_file_and_nothing_else() {
+        let input = |value: serde_json::Value| parse::<FeedbackInput>(value);
+        assert_eq!(
+            input(json!({"kind": "false_refusal", "refusal": "r-7f3a", "reason": "free"}))
+                .on()
+                .unwrap(),
+            FeedbackOn::FalseRefusal(RefusalId::parse("r-7f3a").unwrap())
+        );
+        assert_eq!(
+            input(json!({"kind": "conflict", "path": "src/a.rs", "reason": "by hand"}))
+                .on()
+                .unwrap(),
+            FeedbackOn::Conflict(PathBuf::from("src/a.rs"))
+        );
+        for value in [
+            json!({"kind": "false_refusal", "reason": "x"}),
+            json!({"kind": "false_refusal", "refusal": "7f3a", "reason": "x"}),
+            json!({"kind": "conflict", "path": " ", "reason": "x"}),
+            json!({"kind": "praise", "reason": "x"}),
+        ] {
+            assert!(input(value.clone()).on().is_err(), "{value}");
+        }
+        assert!(
+            input(json!({"kind": "conflict", "path": "a", "reason": " "}))
+                .reason()
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<FeedbackInput>(
+                json!({"kind": "conflict", "reason": "x", "file": "a"})
+            )
+            .is_err()
+        );
     }
 }

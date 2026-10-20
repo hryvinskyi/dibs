@@ -1,7 +1,8 @@
 //! What an integration may call: who it is, the members, the event feed, reading, creating and
 //! importing work items, the ready list, reading the slots, reporting a finished workflow run,
-//! reporting merged and closed pull requests, reading the claims in review and the pull-request
-//! status, listing the live claims, and reporting what a claim's branch changes;
+//! reporting merged and closed pull requests and whether one merges cleanly, reading the claims in
+//! review and the pull-request status, listing the live claims, and reporting what a claim's
+//! branch changes;
 //! never a conversation, a message, an acknowledgement or a slot hold. Every other route of the router answers it
 //! `forbidden`, and each refusal comes before the request is read, so a body that would be refused
 //! for its content still answers `forbidden`.
@@ -75,6 +76,12 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             Method::POST,
             "/v1/prs/closed".into(),
             Some(json!({"pr": "acme/widgets#7"})),
+            StatusCode::OK,
+        ),
+        (
+            Method::POST,
+            "/v1/prs/state".into(),
+            Some(json!({"pr": "acme/widgets#7", "mergeable": false})),
             StatusCode::OK,
         ),
         (
@@ -251,6 +258,14 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             Some(json!({"session_id": session, "until": "2026-03-02T09:05:00Z"})),
         ),
         (Method::GET, "/v1/inbox?deliverable=1".into(), None),
+        (
+            Method::POST,
+            "/v1/feedback".into(),
+            Some(json!({"kind": "false_refusal", "refusal": "r-7f3a", "reason": "free"})),
+        ),
+        (Method::POST, "/v1/feedback".into(), Some(json!({}))),
+        (Method::GET, "/v1/stats".into(), None),
+        (Method::GET, "/v1/stats?from=x".into(), None),
     ];
     for (method, path, body) in refused {
         let answer = world

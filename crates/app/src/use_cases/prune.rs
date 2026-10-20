@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use dibs_domain::event::{EventKind, Pruned};
 use dibs_domain::ids::{ProjectId, ThreadId};
+use dibs_domain::report::ReportDay;
 use dibs_domain::retention::{Cutoffs, Keeps, PruneCounts, thread_expired};
 
 use crate::dependencies::Dependencies;
@@ -25,7 +26,7 @@ pub struct PruneReport {
 
 /// Removes, in every project and each project in a transaction of its own, the conversations quiet
 /// for longer than they are kept — but never one about a work item that is still open, nor one
-/// carrying an escalation no arbiter has settled — with their messages, and the events older than the log keeps; then records what went in one `pruned` event
+/// carrying an escalation no arbiter has settled — with their messages, and the events older than the log keeps, with the reports of days before them and what integrations last said of pull requests before them; then records what went in one `pruned` event
 /// per project that lost anything. A reader whose cursor is behind what went is told so. Browser
 /// sessions past their end go too. The service runs it once a day; it acts for nobody.
 pub struct Prune {
@@ -101,6 +102,10 @@ impl Prune {
             .delete_events_before(project, cutoffs.events)
             .await?
             .count;
+        work.delete_hook_reports_before(project, ReportDay::of(cutoffs.events))
+            .await?;
+        work.delete_pr_states_before(project, cutoffs.events)
+            .await?;
         if !counts.is_empty() {
             work.record(now, EventKind::Pruned(Pruned { counts }))
                 .await?;
@@ -335,5 +340,45 @@ mod tests {
         env.advance(Duration::days(181));
         Prune::new(&env.deps).execute().await.unwrap();
         assert!(subjects(&env).await.is_empty(), "settled, it goes by date");
+    }
+
+    #[tokio::test]
+    async fn reports_and_pull_request_states_go_with_the_events_of_their_days() {
+        use dibs_domain::report::{DayCounts, DayReport, HeartbeatReports, Tally};
+        use dibs_domain::review::PrRef;
+
+        use crate::use_cases::{Heartbeat, ReportPrState};
+
+        let env = Env::new().await;
+        env.advance(Duration::days(1));
+        let first = ReportDay::of(env.now());
+        let reports = HeartbeatReports::new(
+            dibs_domain::report::MachineId::from_bits(1),
+            vec![DayReport {
+                day: first,
+                counts: DayCounts::new([(Tally::Unreachable, 1)].into_iter().collect(), Vec::new())
+                    .unwrap(),
+            }],
+        )
+        .unwrap();
+        Heartbeat::new(&env.deps)
+            .execute_reporting(&env.bob.actor, env.bob.session, None, Some(&reports))
+            .await
+            .unwrap();
+        let pr = PrRef::parse("acme/widgets#3").unwrap();
+        ReportPrState::new(&env.deps)
+            .execute(&env.importer, pr.clone(), false)
+            .await
+            .unwrap();
+        env.advance(Duration::days(91));
+        Prune::new(&env.deps).execute().await.unwrap();
+        let mut tx = env.deps.store.begin().await.unwrap();
+        assert!(
+            tx.hook_reports(env.project, first, ReportDay::of(env.now()))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(tx.pr_mergeable(env.project, &pr).await.unwrap(), None);
     }
 }

@@ -9,6 +9,10 @@
 //! that remembers nothing yet and cannot reach the server — lets the push go with one warning;
 //! `git push --no-verify` stays the conscious way past a refusal, and for a protected branch it
 //! breaks the team's rule.
+//!
+//! A refusal is counted, by its kind, in what this machine reports to the project, and named by the
+//! id it is counted under. With `DIBS_OFF` set the push is let go without a word and without any
+//! call.
 
 use dibs_agent_host::ports::{Workspace, Workspaces};
 use dibs_agent_host::slots::KnownBoard;
@@ -16,14 +20,17 @@ use dibs_agent_host::wording;
 use dibs_domain::handle::Handle;
 use dibs_domain::push::PushProtection;
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::{ReportDay, Tally};
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::slot::{CommandVerdict, RepoRef, SlotName, push_verdict};
+use time::OffsetDateTime;
 
 use crate::commands::check::Governed;
 use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::guard::views;
 use crate::guard::workspace::ClientWorkspaces;
+use crate::guard::{OFF_VAR, switched_off};
 
 /// The remote refs of the lines git writes to a pre-push hook: `<local ref> <local sha> <remote
 /// ref> <remote sha>`, a deletion included. Lines of another shape are skipped.
@@ -63,7 +70,7 @@ pub struct PushedTo<'a> {
 /// pushed to is frozen by a slot another member holds.
 pub async fn check_push(stdin: &str, to: PushedTo<'_>, ctx: &Context) -> Result<(), Failure> {
     let refs = pushed_refs(stdin);
-    if refs.is_empty() {
+    if refs.is_empty() || switched_off(ctx.var(OFF_VAR).as_deref()) {
         return Ok(());
     }
     let workspaces = ClientWorkspaces::new(ctx.env().clone());
@@ -84,7 +91,12 @@ pub async fn check_push(stdin: &str, to: PushedTo<'_>, ctx: &Context) -> Result<
         && let Some(refusal) =
             protected(&*workspace, ctx, &known.settings, &known.member, to, &refs)
     {
-        return Err(Failure::refused("needs_permission", refusal));
+        return Err(counted(
+            &*workspace,
+            Tally::PushNeedsPermission,
+            "needs_permission",
+            refusal,
+        ));
     }
     let connection = match ctx.connect().await {
         Ok(connection) => connection,
@@ -104,10 +116,15 @@ pub async fn check_push(stdin: &str, to: PushedTo<'_>, ctx: &Context) -> Result<
             &refs,
         )
     {
-        return Err(Failure::refused("needs_permission", refusal));
+        return Err(counted(
+            &*workspace,
+            Tally::PushNeedsPermission,
+            "needs_permission",
+            refusal,
+        ));
     }
     match frozen(&connection, &governed, &refs).await {
-        Ok(Some(refusal)) => Err(Failure::refused("frozen", refusal)),
+        Ok(Some(refusal)) => Err(counted(&*workspace, Tally::PushFrozen, "frozen", refusal)),
         Ok(None) => Ok(()),
         Err(failure) => let_through(ctx, &failure),
     }
@@ -208,6 +225,16 @@ async fn frozen(
         "{} To push anyway, knowing what it would break: git push --no-verify.",
         wording::frozen(&slot, &hold, &target.to_string())
     )))
+}
+
+/// The refusal, counted on this machine as `tally` and ending with the id it is counted under.
+fn counted(workspace: &dyn Workspace, tally: Tally, code: &str, refusal: String) -> Failure {
+    let day = ReportDay::of(OffsetDateTime::now_utc());
+    let message = match workspace.tallies().refused(day, &[tally]) {
+        Some(id) => format!("{refusal} {}", wording::refusal_named(&id)),
+        None => refusal,
+    };
+    Failure::refused(code, message)
 }
 
 /// Lets the push go, saying once why it was not checked.

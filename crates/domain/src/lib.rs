@@ -30,6 +30,7 @@ pub mod radar;
 pub mod ready;
 pub mod ref_scheme;
 pub mod repo;
+pub mod report;
 pub mod reservation;
 pub mod retention;
 pub mod review;

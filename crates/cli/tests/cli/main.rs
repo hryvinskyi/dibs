@@ -23,6 +23,8 @@ mod messages;
 #[cfg(test)]
 mod push;
 #[cfg(test)]
+mod report;
+#[cfg(test)]
 mod shell;
 #[cfg(test)]
 mod slots;

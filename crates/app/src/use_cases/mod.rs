@@ -19,6 +19,7 @@ mod escalate;
 mod follow_events;
 mod force_release;
 mod get_item;
+mod give_feedback;
 mod grant;
 mod grant_endings;
 mod handover;
@@ -38,6 +39,7 @@ mod operate_project;
 mod post_message;
 mod prune;
 mod radar;
+mod read_stats;
 mod read_thread;
 mod readable;
 mod ready;
@@ -45,6 +47,7 @@ mod register_session;
 mod release;
 mod remove_dependency;
 mod remove_member;
+mod report_pr_state;
 mod resolve_ui_session;
 mod review;
 mod revoke_grant;
@@ -80,6 +83,7 @@ pub use escalate::{Escalate, EscalateInput, Escalation, OpenEscalation};
 pub use follow_events::{FollowEvents, FollowPage, FollowedEvent};
 pub use force_release::ForceRelease;
 pub use get_item::{GetItem, ItemView};
+pub use give_feedback::{FeedbackAbout, FeedbackInput, GiveFeedback};
 pub use grant::{Grant, GrantInput, GrantResult};
 pub use handover::{
     HandedOver, HandoverSweep, NarrowClaim, NarrowClaimInput, NarrowedClaim, TickHandovers,
@@ -103,12 +107,14 @@ pub use operate_project::OperateProject;
 pub use post_message::{PostMessage, PostMessageInput};
 pub use prune::{Prune, PruneReport};
 pub use radar::{FootprintInput, FootprintRecorded, NamedOverlap, OnBranch, RecordFootprint};
+pub use read_stats::{MAX_STATS_EVENTS, ReadStats, StatsView};
 pub use read_thread::{ReadThread, RecipientAck, ThreadView};
 pub use ready::{ExcludedEntry, NamedNotReady, Ready, ReadyEntry, ReadyView};
 pub use register_session::{RegisterSession, RegisterSessionInput};
 pub use release::Release;
 pub use remove_dependency::RemoveDependency;
 pub use remove_member::{RemoveMember, RemovedMember};
+pub use report_pr_state::ReportPrState;
 pub use resolve_ui_session::ResolveUiSession;
 pub use review::{
     DropPr, DropPrInput, PrReport, PrReportOutcome, PrStatusQuery, PrStatusView, ReadPrStatus,
@@ -177,6 +183,8 @@ pub struct UseCases {
     pub drop_pr: DropPr,
     /// See [`ReportPr`].
     pub report_pr: ReportPr,
+    /// See [`ReportPrState`].
+    pub report_pr_state: ReportPrState,
     /// See [`ReviewClaims`].
     pub review_claims: ReviewClaims,
     /// See [`ListClaims`].
@@ -191,6 +199,10 @@ pub struct UseCases {
     pub edit_check: EditCheck,
     /// See [`Escalate`].
     pub escalate: Escalate,
+    /// See [`GiveFeedback`].
+    pub give_feedback: GiveFeedback,
+    /// See [`ReadStats`].
+    pub read_stats: ReadStats,
     /// See [`Grant`].
     pub grant: Grant,
     /// See [`RevokeGrant`].
@@ -292,6 +304,7 @@ impl UseCases {
             start_review: StartReview::new(deps),
             drop_pr: DropPr::new(deps),
             report_pr: ReportPr::new(deps),
+            report_pr_state: ReportPrState::new(deps),
             review_claims: ReviewClaims::new(deps),
             list_claims: ListClaims::new(deps),
             pr_status: ReadPrStatus::new(deps),
@@ -299,6 +312,8 @@ impl UseCases {
             status: Status::new(deps),
             edit_check: EditCheck::new(deps),
             escalate: Escalate::new(deps),
+            give_feedback: GiveFeedback::new(deps),
+            read_stats: ReadStats::new(deps),
             grant: Grant::new(deps),
             revoke_grant: RevokeGrant::new(deps),
             start_thread: StartThread::new(deps),

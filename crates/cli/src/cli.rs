@@ -13,6 +13,7 @@ use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Importance, Subject};
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::RefusalId;
 use dibs_domain::review::PrRef;
 use dibs_domain::settings::parse_duration;
 use dibs_domain::slot::{Purpose, SlotName};
@@ -96,6 +97,10 @@ pub enum Command {
     /// Ask the project's arbiters to settle what you and another member's agent do not agree on:
     /// who goes first on a work item, a slot, or a conversation left unanswered.
     Escalate(EscalateArgs),
+    /// Tell the project's admins that a refusal of dibs was wrong, or that you resolved a rebase
+    /// conflict by hand.
+    #[command(subcommand)]
+    Feedback(FeedbackCommand),
     /// Take, wait for and release slots: short holds on shared actions (a deploy, a release, a
     /// migration) that one member does at a time.
     #[command(subcommand)]
@@ -111,6 +116,20 @@ pub enum Command {
     /// Manage the project (admins only).
     #[command(subcommand)]
     Admin(AdminCommand),
+}
+
+impl Command {
+    /// Whether the command, once done, starts the background sync that sends what the hooks
+    /// counted and no heartbeat carried yet: every command but the sync itself, the tool server,
+    /// which runs for a whole session, `self-update`, which replaces the binary such a sync would
+    /// run, and the pre-push check while the guard is switched off.
+    pub fn reports_after(&self, switched_off: bool) -> bool {
+        match self {
+            Self::Sync(_) | Self::Mcp | Self::SelfUpdate(_) => false,
+            Self::Check(args) => !(args.push && switched_off),
+            _ => true,
+        }
+    }
 }
 
 /// `dibs sync`.
@@ -132,6 +151,10 @@ pub struct SyncArgs {
     /// is newer than this one.
     #[arg(long)]
     pub update: bool,
+    /// Send a heartbeat, due or not, when this machine counted refusals or failures it has not
+    /// reported yet.
+    #[arg(long)]
+    pub report: bool,
 }
 
 /// `dibs self-update`.
@@ -419,6 +442,41 @@ fn parse_message(text: &str) -> Result<MessageId, String> {
         .ok_or_else(|| format!("'{text}' is not a message id; ids are whole numbers"))
 }
 
+/// `dibs feedback`.
+#[derive(Debug, Subcommand)]
+pub enum FeedbackCommand {
+    /// A refusal that was wrong, by the id its reason ends with (`r-7f3a`).
+    FalseRefusal(FalseRefusalArgs),
+    /// A file whose conflict you resolved by hand while rebasing; only the area it lies in is
+    /// kept.
+    Conflict(ConflictArgs),
+}
+
+/// `dibs feedback false-refusal`.
+#[derive(Debug, Args)]
+pub struct FalseRefusalArgs {
+    /// The refusal's id, as its reason shows it.
+    #[arg(value_parser = RefusalId::parse)]
+    pub id: RefusalId,
+    /// Why it was wrong, one line of at most 280 characters (`-` reads it from standard input).
+    /// It is kept as written for 90 days and read by you and the project's admins: name no path,
+    /// command line, credential or customer's data.
+    #[arg(long)]
+    pub reason: String,
+}
+
+/// `dibs feedback conflict`.
+#[derive(Debug, Args)]
+pub struct ConflictArgs {
+    /// The file, relative to the current directory or absolute.
+    pub path: PathBuf,
+    /// What conflicted, one line of at most 280 characters (`-` reads it from standard input). It
+    /// is kept as written for 90 days and read by you and the project's admins: name no path,
+    /// command line, credential or customer's data.
+    #[arg(long)]
+    pub reason: String,
+}
+
 /// `dibs escalate`.
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("subject").required(true).args(["item", "slot", "thread"])))]
@@ -704,6 +762,51 @@ pub struct FileArgs {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_command_but_the_sync_the_tool_server_and_self_update_reports_after_it_ran() {
+        let reports = |line: &[&str], off: bool| {
+            let Invocation::Service(command) = Cli::try_parse_from(line).unwrap().command else {
+                panic!("{line:?} is no command of the server");
+            };
+            command.reports_after(off)
+        };
+        for line in [
+            &["dibs", "status"][..],
+            &["dibs", "whoami"],
+            &["dibs", "ready"],
+            &["dibs", "claim", "12"],
+            &["dibs", "release", "12"],
+            &["dibs", "inbox"],
+            &["dibs", "slot", "list"],
+            &["dibs", "check", "src/a.rs"],
+            &[
+                "dibs",
+                "feedback",
+                "false-refusal",
+                "r-7f3a51",
+                "--reason",
+                "free",
+            ],
+            &["dibs", "admin", "force-release", "12"],
+        ] {
+            assert!(reports(line, false), "{line:?}");
+            assert!(
+                reports(line, true),
+                "the switch silences hooks only: {line:?}"
+            );
+        }
+        for line in [
+            &["dibs", "sync"][..],
+            &["dibs", "sync", "--report"],
+            &["dibs", "mcp"],
+            &["dibs", "self-update"],
+        ] {
+            assert!(!reports(line, false), "{line:?}");
+        }
+        assert!(reports(&["dibs", "check", "--push"], false));
+        assert!(!reports(&["dibs", "check", "--push"], true));
+    }
+
     use clap::CommandFactory;
 
     use super::*;

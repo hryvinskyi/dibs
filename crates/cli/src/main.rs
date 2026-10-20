@@ -106,6 +106,12 @@ fn run(command: Command, env: HashMap<String, String>, printer: Printer) -> Resu
         .enable_all()
         .build()
         .map_err(|_| Failure::config("no_runtime", "The command could not start its runtime."))?;
+    let off = guard::switched_off(env.get(guard::OFF_VAR).map(String::as_str));
+    let reports_after = command.reports_after(off);
     let ctx = Context::new(env, cwd, printer);
-    runtime.block_on(commands::run(command, &ctx))
+    let result = runtime.block_on(commands::run(command, &ctx));
+    if reports_after {
+        commands::sync::report_later(&ctx);
+    }
+    result
 }

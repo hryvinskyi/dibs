@@ -35,6 +35,25 @@ impl Work {
         Self::begin_present(store, actor.project, Some(actor.member)).await
     }
 
+    /// Opens a transaction that only reads, for a member's request in their project, refusing a
+    /// member removed since they signed in as [`Work::begin_for`] does. It takes no write lock and
+    /// is never committed: dropping it ends it.
+    ///
+    /// # Errors
+    /// [`AppError::Unauthorized`] when the member is no longer in the project;
+    /// [`AppError::Store`] when the store fails.
+    pub(crate) async fn begin_reading_for(
+        store: &dyn Store,
+        actor: &Actor,
+    ) -> Result<Self, AppError> {
+        let work = Self {
+            tx: store.read().await?,
+            project: actor.project,
+            last_event: None,
+        };
+        work.present(actor.member).await
+    }
+
     /// Opens a transaction for whoever administers a project: an admin, who must still be in it
     /// as [`Work::begin_for`] requires, or the operator of the service.
     ///
@@ -66,22 +85,29 @@ impl Work {
         project: ProjectId,
         member: Option<MemberId>,
     ) -> Result<Self, AppError> {
-        let mut work = Self {
+        let work = Self {
             tx: store.begin().await?,
             project,
             last_event: None,
         };
-        if let Some(member) = member {
-            let present = work
-                .tx
-                .member(project, member)
-                .await?
-                .is_some_and(|record| record.is_present());
-            if !present {
-                return Err(AppError::Unauthorized);
-            }
+        match member {
+            Some(member) => work.present(member).await,
+            None => Ok(work),
         }
-        Ok(work)
+    }
+
+    /// The transaction, once `member` is found still in its project.
+    async fn present(mut self, member: MemberId) -> Result<Self, AppError> {
+        let present = self
+            .tx
+            .member(self.project, member)
+            .await?
+            .is_some_and(|record| record.is_present());
+        if present {
+            Ok(self)
+        } else {
+            Err(AppError::Unauthorized)
+        }
     }
 
     /// Scopes a transaction opened before its project was known (while authenticating) to that

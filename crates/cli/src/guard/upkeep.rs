@@ -5,6 +5,9 @@
 //! A start of a session that finds the daily check for a newer client due asks the sync for it
 //! (`--update`); no other event does.
 //!
+//! A command of the command line starts one too (`--report`) when the hooks counted refusals or
+//! failures that no heartbeat carried yet.
+//!
 //! One at a time per project: the hook starts one only while it can take the project's sync lock,
 //! and not again within a few seconds of the last start; the sync itself takes the same lock for
 //! the whole of its run. A second hook that cannot take the lock starts nothing.
@@ -50,41 +53,34 @@ fn refused(what: &str) -> impl Fn(std::io::Error) -> PortError + '_ {
     }
 }
 
-impl Upkeep for DetachedSync {
-    fn start(
-        &self,
-        session: &SessionRef,
-        now: OffsetDateTime,
-        due: Due,
-    ) -> Result<bool, PortError> {
+impl DetachedSync {
+    /// Starts `dibs sync --quiet` with `args` in the background, unless one runs or, when
+    /// `spaced`, was started within [`START_SPACING`]; answers whether it was started now. Only a
+    /// spaced start is remembered as the last start.
+    fn spawn(&self, now: OffsetDateTime, spaced: bool, args: &[&str]) -> Result<bool, PortError> {
         let lock = open_lock(&self.state).map_err(refused("Opening the sync lock"))?;
         match lock.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Ok(false),
             Err(TryLockError::Error(error)) => return Err(refused("Taking the sync lock")(error)),
         }
-        if self
-            .state
-            .sync_started_at()
-            .is_some_and(|at| is_fresh(at, now, START_SPACING))
-        {
-            return Ok(false);
+        if spaced {
+            if self
+                .state
+                .sync_started_at()
+                .is_some_and(|at| is_fresh(at, now, START_SPACING))
+            {
+                return Ok(false);
+            }
+            self.state
+                .remember_sync_started(now)
+                .map_err(refused("Recording the sync's start"))?;
         }
-        self.state
-            .remember_sync_started(now)
-            .map_err(refused("Recording the sync's start"))?;
         let exe = std::env::current_exe().map_err(refused("Finding the dibs binary"))?;
         let mut command = Command::new(exe);
         command
-            .args([
-                "sync",
-                "--quiet",
-                "--host",
-                session.host.as_str(),
-                "--session",
-            ])
-            .arg(session.key.as_str())
-            .args(due.update.then_some("--update"))
+            .args(["sync", "--quiet"])
+            .args(args)
             .current_dir(&self.root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -92,6 +88,38 @@ impl Upkeep for DetachedSync {
         detach(&mut command);
         command.spawn().map_err(refused("Starting dibs sync"))?;
         Ok(true)
+    }
+
+    /// Starts the sync a command of the command line leaves behind when the hooks counted
+    /// something not reported yet: a heartbeat of the command line's session that carries it.
+    /// A command runs far less often than a hook, so only a sync still running holds it back, and
+    /// it does not count as the last start the hooks space theirs from: a session's first hook
+    /// still asks for the daily check for a newer client.
+    ///
+    /// # Errors
+    /// [`PortError::Refused`] when it could not be started.
+    pub fn start_reporting(&self, now: OffsetDateTime) -> Result<bool, PortError> {
+        self.spawn(now, false, &["--report"])
+    }
+}
+
+impl Upkeep for DetachedSync {
+    fn start(
+        &self,
+        session: &SessionRef,
+        now: OffsetDateTime,
+        due: Due,
+    ) -> Result<bool, PortError> {
+        let mut args = vec![
+            "--host",
+            session.host.as_str(),
+            "--session",
+            session.key.as_str(),
+        ];
+        if due.update {
+            args.push("--update");
+        }
+        self.spawn(now, true, &args)
     }
 }
 

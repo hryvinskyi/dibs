@@ -4,8 +4,9 @@
 //! for the acknowledgement of the area's holder, slots taken by racing members and handed to the
 //! one waiting, a shell command refused while another member holds the slot it needs, a member
 //! removed while they held a claim and a slot, a claim through review that an integration's
-//! merge report completes, an overlap of two members' branches reported by an integration, and a
-//! feature claim that receives the area a debt claim hands over.
+//! merge report completes, an overlap of two members' branches reported by an integration, a
+//! feature claim that receives the area a debt claim hands over, and the figures of a pilot that
+//! members' machines reported.
 
 #[cfg(test)]
 mod harness;
@@ -18,6 +19,8 @@ mod handover;
 mod hooks;
 #[cfg(test)]
 mod people;
+#[cfg(test)]
+mod pilot;
 #[cfg(test)]
 mod race;
 #[cfg(test)]

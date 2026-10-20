@@ -321,7 +321,9 @@ a host.
 | OpenCode | planned | its in-process plugins, through a shim over `dibs hook neutral` |
 
 `dibs doctor` shows the hosts this binary supports and what each can carry. `DIBS_OFF=1` switches the guard off on a
-machine: every hook answers without objection and contacts nobody.
+machine: every hook answers without objection and contacts nobody, and `dibs check --push` lets every push go. The
+switch is not hidden: the machine counts each session that ran with it on, and the next report shows it to the
+project's admins ([docs/operations.md](docs/operations.md#a-pilots-figures)).
 
 ### Claude Code
 
@@ -412,6 +414,8 @@ dibs thread 31                                    # read one, with each message'
 dibs read 31                                      # mark it read
 dibs ack 57                                       # acknowledge message 57 once you have read it (for a wide claim's announcement, that grants)
 dibs escalate gh:acme/widgets#42 --reason "alice's agent and mine both need billing today"   # or --slot, --thread
+dibs feedback false-refusal r-7f3a51 --reason "billing was released an hour ago"   # a refusal that was wrong, by its id
+dibs feedback conflict src/billing/rates.rs --reason "rebased over a rounding change"   # a conflict resolved by hand
 dibs slot take deploy:prod --purpose "ship 2.4" [--wait 9m] [--until-run deploy.yml@<sha>]   # exit 1 while queued
 dibs slot run deploy:prod --purpose "ship 2.4" -- ./deploy.sh prod   # hold it while the command runs, then release
 dibs slot release deploy:prod                     # the first member waiting is offered it
@@ -419,7 +423,7 @@ dibs slot leave deploy:prod                       # stop waiting, or give up the
 dibs slot list                                    # every slot: who holds it and why, until when, who waits
 dibs slot test settings.toml -- 'cd ops && ./deploy.sh prod'   # what a command line needs, without a server
 dibs slot takeover deploy:prod --purpose "finish it" --reason "the deploy log stopped; checked the hosts"
-dibs sync [--force] [--quiet] [--update]          # heartbeat and refresh what this machine remembers
+dibs sync [--force] [--quiet] [--update] [--report]   # heartbeat and refresh what this machine remembers
 dibs self-update [--version 1.2.3]                # install a newer release, checked against the release key
 dibs mcp                                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook

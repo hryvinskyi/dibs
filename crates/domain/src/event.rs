@@ -17,6 +17,7 @@ use crate::item::{ExternalRef, Title};
 use crate::paths::RepoPath;
 use crate::radar::{BranchName, OverlapKind};
 use crate::repo::RepoId;
+use crate::report::{DayCounts, Feedback, FeedbackReason, ReportDay};
 use crate::retention::PruneCounts;
 use crate::review::PrRef;
 use crate::session::HostName;
@@ -148,6 +149,14 @@ pub enum EventKind {
     WaitWithdrawn(WaitWithdrawn),
     /// A request to hand an area over waited past the project's limit and could not be escalated.
     YieldUnescalated(YieldUnescalated),
+    /// A member's machine reported a day's counts that differ from those kept for it. Seen by
+    /// admins and by that member only.
+    HookReported(HookReported),
+    /// A member's agent said what it thought of a refusal, or that it resolved a conflict by hand.
+    /// Seen by admins and by that member only.
+    FeedbackGiven(FeedbackGiven),
+    /// An integration reported that a pull request stopped, or started again, merging cleanly.
+    PrStateReported(PrStateReported),
 }
 
 impl EventKind {
@@ -203,6 +212,9 @@ impl EventKind {
             Self::ClaimNarrowed(_) => "claim_narrowed",
             Self::WaitWithdrawn(_) => "wait_withdrawn",
             Self::YieldUnescalated(_) => "yield_unescalated",
+            Self::HookReported(_) => "hook_reported",
+            Self::FeedbackGiven(_) => "feedback_given",
+            Self::PrStateReported(_) => "pr_state_reported",
         }
     }
 
@@ -267,8 +279,11 @@ impl EventKind {
             | Self::YieldRequested(_)
             | Self::AreaHandedOver(_)
             | Self::WaitWithdrawn(_)
-            | Self::YieldUnescalated(_) => Vec::new(),
+            | Self::YieldUnescalated(_)
+            | Self::PrStateReported(_) => Vec::new(),
             Self::ClaimNarrowed(e) => vec![Some(e.member)],
+            Self::HookReported(e) => vec![Some(e.member)],
+            Self::FeedbackGiven(e) => vec![Some(e.member)],
         };
         named.into_iter().flatten().collect()
     }
@@ -324,7 +339,10 @@ impl EventKind {
             | Self::AreaHandedOver(_)
             | Self::ClaimNarrowed(_)
             | Self::WaitWithdrawn(_)
-            | Self::YieldUnescalated(_) => None,
+            | Self::YieldUnescalated(_)
+            | Self::HookReported(_)
+            | Self::FeedbackGiven(_)
+            | Self::PrStateReported(_) => None,
         }
     }
 
@@ -385,7 +403,10 @@ impl EventKind {
             | Self::AreaHandedOver(_)
             | Self::ClaimNarrowed(_)
             | Self::WaitWithdrawn(_)
-            | Self::YieldUnescalated(_) => None,
+            | Self::YieldUnescalated(_)
+            | Self::HookReported(_)
+            | Self::FeedbackGiven(_)
+            | Self::PrStateReported(_) => None,
         }
     }
 
@@ -405,6 +426,65 @@ impl EventKind {
             | Self::SlotStalled(SlotMember { slot, .. })
             | Self::SlotResumed(SlotMember { slot, .. }) => Some(slot),
             _ => None,
+        }
+    }
+
+    /// The member an event is kept between: only they and the project's admins see it. `None`
+    /// for an event every reader of the log may see.
+    pub const fn private_to(&self) -> Option<MemberId> {
+        match self {
+            Self::HookReported(e) => Some(e.member),
+            Self::FeedbackGiven(e) => Some(e.member),
+            Self::ItemCreated(_)
+            | Self::Claimed(_)
+            | Self::Renewed(_)
+            | Self::TakenOver(_)
+            | Self::Released(_)
+            | Self::Completed(_)
+            | Self::ForceReleased(_)
+            | Self::Reserved(_)
+            | Self::Granted(_)
+            | Self::GrantRevoked(_)
+            | Self::ThreadStarted(_)
+            | Self::MessagePosted(_)
+            | Self::SettingsChanged(_)
+            | Self::ItemUpdated(_)
+            | Self::DependencyAdded(_)
+            | Self::DependencyRemoved(_)
+            | Self::Acked(_)
+            | Self::WideClaimed(_)
+            | Self::WideGrantedByAck(_)
+            | Self::SlotTaken(_)
+            | Self::SlotRenewed(_)
+            | Self::SlotQueued(_)
+            | Self::SlotLeft(_)
+            | Self::SlotOffered(_)
+            | Self::SlotOfferLapsed(_)
+            | Self::SlotReleased(_)
+            | Self::SlotExpired(_)
+            | Self::SlotForceReleased(_)
+            | Self::SlotStalled(_)
+            | Self::SlotResumed(_)
+            | Self::SlotStallTakenOver(_)
+            | Self::Escalated(_)
+            | Self::MemberRemoved(_)
+            | Self::Pruned(_)
+            | Self::ThreadDeleted(_)
+            | Self::ReviewStarted(_)
+            | Self::PrMerged(_)
+            | Self::PrClosed(_)
+            | Self::PrDropped(_)
+            | Self::ReviewEnded(_)
+            | Self::CompletedByMerge(_)
+            | Self::BranchRecorded(_)
+            | Self::FootprintChanged(_)
+            | Self::OverlapFound(_)
+            | Self::YieldRequested(_)
+            | Self::AreaHandedOver(_)
+            | Self::ClaimNarrowed(_)
+            | Self::WaitWithdrawn(_)
+            | Self::YieldUnescalated(_)
+            | Self::PrStateReported(_) => None,
         }
     }
 }
@@ -908,6 +988,42 @@ pub struct YieldUnescalated {
     pub reason: UnescalatedReason,
 }
 
+/// A member's machine reported what it counted on a day: refusals and failures by kind, and how
+/// long hooks took. Never a path, a command line or a work item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookReported {
+    /// The member.
+    pub member: MemberId,
+    /// Their machine.
+    pub host: HostName,
+    /// The day, in UTC.
+    pub day: ReportDay,
+    /// What was counted.
+    #[serde(flatten)]
+    pub counts: DayCounts,
+}
+
+/// A member's agent gave feedback on the guard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedbackGiven {
+    /// The member.
+    pub member: MemberId,
+    /// What it is about.
+    pub about: Feedback,
+    /// Why, as the member wrote it.
+    pub reason: FeedbackReason,
+}
+
+/// An integration reported whether a pull request merges cleanly into its base, and that differs
+/// from what it reported last.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrStateReported {
+    /// The pull request.
+    pub pr: PrRef,
+    /// Whether it merges without a conflict.
+    pub mergeable: bool,
+}
+
 /// An admin deleted a conversation. Carries the id only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadDeleted {
@@ -1335,6 +1451,102 @@ mod tests {
         assert!(kinds[0].members().is_empty() && kinds[1].members().is_empty());
         assert!(kinds[3].members().is_empty() && kinds[4].members().is_empty());
         assert_eq!(kinds[2].members(), BTreeSet::from([ALICE]));
+    }
+
+    fn report_kinds() -> Vec<EventKind> {
+        use crate::report::{DurationBuckets, HookDurations, HookEventName, RefusalId, Tally as T};
+        use crate::session::AgentLabel;
+        let counts = DayCounts::new(
+            std::collections::BTreeMap::from([(T::HeldBy, 2), (T::SwitchedOff, 1)]),
+            vec![HookDurations {
+                agent: AgentLabel::parse("neutral").unwrap(),
+                event: HookEventName::parse("before_tool").unwrap(),
+                buckets: DurationBuckets::new([3, 1, 0, 0, 0, 0, 0]),
+            }],
+        )
+        .unwrap();
+        vec![
+            EventKind::HookReported(HookReported {
+                member: ALICE,
+                host: HostName::parse("laptop").unwrap(),
+                day: ReportDay::parse("2026-03-02").unwrap(),
+                counts,
+            }),
+            EventKind::FeedbackGiven(FeedbackGiven {
+                member: BOB,
+                about: Feedback::FalseRefusal {
+                    refusal: RefusalId::parse("r-7f3a").unwrap(),
+                    tally: Some(T::HeldBy),
+                },
+                reason: FeedbackReason::parse("the area was released").unwrap(),
+            }),
+            EventKind::FeedbackGiven(FeedbackGiven {
+                member: BOB,
+                about: Feedback::Conflict {
+                    repo: RepoId::parse("api").unwrap(),
+                    area: Some(area("api:billing")),
+                },
+                reason: FeedbackReason::parse("both changed the rounding").unwrap(),
+            }),
+            EventKind::PrStateReported(PrStateReported {
+                pr: PrRef::parse("acme/widgets#7").unwrap(),
+                mergeable: false,
+            }),
+        ]
+    }
+
+    #[test]
+    fn report_events_carry_counts_kinds_and_areas_only_and_are_kept_between_their_member_and_admins()
+     {
+        let kinds = report_kinds();
+        for kind in &kinds {
+            let value = serde_json::to_value(kind).unwrap();
+            assert_eq!(value["kind"], kind.name());
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(&back, kind);
+            assert_eq!(
+                (kind.message(), kind.thread(), kind.slot()),
+                (None, None, None)
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&kinds[0]).unwrap()["payload"],
+            serde_json::json!({
+                "member": 1,
+                "host": "laptop",
+                "day": "2026-03-02",
+                "counts": {"held_by": 2, "switched_off": 1},
+                "durations": [
+                    {"agent": "neutral", "event": "before_tool", "buckets": [3, 1, 0, 0, 0, 0, 0]}
+                ],
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&kinds[1]).unwrap()["payload"],
+            serde_json::json!({
+                "member": 2,
+                "about": {"kind": "false_refusal", "refusal": "r-7f3a", "tally": "held_by"},
+                "reason": "the area was released",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&kinds[2]).unwrap()["payload"]["about"],
+            serde_json::json!({"kind": "conflict", "repo": "api", "area": "api:billing"})
+        );
+        assert_eq!(
+            serde_json::to_value(&kinds[3]).unwrap()["payload"],
+            serde_json::json!({"pr": "acme/widgets#7", "mergeable": false})
+        );
+        let private: Vec<Option<MemberId>> = kinds.iter().map(EventKind::private_to).collect();
+        assert_eq!(private, [Some(ALICE), Some(BOB), Some(BOB), None]);
+        assert_eq!(kinds[0].members(), BTreeSet::from([ALICE]));
+        assert!(kinds[3].members().is_empty());
+        let public = every_kind()
+            .into_iter()
+            .chain(slot_kinds())
+            .chain(review_kinds())
+            .all(|kind| kind.private_to().is_none());
+        assert!(public, "only reports and feedback are kept private");
     }
 
     #[test]

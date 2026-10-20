@@ -57,7 +57,13 @@ fn a_push_to_a_frozen_main_is_refused_and_main_unfrozen_or_a_branch_is_silent() 
     let refused = check(&setup, "bob", &api, MAIN);
     assert_eq!(status(&refused), 1);
     let said = text(&refused.stderr);
-    for part in ["migrate", "alice", "invoices to bigint", "--no-verify"] {
+    for part in [
+        "migrate",
+        "alice",
+        "invoices to bigint",
+        "--no-verify",
+        "(refusal r-",
+    ] {
         assert!(said.contains(part), "{part}: {said}");
     }
     let branch = check(&setup, "bob", &api, FEATURE);
@@ -194,6 +200,7 @@ fn a_push_to_a_protected_main_is_refused_for_a_member_who_is_no_pusher_and_lets_
         "open a pull request",
         "--no-verify",
         "breaks the team's rule",
+        "(refusal r-",
     ] {
         assert!(said.contains(part), "{part}: {said}");
     }
@@ -220,6 +227,65 @@ fn git_refuses_a_members_push_to_a_protected_main_through_its_pre_push_hook() {
     git(&api, &["checkout", "-q", "-b", "bob/7-rounding"]);
     let branch = push(&api, &["shared", "bob/7-rounding"]);
     assert!(branch.status.success(), "{}", text(&branch.stderr));
+}
+
+#[test]
+fn switched_off_the_push_check_lets_every_push_go_without_a_word_or_a_call() {
+    let setup = setup();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    take(&setup, "alice", &api);
+    let before = setup.server.requests();
+    let out = setup
+        .dibs_as("bob", &api)
+        .env("DIBS_OFF", "1")
+        .args(["check", "--push"])
+        .write_stdin(MAIN.to_owned())
+        .output()
+        .unwrap();
+    assert_eq!(status(&out), 0);
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stderr), "");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        setup.server.requests(),
+        before,
+        "no call, and no sync started"
+    );
+}
+
+#[test]
+fn a_refused_push_is_counted_by_its_kind_and_the_next_command_reports_it() {
+    let setup = protected();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let refused = check(&setup, "bob", &api, MAIN);
+    assert_eq!(status(&refused), 1);
+    let sync = setup
+        .dibs_as("bob", &api)
+        .args(["sync", "--report"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&sync), 0, "{}", text(&sync.stderr));
+    let beats = || -> String {
+        setup
+            .server
+            .request_log()
+            .into_iter()
+            .filter(|request| request.starts_with("POST /v1/heartbeat"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !beats().contains(r#""counts":{"push_needs_permission":1}"#)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let reported = beats();
+    assert!(
+        reported.contains(r#""counts":{"push_needs_permission":1}"#),
+        "{reported}"
+    );
+    assert!(!reported.contains("refs/heads/main"), "{reported}");
 }
 
 /// Another remote of the checkout, `name`, fetched from `url` and pushed to a bare repository of

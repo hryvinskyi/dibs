@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use dibs_domain::event::{BranchRecorded, EventKind};
+use dibs_domain::event::{BranchRecorded, EventKind, HookReported};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::radar::heartbeat_branches;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
+use dibs_domain::report::{HeartbeatReports, HookReport, ReportDay};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -21,6 +22,11 @@ use crate::work::Work;
 pub struct HeartbeatOutcome {
     /// The claims whose `last_seen` moved to now.
     pub refreshed: Vec<ItemId>,
+    /// The days whose report changed what was kept for the session's member and machine.
+    pub reported: Vec<ReportDay>,
+    /// The days whose report was kept or was already: every day reported but those outside the
+    /// week a heartbeat may report.
+    pub accepted: Vec<ReportDay>,
 }
 
 /// Refreshes the session and the caller's live claims taken from a session on the same machine. A
@@ -33,6 +39,11 @@ pub struct HeartbeatOutcome {
 /// the same machine may work in another checkout on another branch. A `BranchRecorded` event marks
 /// each change, and the claim's footprint of the repository, which measured the branch before,
 /// goes with what it made. A repository the project does not list records nothing.
+///
+/// The reports it carries are kept one per member, machine (by the id its dibs gave it, whatever it
+/// is called) and day: a report that differs from the one kept replaces it and appends a
+/// `HookReported` event, one that does not changes nothing. A day more than a week before the
+/// heartbeat, or after the day it is sent, is not kept.
 pub struct Heartbeat {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -55,16 +66,30 @@ impl Heartbeat {
         }
     }
 
-    /// Records the heartbeat.
+    /// Records a heartbeat that reports nothing.
     ///
     /// # Errors
-    /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] when the session is not the caller's; [`AppError::Store`] when the
-    /// store fails.
+    /// As [`Heartbeat::execute_reporting`].
     pub async fn execute(
         &self,
         actor: &Actor,
         session: SessionId,
         branch: Option<&OnBranch>,
+    ) -> Result<HeartbeatOutcome, AppError> {
+        self.execute_reporting(actor, session, branch, None).await
+    }
+
+    /// Records the heartbeat and keeps the reports it carries.
+    ///
+    /// # Errors
+    /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] when the session is not the caller's; [`AppError::Store`] when the
+    /// store fails.
+    pub async fn execute_reporting(
+        &self,
+        actor: &Actor,
+        session: SessionId,
+        branch: Option<&OnBranch>,
+        reports: Option<&HeartbeatReports>,
     ) -> Result<HeartbeatOutcome, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
@@ -111,9 +136,48 @@ impl Heartbeat {
         if board.refresh_member(actor.member, now) {
             work.put_slot_board(actor.project, &board).await?;
         }
+        let mut reported = Vec::new();
+        let mut accepted = Vec::new();
+        let (machine, days) = match reports {
+            Some(reports) => (Some(reports.machine()), reports.days()),
+            None => (None, &[][..]),
+        };
+        for (machine, day) in days
+            .iter()
+            .filter(|day| day.is_recent(now))
+            .filter_map(|day| Some((machine?, day)))
+        {
+            accepted.push(day.day);
+            let report = HookReport {
+                member: actor.member,
+                machine: machine.clone(),
+                host: session.host.clone(),
+                report: day.clone(),
+            };
+            let kept = work
+                .hook_report(actor.project, actor.member, machine, day.day)
+                .await?;
+            if !report.changes(kept.as_ref()) {
+                continue;
+            }
+            work.save_hook_report(actor.project, &report).await?;
+            work.record(
+                now,
+                EventKind::HookReported(HookReported {
+                    member: actor.member,
+                    host: session.host.clone(),
+                    day: day.day,
+                    counts: day.counts.clone(),
+                }),
+            )
+            .await?;
+            reported.push(day.day);
+        }
         work.commit(&*self.notifier).await?;
         Ok(HeartbeatOutcome {
             refreshed: kept.iter().map(|claim| claim.item).collect(),
+            reported,
+            accepted,
         })
     }
 }
@@ -206,6 +270,100 @@ mod tests {
         assert_eq!(
             stored.branch(&RepoId::implicit()).map(BranchName::as_str),
             Some("bob/1-x")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_report_is_kept_per_member_machine_and_day_and_a_resend_replaces_it() {
+        use std::collections::BTreeMap;
+
+        use dibs_domain::report::{DayCounts, DayReport, MachineId, Tally};
+
+        let env = Env::new().await;
+        env.advance(Duration::days(30));
+        let today = ReportDay::of(env.now());
+        let day_of = |day: ReportDay, held: u64| DayReport {
+            day,
+            counts: DayCounts::new(BTreeMap::from([(Tally::HeldBy, held)]), Vec::new()).unwrap(),
+        };
+        let laptop = MachineId::from_bits(1);
+        let other = MachineId::from_bits(2);
+        let beat = |session: SessionId, machine: &MachineId, reports: Vec<DayReport>| {
+            let reports = HeartbeatReports::new(machine.clone(), reports).unwrap();
+            let env = &env;
+            async move {
+                Heartbeat::new(&env.deps)
+                    .execute_reporting(&env.bob.actor, session, None, Some(&reports))
+                    .await
+                    .unwrap()
+            }
+        };
+        let before = env.events().await.len();
+        let first = beat(
+            env.bob.session,
+            &laptop,
+            vec![day_of(today, 1), day_of(today.minus_days(30), 4)],
+        )
+        .await;
+        assert_eq!(first.reported, [today]);
+        assert_eq!(
+            first.accepted,
+            [today],
+            "a day older than a week is not kept"
+        );
+        let again = beat(env.bob.session, &laptop, vec![day_of(today, 1)]).await;
+        assert!(again.reported.is_empty(), "unchanged");
+        assert_eq!(again.accepted, [today], "accepted all the same");
+        assert_eq!(
+            beat(env.bob.session, &laptop, vec![day_of(today, 3)])
+                .await
+                .reported,
+            [today]
+        );
+        let renamed = session(&env.deps, &env.bob.actor, "desktop-renamed", "renamed/0a").await;
+        beat(renamed, &laptop, vec![day_of(today, 4)]).await;
+        let twin = session(&env.deps, &env.bob.actor, "desktop", "desktop/twin").await;
+        beat(twin, &other, vec![day_of(today, 5)]).await;
+        let reported: Vec<(String, u64)> = env
+            .kinds_after(before)
+            .await
+            .into_iter()
+            .filter_map(|kind| match kind {
+                EventKind::HookReported(report) => Some((
+                    report.host.to_string(),
+                    report.counts.counts[&Tally::HeldBy],
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            [
+                ("desktop".to_owned(), 1),
+                ("desktop".to_owned(), 3),
+                ("desktop-renamed".to_owned(), 4),
+                ("desktop".to_owned(), 5)
+            ]
+        );
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let kept = tx.hook_reports(env.project, today, today).await.unwrap();
+        let rows: Vec<(String, String, u64)> = kept
+            .iter()
+            .map(|report| {
+                (
+                    report.machine.to_string(),
+                    report.host.to_string(),
+                    report.report.counts.counts[&Tally::HeldBy],
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (laptop.to_string(), "desktop-renamed".to_owned(), 4),
+                (other.to_string(), "desktop".to_owned(), 5)
+            ],
+            "a renamed machine keeps one row, two machines of one name keep two"
         );
     }
 

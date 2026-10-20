@@ -436,7 +436,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
         .unwrap();
         bob.done(item).await.unwrap();
         assert_eq!(bob.item(item).await.unwrap().item.status, ItemStatus::Done);
-        let heartbeat = bob.heartbeat(bob_session, None).await.unwrap();
+        let heartbeat = bob.heartbeat(bob_session, None, None, &[]).await.unwrap();
         assert!(heartbeat.refreshed.is_empty());
     });
 }
@@ -758,4 +758,77 @@ fn a_feature_claim_waits_for_a_debt_held_area_and_receives_it_when_it_is_narrowe
         let allowed = bob.edit_check(&request).await.unwrap().verdicts;
         assert_eq!(allowed[0].verdict, Verdict::Allowed, "{allowed:?}");
     });
+}
+
+#[test]
+fn a_heartbeat_carries_the_days_reports_and_feedback_is_kept_as_the_server_answers_it() {
+    use std::collections::BTreeMap;
+
+    use dibs_client::api::{FeedbackAbout, FeedbackRequest};
+    use dibs_domain::report::{
+        DayCounts, DayReport, Feedback, FeedbackReason, RefusalId, ReportDay, Tally,
+    };
+
+    let world = World::new();
+    let bob = world.client(&world.bob);
+    run(async {
+        let bob_session = session(&bob, "desktop/cli").await.session_id;
+        let day = ReportDay::of(dibs_test_server::START);
+        let machine = dibs_domain::report::MachineId::from_bits(42);
+        let report = DayReport {
+            day,
+            counts: DayCounts::new(BTreeMap::from([(Tally::NeedsClaim, 2)]), Vec::new()).unwrap(),
+        };
+        let first = bob
+            .heartbeat(
+                bob_session,
+                None,
+                Some(&machine),
+                std::slice::from_ref(&report),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.reported, [day]);
+        let again = bob
+            .heartbeat(bob_session, None, Some(&machine), &[report])
+            .await
+            .unwrap();
+        assert_eq!(again.reports_accepted, [day]);
+        assert!(again.reported.is_empty());
+        let given = bob
+            .feedback(&FeedbackRequest {
+                about: FeedbackAbout::FalseRefusal {
+                    refusal: RefusalId::parse("r-7f3a").unwrap(),
+                    tally: Some(Tally::NeedsClaim),
+                },
+                reason: FeedbackReason::parse("the claim was there").unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            given.feedback,
+            Feedback::FalseRefusal {
+                refusal: RefusalId::parse("r-7f3a").unwrap(),
+                tally: Some(Tally::NeedsClaim),
+            }
+        );
+        let refused = bob
+            .feedback(&FeedbackRequest {
+                about: FeedbackAbout::Conflict {
+                    repo: "elsewhere".parse().unwrap(),
+                    path: dibs_domain::paths::RelPath::parse("a.rs").unwrap(),
+                },
+                reason: FeedbackReason::parse("by hand").unwrap(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "unknown_repo");
+    });
+    let log = world.server.request_log().join("\n");
+    assert!(
+        log.contains(
+            r#""reports":[{"day":"2026-03-02","counts":{"needs_claim":2},"durations":[]}]"#
+        ),
+        "{log}"
+    );
 }

@@ -157,6 +157,7 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
             post(routes::review::merged).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
         )
         .route("/v1/prs/closed", post(routes::review::closed))
+        .route("/v1/prs/state", post(routes::reports::pr_state))
         .route("/v1/review-claims", get(routes::review::claims))
         .route("/v1/claims", get(routes::radar::claims))
         .route("/v1/pr-status", get(routes::review::status))
@@ -193,6 +194,8 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/events", get(routes::events::list))
         .route("/v1/events/stream", get(routes::events::stream))
         .route("/v1/escalations", post(routes::escalations::escalate))
+        .route("/v1/feedback", post(routes::reports::feedback))
+        .route("/v1/stats", get(routes::reports::stats))
         .route("/v1/admin/members", post(routes::admin::add_member))
         .route(
             "/v1/admin/members/{handle}",

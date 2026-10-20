@@ -15,9 +15,9 @@ use crate::context::Context;
 use crate::failure::Failure;
 use crate::mcp::answer;
 use crate::mcp::inputs::{
-    AckInput, CheckInput, ClaimInput, EscalateInput, GrantInput, InboxInput, ItemsInput, KeyInput,
-    NarrowInput, NewInput, ReviewInput, SendInput, SlotInput, SlotTakeInput, TakeoverInput,
-    ThreadInput,
+    AckInput, CheckInput, ClaimInput, EscalateInput, FeedbackInput, GrantInput, InboxInput,
+    ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, SlotInput, SlotTakeInput,
+    TakeoverInput, ThreadInput,
 };
 use crate::mcp::link::Link;
 
@@ -219,6 +219,14 @@ impl Tools {
     }
 
     #[tool(
+        description = "Tell the project's admins what you think of dibs, in two cases. kind false_refusal: a refusal of dibs was wrong (the area was free, the claim was there); give refusal, the id its reason ends with (r-7f3a), and the reason. kind conflict: you resolved a conflict by hand while rebasing; give path, the file, and the reason. Only the area of the file is kept, never its path. The reason, one line of at most 280 characters, is kept as written for 90 days and read by your member and the project's admins: never quote a path, a command line or a secret in it. It is not a message to anyone and changes nothing: when you need an answer, use dibs_send or dibs_escalate."
+    )]
+    async fn dibs_feedback(&self, Parameters(input): Parameters<FeedbackInput>) -> CallToolResult {
+        self.perform(|link| async move { link.feedback(input).await })
+            .await
+    }
+
+    #[tool(
         description = "Take a slot before you do a shared action one member does at a time (a deploy, a release, a migration of a shared database): give the slot and a purpose every member may read (never a credential, a host or a customer's data). outcome taken means it is yours until slot.hold.expires_at; taking it again renews it. outcome queued means another member holds it or it is offered to someone first: position is your place. Then wait for it with wait_seconds (up to 540) or do other work and take it again later; never run the action meanwhile. When it is offered to you, dibs tells you, and your next take gets it. A hold is your member's, shared by all your sessions. Release it with dibs_slot_release as soon as you are done."
     )]
     async fn dibs_slot_take(&self, Parameters(input): Parameters<SlotTakeInput>) -> CallToolResult {
@@ -282,6 +290,7 @@ mod tests {
                 "dibs_claim",
                 "dibs_done",
                 "dibs_escalate",
+                "dibs_feedback",
                 "dibs_grant",
                 "dibs_inbox",
                 "dibs_items",

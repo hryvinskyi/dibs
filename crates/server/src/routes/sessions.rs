@@ -6,18 +6,21 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use dibs_app::use_cases::{OnBranch, RegisterSessionInput};
 use dibs_domain::ids::ItemId;
 use dibs_domain::message::SessionLabel;
 use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::ReportDay;
 use dibs_domain::session::{AgentLabel, HostName};
 
 use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::fields::{parse, parse_required, required, session_in_body};
 use crate::http::AppState;
+use crate::routes::reports::heartbeat_reports;
 use crate::views::{SessionView, reply};
 
 /// The body of `POST /v1/sessions`.
@@ -59,17 +62,25 @@ pub struct HeartbeatBody {
     session_id: Option<u64>,
     repo: Option<String>,
     branch: Option<String>,
+    machine: Option<Value>,
+    reports: Option<Value>,
 }
 
 #[derive(Serialize)]
 struct HeartbeatAnswer {
     refreshed: Vec<ItemId>,
+    reported: Vec<ReportDay>,
+    reports_accepted: Vec<ReportDay>,
 }
 
 /// Records a session's sign of life and answers the claims it kept alive. `repo` and `branch` name
 /// the checkout the session works in and the branch it is on, which the claims of this session it
 /// kept alive record; a checkout on a detached head sends no branch, and a branch needs its
-/// repository.
+/// repository. `reports` carries what the session's machine counted, one entry per day, and
+/// `machine` the id its dibs gave that machine: each day is kept for the caller and the machine,
+/// replacing what was kept for that day. `reported` names the days whose report changed it, and
+/// `reports_accepted` every day whose report was read and is kept, so the client sends the others
+/// again; a report that cannot be read is left out and never fails the heartbeat.
 ///
 /// # Errors
 /// `forbidden` for an integration;
@@ -95,13 +106,16 @@ pub async fn heartbeat(
         }),
         None => None,
     };
+    let reports = heartbeat_reports(actor.member, body.machine.as_ref(), body.reports.as_ref());
     let outcome = state
         .app
         .heartbeat
-        .execute(&actor, session, branch.as_ref())
+        .execute_reporting(&actor, session, branch.as_ref(), reports.as_ref())
         .await?;
     let answer = HeartbeatAnswer {
         refreshed: outcome.refreshed,
+        reported: outcome.reported,
+        reports_accepted: outcome.accepted,
     };
     Ok(reply(StatusCode::OK, &answer))
 }

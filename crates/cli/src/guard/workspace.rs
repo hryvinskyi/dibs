@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
 use dibs_agent_host::ports::{
-    CoordinationGateway, DeliveryLedger, LocalCache, PortError, Upkeep, Workspace, Workspaces,
+    CoordinationGateway, DeliveryLedger, LocalCache, PortError, Tallies, Upkeep, Workspace,
+    Workspaces,
 };
 use dibs_agent_host::upkeep::is_fresh;
 use dibs_client::branch::current_branch;
@@ -28,6 +29,7 @@ use crate::guard::cache::StateCache;
 use crate::guard::gateway::HookGateway;
 use crate::guard::ledger::SessionLedgers;
 use crate::guard::remote::{Remote, RemoteError, checkout_of};
+use crate::guard::report::StateTallies;
 use crate::guard::upkeep::DetachedSync;
 
 /// The variable that names a git directory other than the checkout's own.
@@ -77,6 +79,7 @@ pub struct ClientWorkspace {
     gateway: HookGateway,
     upkeep: DetachedSync,
     ledger: SessionLedgers,
+    tallies: StateTallies,
 }
 
 impl ClientWorkspace {
@@ -86,6 +89,7 @@ impl ClientWorkspace {
             cache: StateCache::new(state.clone(), checkout.root()),
             upkeep: DetachedSync::new(state.clone(), checkout.root()),
             ledger: SessionLedgers::new(state.clone()),
+            tallies: StateTallies::new(state.clone()),
             gateway: HookGateway::new(remote, checkout.clone()),
             checkout,
             git_dir,
@@ -173,5 +177,9 @@ impl Workspace for ClientWorkspace {
 
     fn ledger(&self) -> &dyn DeliveryLedger {
         &self.ledger
+    }
+
+    fn tallies(&self) -> &dyn Tallies {
+        &self.tallies
     }
 }

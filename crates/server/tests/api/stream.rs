@@ -304,6 +304,63 @@ async fn a_conversation_reaches_only_the_streams_of_its_readers() {
 }
 
 #[tokio::test]
+async fn a_report_and_feedback_reach_only_the_streams_of_their_member_and_the_admins() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    let carol = world.member(&alice, "carol", Role::Member).await;
+    let board = world.member(&alice, "board", Role::Importer).await;
+    let session = world.session(&bob, "laptop").await;
+    let (address, _served) = world.serve().await;
+    let (_, mut alices) = Client::connect(address, &alice, "/v1/events/stream", None).await;
+    let (_, mut bobs) = Client::connect(address, &bob, "/v1/events/stream", None).await;
+    let (_, mut carols) = Client::connect(address, &carol, "/v1/events/stream", None).await;
+    let (head, _) = Client::connect(address, &board, "/v1/events/stream", None).await;
+    assert!(
+        head.starts_with("HTTP/1.1 403"),
+        "an integration follows no stream: {head}"
+    );
+
+    world
+        .post(
+            &bob,
+            "/v1/heartbeat",
+            json!({"session_id": session, "machine": "0123456789abcdef0123456789abcdef",
+                   "reports": [{"day": "2026-03-02", "counts": {"held_by": 1}}]}),
+        )
+        .await;
+    world
+        .post(
+            &bob,
+            "/v1/feedback",
+            json!({"kind": "false_refusal", "refusal": "r-7f3a51", "reason": "it was free"}),
+        )
+        .await;
+    let sentinel = world.item(&alice, None, "Everyone sees this").await;
+
+    let kinds = |events: Vec<Received>| -> Vec<String> {
+        events
+            .iter()
+            .map(|e| e.data["kind"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        kinds(bobs.events(3).await),
+        ["hook_reported", "feedback_given", "item_created"]
+    );
+    assert_eq!(
+        kinds(alices.events(3).await),
+        ["hook_reported", "feedback_given", "item_created"]
+    );
+    let carols_events = carols.events(1).await;
+    assert_eq!(carols_events[0].data["payload"]["item"], sentinel);
+    assert_eq!(carols.event(QUIET).await, None);
+    let (_, mut replay) = Client::connect(address, &carol, "/v1/events/stream?after=0", None).await;
+    let replayed = format!("{:?}", replay.events(1).await);
+    assert!(!replayed.contains("hook_reported") && !replayed.contains("it was free"));
+}
+
+#[tokio::test]
 async fn another_projects_events_never_arrive() {
     let world = World::new().await;
     let alice = world.project("acme", "alice").await;

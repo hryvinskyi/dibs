@@ -165,6 +165,30 @@ impl EventRows for SqliteTx {
             .map(|row| completion(event(row)?))
             .collect()
     }
+
+    async fn events_of_kinds(
+        &mut self,
+        project: ProjectId,
+        names: &[&str],
+        (from, to): (OffsetDateTime, OffsetDateTime),
+        after: Option<EventId>,
+        limit: usize,
+    ) -> StoreResult<Vec<Event>> {
+        let statement = sqlx::query(
+            "SELECT e.id, e.project_id, e.kind, e.payload, e.at \
+             FROM json_each(?2) k JOIN events e INDEXED BY events_by_kind_and_time \
+               ON e.project_id = ?1 AND e.kind = k.value AND e.at >= ?3 AND e.at < ?4 \
+             WHERE ?5 IS NULL OR e.id > ?5 \
+             ORDER BY e.id LIMIT ?6",
+        )
+        .bind(int(project.get())?)
+        .bind(json(names)?)
+        .bind(nanos(from)?)
+        .bind(nanos(to)?)
+        .bind(after.map(|id| int(id.get())).transpose()?)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX));
+        self.all(statement).await?.iter().map(event).collect()
+    }
 }
 
 /// The completion an event stored under a completion's name records.

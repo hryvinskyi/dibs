@@ -140,13 +140,17 @@ pub(crate) async fn visible_page(
     Ok(VisiblePage { events, next, more })
 }
 
-/// Whether the actor may see an event: always, unless it is about a conversation; then only when
-/// the conversation is among `threads` and the actor may read it.
+/// Whether the actor may see an event: one kept between a member and the admins only by them;
+/// one about a conversation only when the conversation is among `threads` and the actor may read
+/// it; any other always.
 pub(crate) fn visible(
     actor: &Actor,
     kind: &EventKind,
     threads: &BTreeMap<ThreadId, ThreadRecord>,
 ) -> bool {
+    if let Some(member) = kind.private_to() {
+        return member == actor.member || actor.role.is_admin();
+    }
     match kind.thread() {
         None => true,
         Some(id) => threads
@@ -222,6 +226,14 @@ mod tests {
             item: ItemId(4),
             member: MemberId(1),
         });
+        let feedback = EventKind::FeedbackGiven(dibs_domain::event::FeedbackGiven {
+            member: MemberId(3),
+            about: dibs_domain::report::Feedback::Conflict {
+                repo: dibs_domain::repo::RepoId::implicit(),
+                area: None,
+            },
+            reason: dibs_domain::report::FeedbackReason::parse("both edited it").unwrap(),
+        });
         let cases = [
             (actor(1, Role::Admin), &started, true),
             (actor(2, Role::Member), &started, true),
@@ -233,6 +245,10 @@ mod tests {
             (actor(3, Role::Member), &completed, true),
             (actor(4, Role::Importer), &posted(20), false),
             (actor(4, Role::Importer), &completed, true),
+            (actor(3, Role::Member), &feedback, true),
+            (actor(1, Role::Admin), &feedback, true),
+            (actor(2, Role::Member), &feedback, false),
+            (actor(4, Role::Importer), &feedback, false),
         ];
         for (who, kind, expected) in cases {
             assert_eq!(

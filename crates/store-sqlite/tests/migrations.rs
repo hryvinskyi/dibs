@@ -867,4 +867,65 @@ mod migrations {
             );
         }
     }
+
+    #[tokio::test]
+    async fn reports_start_empty_on_a_database_of_before_and_refuse_a_malformed_row() {
+        use std::collections::BTreeMap;
+
+        use dibs_domain::report::{DayCounts, DayReport, HookReport, ReportDay, Tally};
+        use dibs_domain::review::PrRef;
+        use dibs_domain::session::HostName;
+
+        let (_dir, path) = database_at(10, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let project = ProjectId(1);
+        let day = ReportDay::parse("2026-03-02").unwrap();
+        assert!(tx.hook_reports(project, day, day).await.unwrap().is_empty());
+        let report = HookReport {
+            member: MemberId(11),
+            machine: dibs_domain::report::MachineId::from_bits(1),
+            host: HostName::parse("laptop").unwrap(),
+            report: DayReport {
+                day,
+                counts: DayCounts::new(BTreeMap::from([(Tally::Frozen, 1)]), Vec::new()).unwrap(),
+            },
+        };
+        tx.save_hook_report(project, &report).await.unwrap();
+        let pr = PrRef::parse("acme/widgets#1").unwrap();
+        tx.save_pr_mergeable(project, &pr, false, time::OffsetDateTime::UNIX_EPOCH)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.hook_reports(project, day, day).await.unwrap(), [report]);
+        assert_eq!(tx.pr_mergeable(project, &pr).await.unwrap(), Some(false));
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for update in [
+            "UPDATE hook_reports SET day = '2026-3-2'",
+            "UPDATE hook_reports SET counts = '[]'",
+            "UPDATE hook_reports SET durations = 'not json'",
+            "UPDATE hook_reports SET machine = 'laptop'",
+            "UPDATE hook_reports SET machine = upper(machine) || 'A'",
+            "UPDATE pr_states SET mergeable = 2",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{update}"
+            );
+        }
+    }
 }

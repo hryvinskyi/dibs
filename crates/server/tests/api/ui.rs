@@ -622,6 +622,48 @@ async fn the_stream_follows_a_signed_in_browser_and_refuses_one_without_a_sessio
     );
 }
 
+/// What a signed-in browser's stream sends from the start of the log until it has sent `until`.
+async fn browser_stream(world: &World, browser: &Browser, until: &str) -> String {
+    let request = Request::builder()
+        .uri("/ui/events/stream?after=0")
+        .header(header::COOKIE, &browser.cookie)
+        .body(Body::empty())
+        .unwrap();
+    let response = world.open(request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut text = String::new();
+    while !text.contains(until) {
+        let frame = tokio::time::timeout(StdDuration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        text.push_str(std::str::from_utf8(&frame.into_data().unwrap()).unwrap());
+    }
+    text
+}
+
+#[tokio::test]
+async fn a_browsers_stream_carries_a_members_report_to_them_and_to_no_other_member() {
+    let (world, alice, bob) = team().await;
+    let carol = world.member(&alice, "carol", Role::Member).await;
+    let session = world.session(&bob, "laptop").await;
+    world
+        .post(
+            &bob,
+            "/v1/heartbeat",
+            json!({"session_id": session, "machine": "0123456789abcdef0123456789abcdef",
+                   "reports": [{"day": "2026-03-02", "counts": {"needs_slot": 1}}]}),
+        )
+        .await;
+    world.item(&alice, None, "The last event").await;
+    let bobs = browser_stream(&world, &sign_in(&world, &bob).await, "The last event").await;
+    assert!(bobs.contains("\"kind\":\"hook_reported\""), "{bobs}");
+    let carols = browser_stream(&world, &sign_in(&world, &carol).await, "The last event").await;
+    assert!(!carols.contains("hook_reported"), "{carols}");
+}
+
 #[tokio::test]
 async fn a_revoked_token_ends_the_browser_sessions_it_opened() {
     let (world, alice, bob) = team().await;
