@@ -19,6 +19,7 @@ use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
 use dibs_domain::paths::RelPath;
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::repo::{RemoteUrl, RepoId};
+use dibs_domain::review::PrRef;
 use dibs_domain::session::{AgentLabel, HostName};
 use dibs_domain::settings::{ProjectSettings, SettingsDocument, SettingsError};
 use dibs_domain::slot::SlotName;
@@ -346,6 +347,70 @@ pub struct Claim {
     /// The last sign of life.
     #[serde(with = "time::serde::rfc3339")]
     pub last_seen: OffsetDateTime,
+    /// Whether its holder works on it or it waits in review.
+    #[serde(default)]
+    pub state: WorkState,
+    /// While it is in review, the pull requests it recorded.
+    #[serde(default)]
+    pub review: Option<ReviewInfo>,
+}
+
+impl Claim {
+    /// Whether the claim waits in review.
+    pub fn in_review(&self) -> bool {
+        self.state == WorkState::InReview
+    }
+}
+
+/// Where a claim's work stands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkState {
+    /// Its holder works on it.
+    #[default]
+    Working,
+    /// Its work waits in pull requests.
+    InReview,
+    /// A state this client does not know yet.
+    #[serde(other)]
+    Other,
+}
+
+/// The review of a claim in review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewInfo {
+    /// The pull requests it recorded, in order.
+    pub prs: BTreeSet<PrRef>,
+    /// Since when it is in review.
+    #[serde(with = "time::serde::rfc3339")]
+    pub since: OffsetDateTime,
+    /// Whether more pull requests of the item follow these.
+    pub more: bool,
+}
+
+/// `POST /v1/items/{id}/review`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReviewRequest {
+    /// The pull request to record.
+    pub pr: PrRef,
+    /// Whether more pull requests of the item follow this one.
+    pub more: bool,
+}
+
+/// `POST /v1/items/{id}/review/drop`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DropPrRequest {
+    /// The pull request recorded by mistake.
+    pub pr: PrRef,
+}
+
+/// The answer to a review request: the claim in review and its item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reviewed {
+    /// The claim.
+    pub claim: Claim,
+    /// The item.
+    pub item: ItemName,
 }
 
 /// The scope of a wide claim.
@@ -528,6 +593,9 @@ pub struct Status {
     /// The escalations the caller may read that no arbiter has acknowledged yet, newest first.
     #[serde(default)]
     pub escalations: Vec<OpenEscalation>,
+    /// Since when the project's integrations have not called, once that counts as silent.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub integration_silent_since: Option<OffsetDateTime>,
 }
 
 /// An escalation that waits for an arbiter.
@@ -745,6 +813,8 @@ impl Toucher {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeldReason {
+    /// The holder's claim is in review: the area is free once its pull requests merge.
+    InReview,
     /// Message the holder or ask for a grant.
     AskHolder,
     /// The caller's wide claim names the area: wait for the holder to acknowledge its
@@ -785,6 +855,9 @@ pub enum Verdict {
         area: QualifiedArea,
         /// The way on.
         reason: HeldReason,
+        /// For a holder in review, the pull requests their claim waits for.
+        #[serde(default)]
+        prs: Vec<PrRef>,
     },
     /// The holder granted the member edits in the area.
     Granted {

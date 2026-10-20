@@ -5,9 +5,9 @@
 use std::path::PathBuf;
 
 use dibs_client::api::{
-    Acked, ClaimRequest, Claimed, CreatedItem, EditCheck, Ended, Granted, Inbox, InboxRequest,
-    Items, MarkedRead, PostMessage, Posted, ReadyList, StartThread, Started, Status,
-    TakeOverRequest, TakenOver, ThreadDetail,
+    Acked, ClaimRequest, Claimed, CreatedItem, DropPrRequest, EditCheck, Ended, Granted, Inbox,
+    InboxRequest, Items, MarkedRead, PostMessage, Posted, ReadyList, ReviewRequest, Reviewed,
+    StartThread, Started, Status, TakeOverRequest, TakenOver, ThreadDetail,
 };
 use dibs_client::api::{
     Escalated, EscalationRequest, HoldMode, ReleaseSlotRequest, SlotAnswer, SlotReleased, Slots,
@@ -22,8 +22,8 @@ use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::mcp::inputs::{
     AckInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget, GrantInput, InboxInput,
-    ItemsInput, KeyInput, NewInput, SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput,
-    ThreadInput,
+    ItemsInput, KeyInput, NewInput, ReviewInput, SendInput, Sending, SlotInput, SlotTakeInput,
+    TakeoverInput, ThreadInput,
 };
 
 /// The kind of agent the sessions of the tool server report.
@@ -152,6 +152,27 @@ impl Link {
     pub async fn done(&self, input: KeyInput) -> Result<Ended, Failure> {
         let item = self.resolve(&input.key.key("key")?).await?;
         self.call(self.connection.client.done(item)).await
+    }
+
+    /// Records a pull request on the caller's claim, which waits in review from then on, or
+    /// removes one recorded by mistake.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, a refusal, or of the call.
+    pub async fn review(&self, input: ReviewInput) -> Result<Reviewed, Failure> {
+        let pr = input.pr()?;
+        let item = self.resolve(&input.key.key("key")?).await?;
+        if input.drop {
+            return self
+                .call(self.connection.client.drop_pr(item, &DropPrRequest { pr }))
+                .await;
+        }
+        let request = ReviewRequest {
+            pr,
+            more: input.more,
+        };
+        self.call(self.connection.client.review(item, &request))
+            .await
     }
 
     /// The verdicts on paths about to change, judged by the settings the server holds now.

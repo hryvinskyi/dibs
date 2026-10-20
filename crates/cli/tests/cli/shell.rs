@@ -183,3 +183,47 @@ fn an_unreachable_server_lets_the_command_through_with_a_notice() {
     assert_eq!(answer["decision"], "no_objection", "{answer}");
     assert!(answer["notice"].as_str().is_some(), "{answer}");
 }
+
+#[test]
+fn a_push_to_a_protected_branch_is_denied_without_a_call_and_its_pusher_passes() {
+    let setup = Setup::new();
+    let mut settings = two_repositories();
+    settings["repos"][0]["protected_refs"] =
+        json!([{"ref": "refs/heads/main", "pushers": ["alice"]}]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let warm = before(&setup, "bob", &api, "git status");
+    assert_eq!(warm["decision"], "no_objection", "{warm}");
+    let before_count = setup.server.requests();
+    let answer = before(&setup, "bob", &api, "git push origin main");
+    assert_eq!(answer["decision"], "deny", "{answer}");
+    let reason = answer["reason"].as_str().unwrap();
+    assert!(reason.contains("only alice may push to"), "{reason}");
+    assert!(reason.contains("dibs_review"), "{reason}");
+    let asked: Vec<String> = setup.server.request_paths()[before_count..]
+        .iter()
+        .filter(|path| path.starts_with("/v1/slots") || path.starts_with("/v1/edit-check"))
+        .cloned()
+        .collect();
+    assert!(
+        asked.is_empty(),
+        "the protected branch is judged from the cached settings: {asked:?}"
+    );
+    let branch = before(&setup, "bob", &api, "git push origin bob/7-rounding");
+    assert_eq!(branch["decision"], "no_objection", "{branch}");
+    for line in ["git push", "git push origin HEAD", "git push --all origin"] {
+        let answer = before(&setup, "bob", &api, line);
+        assert_eq!(answer["decision"], "deny", "{line}: {answer}");
+    }
+    crate::support::git(
+        &api,
+        &["remote", "add", "fork", "https://github.com/bob/api.git"],
+    );
+    let fork = before(&setup, "bob", &api, "git push fork main");
+    assert_eq!(
+        fork["decision"], "no_objection",
+        "a fork protects nothing: {fork}"
+    );
+    let pusher = before(&setup, "alice", &api, "git push origin main");
+    assert_eq!(pusher["decision"], "no_objection", "{pusher}");
+}

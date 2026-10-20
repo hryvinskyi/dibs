@@ -1,10 +1,11 @@
 //! What the command line asks git about a checkout: its `origin`, where the checkout sits in its
-//! repository, and the paths a range of commits changed.
+//! repository, the paths a range of commits changed, and the settings a push reads.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dibs_domain::push::GitFacts;
 use dibs_domain::repo::RemoteUrl;
 
 use crate::failure::Failure;
@@ -28,6 +29,21 @@ impl Git {
     pub fn origin(&self) -> Option<RemoteUrl> {
         let url = self.run(&["remote", "get-url", "origin"]).ok()?;
         RemoteUrl::parse(String::from_utf8_lossy(&url).trim()).ok()
+    }
+
+    /// What a push from this directory reads: the current branch (`None` on a detached head) and
+    /// every setting in force. `None` when git cannot list the settings. Two git runs.
+    pub fn push_facts(&self) -> Option<GitFacts> {
+        let config = self.run(&["config", "--list", "-z"]).ok()?;
+        let branch = self
+            .run(&["symbolic-ref", "-q", "--short", "HEAD"])
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out).trim().to_owned())
+            .filter(|branch| !branch.is_empty());
+        Some(GitFacts {
+            branch,
+            config: parse_config(&config),
+        })
     }
 
     /// The paths the non-merge commits of `range` changed, both sides of every rename, relative
@@ -94,6 +110,22 @@ impl Git {
     }
 }
 
+/// The settings of `git config --list -z` output, in order: each entry is the key, a line break and
+/// the value, entries ending in NUL; a key without a value is a boolean set to true.
+pub fn parse_config(output: &[u8]) -> Vec<(String, String)> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let entry = String::from_utf8_lossy(entry);
+            match entry.split_once('\n') {
+                Some((key, value)) => (key.to_owned(), value.to_owned()),
+                None => (entry.into_owned(), "true".to_owned()),
+            }
+        })
+        .collect()
+}
+
 /// The paths of `git log --name-status -z --format=` output, in order of first appearance: one
 /// path per entry, two for a rename or a copy.
 pub fn parse_name_status(output: &[u8]) -> Vec<String> {
@@ -122,6 +154,28 @@ pub fn parse_name_status(output: &[u8]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_are_read_key_by_key_with_a_bare_key_as_true() {
+        let output: &[u8] = &[
+            &b"remote.origin.url\ngit@example.com:acme/api.git\0core.bare\nfalse\0"[..],
+            &b"branch.Main.merge\nrefs/heads/main\0push.autosetupremote\0"[..],
+        ]
+        .concat();
+        assert_eq!(
+            parse_config(output),
+            [
+                (
+                    "remote.origin.url".to_owned(),
+                    "git@example.com:acme/api.git".to_owned()
+                ),
+                ("core.bare".to_owned(), "false".to_owned()),
+                ("branch.Main.merge".to_owned(), "refs/heads/main".to_owned()),
+                ("push.autosetupremote".to_owned(), "true".to_owned()),
+            ]
+        );
+        assert!(parse_config(b"").is_empty());
+    }
 
     #[test]
     fn renames_give_both_sides_and_each_path_appears_once() {

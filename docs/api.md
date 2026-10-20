@@ -45,7 +45,10 @@ for every cause. Failed attempts are counted per client address (see `DIBS_TRUST
 Roles: `member` and `admin` are people; `importer` is an integration that feeds the project from an outside tracker. An
 integration holds no claim, receives no message and reads no conversation. Its token may call exactly the routes marked
 *any* and *import* below — `GET /v1/version`, `GET /v1/me`, `GET /v1/members`, `GET /v1/events`, `GET`, `POST` and `PUT /v1/items`,
-`GET /v1/items/{id}` and `GET /v1/ready` — and every other route answers it `403 forbidden`. Routes marked *people*,
+`GET /v1/items/{id}`, `GET /v1/ready`, `GET /v1/slots` and `GET /v1/slots/{name}`, `POST /v1/slots/{name}/run-finished`,
+`POST /v1/prs/merged`, `POST /v1/prs/closed`, `GET /v1/review-claims` and `GET /v1/pr-status` — and every other route
+answers it `403 forbidden`. An integration's calls are recorded, at most one a minute: `GET /v1/status` says when they
+all went silent, while the project's reviews rely on them. Routes marked *people*,
 *import* and *admin* answer `403 forbidden` to a role they do not name before they read the request.
 
 ## Errors
@@ -71,14 +74,14 @@ cause of an internal failure and answers `internal`.
 |---|---|
 | `400` | `invalid_json` (the body is not JSON of the shape the route expects), `invalid_query` |
 | `401` | `unauthorized` |
-| `403` | `forbidden`, `not_holder` (details: `holder`; for a slot too), `not_grantor`, `not_a_recipient` (an acknowledgement or a delivery for somebody a message did not reach), `not_author` |
+| `403` | `forbidden`, `not_holder` (details: `holder`; for a slot and a review too), `not_grantor`, `not_a_recipient` (an acknowledgement or a delivery for somebody a message did not reach), `not_author` |
 | `404` | `not_found` (also: a record of another project, and a conversation the caller may not read), `unknown_slot` (`slot`) |
 | `405` | `method_not_allowed` |
-| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal` |
+| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal`, `claim_stale`, `pr_recorded` (`item`, `item_ref`, `holder`), `pr_not_recorded` (`pr`) |
 | `410` | `cursor_expired` (details: `pruned_through`) |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
-| `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`) |
+| `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`; `pr` for a review), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`) |
 | `426` | `client_too_old` (details: `min_client`) |
 | `429` | `too_many_attempts` (details: `retry_after`), `importance_limited` (`limit`, `frees_at`) |
 | `500` | `internal` |
@@ -107,7 +110,13 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/items/{id}/takeover` | people | Take over another member's stale claim. |
 | `POST /v1/items/{id}/release` | people | Release your claim. |
 | `POST /v1/items/{id}/done` | people | Complete your claim. |
-| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims, the caller's ready list and the slots. |
+| `POST /v1/items/{id}/review` | people | Record a pull request of your claim; the claim waits in review. |
+| `POST /v1/items/{id}/review/drop` | people | Remove a pull request you recorded by mistake. |
+| `POST /v1/prs/merged` | import | A pull request was merged: the claim that recorded it moves on, or completes. |
+| `POST /v1/prs/closed` | import | A pull request was closed unmerged: the claim that recorded it moves on. |
+| `GET /v1/review-claims` | import | The claims in review and the pull requests they wait for. |
+| `GET /v1/pr-status` | import | The status a forge shows on a repository's pull requests into a base branch. |
+| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims, the caller's ready list, the slots, and whether the integrations went silent. |
 | `POST /v1/edit-check` | people | May I edit these paths? |
 | `POST /v1/grants` | people | Let another member edit in an area you hold. |
 | `DELETE /v1/grants/{id}` | people | Withdraw a grant you gave. |
@@ -384,6 +393,9 @@ live), `own_claim`, `nothing_to_take`, `area_held`, `wide_overlap`.
 `POST /v1/items/{id}/release` and `POST /v1/items/{id}/done` take no body and answer
 `{ "claim": claim, "item": item ref }`, the claim that ended and its item; the item is open again, or done. Refusals: `not_holder` (`403`), `no_claim` (`409`).
 
+A claim carries `state`: `working` while its holder works on it, `in_review` while its work waits in pull requests, with
+`review: { "prs": ["acme/api#12"], "since": "…", "more": false }` (`null` while it is worked on).
+
 `GET /v1/status` answers
 
 ```json
@@ -396,15 +408,92 @@ live), `own_claim`, `nothing_to_take`, `area_held`, `wide_overlap`.
                         { "area": "default:search", "state": "free", "holder": null, "item": null }] }],
   "ready": { "ready": [], "excluded": [] },
   "escalations": [{ "subject": { "item": 12 }, "about": "work item gh:acme/widgets#7 \"Refund rounding\"",
-                    "by": "bob", "arbiters": ["carol"], "thread_id": 40, "message_id": 41, "at": "…" }]
+                    "by": "bob", "arbiters": ["carol"], "thread_id": 40, "message_id": 41, "at": "…" }],
+  "integration_silent_since": null
 }
 ```
+
+`integration_silent_since` is the last call of the project's integrations when none has called for 15 minutes (or,
+for one that never called, when it joined), shown only while the project's reviews rely on one — a claim is in review,
+or a repository's `pr_status` is enabled — and `null` otherwise, while one calls, or when the project has none: while
+they are silent, merges complete no claims and pull request statuses go stale. A claim in review is always live.
 
 `escalations` lists, newest first, the escalations the caller may read (it reached them, or they sent it) that no arbiter
 has acknowledged yet. `holds` never lists an area a wide claim names. `wide` lists the live wide claims by item, each area with where it
 stands for the wide claim's member: `free` (nobody else holds it), `granted` (its holder acknowledged the announcement,
 or granted the edits) or `waiting` (its holder has not). `ready` is the caller's ready list, as `GET /v1/ready` answers
 it.
+
+### Review
+
+A teammate works on a branch and opens a pull request; whoever the project lets merge reviews and merges it. dibs keeps
+the claim alive through that wait and ends it with the merge, through these routes. dibs speaks no forge API: an
+integration watching the forge calls the `import` routes.
+
+`POST /v1/items/{id}/review`, body `{ "pr": "acme/api#12", "more": false }`, records a pull request on the caller's live
+claim of the item. A pull request is written `<owner>/<name>#<number>` and compared in one form (lowercased, no leading
+zeros); in a project that lists repositories it must belong to one of them, matched by the path of its `remote`. The
+claim is **in review**: it keeps its areas, so nobody else edits the files under review (their edits answer `held_by`
+with `reason: "in_review"` and the pull requests); it never goes stale while it is in review, so it needs no heartbeat
+and cannot be taken over; and its holder may go on editing its branch for review comments. A claim may record several
+pull requests — an API change and its client in two repositories, or a series — and `more: true` says more pull
+requests of the item follow the ones recorded: the latest request decides it. Recording one the claim has changes at most
+`more`. Answers `{ "claim": claim, "item": item ref }` and appends `review_started` with every pull request recorded.
+Refusals: `no_claim` (`409`), `not_holder` (`403`, `details.holder`), `claim_stale` (`409`: claim the item again first),
+`pr_recorded` (`409`: another claim recorded it; `details` name its `item`, `item_ref` and `holder`),
+`unlisted_repository` (`422`, `details.pr`), `invalid_request`.
+
+`POST /v1/items/{id}/review/drop`, body `{ "pr": "acme/api#12" }`, removes a pull request the holder recorded by mistake
+(`pr_dropped`). With others left the claim stays in review as it was; with none left it is worked on again, seen now
+(`review_ended`). Answers as recording one does. Refusals: `no_claim`, `pr_not_recorded` (`409`, `details.pr`),
+`not_holder` (`403`).
+
+A pull request leaves a claim through its holder's removal, or through a report that it was merged or closed, matched
+against the pull requests claims in review recorded — never by a ticket number read from a branch or a description. Both
+reports answer `{ "matched": false }` and change nothing for a pull request no claim records, or one already reported,
+so a worker may send every report again; a match answers
+`{ "matched": true, "item": 12, "claim": "in_review" | "set_aside" | "working" | "completed" }`.
+
+`POST /v1/prs/merged`, body `{ "pr": "acme/api#12", "base": "main", "merged_at": "2026-03-02T10:00:00Z", "files": [] }`
+(`files`, the paths the merge changed, is optional and holds at most 3000; the body may be up to 2 MiB). The pull
+request leaves its claim (`pr_merged`). A merge **delivers** the work when its repository protects no branch, or when
+`base` (`main` or `refs/heads/main`) is one of its protected branches; a merge into any other base — a stacked pull
+request merged into the branch of the one below it — delivers nothing yet, and is treated as a close (below).
+After a merge that delivers, with other pull requests recorded, the claim stays in review (`in_review`). With none left,
+it **completes** (`completed`, event `completed_by_merge`: areas free, grants on it ended, the item done, counted in the
+day's completions) and its holder is sent one message from dibs, "Pull request … merged; the claim on … is done"; or,
+when `more` was set, it is worked on again with its areas, seen now (`working`, `review_ended`).
+
+`POST /v1/prs/closed`, body `{ "pr": "acme/api#12" }`: the pull request was closed without being merged and leaves its
+claim (`pr_closed`). Its work is not in, so the claim's other pull requests can no longer complete it: with others left
+the claim stays in review with `more` set (`set_aside`), and its holder is told in a message from dibs to record the pull
+request that brings the work in, or to mark the item done once it is in. With none left the claim is worked on again,
+seen now — a claim that sat in review for days is not stale on arrival — and its holder is told (`working`,
+`review_ended`).
+
+`GET /v1/review-claims` answers the claims in review, by item:
+`{ "claims": [{ "item": item ref, "holder": "bob", "prs": ["acme/api#12"], "since": "…", "more": false }] }`. A worker
+reconciles **every** pull request listed here on each pass: it asks the forge where each one stands and reports those
+already merged or closed. That is how a pull request merged before its holder recorded it, or while the worker was
+down, is reported at all; the forge's own lists of recent changes alone would miss it.
+
+`GET /v1/pr-status?repo=api&base=main` answers the status a forge shows on a repository's pull requests into a branch.
+`repo` is a repository's id or the path of its declared `remote` (`acme/api`); in a project that lists no repositories,
+its one repository's id is `default` and it has no remote, so `repo=default`. `base` is a branch, `main` or
+`refs/heads/main`.
+
+```json
+{ "enabled": true, "context": "dibs", "state": "failure",
+  "description": "A freezing action is in progress until 14:40 UTC." }
+```
+
+`state` is `failure` while any member holds a slot that `freezes` the branch, `success` otherwise. `enabled`,
+`context` and whether `description` names the slot, its holder and their purpose come from the repository's
+`pr_status` setting: a status is visible to everyone who can read the repository, so by default it names neither. The
+description holds at most 140 characters. Reading it applies what time changed about the slots, as every read of them
+does (an expired hold is ended and its holder told, once). Refusals: `not_found` for a repository the project does not
+list or a base that is no branch, `invalid_request` for a missing field. A worker writes a status only when its state or
+description changed since the last one it wrote for that commit, and only on pull requests of the project's members.
 
 ### Edit check
 
@@ -427,7 +516,7 @@ check writes nothing. Answers a verdict per path, in the order asked:
 | `allowed` | The caller may edit. | |
 | `allowed_with_note` | The caller may edit; a hot-file rule has something to say. | `rule`, `note`, `touched_by: [{ holder, item, item_ref }]` |
 | `needs_claim` | The path is governed, the policy requires a claim, and the caller holds none that covers it. | |
-| `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason`: `ask_holder` (message them or ask for a grant), or `awaiting_ack` (the caller's live wide claim names the area and the holder has not acknowledged its announcement yet) |
+| `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason`: `in_review` (the holder's claim is in review; `prs` lists its pull requests, and the area is free when they merge), `ask_holder` (message them or ask for a grant), or `awaiting_ack` (the caller's live wide claim names the area and the holder has not acknowledged its announcement yet) |
 | `granted` | The holder granted the caller edits in the area, by a grant or by acknowledging the caller's wide claim's announcement. | `by`, `area` |
 
 A path that no area or rule governs is `allowed`. Refusals: `unknown_repo` (`422`), `invalid_request` for a missing
@@ -670,6 +759,10 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `member_removed` | `member`, `by` (the admin; `null` for the operator) |
 | `pruned` | `counts`: `{ threads, messages, events }` |
 | `thread_deleted` | `thread`, `by` (the admin; `null` for the operator) |
+| `review_started` | `item`, `member`, `prs` (every pull request the claim records now) |
+| `pr_merged`, `pr_closed`, `pr_dropped` | `item`, `member`, `pr` (`pr_dropped`: its holder removed it) |
+| `review_ended` | `item`, `member` (the claim is worked on again) |
+| `completed_by_merge` | `item`, `member` (the merge of its last pull request completed the claim) |
 
 `item_updated` is appended when one of an item's reported facts actually changed; read the item for what it says now.
 `wide_claimed` is appended when a claim becomes wide or its scope grows; a renewal that names nothing new appends none.
@@ -719,7 +812,9 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | `raised_per_hour` | How many `high` or `urgent` messages one member may write within an hour: 1 to 1000; default 10. What dibs writes itself is not counted. |
 | `areas` | For a project with one repository: `[{ "name": "billing", "paths": ["packages/billing/**"] }]`. |
 | `hot` | For a project with one repository: hot-file rules, first match wins. |
-| `repos` | For a project with several: `[{ "id", "remote", "areas", "hot" }]`. The two layouts are never mixed. |
+| `protected_refs` | For a project with one repository: the branches only some members may push to; see below. |
+| `pr_status` | For a project with one repository: whether and how its pull requests get a status; see below. |
+| `repos` | For a project with several: `[{ "id", "remote", "areas", "hot", "protected_refs", "pr_status" }]`. The two layouts are never mixed. |
 | `slots` | The shared actions one member does at a time; see below. |
 | `arbiters` | The handles of the members who settle what agents do not agree on (`POST /v1/escalations`). A handle that is no person of the project, or a member removed since, settles nothing. |
 
@@ -759,6 +854,33 @@ The command line itself never leaves the member's machine: the guard splits and 
 it keeps, and asks the server only `GET /v1/slots/{name}` for the few slots its verdict reads — the one whose pattern
 matches, and those that freeze a ref a `git push` in the line names. A line no slot governs asks the server nothing.
 `dibs check --push`, run from git's `pre-push` hook, judges the refs git says a push goes to by the same rule.
+
+**Protected branches.** `protected_refs: [{ "ref": "refs/heads/main", "pushers": ["alice"] }]` names, per repository,
+the branches only the members listed (by handle) may push to; an empty `pushers` means nobody pushes there directly.
+Where the forge offers no branch protection, this is how the agents keep a team's rule that everyone else's way to the
+branch is a pull request. A push is judged against the repository of the remote it goes to: the listed repository whose
+`remote` is the URL of that remote (its fetch URL, after `url.<base>.insteadOf`); a remote no listed repository has — a
+fork — protects nothing, and in a project that lists no repositories every remote is its one repository. Protection is
+judged before any freeze and **fails closed**:
+
+- The agent's command check reads what a `git push` updates from the line and, where the line leaves it to git, from the
+  checkout's git settings — the current branch, its push remote and upstream, `push.default`, `remote.<name>.push` —
+  read only for a line that pushes, in a project that protects a branch, without asking the server. `HEAD`, a bare
+  `git push`, `--repo`, `-C .`, `--delete`, `+` and `:` refspecs are read as git reads them.
+- A push that may update every branch (`--all`, `--branches`, `--mirror`, `--prune`, `push.default=matching`, a `:`
+  refspec), a wildcard refspec that matches a protected branch, and a push whose branches cannot be read (another
+  directory with `-C`, `--git-dir`, a `remote.<name>.push` setting, `HEAD` pushed from a detached head, or git settings that
+  cannot be read) is refused for anyone who is not a pusher, saying it may update the branch.
+- `dibs check --push`, run from git's `pre-push` hook as `dibs check --push --remote "$1" --url "$2"`, judges the exact
+  refs git hands it against the repository of that remote, from the settings and the member this machine remembers, so a
+  server that cannot be reached does not let such a push through (exit 1). Only a machine that remembers nothing yet
+  asks the server, and lets the push go with a warning when it cannot reach it.
+
+A person in a terminal can still push with `git push --no-verify`; that breaks the team's rule.
+
+**Pull-request status.** `pr_status: { "enabled": false, "context": "dibs", "describe_holder": false }` (the defaults)
+says whether the repository's pull requests get a status from `GET /v1/pr-status`, the name it is filed under (1 to 100
+characters), and whether its description names the slot, its holder and their purpose.
 
 ### Admin routes
 

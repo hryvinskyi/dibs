@@ -16,7 +16,7 @@ use crate::failure::Failure;
 use crate::mcp::answer;
 use crate::mcp::inputs::{
     AckInput, CheckInput, ClaimInput, EscalateInput, GrantInput, InboxInput, ItemsInput, KeyInput,
-    NewInput, SendInput, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
+    NewInput, ReviewInput, SendInput, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
 };
 use crate::mcp::link::Link;
 
@@ -135,7 +135,15 @@ impl Tools {
     }
 
     #[tool(
-        description = "Ask whether you may edit files, before you edit them. Give the paths, relative to the working directory or absolute. Each path gets a verdict: allowed, allowed_with_note (read the note), needs_claim (claim an item with dibs_claim first), held_by (another member holds its area: message them with dibs_send or ask for a grant) or granted. Edit only where the verdict permits it. This changes nothing.",
+        description = "Record the pull request of your claim once you opened it (pr as owner/repo#number, such as acme/api#12). The claim then waits in review: it keeps its areas, so nobody edits the files under review, and needs no heartbeat while the pull request is open. You may still push review fixes to its branch. When it is merged the claim is completed for you; give more: true when more pull requests of the same item follow, and the merge returns the claim to you instead. A pull request closed unmerged returns the claim to you as well. With drop: true, the pull request is removed from your claim instead, when you recorded it by mistake."
+    )]
+    async fn dibs_review(&self, Parameters(input): Parameters<ReviewInput>) -> CallToolResult {
+        self.perform(|link| async move { link.review(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Ask whether you may edit files, before you edit them. Give the paths, relative to the working directory or absolute. Each path gets a verdict: allowed, allowed_with_note (read the note), needs_claim (claim an item with dibs_claim first), held_by (another member holds its area: its reason says the way on — in_review means it is free when the holder's pull request merges, otherwise message them with dibs_send or ask for a grant) or granted. Edit only where the verdict permits it. This changes nothing.",
         annotations(read_only_hint = true)
     )]
     async fn dibs_check(&self, Parameters(input): Parameters<CheckInput>) -> CallToolResult {
@@ -272,6 +280,7 @@ mod tests {
                 "dibs_read",
                 "dibs_ready",
                 "dibs_release",
+                "dibs_review",
                 "dibs_send",
                 "dibs_slot_leave",
                 "dibs_slot_release",

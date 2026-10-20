@@ -695,4 +695,71 @@ mod migrations {
             "the rebuilt tables keep their indexes"
         );
     }
+
+    #[tokio::test]
+    async fn review_carries_every_claim_over_as_worked_on_and_records_no_call() {
+        use dibs_domain::review::{ClaimState, PrRef, Review};
+
+        let (_dir, path) = database_at(7, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let project = ProjectId(1);
+        let claims = tx.claims(project).await.unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.state == ClaimState::Working),
+            "every claim of before is worked on"
+        );
+        assert!(tx.last_calls(project).await.unwrap().is_empty());
+        let since = claims[0].last_seen;
+        let reviewing = Claim {
+            state: ClaimState::InReview(
+                Review::new(
+                    [PrRef::parse("acme/widgets#7").unwrap()].into(),
+                    since,
+                    false,
+                )
+                .unwrap(),
+            ),
+            ..claims[0].clone()
+        };
+        tx.save_claim(project, &reviewing).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim(project, reviewing.item).await.unwrap(),
+            Some(reviewing)
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for update in [
+            "UPDATE claims SET review_prs = '[\"acme/widgets#8\"]' WHERE item_id = 52",
+            "UPDATE claims SET review_since = 5, review_more = 0 WHERE item_id = 52",
+            "UPDATE claims SET review_prs = '[]', review_since = 5, review_more = 0 WHERE item_id = 52",
+            "UPDATE claims SET review_prs = '[\"acme/widgets#8\"]', review_since = 5, review_more = 2 \
+             WHERE item_id = 52",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{update}"
+            );
+        }
+        let kept = sqlx::query(
+            "UPDATE claims SET review_prs = '[\"acme/widgets#8\"]', review_since = 5, \
+             review_more = 1 WHERE item_id = 52",
+        )
+        .execute(&pool)
+        .await;
+        assert!(kept.is_ok());
+    }
 }

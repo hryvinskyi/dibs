@@ -318,3 +318,91 @@ fn a_wide_claim_from_the_command_line_waits_for_the_holders_acknowledgement() {
     let granted = run(&setup.bob, &["check", "src/billing/a.rs"]);
     assert_eq!(status(&granted), 0, "{}", text(&granted.stdout));
 }
+
+#[test]
+fn a_claim_goes_to_review_through_the_command_line_and_its_holder_reads_the_pull_requests() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let alice = |args: &[&str]| setup.dibs(&setup.alice, &api).args(args).output().unwrap();
+    assert_eq!(
+        status(&alice(&["new", "gh:acme/api#7", "--title", "Fix rounding"])),
+        0
+    );
+    assert_eq!(
+        status(&alice(&["claim", "gh:acme/api#7", "--area", "billing"])),
+        0
+    );
+    let reviewed = alice(&["claim", "review", "gh:acme/api#7", "--pr", "acme/api#12"]);
+    assert_eq!(status(&reviewed), 0, "{}", text(&reviewed.stderr));
+    let said = text(&reviewed.stdout);
+    assert!(
+        said.starts_with("Your claim on gh:acme/api#7 is in review on acme/api#12"),
+        "{said}"
+    );
+    assert!(said.contains("completes it"), "{said}");
+    let more = alice(&[
+        "claim",
+        "review",
+        "gh:acme/api#7",
+        "--pr",
+        "acme/web#3",
+        "--more",
+        "--json",
+    ]);
+    assert_eq!(status(&more), 0);
+    let answer = json(&more);
+    assert_eq!(answer["claim"]["state"], "in_review");
+    assert_eq!(
+        answer["claim"]["review"]["prs"],
+        serde_json::json!(["acme/api#12", "acme/web#3"])
+    );
+    assert_eq!(answer["claim"]["review"]["more"], true);
+    let shown = text(&alice(&["status"]).stdout);
+    assert!(
+        shown.contains("in review on acme/api#12, acme/web#3"),
+        "{shown}"
+    );
+    let elsewhere = alice(&["claim", "review", "gh:acme/api#7", "--pr", "acme/other#1"]);
+    assert_eq!(status(&elsewhere), 1, "{}", text(&elsewhere.stderr));
+    assert!(
+        text(&elsewhere.stderr).contains("no repository this project lists"),
+        "{}",
+        text(&elsewhere.stderr)
+    );
+    let malformed = alice(&["claim", "review", "gh:acme/api#7", "--pr", "acme/api"]);
+    assert_eq!(status(&malformed), 2, "a usage error before any call");
+    let dropped = alice(&[
+        "claim",
+        "review",
+        "gh:acme/api#7",
+        "--drop-pr",
+        "acme/web#3",
+        "--json",
+    ]);
+    assert_eq!(status(&dropped), 0, "{}", text(&dropped.stderr));
+    assert_eq!(
+        json(&dropped)["claim"]["review"]["prs"],
+        serde_json::json!(["acme/api#12"])
+    );
+    let last = alice(&[
+        "claim",
+        "review",
+        "gh:acme/api#7",
+        "--drop-pr",
+        "acme/api#12",
+    ]);
+    assert_eq!(status(&last), 0, "{}", text(&last.stderr));
+    assert!(
+        text(&last.stdout).contains("is no longer in review"),
+        "{}",
+        text(&last.stdout)
+    );
+    let unknown = alice(&[
+        "claim",
+        "review",
+        "gh:acme/api#7",
+        "--drop-pr",
+        "acme/api#12",
+    ]);
+    assert_eq!(status(&unknown), 1);
+}

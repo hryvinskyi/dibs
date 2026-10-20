@@ -43,6 +43,7 @@ mod release;
 mod remove_dependency;
 mod remove_member;
 mod resolve_ui_session;
+mod review;
 mod revoke_grant;
 mod revoke_token;
 mod rotate_token;
@@ -101,6 +102,10 @@ pub use release::Release;
 pub use remove_dependency::RemoveDependency;
 pub use remove_member::{RemoveMember, RemovedMember};
 pub use resolve_ui_session::ResolveUiSession;
+pub use review::{
+    DropPr, DropPrInput, PrReport, PrReportOutcome, PrStatusQuery, PrStatusView, ReadPrStatus,
+    ReportPr, ReportedEnd, ReviewClaim, ReviewClaims, ReviewedClaim, StartReview, StartReviewInput,
+};
 pub use revoke_grant::RevokeGrant;
 pub use revoke_token::RevokeToken;
 pub use rotate_token::{RotateToken, RotatedToken};
@@ -156,6 +161,16 @@ pub struct UseCases {
     pub release: Release,
     /// See [`Complete`].
     pub complete: Complete,
+    /// See [`StartReview`].
+    pub start_review: StartReview,
+    /// See [`DropPr`].
+    pub drop_pr: DropPr,
+    /// See [`ReportPr`].
+    pub report_pr: ReportPr,
+    /// See [`ReviewClaims`].
+    pub review_claims: ReviewClaims,
+    /// See [`ReadPrStatus`].
+    pub pr_status: ReadPrStatus,
     /// See [`Status`].
     pub status: Status,
     /// See [`EditCheck`].
@@ -257,6 +272,11 @@ impl UseCases {
             take_over: TakeOver::new(deps),
             release: Release::new(deps),
             complete: Complete::new(deps),
+            start_review: StartReview::new(deps),
+            drop_pr: DropPr::new(deps),
+            report_pr: ReportPr::new(deps),
+            review_claims: ReviewClaims::new(deps),
+            pr_status: ReadPrStatus::new(deps),
             status: Status::new(deps),
             edit_check: EditCheck::new(deps),
             escalate: Escalate::new(deps),

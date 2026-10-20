@@ -15,6 +15,7 @@ use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, Sessi
 use crate::item::{ExternalRef, Title};
 use crate::paths::RepoPath;
 use crate::retention::PruneCounts;
+use crate::review::PrRef;
 use crate::session::HostName;
 use crate::slot::{Purpose, RunExit, SlotName};
 
@@ -112,6 +113,18 @@ pub enum EventKind {
     Pruned(Pruned),
     /// An admin deleted a conversation at once.
     ThreadDeleted(ThreadDeleted),
+    /// A claim's holder recorded a pull request on it; the claim is in review of these.
+    ReviewStarted(ReviewStarted),
+    /// A pull request a claim in review recorded was merged.
+    PrMerged(PrReported),
+    /// A pull request a claim in review recorded was closed without being merged.
+    PrClosed(PrReported),
+    /// A claim's holder removed a pull request they had recorded.
+    PrDropped(PrReported),
+    /// A claim's last recorded pull request left it and its holder works on it again.
+    ReviewEnded(ReviewEnded),
+    /// The merge of a claim's last recorded pull request completed it; the item is done.
+    CompletedByMerge(CompletedByMerge),
 }
 
 impl EventKind {
@@ -153,8 +166,27 @@ impl EventKind {
             Self::MemberRemoved(_) => "member_removed",
             Self::Pruned(_) => "pruned",
             Self::ThreadDeleted(_) => "thread_deleted",
+            Self::ReviewStarted(_) => "review_started",
+            Self::PrMerged(_) => "pr_merged",
+            Self::PrClosed(_) => "pr_closed",
+            Self::PrDropped(_) => "pr_dropped",
+            Self::ReviewEnded(_) => "review_ended",
+            Self::CompletedByMerge(_) => "completed_by_merge",
         }
     }
+
+    /// The item done and the member whose claim completed it, for the kinds that complete a claim:
+    /// by its holder, or by the merge of its last pull request.
+    pub const fn completion(&self) -> Option<(ItemId, MemberId)> {
+        match self {
+            Self::Completed(Completed { item, member })
+            | Self::CompletedByMerge(CompletedByMerge { item, member }) => Some((*item, *member)),
+            _ => None,
+        }
+    }
+
+    /// The names of the kinds [`EventKind::completion`] answers for.
+    pub const COMPLETION_NAMES: [&'static str; 2] = ["completed", "completed_by_merge"];
 
     /// Every member the event names.
     pub fn members(&self) -> BTreeSet<MemberId> {
@@ -194,6 +226,10 @@ impl EventKind {
             Self::MemberRemoved(e) => vec![Some(e.member), e.by],
             Self::Pruned(_) => Vec::new(),
             Self::ThreadDeleted(e) => vec![e.by],
+            Self::ReviewStarted(e) => vec![Some(e.member)],
+            Self::PrMerged(e) | Self::PrClosed(e) | Self::PrDropped(e) => vec![Some(e.member)],
+            Self::ReviewEnded(e) => vec![Some(e.member)],
+            Self::CompletedByMerge(e) => vec![Some(e.member)],
         };
         named.into_iter().flatten().collect()
     }
@@ -235,7 +271,13 @@ impl EventKind {
             | Self::Escalated(_)
             | Self::MemberRemoved(_)
             | Self::Pruned(_)
-            | Self::ThreadDeleted(_) => None,
+            | Self::ThreadDeleted(_)
+            | Self::ReviewStarted(_)
+            | Self::PrMerged(_)
+            | Self::PrClosed(_)
+            | Self::PrDropped(_)
+            | Self::ReviewEnded(_)
+            | Self::CompletedByMerge(_) => None,
         }
     }
 
@@ -282,7 +324,13 @@ impl EventKind {
             | Self::SlotForceReleased(_)
             | Self::SlotStalled(_)
             | Self::SlotResumed(_)
-            | Self::SlotStallTakenOver(_) => None,
+            | Self::SlotStallTakenOver(_)
+            | Self::ReviewStarted(_)
+            | Self::PrMerged(_)
+            | Self::PrClosed(_)
+            | Self::PrDropped(_)
+            | Self::ReviewEnded(_)
+            | Self::CompletedByMerge(_) => None,
         }
     }
 
@@ -658,6 +706,46 @@ pub struct Pruned {
     pub counts: PruneCounts,
 }
 
+/// A claim's holder recorded a pull request on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewStarted {
+    /// The item.
+    pub item: ItemId,
+    /// The member holding it.
+    pub member: MemberId,
+    /// Every pull request the claim records now.
+    pub prs: BTreeSet<PrRef>,
+}
+
+/// A merge or a close of a pull request a claim recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrReported {
+    /// The item of the claim.
+    pub item: ItemId,
+    /// The member holding it.
+    pub member: MemberId,
+    /// The pull request.
+    pub pr: PrRef,
+}
+
+/// A claim's review ended and its holder works on it again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewEnded {
+    /// The item.
+    pub item: ItemId,
+    /// The member holding it.
+    pub member: MemberId,
+}
+
+/// A merge completed a claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedByMerge {
+    /// The item.
+    pub item: ItemId,
+    /// The member who held it.
+    pub member: MemberId,
+}
+
 /// An admin deleted a conversation. Carries the id only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadDeleted {
@@ -882,6 +970,91 @@ mod tests {
         let released = serde_json::to_value(&slot_kinds()[6]).unwrap();
         assert_eq!(released["payload"]["exit"], serde_json::json!({"code": 3}));
         assert_eq!(every_kind()[0].slot(), None);
+    }
+
+    fn review_kinds() -> Vec<EventKind> {
+        let item = ItemId(4);
+        let pr = PrRef::parse("acme/api#12").unwrap();
+        vec![
+            EventKind::ReviewStarted(ReviewStarted {
+                item,
+                member: ALICE,
+                prs: BTreeSet::from([pr.clone(), PrRef::parse("acme/web#3").unwrap()]),
+            }),
+            EventKind::PrMerged(PrReported {
+                item,
+                member: ALICE,
+                pr: pr.clone(),
+            }),
+            EventKind::PrClosed(PrReported {
+                item,
+                member: ALICE,
+                pr: pr.clone(),
+            }),
+            EventKind::PrDropped(PrReported {
+                item,
+                member: ALICE,
+                pr,
+            }),
+            EventKind::ReviewEnded(ReviewEnded {
+                item,
+                member: ALICE,
+            }),
+            EventKind::CompletedByMerge(CompletedByMerge {
+                item,
+                member: ALICE,
+            }),
+        ]
+    }
+
+    #[test]
+    fn review_events_round_trip_and_carry_the_item_its_holder_and_pull_requests_only() {
+        let allowed = ["item", "member", "prs", "pr"];
+        for kind in review_kinds() {
+            let value = serde_json::to_value(&kind).unwrap();
+            assert_eq!(value["kind"], kind.name());
+            assert_eq!(value["payload"]["item"], 4);
+            for field in value["payload"].as_object().unwrap().keys() {
+                assert!(
+                    allowed.contains(&field.as_str()),
+                    "{} carries {field}",
+                    kind.name()
+                );
+            }
+            assert_eq!(kind.members(), BTreeSet::from([ALICE]));
+            assert_eq!(
+                (kind.message(), kind.thread(), kind.slot()),
+                (None, None, None)
+            );
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(back, kind);
+        }
+        let started = serde_json::to_value(&review_kinds()[0]).unwrap();
+        assert_eq!(
+            started["payload"]["prs"],
+            serde_json::json!(["acme/api#12", "acme/web#3"])
+        );
+    }
+
+    #[test]
+    fn a_claim_completes_by_its_holder_or_by_a_merge_and_nothing_else_does() {
+        let completions: Vec<(&str, Option<(ItemId, MemberId)>)> = every_kind()
+            .iter()
+            .chain(review_kinds().iter())
+            .map(|kind| (kind.name(), kind.completion()))
+            .filter(|(_, done)| done.is_some())
+            .collect();
+        assert_eq!(
+            completions,
+            [
+                ("completed", Some((ItemId(4), BOB))),
+                ("completed_by_merge", Some((ItemId(4), ALICE))),
+            ]
+        );
+        assert_eq!(
+            EventKind::COMPLETION_NAMES,
+            ["completed", "completed_by_merge"]
+        );
     }
 
     #[test]

@@ -317,6 +317,7 @@ fn test(args: &SlotTestArgs, ctx: &Context) -> Result<(), Failure> {
         settings.slots(),
         &SlotBoard::default(),
         MemberId(0),
+        None,
     );
     let frozen_while_held: Vec<SlotName> = commands
         .iter()
@@ -336,6 +337,7 @@ fn test(args: &SlotTestArgs, ctx: &Context) -> Result<(), Failure> {
         CommandVerdict::NeedsSlot { slot, run_only, .. } => ("needs_slot", Some(slot), run_only),
         CommandVerdict::Holding { slot } => ("holding", Some(slot), false),
         CommandVerdict::Frozen { slot, .. } => ("frozen", Some(slot), false),
+        CommandVerdict::NeedsPermission { .. } => ("needs_permission", None, false),
     };
     let answer = TestAnswer {
         commands: commands.into_iter().map(|command| command.text).collect(),

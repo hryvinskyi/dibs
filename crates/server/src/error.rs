@@ -24,6 +24,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::import::BatchRefused;
 use dibs_domain::item::CreateRefused;
 use dibs_domain::message::{AckRefused, RecipientsError};
+use dibs_domain::review::{DropRefused, ReviewRefused};
 use dibs_domain::settings::AreaLookupError;
 use dibs_domain::slot::{BeatRefused, SlotRefused};
 use dibs_domain::wide::WideScopeError;
@@ -285,6 +286,14 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::Revoke(RevokeRefused::NotGrantor)
         | AppError::NotAuthor
         | AppError::Ack(AckRefused::NotRecipient)
+        | AppError::Review(Refusal {
+            reason: ReviewRefused::HolderOnly(HolderOnly::NotHolder { .. }),
+            ..
+        })
+        | AppError::DropPr(Refusal {
+            reason: DropRefused::HolderOnly(HolderOnly::NotHolder { .. }),
+            ..
+        })
         | AppError::Slot(Refusal {
             reason: SlotRefused::NotHolder { .. },
             ..
@@ -318,6 +327,17 @@ fn status_of(error: &AppError) -> StatusCode {
             ..
         })
         | AppError::ForceRelease(ForceReleaseRefused::NoClaim)
+        | AppError::Review(Refusal {
+            reason:
+                ReviewRefused::HolderOnly(HolderOnly::NoClaim)
+                | ReviewRefused::Stale
+                | ReviewRefused::RecordedElsewhere { .. },
+            ..
+        })
+        | AppError::DropPr(Refusal {
+            reason: DropRefused::HolderOnly(HolderOnly::NoClaim) | DropRefused::NotRecorded { .. },
+            ..
+        })
         | AppError::Grant(GrantRefused::GranteeHasNoClaim)
         | AppError::Dependency(DependencyRefused::Cycle)
         | AppError::Ack(AckRefused::NotRequired)
@@ -351,6 +371,10 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::Wide(WideScopeError::NoAreas)
         | AppError::Grant(GrantRefused::SelfGrant | GrantRefused::UnknownArea { .. })
         | AppError::Create(CreateRefused::UnlistedRepository { .. })
+        | AppError::Review(Refusal {
+            reason: ReviewRefused::UnknownRepository { .. },
+            ..
+        })
         | AppError::Area(
             AreaLookupError::Malformed { .. }
             | AreaLookupError::NotFound { .. }
@@ -483,6 +507,35 @@ fn details_of(error: &AppError) -> Map<String, Value> {
             ..
         }) => details.put("slot", slot),
         AppError::CursorExpired { through } => details.put("pruned_through", through),
+        AppError::Review(Refusal {
+            reason: ReviewRefused::RecordedElsewhere { item, .. },
+            member,
+            item_ref,
+        }) => {
+            details.put("item", item);
+            details.holder(member.as_ref());
+            if let Some(reference) = item_ref {
+                details.put("item_ref", reference);
+            }
+        }
+        AppError::Review(Refusal {
+            reason: ReviewRefused::HolderOnly(HolderOnly::NotHolder { .. }),
+            member,
+            ..
+        })
+        | AppError::DropPr(Refusal {
+            reason: DropRefused::HolderOnly(HolderOnly::NotHolder { .. }),
+            member,
+            ..
+        }) => details.holder(member.as_ref()),
+        AppError::Review(Refusal {
+            reason: ReviewRefused::UnknownRepository { pr },
+            ..
+        })
+        | AppError::DropPr(Refusal {
+            reason: DropRefused::NotRecorded { pr },
+            ..
+        }) => details.put("pr", pr),
         AppError::AlreadyEscalated { thread } => details.put("thread_id", thread),
         _ => {}
     }

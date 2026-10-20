@@ -8,7 +8,11 @@
   {% endfor %}
 </li>{% endmacro %}
 <template data-updated-template>{% call ui::time(board.updated) %}{% endcall %}</template>
-{% for escalation in board.escalations %}<div class="banner banner--danger" role="status" data-escalation>
+{% match board.integration_silent %}{% when Some with (since) %}<div class="banner banner--warn" role="status" data-integration-silent>
+  <span class="banner__icon" aria-hidden="true">!</span>
+  <p class="banner__text">Integration silent since {% call ui::time(since) %}{% endcall %}: merges complete no claims and pull request statuses go stale until it calls again</p>
+</div>
+{% when None %}{% endmatch %}{% for escalation in board.escalations %}<div class="banner banner--danger" role="status" data-escalation>
   <span class="banner__icon" aria-hidden="true">▲</span>
   <p class="banner__text">Escalated by {{ escalation.by }}: {{ escalation.about }} — waiting for an arbiter ({{ escalation.arbiters }}) to acknowledge it</p>
   <a class="banner__action" href="/ui/threads/{{ escalation.thread }}">Open the conversation</a>
@@ -53,7 +57,16 @@
   <p class="card__meta"><span class="member">{{ row.holder }}</span><span>heartbeat {% call ui::time(row.seen) %}{% endcall %}</span></p>
 </li>
 {% endfor %}  </ul>
-</section>
+{% if !board.in_review.is_empty() %}  <h3 class="column__sub" id="c-review">In review <span class="column__count">{{ board.in_review.len() }}</span></h3>
+  <ul class="cards" aria-labelledby="c-review">
+{% for row in board.in_review %}<li class="card" data-in-review>
+  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}<span class="badge badge--review"><span class="badge__icon badge__icon--half" aria-hidden="true"></span>In review</span></div>
+  <p class="card__title">{{ row.title }}</p>
+  {% call ui::chips(row.areas) %}{% endcall %}
+  <p class="card__meta"><span class="member">{{ row.holder }}</span><span>{{ row.prs|join(", ") }}</span></p>
+</li>
+{% endfor %}  </ul>
+{% endif %}</section>
 <section class="column" aria-labelledby="c-stale">
   <div class="column__head"><h2 id="c-stale">Stale</h2><span class="column__count">{{ board.stale.len() }}</span></div>
   <ul class="cards">

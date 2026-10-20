@@ -29,10 +29,11 @@ use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::paths::{RelPath, RepoPath};
+use dibs_domain::push::{GitFacts, PushProtection, git_pushes};
 use dibs_domain::repo::RepoId;
 use dibs_domain::settings::{EditPolicy, ProjectSettings};
 use dibs_domain::slot::{
-    CommandVerdict, SlotHold, command_verdict, slots_in_question, split_commands,
+    CommandVerdict, SimpleCommand, SlotHold, command_verdict, slots_in_question, split_commands,
 };
 
 use crate::adapter::{HostAdapter, HostReply};
@@ -237,7 +238,7 @@ impl Run<'_> {
     fn before_tool(&self, cwd: &Path, call: &ToolCall) -> Result<GuardOutcome, Problem> {
         match call {
             ToolCall::Edit { paths } if self.capabilities.deny_edit => self.edits(cwd, paths),
-            ToolCall::Shell { command } if self.capabilities.deny_shell => self.shell(command),
+            ToolCall::Shell { command } if self.capabilities.deny_shell => self.shell(cwd, command),
             ToolCall::Edit { .. } | ToolCall::Shell { .. } | ToolCall::Other => {
                 Ok(GuardOutcome::silent())
             }
@@ -295,11 +296,41 @@ impl Run<'_> {
 
     /// The command check: the line is split and judged on this machine, against the cached
     /// settings and the fresh state of the few slots its verdict reads. The line itself never
-    /// leaves the machine; a line that touches no slot is answered without the server.
-    fn shell(&self, command: &str) -> Result<GuardOutcome, Problem> {
+    /// leaves the machine. A push is judged against the protected branches from the settings and
+    /// the checkout's git settings alone, failing closed; git is asked only about a line that
+    /// pushes, in a project that protects a branch, and a line that touches no slot is answered
+    /// without the server. A line that neither pushes nor touches a slot needs nothing from the
+    /// checkout, so it never draws a warning about it.
+    fn shell(&self, cwd: &Path, command: &str) -> Result<GuardOutcome, Problem> {
         let known = self.settings()?;
         let settings = &known.value.settings;
         let catalog = settings.slots();
+        let commands = split_commands(command);
+        let governed: Vec<&SimpleCommand> = commands.iter().collect();
+        let pushes = git_pushes(&governed);
+        let here = |dir: &str| self.workspace.contains_dir(cwd, dir);
+        let protects = settings
+            .repos()
+            .iter()
+            .any(|repo| !repo.protected_refs.is_empty());
+        let judged = protects && !pushes.is_empty();
+        let facts: Option<GitFacts> = if judged {
+            self.workspace.git_facts(cwd)
+        } else {
+            None
+        };
+        let protection = PushProtection {
+            pusher: &known.value.member,
+            settings,
+            facts: facts.as_ref(),
+            here: &here,
+        };
+        if judged && let Some(refusal) = protection.refusal(&pushes) {
+            return Ok(command_outcome(
+                &refusal,
+                &KnownBoard::of(&[], &known.value.member),
+            ));
+        }
         if catalog.slots().is_empty() {
             return Ok(GuardOutcome::silent());
         }
@@ -307,7 +338,6 @@ impl Run<'_> {
             .workspace
             .repo(settings)
             .map_err(|error| Problem::Repository(error.to_string()))?;
-        let commands = split_commands(command);
         let names = slots_in_question(&commands, &repo, catalog);
         if names.is_empty() {
             return Ok(GuardOutcome::silent());
@@ -320,6 +350,7 @@ impl Run<'_> {
             catalog,
             &known_board.board,
             known_board.me,
+            judged.then_some(&protection),
         );
         Ok(command_outcome(&verdict, &known_board))
     }
@@ -399,7 +430,7 @@ impl Run<'_> {
                         holder.as_ref(),
                         &wording::item_name(*item, item_ref.as_ref()),
                         area,
-                        *way,
+                        way,
                     ));
                 }
             }
@@ -614,6 +645,17 @@ fn command_outcome(verdict: &CommandVerdict, known: &KnownBoard) -> GuardOutcome
                 reason: Text::new(reason),
             }
         }
+        CommandVerdict::NeedsPermission {
+            target,
+            pushers,
+            certain,
+        } => GuardOutcome::Deny {
+            reason: Text::new(wording::needs_permission(
+                &target.to_string(),
+                pushers,
+                *certain,
+            )),
+        },
         CommandVerdict::Frozen {
             slot,
             holder,

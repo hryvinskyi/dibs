@@ -569,3 +569,84 @@ fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
         assert_eq!(status.wide[0].areas[0].state, WideAreaState::Granted);
     });
 }
+
+#[test]
+fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_merge() {
+    use dibs_client::api::{HeldReason, ReviewRequest, WorkState};
+    use dibs_domain::review::PrRef;
+
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    run(async {
+        let item = alice
+            .create_item(&new_item("gh:acme/api#5", "Rounding"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let laptop = session(&alice, "laptop/cli").await;
+        alice
+            .claim(
+                item,
+                &ClaimRequest {
+                    wide: None,
+                    session_id: laptop.session_id,
+                    areas: vec!["billing".to_owned()],
+                },
+            )
+            .await
+            .unwrap();
+        let pr = PrRef::parse("acme/api#7").unwrap();
+        let reviewed = alice
+            .review(
+                item,
+                &ReviewRequest {
+                    pr: pr.clone(),
+                    more: true,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(reviewed.claim.in_review());
+        assert_eq!(reviewed.claim.state, WorkState::InReview);
+        let review = reviewed.claim.review.unwrap();
+        assert!(review.more);
+        assert_eq!(
+            review.prs.into_iter().collect::<Vec<_>>(),
+            std::slice::from_ref(&pr)
+        );
+        assert_eq!(reviewed.item.id, item);
+
+        let desk = session(&bob, "desk/cli").await;
+        let answer = bob
+            .edit_check(&EditCheckRequest {
+                session_id: desk.session_id,
+                repo: RepoId::parse("api").unwrap(),
+                paths: paths(&["src/billing/round.rs"]),
+                reserve: false,
+            })
+            .await
+            .unwrap();
+        let Verdict::HeldBy { reason, prs, .. } = &answer.verdicts[0].verdict else {
+            panic!("expected held: {:?}", answer.verdicts);
+        };
+        assert_eq!(*reason, HeldReason::InReview);
+        assert_eq!(prs, &[pr]);
+        let status = bob.status().await.unwrap();
+        assert!(status.live[0].claim.in_review());
+        assert_eq!(status.integration_silent_since, None);
+
+        let refused = bob
+            .review(
+                item,
+                &ReviewRequest {
+                    pr: PrRef::parse("acme/api#8").unwrap(),
+                    more: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "not_holder");
+    });
+}

@@ -33,6 +33,12 @@ pub struct SettingsDocument {
     /// The hot-file rules of the project's only repository, first match wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hot: Vec<HotRuleDocument>,
+    /// The branches of the project's only repository that only some members may push to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_refs: Vec<ProtectedRefDocument>,
+    /// Whether and how the pull requests of the project's only repository get a status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_status: Option<PrStatusDocument>,
     /// The project's repositories, when it has several.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<RepoDocument>,
@@ -103,6 +109,40 @@ pub struct RepoDocument {
     /// Its hot-file rules, first match wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hot: Vec<HotRuleDocument>,
+    /// Its branches that only some members may push to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_refs: Vec<ProtectedRefDocument>,
+    /// Whether and how its pull requests get a status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_status: Option<PrStatusDocument>,
+}
+
+/// One protected branch as written.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedRefDocument {
+    /// The branch, `refs/heads/<name>`.
+    #[serde(rename = "ref")]
+    pub target: String,
+    /// The handles of the members who may push to it; none means nobody pushes to it directly.
+    #[serde(default)]
+    pub pushers: Vec<String>,
+}
+
+/// A repository's pull-request status as written.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrStatusDocument {
+    /// Whether its pull requests get a status (default false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// The name the status is filed under (default `dibs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+    /// Whether the status names the slot, its holder and their purpose (default false): everyone
+    /// who can read the repository reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub describe_holder: Option<bool>,
 }
 
 /// One area as written.

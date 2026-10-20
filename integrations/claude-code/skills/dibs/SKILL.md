@@ -13,10 +13,12 @@ areas without asking you. Everything below is done with the `dibs_*` tools of th
 
 ## At the start of a session
 
-Read the brief dibs gives you: your live claims and their areas, other members' live claims, stale claims, unread
-conversations, the messages that ask for your acknowledgement (most pressing first), the live wide claims and who has
-acknowledged each of their areas, the project's edit policy, and the top of your ready list. If you were already working on something,
-your claim is still there; carry on under it.
+Read the brief dibs gives you: your live claims and their areas (and the pull requests of those in review), other
+members' live claims, stale claims, unread conversations, the messages that ask for your acknowledgement (most pressing
+first), the live wide claims and who has acknowledged each of their areas, the project's edit policy, and the top of your
+ready list. If you were already working on something, your claim is still there; carry on under it. A line saying the
+integration is silent means merges complete no claims for now: tell your person, and do not complete a merged claim by
+hand unless they ask.
 
 ## Choosing what to do next
 
@@ -68,13 +70,45 @@ they agree, or when the change cannot collide with what you are doing; otherwise
 unacknowledged. A claim of yours that holds an area inside someone's wide claim says so (`inside_wide`), and its
 announcement is already waiting in your inbox.
 
+## Branches and pull requests
+
+Where your team works through pull requests, every change reaches a protected branch through one that someone the team
+names reviews and merges. Your team's own workflow decides the conventions; where it says nothing, these defaults
+serve many teams:
+
+- Work on a branch of your own, one per claimed item. A common convention, and the default here, names it
+  `<handle>/<number>-<slug>` (`bob/42-refund-rounding`). Rebase it onto the base branch before you ask for review and
+  again before the merge.
+- Many teams name a pull request's ticket in its description as `Refs #<number>` rather than `Closes`, `Fixes` or
+  `Resolves #<number>`, because a forge closes those tickets at the merge, before anyone has checked the change where it
+  runs. Follow your team's rule where it has one.
+- Do not push to a protected branch. A push there by anyone the project does not list as its pusher is refused, naming
+  who may push; a push dibs cannot read — every branch, a wildcard, another directory — is refused too, so name the
+  branch and the remote you push. A push to a fork is not judged. The way on is your branch and a pull request. A person
+  in a terminal can still push with `git push --no-verify`; that breaks the team's rule.
+- Once the pull request is open, record it on your claim: `dibs_review` with the item and `pr` (`owner/repo#number`), or
+  `dibs claim review <item> --pr <owner>/<repo>#<number>`. Your claim is then in review: it keeps its areas, so nobody
+  edits the files under review, and it needs no heartbeat while the pull request is open. You may go on pushing review
+  fixes to its branch. Recorded the wrong one? Remove it: `dibs_review` with `drop: true`, or
+  `dibs claim review <item> --drop-pr <owner>/<repo>#<number>`.
+- The merge into a protected branch completes your claim; dibs tells you. When more pull requests of the same item
+  follow — a change in two repositories, or a feature landing in steps — record each with `more` (`--more`): the merge
+  then returns the claim to you, with its areas, for the next one.
+- A pull request closed without merging, or merged into a branch that is not protected (one stacked on another), does
+  not deliver its work. dibs tells you: with others still open, their merges no longer complete the claim — record the
+  pull request that brings the work in, or mark the item done once it is in; with none left, the claim is yours to work
+  on again.
+- An edit refused with "their claim is in review" waits for that merge: pick other work, or message the holder if you
+  cannot wait.
+
 ## Release and done
 
 - `dibs_release` when you stop working on an item without finishing it, so the item and its areas are free again.
-- `dibs_done` when the work shipped.
+- `dibs_done` when the work shipped without a pull request; a merge of the pull request you recorded completes the claim
+  for you.
 
 A claim stays live while your sessions send heartbeats; dibs sends them in the background. One that goes without a
-heartbeat for the project's `stale_after` becomes stale.
+heartbeat for the project's `stale_after` becomes stale; a claim in review never does.
 
 ## Taking over
 

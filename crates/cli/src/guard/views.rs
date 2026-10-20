@@ -24,6 +24,12 @@ pub fn status(status: &Status) -> StatusView {
         title: held.item.title.clone(),
         holder: held.claim.holder.clone(),
         areas: held.claim.areas.iter().cloned().collect(),
+        prs: held
+            .claim
+            .review
+            .as_ref()
+            .map(|review| review.prs.iter().cloned().collect())
+            .unwrap_or_default(),
     };
     StatusView {
         live: status.live.iter().map(line).collect(),
@@ -102,6 +108,7 @@ pub fn status(status: &Status) -> StatusView {
                     .collect(),
             })
             .collect(),
+        integration_silent_since: status.integration_silent_since,
     }
 }
 
@@ -317,12 +324,14 @@ pub fn answer(verdict: &Verdict) -> PathAnswer {
             item_ref,
             area,
             reason,
+            prs,
         } => PathAnswer::HeldBy {
             holder: holder.clone(),
             item: *item,
             item_ref: item_ref.clone(),
             area: area.clone(),
             way: match reason {
+                HeldReason::InReview => HeldWay::InReview { prs: prs.clone() },
                 HeldReason::AwaitingAck => HeldWay::AwaitingAck,
                 HeldReason::AskHolder | HeldReason::Other => HeldWay::AskHolder,
             },

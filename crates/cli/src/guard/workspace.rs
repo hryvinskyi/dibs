@@ -16,6 +16,7 @@ use dibs_client::checkout::Checkout;
 use dibs_client::locations::Locations;
 use dibs_client::state::{StateDir, read_json, write_json};
 use dibs_domain::paths::RelPath;
+use dibs_domain::push::GitFacts;
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::settings::ProjectSettings;
 
@@ -128,6 +129,20 @@ impl Workspace for ClientWorkspace {
             .governing_repo(settings, origin.as_ref())
             .map(|repo| repo.id.clone())
             .map_err(|refused| PortError::Refused(sentence(&refused.to_string())))
+    }
+
+    fn git_facts(&self, cwd: &Path) -> Option<GitFacts> {
+        Git::new(cwd).push_facts()
+    }
+
+    fn contains_dir(&self, cwd: &Path, dir: &str) -> bool {
+        let (Ok(dir), Ok(root)) = (
+            std::fs::canonicalize(cwd.join(dir)),
+            std::fs::canonicalize(self.checkout.root()),
+        ) else {
+            return false;
+        };
+        dir.starts_with(root)
     }
 
     fn cache(&self) -> &dyn LocalCache {

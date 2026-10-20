@@ -69,6 +69,25 @@ fn held(member: MemberId, item: u64, text: &str) -> Verdict {
     }
 }
 
+/// A claim in review of the pull requests named, since its last sign of life.
+fn reviewing(claim: Claim, prs: &[&str]) -> Claim {
+    use crate::review::{ClaimState, PrRef, Review};
+    let prs = prs.iter().map(|text| PrRef::parse(text).unwrap()).collect();
+    Claim {
+        state: ClaimState::InReview(Review::new(prs, claim.last_seen, false).unwrap()),
+        ..claim
+    }
+}
+
+fn in_review_reason(prs: &[&str]) -> HeldReason {
+    HeldReason::InReview {
+        prs: prs
+            .iter()
+            .map(|text| crate::review::PrRef::parse(text).unwrap())
+            .collect(),
+    }
+}
+
 fn scope(named: &[&str]) -> crate::wide::WideScope {
     crate::wide::WideScope::new(
         crate::testing::areas(named),
@@ -414,6 +433,102 @@ fn verdict_table() {
                     ..claim(2, BOB, &[], 0)
                 },
             ],
+            path: "api:packages/search/src/Index.php",
+            add_areas: vec![add(1, "api:search")],
+            touch: vec![1],
+            ..Case::default()
+        },
+        Case {
+            name: "review: a holder in review still holds the area, free when it merges",
+            claims: vec![
+                alice_plain(),
+                reviewing(bob_billing(), &["acme/api#12", "acme/web#3"]),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: in_review_reason(&["acme/api#12", "acme/web#3"]),
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "review: a holder in review is held long after a working claim would be stale",
+            claims: vec![
+                alice_plain(),
+                reviewing(claim(2, BOB, &["api:billing"], stale), &["acme/api#12"]),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: in_review_reason(&["acme/api#12"]),
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "review: being in review comes before waiting for an acknowledgement",
+            claims: vec![alice_wide(), reviewing(bob_billing(), &["acme/api#12"])],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: in_review_reason(&["acme/api#12"]),
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "review: a grant from a holder in review is in force",
+            claims: vec![alice_plain(), reviewing(bob_billing(), &["acme/api#12"])],
+            grants: vec![Grant {
+                item: ItemId(1),
+                area: area("api:billing"),
+                from: BOB,
+                to: ALICE,
+            }],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::Granted {
+                by: BOB,
+                area: area("api:billing"),
+            },
+            touch: vec![1],
+            ..Case::default()
+        },
+        Case {
+            name: "review: my own area stays mine while my claim is in review",
+            claims: vec![reviewing(alice_billing(), &["acme/api#12"])],
+            path: "api:packages/billing/src/Invoice.php",
+            touch: vec![1],
+            ..Case::default()
+        },
+        Case {
+            name: "review: a new area goes to my claim I am working on, not the newer one in review",
+            claims: vec![
+                claim(5, ALICE, &[], 0),
+                reviewing(claim(9, ALICE, &[], 10), &["acme/api#12"]),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            add_areas: vec![add(5, "api:billing")],
+            touch: vec![5],
+            ..Case::default()
+        },
+        Case {
+            name: "review: with every claim of mine in review, the latest of them gets the area",
+            claims: vec![
+                reviewing(claim(5, ALICE, &[], 0), &["acme/api#11"]),
+                reviewing(claim(9, ALICE, &[], 10), &["acme/api#12"]),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            add_areas: vec![add(9, "api:billing")],
+            touch: vec![9],
+            ..Case::default()
+        },
+        Case {
+            name: "review: a claim of mine in review is a live claim, so no claim is needed",
+            claims: vec![reviewing(claim(1, ALICE, &[], stale), &["acme/api#12"])],
             path: "api:packages/search/src/Index.php",
             add_areas: vec![add(1, "api:search")],
             touch: vec![1],

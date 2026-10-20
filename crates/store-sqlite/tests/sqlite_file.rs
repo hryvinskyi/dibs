@@ -85,7 +85,7 @@ mod sqlite_file {
             "SELECT group_concat(version || ':' || success) FROM _sqlx_migrations",
         )
         .await;
-        assert_eq!(applied, "1:1,2:1,3:1,4:1,5:1,6:1,7:1");
+        assert_eq!(applied, "1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1");
         assert_eq!(scalar(&path, "PRAGMA journal_mode").await, "wal");
     }
 
@@ -177,8 +177,10 @@ mod sqlite_file {
         SqliteStore::open(&path).await.unwrap().close().await;
         let mut connection = raw(&path).await;
         let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(
-            "EXPLAIN QUERY PLAN SELECT id FROM events \
+            "EXPLAIN QUERY PLAN SELECT id, at FROM events \
              WHERE project_id = 1 AND kind = 'completed' AND at >= 0 \
+             UNION ALL SELECT id, at FROM events \
+             WHERE project_id = 1 AND kind = 'completed_by_merge' AND at >= 0 \
              ORDER BY at DESC, id DESC LIMIT 10",
         )
         .fetch_all(&mut connection)

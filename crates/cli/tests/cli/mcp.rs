@@ -15,7 +15,7 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 20] = [
+const TOOLS: [&str; 21] = [
     "dibs_ack",
     "dibs_check",
     "dibs_claim",
@@ -28,6 +28,7 @@ const TOOLS: [&str; 20] = [
     "dibs_read",
     "dibs_ready",
     "dibs_release",
+    "dibs_review",
     "dibs_send",
     "dibs_slot_leave",
     "dibs_slot_release",
@@ -281,6 +282,50 @@ fn a_claim_is_taken_in_the_members_name_and_the_command_line_sees_it() {
     assert_eq!(done.ok()["claim"]["holder"], "alice");
     let finished = mcp.tool("dibs_items", json!({"status": "done"}));
     assert_eq!(finished.ok()["items"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn a_claim_goes_to_review_through_a_tool_and_another_members_edit_waits_for_the_merge() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#7", "title": "Fix billing rounding"}),
+    );
+    alice.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#7", "areas": ["billing"]}),
+    );
+    let reviewed = alice.tool(
+        "dibs_review",
+        json!({"key": "gh:acme/api#7", "pr": "acme/api#12", "more": true}),
+    );
+    let answer = reviewed.ok();
+    assert_eq!(answer["claim"]["state"], "in_review");
+    assert_eq!(answer["claim"]["review"]["prs"], json!(["acme/api#12"]));
+    assert_eq!(answer["claim"]["review"]["more"], true);
+    let held = bob.tool("dibs_check", json!({"paths": ["src/billing/round.rs"]}));
+    let verdict = &held.ok()["verdicts"][0];
+    assert_eq!(verdict["verdict"], "held_by", "{verdict}");
+    assert_eq!(verdict["reason"], "in_review");
+    assert_eq!(verdict["prs"], json!(["acme/api#12"]));
+    let malformed = alice.tool(
+        "dibs_review",
+        json!({"key": "gh:acme/api#7", "pr": "acme/api"}),
+    );
+    assert!(malformed.error().contains("pr"), "{}", malformed.text);
+    let not_mine = bob.tool(
+        "dibs_review",
+        json!({"key": "gh:acme/api#7", "pr": "acme/api#13"}),
+    );
+    assert!(not_mine.error().contains("alice"), "{}", not_mine.text);
+    let dropped = alice.tool(
+        "dibs_review",
+        json!({"key": "gh:acme/api#7", "pr": "acme/api#12", "drop": true}),
+    );
+    assert_eq!(dropped.ok()["claim"]["state"], "working");
 }
 
 #[test]

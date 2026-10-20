@@ -17,7 +17,7 @@
   <table class="table">
     <thead><tr><th scope="col">Item</th><th scope="col">Member</th><th scope="col">Areas</th><th scope="col">Since</th><th scope="col">Last heartbeat</th></tr></thead>
     <tbody>
-      {% for row in live %}<tr><td><span class="ref">{{ row.reference }}</span><span class="item-title">{{ row.title }}</span></td><td><span class="member">{{ row.holder }}</span><span class="session">{{ row.host }}</span></td><td>{% call ui::chips(row.areas) %}{% endcall %}</td><td>{% call ui::time(row.since) %}{% endcall %}</td><td>{% call ui::time(row.seen) %}{% endcall %}</td></tr>
+      {% for row in live %}<tr><td><span class="ref">{{ row.reference }}</span><span class="item-title">{{ row.title }}</span></td><td><span class="member">{{ row.holder }}</span><span class="session">{{ row.host }}</span></td><td>{% call ui::chips(row.areas) %}{% endcall %}</td><td>{% call ui::time(row.since) %}{% endcall %}</td><td>{% if row.in_review() %}<span class="badge badge--review"><span class="badge__icon badge__icon--half" aria-hidden="true"></span>In review</span> {{ row.prs|join(", ") }}{% else %}{% call ui::time(row.seen) %}{% endcall %}{% endif %}</td></tr>
       {% endfor %}
     </tbody>
   </table>

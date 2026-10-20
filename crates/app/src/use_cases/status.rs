@@ -2,11 +2,14 @@
 
 use std::sync::Arc;
 
+use time::OffsetDateTime;
+
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::grant::Grant;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MemberId};
+use dibs_domain::integration::{IntegrationSign, review_in_use, silent_since};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::wide::standing;
 
@@ -84,11 +87,17 @@ pub struct StatusView {
     pub slots: Vec<SlotLine>,
     /// The escalations the caller may read that no arbiter has acknowledged yet, newest first.
     pub escalations: Vec<OpenEscalation>,
+    /// Since when the project's integrations have not called, once that is long enough to count
+    /// as silent, in a project whose reviews rely on them — a claim is in review or a repository's
+    /// pull requests get a status: merges then complete no claims and statuses go stale. `None`
+    /// while one calls, when the project has none, or when nothing relies on them.
+    pub integration_silent_since: Option<OffsetDateTime>,
 }
 
 /// Shows the project's live and stale claims, the areas held, the live wide claims with where each
 /// of their areas stands, the caller's ready list, where the slots stand — after applying, and
-/// recording, what time changed about them — and the escalations still waiting for an arbiter.
+/// recording, what time changed about them — the escalations still waiting for an arbiter, and
+/// whether the project's integrations went silent.
 pub struct Status {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -140,8 +149,12 @@ impl Status {
             ready,
             slots: scene_lines(&mut work, &scene).await?,
             escalations: open_escalations(&mut work, actor, &names, &self.ref_schemes).await?,
+            integration_silent_since: None,
         };
         let claims = work.claims(actor.project).await?;
+        if review_in_use(&claims, &settings) {
+            view.integration_silent_since = integration_silence(&mut work, now).await?;
+        }
         let grants: Vec<Grant> = work
             .grants(actor.project)
             .await?
@@ -203,6 +216,29 @@ impl Status {
     }
 }
 
+/// Since when the project's present integrations have not called, when that counts as silent.
+async fn integration_silence(
+    work: &mut Work,
+    now: OffsetDateTime,
+) -> Result<Option<OffsetDateTime>, AppError> {
+    let project = work.project_id();
+    let calls = work.last_calls(project).await?;
+    let signs: Vec<IntegrationSign> = work
+        .members(project)
+        .await?
+        .into_iter()
+        .filter(|member| member.is_present() && !member.role.is_person())
+        .map(|member| IntegrationSign {
+            joined: member.created_at,
+            last_call: calls
+                .iter()
+                .find(|(id, _)| *id == member.id)
+                .map(|(_, at)| *at),
+        })
+        .collect();
+    Ok(silent_since(&signs, now))
+}
+
 #[cfg(test)]
 mod tests {
     use time::Duration;
@@ -261,5 +297,38 @@ mod tests {
             Some("https://github.com/acme/widgets/issues/1"),
             "a held item links to its tracker's page"
         );
+    }
+
+    #[tokio::test]
+    async fn the_status_says_since_when_the_integrations_are_silent_while_reviews_rely_on_them() {
+        let env = Env::with_settings(r#"{"pr_status": {"enabled": true}}"#).await;
+        let quiet = Env::new().await;
+        quiet.advance(Duration::minutes(16));
+        assert_eq!(
+            Status::new(&quiet.deps)
+                .execute(&quiet.alice.actor)
+                .await
+                .unwrap()
+                .integration_silent_since,
+            None,
+            "a project whose reviews do not rely on an integration hears no alarm"
+        );
+        let status = || async {
+            Status::new(&env.deps)
+                .execute(&env.alice.actor)
+                .await
+                .unwrap()
+                .integration_silent_since
+        };
+        assert_eq!(status().await, None, "it signed in a moment ago");
+        env.advance(Duration::minutes(16));
+        let silent = status().await;
+        assert_eq!(silent, Some(crate::use_cases::testing::START));
+        let mut tx = env.deps.store.begin().await.unwrap();
+        tx.record_call(env.project, env.importer.member, env.now())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(status().await, None, "a call ends the silence");
     }
 }

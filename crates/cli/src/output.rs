@@ -108,6 +108,10 @@ pub fn claim_text(claim: &Claim) -> String {
         let areas: Vec<String> = claim.areas.iter().map(ToString::to_string).collect();
         let _ = write!(text, ", areas {}", areas.join(", "));
     }
+    if let Some(review) = &claim.review {
+        let prs: Vec<String> = review.prs.iter().map(ToString::to_string).collect();
+        let _ = write!(text, ", in review on {}", prs.join(", "));
+    }
     text
 }
 
@@ -140,6 +144,7 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
             item_ref,
             area,
             reason,
+            prs,
         } => {
             let who = holder
                 .as_ref()
@@ -148,6 +153,10 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
                 .as_ref()
                 .map_or_else(|| item.to_string(), ToString::to_string);
             let way = match reason {
+                HeldReason::InReview => {
+                    let prs: Vec<String> = prs.iter().map(ToString::to_string).collect();
+                    format!("in review on {}; free when it merges", prs.join(", "))
+                }
                 HeldReason::AwaitingAck => format!(
                     "your wide claim names it; waiting for {who}'s acknowledgement, which grants the edit"
                 ),

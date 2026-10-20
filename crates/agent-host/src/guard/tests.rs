@@ -82,6 +82,8 @@ struct State {
     upkeep_due: Vec<crate::upkeep::Due>,
     versions_checked: Option<OffsetDateTime>,
     newer: Option<crate::ports::NewerRelease>,
+    git: Option<dibs_domain::push::GitFacts>,
+    git_reads: u32,
 }
 
 impl State {
@@ -128,6 +130,20 @@ impl State {
             upkeep_due: Vec::new(),
             versions_checked: Some(at(0)),
             newer: None,
+            git: Some(dibs_domain::push::GitFacts {
+                branch: Some("feature".to_owned()),
+                config: vec![
+                    (
+                        "remote.origin.url".to_owned(),
+                        "https://example.com/acme/api.git".to_owned(),
+                    ),
+                    (
+                        "remote.fork.url".to_owned(),
+                        "https://example.com/bob/api.git".to_owned(),
+                    ),
+                ],
+            }),
+            git_reads: 0,
         }
     }
 }
@@ -187,6 +203,16 @@ impl Workspace for World {
 
     fn repo(&self, _settings: &ProjectSettings) -> Result<RepoId, PortError> {
         self.0.borrow().repo.clone()
+    }
+
+    fn git_facts(&self, _cwd: &Path) -> Option<dibs_domain::push::GitFacts> {
+        let mut state = self.0.borrow_mut();
+        state.git_reads += 1;
+        state.git.clone()
+    }
+
+    fn contains_dir(&self, _cwd: &Path, dir: &str) -> bool {
+        dir == "."
     }
 
     fn cache(&self) -> &dyn LocalCache {
@@ -1090,6 +1116,7 @@ fn a_session_starts_with_a_brief_from_a_fresh_cache() {
                     title: "Fix billing".parse().unwrap(),
                     holder: handle("bob"),
                     areas: vec![area("api:billing")],
+                    prs: Vec::new(),
                 }],
                 ..StatusView::default()
             },
@@ -1821,4 +1848,190 @@ fn a_stale_inbox_still_delivers_from_this_machine_and_starts_the_upkeep_without_
     assert!(context(&run(&world, "neutral", "after-tool", &thread_input("main"))).is_some());
     assert_eq!(world.0.borrow().upkeep_starts, 1);
     assert!(world.calls().is_empty(), "nothing was waited for");
+}
+
+/// One repository whose main branch only alice may push to, and no slot.
+fn protected_settings(member: &str) -> KnownSettings {
+    let document: SettingsDocument = serde_json::from_value(json!({
+        "repos": [{
+            "id": "api",
+            "remote": "https://example.com/acme/api.git",
+            "protected_refs": [{"ref": "refs/heads/main", "pushers": ["alice"]}]
+        }]
+    }))
+    .unwrap();
+    KnownSettings {
+        member: handle(member),
+        settings: ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+    }
+}
+
+#[test]
+fn a_push_to_a_protected_branch_is_refused_from_the_settings_alone_and_its_pushers_pass() {
+    let world = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: protected_settings("bob"),
+            at: at(0),
+        });
+    });
+    let reason = denial(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git fetch && git push origin HEAD:main"),
+    ));
+    for part in [
+        "api:refs/heads/main",
+        "only alice may push to",
+        "open a pull request",
+        "dibs_review",
+        "dibs claim review <item> --pr",
+    ] {
+        assert!(reason.contains(part), "{part}: {reason}");
+    }
+    for line in [
+        "git push --all origin",
+        "git -C ../other push origin feature",
+        "git push origin 'refs/heads/*:refs/heads/*'",
+    ] {
+        let reason = denial(&run(&world, "neutral", "before-tool", &shell(line)));
+        assert!(
+            reason.contains("only alice may push to"),
+            "{line}: {reason}"
+        );
+    }
+    world.set(|state| {
+        if let Some(git) = &mut state.git {
+            git.branch = Some("main".to_owned());
+        }
+    });
+    let current = denial(&run(&world, "neutral", "before-tool", &shell("git push")));
+    let head = denial(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin HEAD"),
+    ));
+    assert!(
+        head.contains("This push goes to api:refs/heads/main"),
+        "{head}"
+    );
+    assert!(
+        current.contains("This push goes to api:refs/heads/main"),
+        "{current}"
+    );
+    world.set(|state| {
+        if let Some(git) = &mut state.git {
+            git.branch = Some("feature".to_owned());
+        }
+    });
+    for line in [
+        "git push origin bob/42-rounding",
+        "git push fork main",
+        "git status",
+        "cargo test",
+    ] {
+        let answer = run(&world, "neutral", "before-tool", &shell(line));
+        assert_eq!(no_objection(&answer)["notice"], Value::Null, "{line}");
+    }
+    assert!(
+        world.calls().is_empty(),
+        "a protected branch costs no call: {:?}",
+        world.calls()
+    );
+    let pusher = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: protected_settings("alice"),
+            at: at(0),
+        });
+    });
+    let answer = run(
+        &pusher,
+        "neutral",
+        "before-tool",
+        &shell("git push origin main"),
+    );
+    assert_eq!(
+        reply(&answer),
+        json!({"protocol": 1, "decision": "no_objection"})
+    );
+    assert!(pusher.calls().is_empty());
+}
+
+#[test]
+fn a_protected_branch_is_refused_before_a_freeze_would_be_asked_about() {
+    let world = World::new().with(|state| {
+        let mut known = protected_settings("bob");
+        let mut document = known.settings.to_document();
+        document.slots = slot_settings().to_document().slots;
+        known.settings = ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap();
+        state.cached_settings = Some(Cached {
+            value: known,
+            at: at(0),
+        });
+        state.slot_states = Ok(vec![held(
+            "deploy:prod",
+            "alice",
+            dibs_domain::slot::Liveness::Session,
+        )]);
+    });
+    let reason = denial(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin main"),
+    ));
+    assert!(reason.contains("only alice may push to"), "{reason}");
+    assert!(world.calls().is_empty(), "{:?}", world.calls());
+}
+
+#[test]
+fn git_is_read_only_for_a_push_and_a_line_that_pushes_nothing_draws_no_repository_warning() {
+    let world = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: protected_settings("bob"),
+            at: at(0),
+        });
+        state.repo = Err(PortError::Refused(
+            "this checkout governs no repository of the project.".to_owned(),
+        ));
+    });
+    for line in ["cargo test", "ls -la", "echo git push origin main"] {
+        let answer = run(&world, "neutral", "before-tool", &shell(line));
+        assert_eq!(
+            reply(&answer),
+            json!({"protocol": 1, "decision": "no_objection"}),
+            "{line}"
+        );
+    }
+    assert_eq!(world.0.borrow().git_reads, 0, "no push, no git");
+    let reason = denial(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin main"),
+    ));
+    assert!(reason.contains("only alice may push to"), "{reason}");
+    assert_eq!(world.0.borrow().git_reads, 1);
+}
+
+#[test]
+fn a_checkout_whose_git_cannot_be_read_refuses_a_non_pushers_push() {
+    let world = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: protected_settings("bob"),
+            at: at(0),
+        });
+        state.git = None;
+    });
+    let reason = denial(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin feature"),
+    ));
+    assert!(
+        reason.contains("may update api:refs/heads/main"),
+        "{reason}"
+    );
 }

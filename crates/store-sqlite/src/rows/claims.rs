@@ -9,17 +9,18 @@ use dibs_domain::ids::{ItemId, MemberId, ProjectId, SessionId};
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::repo::RepoId;
 use dibs_domain::reservation::SharedPath;
+use dibs_domain::review::{ClaimState, Review};
 use dibs_domain::session::HostName;
 use dibs_domain::wide::{WideReason, WideScope};
 
 use crate::SqliteTx;
-use crate::codec::{Fields, int, json, nanos};
+use crate::codec::{Fields, int, json, nanos, opt_nanos};
 
 /// The columns a claim is read from.
 macro_rules! claim_columns {
     () => {
         "item_id, member_id, session_id, host, areas, wide_areas, wide_reason, claimed_at, \
-         renewed_at, last_seen"
+         renewed_at, last_seen, review_prs, review_since, review_more"
     };
 }
 
@@ -39,6 +40,25 @@ fn claim(row: &SqliteRow) -> StoreResult<Claim> {
             ));
         }
     };
+    let state = match (
+        f.opt_text("review_prs")?,
+        f.opt_time("review_since")?,
+        f.opt_int("review_more")?,
+    ) {
+        (None, None, None) => ClaimState::Working,
+        (Some(prs), Some(since), Some(more)) => {
+            let prs = serde_json::from_str(&prs).map_err(|error| f.bad("review_prs", error))?;
+            let review =
+                Review::new(prs, since, more != 0).map_err(|error| f.bad("review_prs", error))?;
+            ClaimState::InReview(review)
+        }
+        _ => {
+            return Err(f.bad(
+                "review_prs",
+                "a review has its pull requests, its start and whether more follow, or none of them",
+            ));
+        }
+    };
     Ok(Claim {
         item: ItemId(f.number("item_id")?),
         member: MemberId(f.number("member_id")?),
@@ -49,6 +69,7 @@ fn claim(row: &SqliteRow) -> StoreResult<Claim> {
         claimed_at: f.time("claimed_at")?,
         renewed_at: f.time("renewed_at")?,
         last_seen: f.time("last_seen")?,
+        state,
     })
 }
 
@@ -91,15 +112,18 @@ impl ClaimRows for SqliteTx {
     }
 
     async fn save_claim(&mut self, project: ProjectId, record: &Claim) -> StoreResult<()> {
+        let review = record.state.review();
         let statement = sqlx::query(
             "INSERT INTO claims (project_id, item_id, member_id, session_id, host, areas, \
-             wide_areas, wide_reason, claimed_at, renewed_at, last_seen) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+             wide_areas, wide_reason, claimed_at, renewed_at, last_seen, review_prs, review_since, \
+             review_more) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
              ON CONFLICT (project_id, item_id) DO UPDATE SET member_id = excluded.member_id, \
              session_id = excluded.session_id, host = excluded.host, areas = excluded.areas, \
              wide_areas = excluded.wide_areas, wide_reason = excluded.wide_reason, \
              claimed_at = excluded.claimed_at, renewed_at = excluded.renewed_at, \
-             last_seen = excluded.last_seen",
+             last_seen = excluded.last_seen, review_prs = excluded.review_prs, \
+             review_since = excluded.review_since, review_more = excluded.review_more",
         )
         .bind(int(project.get())?)
         .bind(int(record.item.get())?)
@@ -122,7 +146,10 @@ impl ClaimRows for SqliteTx {
         )
         .bind(nanos(record.claimed_at)?)
         .bind(nanos(record.renewed_at)?)
-        .bind(nanos(record.last_seen)?);
+        .bind(nanos(record.last_seen)?)
+        .bind(review.map(|review| json(review.prs())).transpose()?)
+        .bind(opt_nanos(review.map(Review::since))?)
+        .bind(review.map(|review| i64::from(review.more())));
         self.run(statement).await?;
         Ok(())
     }

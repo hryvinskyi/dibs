@@ -20,7 +20,7 @@ use dibs_app::use_cases::{
 };
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::delivery::Delivery;
-use dibs_domain::edit::Verdict;
+use dibs_domain::edit::{HeldReason, Verdict};
 use dibs_domain::event::EventKind;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::{HotRuleKind, Note};
@@ -31,6 +31,7 @@ use dibs_domain::item::{
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
 use dibs_domain::repo::{RemoteUrl, RepoId};
+use dibs_domain::review::{PrRef, Review};
 use dibs_domain::session::{AgentLabel, HostName};
 
 use crate::error::ApiError;
@@ -322,6 +323,33 @@ pub struct ClaimView {
     /// The last sign of life.
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
     pub last_seen: OffsetDateTime,
+    /// `working` while its holder works on it, `in_review` while its work waits in pull requests.
+    pub state: &'static str,
+    /// While it is in review, the pull requests it recorded; `null` otherwise.
+    pub review: Option<ReviewView>,
+}
+
+/// The review of a claim in review.
+#[derive(Debug, Serialize)]
+pub struct ReviewView {
+    /// The pull requests it recorded, in order.
+    pub prs: BTreeSet<PrRef>,
+    /// Since when it is in review.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub since: OffsetDateTime,
+    /// Whether more pull requests of the item follow these.
+    pub more: bool,
+}
+
+impl ReviewView {
+    /// The view of a review.
+    pub fn of(review: &Review) -> Self {
+        Self {
+            prs: review.prs().clone(),
+            since: review.since(),
+            more: review.more(),
+        }
+    }
 }
 
 impl ClaimView {
@@ -341,6 +369,8 @@ impl ClaimView {
             claimed_at: claim.claimed_at,
             renewed_at: claim.renewed_at,
             last_seen: claim.last_seen,
+            state: claim.state.code(),
+            review: claim.state.review().map(ReviewView::of),
         }
     }
 }
@@ -455,10 +485,14 @@ pub enum VerdictView {
         item_ref: Option<ExternalRef>,
         /// The area.
         area: QualifiedArea,
-        /// The way on: `ask_holder`, message the holder or ask for a grant; `awaiting_ack`, the
-        /// caller's wide claim names the area and the holder has not acknowledged its
-        /// announcement.
+        /// The way on: `in_review`, the holder's claim is in review and the area is free once its
+        /// pull requests merge; `ask_holder`, message the holder or ask for a grant;
+        /// `awaiting_ack`, the caller's wide claim names the area and the holder has not
+        /// acknowledged its announcement.
         reason: &'static str,
+        /// For `in_review`, the pull requests the holder's claim recorded; empty otherwise.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        prs: Vec<PrRef>,
     },
     /// The holder granted the member edits in the area.
     Granted {
@@ -507,6 +541,10 @@ impl PathVerdictView {
                 item_ref: named.item_ref,
                 area,
                 reason: reason.code(),
+                prs: match reason {
+                    HeldReason::InReview { prs } => prs,
+                    HeldReason::AskHolder | HeldReason::AwaitingAck => Vec::new(),
+                },
             },
             Verdict::Granted { area, .. } => VerdictView::Granted {
                 by: named.member,
@@ -856,7 +894,7 @@ mod tests {
     use time::macros::datetime;
 
     use dibs_domain::claim::{Claim, Holder};
-    use dibs_domain::edit::{HeldReason, PathVerdict};
+    use dibs_domain::edit::PathVerdict;
     use dibs_domain::hot_rule::HotRuleRegistry;
     use dibs_domain::ids::MemberId;
     use dibs_domain::paths::RepoPath;
@@ -879,9 +917,10 @@ mod tests {
             claimed_at: datetime!(2026-01-02 03:04:05 UTC),
             renewed_at: datetime!(2026-01-02 03:04:05 UTC),
             last_seen: datetime!(2026-01-02 03:05:00 UTC),
+            state: dibs_domain::review::ClaimState::Working,
         };
         let view = serde_json::to_value(ClaimView::of(NamedClaim {
-            claim,
+            claim: claim.clone(),
             holder: handle("alice"),
         }))
         .unwrap();
@@ -893,8 +932,31 @@ mod tests {
                 "wide": null,
                 "claimed_at": "2026-01-02T03:04:05Z",
                 "renewed_at": "2026-01-02T03:04:05Z",
-                "last_seen": "2026-01-02T03:05:00Z"
+                "last_seen": "2026-01-02T03:05:00Z",
+                "state": "working",
+                "review": null
             })
+        );
+        let reviewing = Claim {
+            state: dibs_domain::review::ClaimState::InReview(
+                Review::new(
+                    BTreeSet::from([PrRef::parse("acme/api#12").unwrap()]),
+                    datetime!(2026-01-03 10:00 UTC),
+                    true,
+                )
+                .unwrap(),
+            ),
+            ..claim
+        };
+        let view = serde_json::to_value(ClaimView::of(NamedClaim {
+            claim: reviewing,
+            holder: handle("alice"),
+        }))
+        .unwrap();
+        assert_eq!(view["state"], "in_review");
+        assert_eq!(
+            view["review"],
+            json!({"prs": ["acme/api#12"], "since": "2026-01-03T10:00:00Z", "more": true})
         );
     }
 
@@ -995,6 +1057,28 @@ mod tests {
                 "holder": "bob", "item": 3, "item_ref": "gh:acme/api#3",
                 "area": "api:billing", "reason": "ask_holder"
             })
+        );
+        let reviewing = NamedVerdict {
+            verdict: PathVerdict {
+                path: RepoPath::parse("api:src/billing/a.rs").unwrap(),
+                verdict: Verdict::HeldBy {
+                    member: MemberId(2),
+                    item: ItemId(3),
+                    area: QualifiedArea::parse("api:billing").unwrap(),
+                    reason: HeldReason::InReview {
+                        prs: vec![PrRef::parse("acme/api#12").unwrap()],
+                    },
+                },
+            },
+            member: Some(handle("bob")),
+            item_ref: None,
+            touched_by: Vec::new(),
+            touched_refs: Vec::new(),
+        };
+        let view = serde_json::to_value(PathVerdictView::of(reviewing)).unwrap();
+        assert_eq!(
+            (&view["reason"], &view["prs"]),
+            (&json!("in_review"), &json!(["acme/api#12"]))
         );
     }
 

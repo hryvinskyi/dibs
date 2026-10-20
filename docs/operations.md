@@ -318,6 +318,53 @@ next waiter — for every project with a hold, a waiter or an offer. The sweep s
 after the requests in flight, and finishes a sweep it is running before the write-ahead log is checkpointed. An admin
 ends any hold with `dibs admin slot force-release <slot> --reason …`; the holder is sent the reason.
 
+## Pull requests and the integration
+
+A team that works on branches and pull requests declares, per repository, the branches only some members may push to
+and whether its pull requests get a status (`docs/api.md` lists the fields). For a project with several repositories
+each entry of `repos` carries its own; a project with one writes them at the top level:
+
+```toml
+[[protected_refs]]
+ref = "refs/heads/main"
+pushers = ["alice"]
+
+[pr_status]
+enabled = true
+context = "dibs"
+describe_holder = false
+```
+
+- **Protected branches** are what keeps the agents to the rule where the forge's plan has no branch protection or
+  required reviews: a push there by anyone not in `pushers` is refused by the agent's command check and by
+  `dibs check --push`, and so is a push whose branches cannot be read. Each push is judged against the repository of
+  the remote it goes to; a fork protects nothing. Install the pre-push hook so that it passes git's arguments on:
+  `exec dibs check --push --remote "$1" --url "$2"`. It judges protected branches from what the machine remembers, so
+  a push to one is refused while the server cannot be reached. Nothing on the server can stop a person who pushes with
+  `git push --no-verify`, or a merge through the forge's web pages; the rule is the team's agreement.
+- **A claim lives through review.** A member records their pull request on their claim (`dibs claim review <item> --pr
+  <owner>/<repo>#<number>`); the claim keeps its areas and never goes stale while in review. Its review ends when the
+  integration reports the merge or the close of a pull request it recorded, or when its holder removes one recorded by
+  mistake (`--drop-pr`); and the claim itself still ends as any claim does — its holder releases or completes it, an
+  admin forces its release, or the member is removed. Only a merge into a protected branch (any branch, in a repository
+  that protects none) completes it.
+- **An integration closes the loop.** dibs speaks no forge API. A worker holding an `importer` token
+  (`dibs admin member add worker --name "Integration" --role importer`) watches the forge and calls
+  `GET /v1/review-claims`, `POST /v1/prs/merged`, `POST /v1/prs/closed` and `GET /v1/pr-status`, then writes the status
+  on each open pull request's head commit — only when its state or description changed since it last wrote one for that
+  commit, since a forge keeps a bounded number of statuses per commit and counts each write against its limits. On
+  **every pass** it reconciles every pull request `GET /v1/review-claims` lists — asking the forge where each stands and
+  reporting those already merged or closed — not only the pull requests that changed recently: a pull request merged
+  before its holder recorded it, or while the worker was down, is reported that way and no other. Every report is
+  idempotent: a repeat answers `matched: false`.
+- **A silent integration is shown** where the project relies on one: while a claim is in review or a repository's
+  `pr_status` is enabled. dibs records an `importer`'s calls, at most one a minute; when none has called for 15
+  minutes, `GET /v1/status`, the session brief, `dibs status` and the board say since when. Merges then complete no
+  claims and statuses go stale until it calls again: check the worker. A project that relies on no integration shows
+  nothing.
+- **`describe_holder`** decides whether a status names the slot, its holder and their purpose. Everyone who can read the
+  repository reads a status; keep it `false` where they should not see who holds what.
+
 ## Restoring
 
 A restore is offline and never replaces a database: it writes a new file. It refuses while a server holds the target
@@ -407,5 +454,6 @@ the repository.
 | *another server, a restore or a migration holds the database* | Another process has the database; stop it. |
 | A client reports a `429` with `too_many_attempts` | Ten failed sign-ins from one address within a minute. If every client shares one address, the proxy's, `DIBS_TRUST_PROXY` and `DIBS_TRUSTED_PROXIES` are not set as above. |
 | A client reports `503` with `too_many_streams` | A member holds 8 event streams open, or the server 128. |
+| The board says *Integration silent since …* | Claims wait in review, or pull requests get a status, and no `importer` token has called for 15 minutes: the worker is down, its token was revoked, or it cannot reach the server. Merges complete no claims until it calls again. |
 | An integration reports `410` with `cursor_expired` | It was off for longer than the log keeps events (90 days); it reads the state again and follows the log from `after=0`. |
 | The web pages cannot sign in | The session cookie is `Secure`: use the pages over HTTPS (or `localhost`). |

@@ -35,7 +35,11 @@ pub async fn check(args: CheckArgs, ctx: &Context) -> Result<(), Failure> {
         if let Err(error) = std::io::stdin().read_to_string(&mut stdin) {
             tracing::debug!(error = %error, "the push could not be read from standard input");
         }
-        return push::check_push(&stdin, ctx).await;
+        let to = push::PushedTo {
+            remote: args.remote.as_deref(),
+            url: args.url.as_deref(),
+        };
+        return push::check_push(&stdin, to, ctx).await;
     }
     match args.git_range {
         Some(range) => {

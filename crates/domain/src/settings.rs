@@ -2,6 +2,7 @@
 
 mod document;
 mod duration;
+mod review;
 mod slots;
 
 use std::collections::BTreeSet;
@@ -11,7 +12,8 @@ use thiserror::Error;
 use time::Duration;
 
 pub use document::{
-    AreaDocument, CommandDocument, HotRuleDocument, RepoDocument, SettingsDocument, SlotDocument,
+    AreaDocument, CommandDocument, HotRuleDocument, PrStatusDocument, ProtectedRefDocument,
+    RepoDocument, SettingsDocument, SlotDocument,
 };
 pub use duration::{DurationError, format_duration, parse_duration};
 pub use slots::SlotError;
@@ -22,8 +24,11 @@ use crate::hot_rule::{
     HotRuleConfig, HotRuleRefused, HotRuleRegistry, HotRuleSpec, Note, NoteError,
 };
 use crate::paths::{PathGlob, PathGlobError, RelPath, RepoPath};
+use crate::pr_status::PrStatusSettings;
+use crate::protection::ProtectedRef;
 use crate::repo::{RemoteUrl, RemoteUrlError, RepoId, RepoIdError};
-use crate::slot::SlotCatalog;
+use crate::review::PrRef;
+use crate::slot::{RepoRef, SlotCatalog};
 
 /// Whether a governed path needs a live claim.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -36,7 +41,8 @@ pub enum EditPolicy {
     Advise,
 }
 
-/// One repository of a project: its remote, areas and hot-file rules.
+/// One repository of a project: its remote, areas, hot-file rules, protected branches and how its
+/// pull requests get a status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoSpec {
     /// The repository's id.
@@ -47,6 +53,10 @@ pub struct RepoSpec {
     pub areas: Vec<Area>,
     /// Its hot-file rules, in declaration order.
     pub hot: Vec<HotRuleSpec>,
+    /// Its branches only some members may push to, in declaration order, each branch once.
+    pub protected_refs: Vec<ProtectedRef>,
+    /// Whether and how its pull requests get a status.
+    pub pr_status: PrStatusSettings,
 }
 
 impl RepoSpec {
@@ -68,6 +78,16 @@ impl RepoSpec {
     /// Whether an area or a hot-file rule matches the path.
     pub fn is_governed(&self, path: &RelPath) -> bool {
         self.hot_rule_for(path).is_some() || self.area_for(path).is_some()
+    }
+
+    /// The branch `name` (`refs/heads/main`, or `main`) of this repository.
+    pub fn branch(&self, name: &str) -> Option<RepoRef> {
+        let full = if name.starts_with("refs/") {
+            name.to_owned()
+        } else {
+            format!("refs/heads/{name}")
+        };
+        RepoRef::of(self.id.clone(), &full)
     }
 
     /// The area name qualified by this repository.
@@ -111,9 +131,10 @@ pub enum SettingsError {
     /// `raised_per_hour` is outside 1 to 1000.
     #[error("raised_per_hour is between 1 and 1000")]
     RaisedPerHourOutOfRange,
-    /// Top-level areas or hot rules sit beside a `repos` list.
+    /// Top-level areas, hot rules, protected refs or a pull-request status sit beside a `repos`
+    /// list.
     #[error(
-        "areas and hot rules are declared either at the top level, for a project with one repository, or inside each entry of repos, never both"
+        "areas, hot rules, protected refs and pr_status are declared either at the top level, for a project with one repository, or inside each entry of repos, never both"
     )]
     MixedLayout,
     /// A repository id is invalid.
@@ -250,6 +271,39 @@ pub enum SettingsError {
         /// The text as written.
         text: String,
     },
+    /// A protected branch is not a branch.
+    #[error("protected ref '{text}' of repository '{repo}' is not written 'refs/heads/<branch>'")]
+    ProtectedRef {
+        /// The repository.
+        repo: RepoId,
+        /// The ref as written.
+        text: String,
+    },
+    /// A branch is protected twice.
+    #[error("protected ref '{text}' of repository '{repo}' is declared twice")]
+    DuplicateProtectedRef {
+        /// The repository.
+        repo: RepoId,
+        /// The ref as written.
+        text: String,
+    },
+    /// A pusher is not a handle.
+    #[error("protected ref '{target}': pusher '{text}' is not a member's handle")]
+    Pusher {
+        /// The branch.
+        target: RepoRef,
+        /// The text as written.
+        text: String,
+    },
+    /// A pull-request status's context is not one.
+    #[error("pr_status of repository '{repo}': {error}")]
+    StatusContext {
+        /// The repository.
+        repo: RepoId,
+        /// What is wrong with it.
+        #[source]
+        error: crate::pr_status::StatusContextError,
+    },
 }
 
 /// Why an area named by a person does not resolve.
@@ -307,6 +361,8 @@ struct RepoInput<'a> {
     remote: Option<&'a str>,
     areas: &'a [AreaDocument],
     hot: &'a [HotRuleDocument],
+    protected_refs: &'a [ProtectedRefDocument],
+    pr_status: Option<&'a PrStatusDocument>,
 }
 
 impl ProjectSettings {
@@ -321,8 +377,11 @@ impl ProjectSettings {
     /// names unique, each slot with `max_hold` between 1 minute and 24 hours, `offer_for` between
     /// 1 minute and 1 hour (default 5 minutes), `max_wait` between 1 minute and 24 hours (default
     /// 2 hours), at most 20 command patterns that compile within their limits, and frozen refs of
-    /// declared repositories; arbiters named by handle, each once. Whether an arbiter is a member is
-    /// for the project to say, not the document.
+    /// declared repositories; arbiters named by handle, each once; per repository, protected
+    /// branches written `refs/heads/<branch>`, each once, their pushers named by handle, and a
+    /// pull-request status whose context is 1 to 100 characters (off, `dibs` and not describing the
+    /// holder by default). Whether an arbiter or a pusher is a member is for the project to say, not
+    /// the document.
     ///
     /// # Errors
     /// The first [`SettingsError`] found, in document order.
@@ -349,7 +408,11 @@ impl ProjectSettings {
             return Err(SettingsError::RaisedPerHourOutOfRange);
         }
         let lists_repositories = !document.repos.is_empty();
-        if lists_repositories && !(document.areas.is_empty() && document.hot.is_empty()) {
+        let top_level_repo = !document.areas.is_empty()
+            || !document.hot.is_empty()
+            || !document.protected_refs.is_empty()
+            || document.pr_status.is_some();
+        if lists_repositories && top_level_repo {
             return Err(SettingsError::MixedLayout);
         }
         let inputs: Vec<RepoInput<'_>> = if lists_repositories {
@@ -361,6 +424,8 @@ impl ProjectSettings {
                     remote: Some(&repo.remote),
                     areas: &repo.areas,
                     hot: &repo.hot,
+                    protected_refs: &repo.protected_refs,
+                    pr_status: repo.pr_status.as_ref(),
                 })
                 .collect()
         } else {
@@ -369,6 +434,8 @@ impl ProjectSettings {
                 remote: None,
                 areas: &document.areas,
                 hot: &document.hot,
+                protected_refs: &document.protected_refs,
+                pr_status: document.pr_status.as_ref(),
             }]
         };
         let mut repos: Vec<RepoSpec> = Vec::with_capacity(inputs.len());
@@ -461,6 +528,33 @@ impl ProjectSettings {
             .find(|repo| repo.remote.as_ref() == Some(remote))
     }
 
+    /// The repository a pull request belongs to: the one whose remote's path is the pull request's
+    /// (`acme/api` for `acme/api#12`), or, in a project that lists no repositories, its one
+    /// repository, whatever the pull request names.
+    pub fn repo_of_pr(&self, pr: &PrRef) -> Option<&RepoSpec> {
+        if !self.lists_repositories {
+            return self.repos.first();
+        }
+        self.repos.iter().find(|repo| {
+            repo.remote
+                .as_ref()
+                .is_some_and(|remote| remote.path() == pr.repo_path())
+        })
+    }
+
+    /// A repository named as an integration names it: by its id (`api`) or by its remote's path
+    /// (`acme/api`).
+    pub fn repo_named(&self, text: &str) -> Option<&RepoSpec> {
+        let path = text.trim().to_ascii_lowercase();
+        self.repos.iter().find(|repo| {
+            repo.id.as_str() == path
+                || repo
+                    .remote
+                    .as_ref()
+                    .is_some_and(|remote| remote.path() == path)
+        })
+    }
+
     /// The declared area.
     pub fn area(&self, area: &QualifiedArea) -> Option<&Area> {
         self.repo(&area.repo).and_then(|repo| repo.area(&area.name))
@@ -543,6 +637,8 @@ impl ProjectSettings {
                 })
                 .collect()
         };
+        let protected = |repo: &RepoSpec| review::protected_documents(&repo.protected_refs);
+        let status = |repo: &RepoSpec| review::pr_status_document(&repo.pr_status);
         let mut document = SettingsDocument {
             stale_after: Some(format_duration(self.stale_after)),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
@@ -566,11 +662,15 @@ impl ProjectSettings {
                         .unwrap_or_default(),
                     areas: areas(repo),
                     hot: hot(repo),
+                    protected_refs: protected(repo),
+                    pr_status: status(repo),
                 })
                 .collect();
         } else if let Some(repo) = self.repos.first() {
             document.areas = areas(repo);
             document.hot = hot(repo);
+            document.protected_refs = protected(repo);
+            document.pr_status = status(repo);
         }
         document
     }
@@ -624,11 +724,15 @@ fn parse_repo(
         }
         areas.push(area);
     }
+    let protected_refs = review::parse_protected_refs(&id, input.protected_refs)?;
+    let pr_status = review::parse_pr_status(&id, input.pr_status)?;
     let mut repo = RepoSpec {
         id,
         remote,
         areas,
         hot: Vec::with_capacity(input.hot.len()),
+        protected_refs,
+        pr_status,
     };
     for (index, written) in input.hot.iter().enumerate() {
         let rule = parse_hot_rule(&repo, index + 1, written, hot_rules)?;

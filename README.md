@@ -143,6 +143,18 @@ revokes their tokens and releases everything they held at once. With the Claude 
 - **Claim.** A member's hold on a work item and on the areas they will change. A claim is *live* while its session is
   seen (a heartbeat, an edit, a renewal) within the project's `stale_after`, 24 hours by default, and *stale* after that.
   Only one member holds an area at a time. A stale claim can be taken over, with a reason that is sent to its holder.
+- **Review.** Work reaches a protected branch through pull requests. A member records the pull request of their claim
+  (`dibs claim review`); the claim is then *in review*: it keeps its areas, so nobody edits the files under review, and
+  never goes stale while it waits. The merge of its last recorded pull request completes it, reported by an integration
+  that watches the forge; with `--more`, the merge returns it to work for the next pull request of the item. A close, or a
+  merge into a branch that is not protected, delivers nothing and returns the claim to its holder. Branch names and how
+  a pull request names its ticket are a team's own conventions; the agents' workflow suggests defaults (`bob/42-slug`,
+  `Refs #42`) that many teams use.
+- **Protected branch.** A branch of a repository only the members a project lists may push to; everyone else's agent is
+  refused a push there, with the pull request as the way on, and so is a push whose branches dibs cannot read. A push to
+  a fork is not judged. The pre-push check judges protection from what the machine remembers, so it holds while the
+  server cannot be reached. Where the forge offers no branch protection, this is how the agents keep that rule;
+  `git push --no-verify` breaks it.
 - **Edit policy.** With `require-claim` (the default), a member may edit a governed path only under a live claim that
   covers it; with `advise` they may, and are told who else is in the area. A path no area or rule governs is free.
 - **Hot-file rules.** Policies for files many people touch, matched by glob: `regenerate` (anyone may change it, nobody
@@ -367,12 +379,14 @@ dibs dep add gh:acme/widgets#42 --blocked-by gh:acme/widgets#40   # record a dep
 dibs new gh:acme/widgets#42 --title "Refund rounding"      # create an item, or show the one that exists
 dibs claim gh:acme/widgets#42 --area billing --area search # claim, or renew your claim
 dibs claim gh:acme/widgets#50 --wide billing,search --reason "Upgrade the HTTP client"   # a wide claim
+dibs claim review gh:acme/widgets#42 --pr acme/widgets#7 [--more]   # your claim waits in review; the merge completes it
+dibs claim review gh:acme/widgets#42 --drop-pr acme/widgets#8       # remove a pull request recorded by mistake
 dibs takeover 12 --reason "alice is out; I am picking this up" --area billing
 dibs release 12                                   # give the item back
 dibs done 12                                      # the item is finished
 dibs check packages/billing/a.rs                  # may I edit these paths?
 dibs check --git-range origin/main..HEAD [--author me]   # warn about what a range of commits changed
-dibs check --push                                 # git's pre-push hook: refuse a push to a branch a held slot freezes
+dibs check --push --remote "$1" --url "$2"       # git's pre-push hook: refuse a push to a protected branch or one a held slot freezes
 dibs grant 14 --area api:billing --to bob         # let bob edit in an area you hold, for his item 14
 dibs send --to alice --subject "Rounding" "May I touch round.rs?"    # or --project; "-" reads stdin
 dibs send --project --subject "Freeze" --importance urgent --ack "No pushes to main until noon."
@@ -416,7 +430,10 @@ Every route, request, response and error code is in [docs/api.md](docs/api.md). 
 token in the `Authorization` header, errors as `{ "error": { "code", "message" } }` with a stable `code`, and the
 project's event log as a page (`GET /v1/events`) or as server-sent events (`GET /v1/events/stream`). An integration
 worker feeds the project from an outside tracker with an `importer` token: it sends its whole view to `PUT /v1/items` as
-often as it likes, and a view equal to what is stored changes nothing.
+often as it likes, and a view equal to what is stored changes nothing. The same token reports merged and closed pull
+requests (`POST /v1/prs/merged`, `POST /v1/prs/closed`), lists the claims in review (`GET /v1/review-claims`) and reads
+the status to set on pull requests (`GET /v1/pr-status`); each report may be sent again. When no integration has called
+for 15 minutes while claims wait in review or pull requests get a status, the status, the brief and the board say so.
 
 ## Web UI
 
@@ -427,8 +444,9 @@ The server also serves pages for people at `/ui`, where you sign in with your to
 - **Board** (`/ui/board`): a banner for each escalation of yours, or to you, that waits for an arbiter; the slots with
   who holds each and why, until when, a stalled run in red and who waits, the live wide claims with who has
   acknowledged them, your ready list with priorities, likely
-  areas and links to the tracker, the open items that wait with their blockers, what is in progress, what went stale and
-  what was done today, filterable by area and member. The columns refresh by themselves when claims, items or slots change;
+  areas and links to the tracker, the open items that wait with their blockers, what is in progress and what waits in
+  review with its pull requests, what went stale and what was done today, filterable by area and member, and a banner
+  while the project's integration is silent. The columns refresh by themselves when claims, items or slots change;
   while you are typing a take-over reason they stay as they are and a banner offers a reload instead.
 - **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply. Each conversation
   shows its importance and whether a message in it awaits your acknowledgement; a message that asks for one lists who has

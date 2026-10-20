@@ -20,9 +20,6 @@ use crate::error::unstorable;
 const KIND: &str = "kind";
 const PAYLOAD: &str = "payload";
 
-/// The stored name of a completion.
-const COMPLETED: &str = "completed";
-
 /// The kind's name and its fields as JSON text.
 fn split(kind: &EventKind) -> StoreResult<(String, String)> {
     let value = serde_json::to_value(kind).map_err(|error| StoreError::Backend(Box::new(error)))?;
@@ -152,12 +149,16 @@ impl EventRows for SqliteTx {
         let statement = sqlx::query(
             "SELECT id, project_id, kind, payload, at FROM events \
              WHERE project_id = ?1 AND kind = ?2 AND at >= ?3 \
+             UNION ALL \
+             SELECT id, project_id, kind, payload, at FROM events \
+             WHERE project_id = ?1 AND kind = ?5 AND at >= ?3 \
              ORDER BY at DESC, id DESC LIMIT ?4",
         )
         .bind(int(project.get())?)
-        .bind(COMPLETED)
+        .bind(EventKind::COMPLETION_NAMES[0])
         .bind(nanos(since)?)
-        .bind(i64::try_from(limit).unwrap_or(i64::MAX));
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .bind(EventKind::COMPLETION_NAMES[1]);
         self.all(statement)
             .await?
             .iter()
@@ -166,9 +167,9 @@ impl EventRows for SqliteTx {
     }
 }
 
-/// The completion an event stored under the completion's name records.
+/// The completion an event stored under a completion's name records.
 fn completion(event: Event) -> StoreResult<CompletionRecord> {
-    let EventKind::Completed(completed) = event.kind else {
+    let Some((item, member)) = event.kind.completion() else {
         return Err(StoreError::Corrupt {
             what: format!(
                 "event {} is stored as a completion but is not one",
@@ -177,8 +178,8 @@ fn completion(event: Event) -> StoreResult<CompletionRecord> {
         });
     };
     Ok(CompletionRecord {
-        item: completed.item,
-        member: completed.member,
+        item,
+        member,
         at: event.at,
     })
 }

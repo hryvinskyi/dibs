@@ -26,6 +26,8 @@ mod people;
 #[cfg(test)]
 mod ready;
 #[cfg(test)]
+mod review;
+#[cfg(test)]
 mod roles;
 #[cfg(test)]
 mod sessions;

@@ -262,6 +262,11 @@ impl TestServer {
         self.traffic.delay_ms.store(millis, Ordering::SeqCst);
     }
 
+    /// Stops serving: from now on the server cannot be reached.
+    pub fn stop(&self) {
+        self.shutdown.stop();
+    }
+
     /// The server's base URL, `http://127.0.0.1:<port>`.
     pub fn url(&self) -> String {
         format!("http://{}", self.address)

@@ -139,6 +139,24 @@ pub trait MemberRows: Send {
         member: MemberId,
         at: OffsetDateTime,
     ) -> StoreResult<()>;
+    /// When the member's last call was recorded, if one ever was.
+    async fn last_call(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<Option<OffsetDateTime>>;
+    /// Records that the member called the service at `at`, in place of any earlier call.
+    async fn record_call(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
+    /// When each member that ever had a call recorded last called, ordered by member.
+    async fn last_calls(
+        &mut self,
+        project: ProjectId,
+    ) -> StoreResult<Vec<(MemberId, OffsetDateTime)>>;
 }
 
 /// API tokens.

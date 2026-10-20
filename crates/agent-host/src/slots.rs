@@ -183,6 +183,7 @@ mod tests {
                 settings.slots(),
                 &known.board,
                 known.me,
+                None,
             )
         };
         let theirs = KnownBoard::of(&[held_by("alice")], &me);

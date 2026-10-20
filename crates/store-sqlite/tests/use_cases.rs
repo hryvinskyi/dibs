@@ -741,6 +741,96 @@ mod use_cases {
     }
 
     #[tokio::test]
+    async fn a_review_on_the_file_survives_a_month_and_its_merge_completes_the_claim_once() {
+        use dibs_app::use_cases::{PrReport, PrReportOutcome, ReportedEnd, StartReviewInput};
+        use dibs_domain::item::ItemStatus;
+        use dibs_domain::review::PrRef;
+
+        let world = World::new().await;
+        let admin = project(&world.app, "widgets", "alice").await;
+        let importer = world
+            .app
+            .create_member
+            .execute(
+                &admin,
+                CreateMemberInput {
+                    member: member("worker"),
+                    role: Role::Importer,
+                },
+            )
+            .await
+            .unwrap();
+        let bot = world
+            .app
+            .authenticate
+            .execute(importer.token.expose())
+            .await
+            .unwrap();
+        let session = register(&world.app, &admin, 1).await;
+        let item = create_item(&world.app, &admin, 42).await;
+        world
+            .app
+            .claim_item
+            .execute(
+                &admin,
+                ClaimItemInput {
+                    item,
+                    session,
+                    areas: Vec::new(),
+                    wide: None,
+                },
+            )
+            .await
+            .unwrap();
+        let pr = PrRef::parse("acme/widgets#7").unwrap();
+        world
+            .app
+            .start_review
+            .execute(
+                &admin,
+                StartReviewInput {
+                    item,
+                    pr: pr.clone(),
+                    more: false,
+                },
+            )
+            .await
+            .unwrap();
+        world.fakes.clock.advance(Duration::days(30));
+        let status = world.app.status.execute(&admin).await.unwrap();
+        assert_eq!(status.live.len(), 1, "still live a month later");
+        let report = || PrReport {
+            pr: pr.clone(),
+            end: ReportedEnd::Merged {
+                base: "main".to_owned(),
+            },
+        };
+        assert_eq!(
+            world.app.report_pr.execute(&bot, report()).await.unwrap(),
+            PrReportOutcome::Completed(item)
+        );
+        let names = world.event_names(admin.project).await;
+        assert_eq!(
+            world.app.report_pr.execute(&bot, report()).await.unwrap(),
+            PrReportOutcome::Unmatched
+        );
+        assert_eq!(world.event_names(admin.project).await, names);
+        let mut tx = world.store.begin().await.unwrap();
+        assert_eq!(tx.claim(admin.project, item).await.unwrap(), None);
+        assert_eq!(
+            tx.item(admin.project, item).await.unwrap().unwrap().status,
+            ItemStatus::Done
+        );
+        assert_eq!(
+            tx.completions_since(admin.project, OffsetDateTime::UNIX_EPOCH, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn an_ack_on_the_file_is_recorded_once_and_its_author_sees_it() {
         let world = World::new().await;
         let app = &world.app;

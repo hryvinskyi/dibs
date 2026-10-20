@@ -130,7 +130,9 @@ pub struct AskDue {
 /// For every live wide claim and every area it names, the member whose live claim holds that area
 /// is asked — unless it is the wide claim's own member, they already granted that member edits in
 /// the area for the wide claim's item, or an announcement of that wide claim still waits for their
-/// acknowledgement about that area. `open` lists the announcements not acknowledged yet. One
+/// acknowledgement about that area. A holder whose claim is in review is not asked while it is:
+/// their acknowledgement would let edits land in the files of a pull request under review, so the
+/// announcement waits until that claim is worked on again. `open` lists the announcements not acknowledged yet. One
 /// announcement goes to each holder, naming every area due for them, so a holder who comes to hold
 /// an area later, or a wide claim that widens, asks only about what is new.
 pub fn asks_due(
@@ -151,7 +153,7 @@ pub fn asks_due(
         };
         for holder in live
             .iter()
-            .filter(|claim| claim.member != wide_claim.member)
+            .filter(|claim| claim.member != wide_claim.member && claim.is_working())
         {
             for area in holder.areas.intersection(scope.areas()) {
                 let granted = grants.iter().any(|grant| {
@@ -397,6 +399,35 @@ mod tests {
                     areas: areas(&["web:checkout"]),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_holder_in_review_is_asked_only_once_their_claim_is_worked_on_again() {
+        use crate::review::{ClaimState, PrRef, Review};
+
+        let settings = two_repo_settings();
+        let reviewing = Claim {
+            state: ClaimState::InReview(
+                Review::new(
+                    BTreeSet::from([PrRef::parse("acme/api#12").unwrap()]),
+                    at(0),
+                    false,
+                )
+                .unwrap(),
+            ),
+            ..claim(2, ALICE, &["api:billing"], 0)
+        };
+        let claims = [wide(1, BOB, &["api:billing"], 0), reviewing.clone()];
+        assert!(asks_due(&claims, &[], &[], at(1), settings.stale_after()).is_empty());
+        let working = Claim {
+            state: ClaimState::Working,
+            ..reviewing
+        };
+        let claims = [wide(1, BOB, &["api:billing"], 0), working];
+        assert_eq!(
+            asks_due(&claims, &[], &[], at(1), settings.stale_after()).len(),
+            1
         );
     }
 

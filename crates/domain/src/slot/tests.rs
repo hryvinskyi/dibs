@@ -721,6 +721,7 @@ fn verdict(run: &Run, line: &str, me: MemberId) -> CommandVerdict {
         &run.catalog,
         &run.board,
         me,
+        None,
     )
 }
 
@@ -982,7 +983,76 @@ fn the_slots_in_question_are_the_ones_a_verdict_reads() {
             &run.catalog,
             &only,
             BOB,
+            None,
         );
         assert_eq!(partial, verdict(&run, line, BOB), "{line}");
     }
+}
+
+#[test]
+fn a_protected_branch_is_judged_before_any_freeze_and_lets_its_pushers_through() {
+    use crate::handle::Handle;
+    use crate::push::{GitFacts, PushProtection};
+
+    let mut run = Run::new();
+    run.take("deploy:prod", ALICE, 0);
+    let mut document = project().to_document();
+    document.protected_refs = vec![crate::settings::ProtectedRefDocument {
+        target: "refs/heads/main".to_owned(),
+        pushers: vec!["alice".to_owned()],
+    }];
+    let protected =
+        ProjectSettings::parse(&document, &crate::hot_rule::HotRuleRegistry::standard()).unwrap();
+    let main = RepoRef::of(RepoId::implicit(), "refs/heads/main").unwrap();
+    let facts = GitFacts {
+        branch: Some("feature".to_owned()),
+        config: Vec::new(),
+    };
+    let here = |_: &str| true;
+    let judge = |line: &str, me: MemberId, handle: &str| {
+        let handle = Handle::parse(handle).unwrap();
+        command_verdict(
+            &split_commands(line),
+            &RepoId::implicit(),
+            &run.catalog,
+            &run.board,
+            me,
+            Some(&PushProtection {
+                pusher: &handle,
+                settings: &protected,
+                facts: Some(&facts),
+                here: &here,
+            }),
+        )
+    };
+    assert_eq!(
+        judge("git push origin main", BOB, "bob"),
+        CommandVerdict::NeedsPermission {
+            target: main.clone(),
+            pushers: [Handle::parse("alice").unwrap()].into(),
+            certain: true,
+        },
+        "refused for permission before the freeze is even looked at"
+    );
+    assert_eq!(
+        judge("git push origin bob/42-rounding", BOB, "bob"),
+        CommandVerdict::Free,
+        "a branch of one's own is pushed freely"
+    );
+    assert_eq!(
+        judge("git push origin main", ALICE, "alice"),
+        CommandVerdict::Free,
+        "a pusher passes, and their own hold does not freeze them"
+    );
+    assert_eq!(
+        verdict(&run, "git push origin main", BOB),
+        CommandVerdict::Frozen {
+            slot: SlotName::parse("deploy:prod").unwrap(),
+            holder: ALICE,
+            purpose: run.board.holds[0].purpose.clone(),
+            until: run.board.holds[0].expires_at,
+            target: main,
+        },
+        "without protection no branch counts as protected"
+    );
 }

@@ -9,6 +9,7 @@ use time::{Duration, OffsetDateTime};
 use crate::area::QualifiedArea;
 use crate::ids::{ItemId, MemberId, SessionId};
 use crate::member::Role;
+use crate::review::ClaimState;
 use crate::session::HostName;
 use crate::settings::ProjectSettings;
 use crate::wide::{WideScope, live_wide_naming};
@@ -36,13 +37,21 @@ pub struct Claim {
     pub renewed_at: OffsetDateTime,
     /// The last sign of life: a heartbeat, an edit, a renewal.
     pub last_seen: OffsetDateTime,
+    /// Whether its holder works on it or its work waits in pull requests.
+    pub state: ClaimState,
 }
 
 impl Claim {
-    /// Whether the claim is live: seen within `stale_after` of `now`. A claim seen in the future
-    /// (another machine's clock running ahead) is live.
+    /// Whether the claim is live: in review, or seen within `stale_after` of `now`. A claim in
+    /// review never goes stale, since its open pull requests are its sign of life; a claim seen in
+    /// the future (another machine's clock running ahead) is live.
     pub fn is_live(&self, now: OffsetDateTime, stale_after: Duration) -> bool {
-        now - self.last_seen <= stale_after
+        self.state.is_in_review() || now - self.last_seen <= stale_after
+    }
+
+    /// Whether its holder works on it, rather than waiting for its pull requests.
+    pub fn is_working(&self) -> bool {
+        !self.state.is_in_review()
     }
 
     /// Whether the claim holds the area — that is, declared it. The areas a wide claim names are
@@ -488,6 +497,7 @@ fn new_claim(
         claimed_at: now,
         renewed_at: now,
         last_seen: now,
+        state: ClaimState::Working,
     }
 }
 

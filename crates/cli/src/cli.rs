@@ -13,6 +13,7 @@ use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Importance, Subject};
 use dibs_domain::repo::RepoId;
+use dibs_domain::review::PrRef;
 use dibs_domain::settings::parse_duration;
 use dibs_domain::slot::{Purpose, SlotName};
 
@@ -69,7 +70,8 @@ pub enum Command {
     Dep(DepCommand),
     /// Create a work item for a reference, or show the one it already names.
     New(NewArgs),
-    /// Claim a work item, or renew your claim, with the areas you will change.
+    /// Claim a work item, or renew your claim, with the areas you will change; `dibs claim review`
+    /// records the pull request of a claim you hold.
     Claim(ClaimArgs),
     /// Take over another member's stale claim, telling them why.
     Takeover(TakeoverArgs),
@@ -207,10 +209,14 @@ pub struct KeyArgs {
 
 /// `dibs claim`.
 #[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct ClaimArgs {
+    /// What to do with a claim you hold, in place of claiming.
+    #[command(subcommand)]
+    pub action: Option<ClaimAction>,
     /// The item: its local id or its reference.
-    #[arg(value_parser = ItemKey::parse)]
-    pub key: ItemKey,
+    #[arg(value_parser = ItemKey::parse, required = true)]
+    pub key: Option<ItemKey>,
     /// An area you will change: `repo:area`, or a name one repository declares. Repeat it for
     /// several.
     #[arg(long = "area")]
@@ -223,6 +229,35 @@ pub struct ClaimArgs {
     /// Why the wide change is made, as the members it asks read it.
     #[arg(long, requires = "wide")]
     pub reason: Option<String>,
+}
+
+/// What `dibs claim` does with a claim the member holds.
+#[derive(Debug, Subcommand)]
+pub enum ClaimAction {
+    /// Record a pull request of your claim: the claim waits in review, keeps its areas so nobody
+    /// edits the files under review, and needs no heartbeat while the pull request is open. Its
+    /// merge completes the claim, unless `--more` says more pull requests of the item follow.
+    Review(ReviewArgs),
+}
+
+/// `dibs claim review`.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("which").required(true).args(["pr", "drop_pr"])))]
+pub struct ReviewArgs {
+    /// The item: its local id or its reference.
+    #[arg(value_parser = ItemKey::parse)]
+    pub key: ItemKey,
+    /// The pull request to record, `<owner>/<repo>#<number>`.
+    #[arg(long, value_parser = PrRef::parse)]
+    pub pr: Option<PrRef>,
+    /// More pull requests of the item follow this one: its merge returns the claim to work
+    /// rather than completing it.
+    #[arg(long, requires = "pr")]
+    pub more: bool,
+    /// Remove a pull request you recorded by mistake; with none left, the claim is worked on
+    /// again.
+    #[arg(long, value_parser = PrRef::parse, conflicts_with = "pr")]
+    pub drop_pr: Option<PrRef>,
 }
 
 /// `dibs dep`.
@@ -273,11 +308,22 @@ pub struct CheckArgs {
     #[arg(long, requires = "git_range", conflicts_with = "paths")]
     pub author: Option<String>,
     /// Check the push git describes on standard input, as its pre-push hook receives it
-    /// (`<local ref> <local sha> <remote ref> <remote sha>` per line): refused while a slot another
-    /// member holds freezes a ref it pushes to, silent otherwise. A server that cannot be reached,
-    /// or anything else that keeps it from deciding, lets the push go with one warning.
+    /// (`<local ref> <local sha> <remote ref> <remote sha>` per line), with the hook's arguments
+    /// as `--remote "$1" --url "$2"`: refused for a protected branch of the repository pushed to
+    /// that you are not among the pushers of — judged from what this machine remembers, even when
+    /// the server cannot be reached — and while a slot another member holds freezes a ref it
+    /// pushes to; silent otherwise. Anything else that keeps it from deciding lets the push go
+    /// with one warning.
     #[arg(long, conflicts_with_all = ["paths", "git_range"])]
     pub push: bool,
+    /// With `--push`, the remote pushed to: its name, or the URL when the push named none (the
+    /// pre-push hook's first argument). Without it, the push is judged as one to the repository
+    /// the checkout governs.
+    #[arg(long, requires = "push")]
+    pub remote: Option<String>,
+    /// With `--push`, the URL pushed to (the pre-push hook's second argument).
+    #[arg(long, requires = "push")]
+    pub url: Option<String>,
 }
 
 /// `dibs grant`.
@@ -706,8 +752,57 @@ mod tests {
         else {
             panic!("not a claim");
         };
-        assert_eq!(claim.key.to_string(), "gh:acme/api#4");
+        assert_eq!(
+            claim.key.as_ref().map(ToString::to_string).as_deref(),
+            Some("gh:acme/api#4")
+        );
         assert_eq!(claim.areas, ["billing"]);
+        assert!(claim.action.is_none());
+        let Invocation::Service(Command::Claim(review)) = Cli::try_parse_from([
+            "dibs",
+            "claim",
+            "review",
+            "42",
+            "--pr",
+            "acme/api#7",
+            "--more",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not a claim");
+        };
+        let Some(ClaimAction::Review(review)) = review.action else {
+            panic!("not a review");
+        };
+        assert_eq!(review.key.to_string(), "42");
+        assert_eq!(
+            review.pr.map(|pr| pr.to_string()).as_deref(),
+            Some("acme/api#7")
+        );
+        assert!(review.more);
+        assert!(
+            Cli::try_parse_from(["dibs", "claim", "review", "42", "--drop-pr", "acme/api#7"])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "dibs",
+                "claim",
+                "review",
+                "42",
+                "--pr",
+                "acme/api#7",
+                "--drop-pr",
+                "acme/api#8"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["dibs", "claim"]).is_err());
+        assert!(Cli::try_parse_from(["dibs", "claim", "review", "42"]).is_err());
+        assert!(
+            Cli::try_parse_from(["dibs", "claim", "review", "42", "--pr", "acme/api"]).is_err()
+        );
         assert!(Cli::try_parse_from(["dibs", "release", "not a key"]).is_err());
         assert!(Cli::try_parse_from(["dibs", "thread", "0"]).is_err());
     }

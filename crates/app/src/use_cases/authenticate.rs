@@ -2,18 +2,23 @@
 
 use std::sync::Arc;
 
+use dibs_domain::integration::call_due;
+
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::ports::{Store, TokenHasher, Tx};
+use crate::ports::{Clock, Store, TokenHasher, Tx};
 use crate::records::MemberRecord;
 use crate::token::SecretToken;
 
 /// Finds the member a token authenticates. A malformed, unknown or revoked token, and a token whose
-/// member is gone or was removed from the project, are all refused the same way.
+/// member is gone or was removed from the project, are all refused the same way. An integration's
+/// calls are recorded, at most one a minute, so the project can tell when its integrations fall
+/// silent without a write on every request of a worker that polls.
 pub struct Authenticate {
     store: Arc<dyn Store>,
     hasher: Arc<dyn TokenHasher>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Authenticate {
@@ -22,6 +27,7 @@ impl Authenticate {
         Self {
             store: deps.store.clone(),
             hasher: deps.hasher.clone(),
+            clock: deps.clock.clone(),
         }
     }
 
@@ -32,7 +38,16 @@ impl Authenticate {
     /// store fails.
     pub async fn execute(&self, token: &str) -> Result<Actor, AppError> {
         let mut tx = self.store.begin().await?;
-        authenticate_in(&mut *tx, &*self.hasher, token).await
+        let actor = authenticate_in(&mut *tx, &*self.hasher, token).await?;
+        if !actor.role.is_person() {
+            let now = self.clock.now();
+            let last = tx.last_call(actor.project, actor.member).await?;
+            if call_due(last, now) {
+                tx.record_call(actor.project, actor.member, now).await?;
+                tx.commit().await?;
+            }
+        }
+        Ok(actor)
     }
 }
 
@@ -77,6 +92,52 @@ mod tests {
         assert_eq!(env.bob.actor.project, env.project);
         assert_eq!(env.bob.actor.role, Role::Member);
         assert_ne!(env.alice.actor.member, env.bob.actor.member);
+    }
+
+    #[tokio::test]
+    async fn an_integrations_call_is_recorded_and_a_persons_is_not() {
+        let env = Env::new().await;
+        let calls = || async {
+            let mut tx = env.deps.store.begin().await.unwrap();
+            tx.last_calls(env.project).await.unwrap()
+        };
+        let before = calls().await;
+        assert_eq!(
+            before.iter().map(|(member, _)| *member).collect::<Vec<_>>(),
+            [env.importer.member],
+            "only the integration's own sign-in was recorded"
+        );
+        let token = CreateMember::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                CreateMemberInput {
+                    member: crate::use_cases::testing::new_member("worker"),
+                    role: Role::Importer,
+                },
+            )
+            .await
+            .unwrap()
+            .token;
+        env.fakes.clock.advance(time::Duration::minutes(3));
+        let authenticate = Authenticate::new(&env.deps);
+        let worker = authenticate.execute(token.expose()).await.unwrap();
+        let first = crate::use_cases::testing::START + time::Duration::minutes(3);
+        let after = calls().await;
+        assert_eq!(after.len(), 2);
+        assert!(after.contains(&(worker.member, first)));
+        env.fakes.clock.advance(time::Duration::seconds(30));
+        authenticate.execute(token.expose()).await.unwrap();
+        assert!(
+            calls().await.contains(&(worker.member, first)),
+            "a call within the minute is not written again"
+        );
+        env.fakes.clock.advance(time::Duration::seconds(31));
+        authenticate.execute(token.expose()).await.unwrap();
+        assert!(
+            calls()
+                .await
+                .contains(&(worker.member, first + time::Duration::seconds(61)))
+        );
     }
 
     #[tokio::test]

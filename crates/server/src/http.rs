@@ -145,6 +145,15 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/items/{id}/takeover", post(routes::claims::take_over))
         .route("/v1/items/{id}/release", post(routes::claims::release))
         .route("/v1/items/{id}/done", post(routes::claims::done))
+        .route("/v1/items/{id}/review", post(routes::review::start))
+        .route("/v1/items/{id}/review/drop", post(routes::review::drop))
+        .route(
+            "/v1/prs/merged",
+            post(routes::review::merged).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)),
+        )
+        .route("/v1/prs/closed", post(routes::review::closed))
+        .route("/v1/review-claims", get(routes::review::claims))
+        .route("/v1/pr-status", get(routes::review::status))
         .route("/v1/status", get(routes::status::status))
         .route("/v1/edit-check", post(routes::edit_check::check))
         .route("/v1/grants", post(routes::grants::grant))

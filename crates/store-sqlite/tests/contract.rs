@@ -40,6 +40,7 @@ mod contract {
     use dibs_domain::project::ProjectSlug;
     use dibs_domain::repo::{RemoteUrl, RepoId};
     use dibs_domain::reservation::SharedPath;
+    use dibs_domain::review::{ClaimState, PrRef, Review};
     use dibs_domain::session::{AgentLabel, HostName};
     use dibs_domain::settings::SettingsDocument;
     use dibs_domain::wide::{WideAsk, WideReason, WideScope};
@@ -107,6 +108,8 @@ mod contract {
         items_keep_what_an_importer_reports_and_change_only_that,
         dependencies_are_one_per_pair_scoped_and_removed,
         claims_are_kept_live_or_stale_and_replaced_per_item,
+        a_claim_in_review_keeps_its_pull_requests_start_and_whether_more_follow,
+        calls_are_kept_per_member_and_replaced,
         shared_paths_are_kept_once_and_removed_explicitly,
         grants_are_listed_by_id,
         threads_keep_their_recipients_and_messages_their_order,
@@ -230,6 +233,7 @@ mod contract {
             claimed_at: at(10),
             renewed_at: at(11),
             last_seen: at(12),
+            state: ClaimState::Working,
         }
     }
 
@@ -799,6 +803,71 @@ mod contract {
         assert_eq!(tx.claims(B).await.unwrap().len(), 1);
     }
 
+    async fn a_claim_in_review_keeps_its_pull_requests_start_and_whether_more_follow(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let prs = [
+            PrRef::parse("acme/api#12").unwrap(),
+            PrRef::parse("acme/web#3").unwrap(),
+        ];
+        let reviewing = Claim {
+            state: ClaimState::InReview(Review::new(prs.clone().into(), at(20), true).unwrap()),
+            ..claim(THIRD, BOB, BOB_LAPTOP, &["api:billing"])
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.save_claim(A, &reviewing).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.claim(A, THIRD).await.unwrap(), Some(reviewing.clone()));
+        let fewer = Claim {
+            state: ClaimState::InReview(
+                Review::new([prs[0].clone()].into(), at(20), false).unwrap(),
+            ),
+            ..reviewing.clone()
+        };
+        tx.save_claim(A, &fewer).await.unwrap();
+        assert_eq!(tx.claims(A).await.unwrap(), vec![fewer]);
+        let working = Claim {
+            state: ClaimState::Working,
+            last_seen: at(90),
+            ..reviewing
+        };
+        tx.save_claim(A, &working).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.claim(A, THIRD).await.unwrap(), Some(working));
+    }
+
+    async fn calls_are_kept_per_member_and_replaced(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        assert!(tx.last_calls(A).await.unwrap().is_empty());
+        tx.record_call(A, BOB, at(10)).await.unwrap();
+        tx.record_call(A, ALICE, at(20)).await.unwrap();
+        tx.record_call(A, BOB, at(30)).await.unwrap();
+        tx.record_call(B, DAVE, at(40)).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.last_calls(A).await.unwrap(),
+            [(ALICE, at(20)), (BOB, at(30))]
+        );
+        assert_eq!(tx.last_calls(B).await.unwrap(), [(DAVE, at(40))]);
+        assert_eq!(tx.last_call(A, BOB).await.unwrap(), Some(at(30)));
+        assert_eq!(
+            tx.last_call(B, BOB).await.unwrap(),
+            None,
+            "scoped to its project"
+        );
+        assert_eq!(tx.last_call(A, DAVE).await.unwrap(), None);
+        tx.record_call(A, MemberId(999), at(50)).await.unwrap();
+        assert!(
+            tx.commit().await.is_err(),
+            "a call of a member who does not exist commits nothing"
+        );
+    }
+
     async fn shared_paths_are_kept_once_and_removed_explicitly(store: Arc<dyn Store>) {
         seed(&store).await;
         let mut tx = store.begin().await.unwrap();
@@ -1147,6 +1216,16 @@ mod contract {
         tx.append_event(B, at(40), &done(GADGET, DAVE))
             .await
             .unwrap();
+        tx.append_event(
+            A,
+            at(26),
+            &EventKind::ReviewEnded(dibs_domain::event::ReviewEnded {
+                item: FIRST,
+                member: ALICE,
+            }),
+        )
+        .await
+        .unwrap();
         tx.commit().await.unwrap();
         let record = |item: ItemId, member: MemberId, seconds: i64| CompletionRecord {
             item,
@@ -1188,6 +1267,25 @@ mod contract {
             vec![record(GADGET, DAVE, 40)]
         );
         assert!(tx.completions_since(A, at(0), 0).await.unwrap().is_empty());
+        tx.append_event(
+            A,
+            at(35),
+            &EventKind::CompletedByMerge(dibs_domain::event::CompletedByMerge {
+                item: FIRST,
+                member: BOB,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tx.completions_since(A, at(30), 10).await.unwrap(),
+            vec![
+                record(FIRST, BOB, 35),
+                record(THIRD, ALICE, 30),
+                record(SECOND, BOB, 30),
+            ],
+            "a merge's completion is one too"
+        );
     }
 
     async fn events_keep_every_field(store: Arc<dyn Store>) {

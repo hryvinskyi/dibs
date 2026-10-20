@@ -1,6 +1,7 @@
 //! Every sentence the guard says, on every host: the brief, the reasons of a refusal, the notes and
 //! the notices. They are written for the agent or the person reading them, and name the ways on.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use time::{Duration, OffsetDateTime};
@@ -11,6 +12,7 @@ use dibs_domain::hot_rule::Note;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ExternalRef;
 use dibs_domain::paths::RelPath;
+use dibs_domain::review::PrRef;
 use dibs_domain::settings::EditPolicy;
 
 use dibs_domain::slot::{Purpose, SlotName};
@@ -43,9 +45,20 @@ pub fn held_by(
     holder: Option<&Handle>,
     item: &str,
     area: &QualifiedArea,
-    way: HeldWay,
+    way: &HeldWay,
 ) -> String {
     match (holder, way) {
+        (holder, HeldWay::InReview { prs }) => {
+            let who = holder.map_or_else(|| "another member".to_owned(), ToString::to_string);
+            let message = holder.map_or_else(
+                || "message the holder".to_owned(),
+                |holder| format!("message {holder} (dibs_send, or dibs send --to {holder})"),
+            );
+            format!(
+                "{path} is in the area {area}, which {who} holds for work item {item}. Their claim is in review on {}; the area is free when it merges. Do not edit it now: the files of a pull request under review stay as they are. Pick other work, or {message} if you cannot wait.",
+                pr_list(prs)
+            )
+        }
         (Some(holder), HeldWay::AskHolder) => format!(
             "{path} is in the area {area}, which {holder} holds for work item {item}. Do not edit it now: message {holder} (dibs_send, or dibs send --to {holder}) to agree on the change or ask for a grant, or pick other work."
         ),
@@ -59,6 +72,46 @@ pub fn held_by(
             "{path} is in the area {area}, which another member holds for work item {item}. Your wide claim names it, and the edit waits for the holder to acknowledge it. Do not edit it now: go on where the areas are free, or message the holder."
         ),
     }
+}
+
+/// Pull requests as a sentence lists them: `acme/api#12 and acme/web#3`.
+fn pr_list(prs: &[PrRef]) -> String {
+    let names: Vec<String> = prs.iter().map(ToString::to_string).collect();
+    match names.as_slice() {
+        [] => "a pull request".to_owned(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// The reason a push is refused: it updates `target`, or — when not `certain` — may update it, and
+/// only `pushers` may push to that branch. The way on is a branch of one's own and a pull request,
+/// recorded on the claim.
+pub fn needs_permission(target: &str, pushers: &BTreeSet<Handle>, certain: bool) -> String {
+    let who = if pushers.is_empty() {
+        "nobody pushes to directly".to_owned()
+    } else {
+        let names: Vec<String> = pushers.iter().map(ToString::to_string).collect();
+        format!("only {} may push to", names.join(", "))
+    };
+    let what = if certain {
+        format!("This push goes to {target}, which {who}.")
+    } else {
+        format!(
+            "This push may update {target}, which {who}: it pushes every branch, or dibs cannot tell from the command and the checkout's git settings which branches it pushes. Name the branch you push and the remote (git push origin <your-branch>)."
+        )
+    };
+    format!(
+        "{what} Do not push to a protected branch: push your own branch, open a pull request, and record it on your claim (dibs_review, or dibs claim review <item> --pr <owner>/<repo>#<number>)."
+    )
+}
+
+/// The brief's line while the project's integrations are silent.
+pub fn integration_silent(since: OffsetDateTime) -> String {
+    format!(
+        "[DIBS] integration silent since {}: merges complete no claims and pull request statuses go stale until it calls again.",
+        clock(since)
+    )
 }
 
 /// The reason an edit of `path` is refused: the member holds no live claim.
@@ -333,6 +386,13 @@ impl Brief<'_> {
                 newer.installed, newer.latest
             );
         }
+        if let Some(since) = self
+            .status
+            .and_then(|status| status.integration_silent_since)
+        {
+            text.push('\n');
+            text.push_str(&integration_silent(since));
+        }
         if let Some(status) = self.status {
             self.stalled_lines(&status.slots, &mut text);
         }
@@ -501,6 +561,9 @@ fn claim_lines(heading: &str, claims: &[&ClaimLine], text: &mut String) {
             let areas: Vec<String> = claim.areas.iter().map(ToString::to_string).collect();
             let _ = write!(text, ", areas {}", areas.join(", "));
         }
+        if !claim.prs.is_empty() {
+            let _ = write!(text, ", in review on {}", pr_list(&claim.prs));
+        }
     }
 }
 
@@ -663,6 +726,7 @@ mod tests {
                 .iter()
                 .map(|area| QualifiedArea::parse(area).unwrap())
                 .collect(),
+            prs: Vec::new(),
         }
     }
 
@@ -677,7 +741,7 @@ mod tests {
             Some(&handle("alice")),
             &named,
             &area,
-            HeldWay::AskHolder,
+            &HeldWay::AskHolder,
         );
         assert!(
             text.contains("alice holds for work item gh:acme/web#12"),
@@ -690,18 +754,110 @@ mod tests {
             None,
             &item_name(ItemId(4), None),
             &area,
-            HeldWay::AskHolder,
+            &HeldWay::AskHolder,
         );
         assert!(
             local.contains("another member holds for work item 4"),
             "{local}"
         );
         for holder in [Some(handle("alice")), None] {
-            let waiting = held_by(&path, holder.as_ref(), &named, &area, HeldWay::AwaitingAck);
+            let waiting = held_by(&path, holder.as_ref(), &named, &area, &HeldWay::AwaitingAck);
             assert!(waiting.contains("Your wide claim names it"), "{waiting}");
             assert!(waiting.contains("Do not edit it now"), "{waiting}");
             assert!(!waiting.contains("ask for a grant"), "{waiting}");
         }
+    }
+
+    #[test]
+    fn a_path_held_by_a_claim_in_review_waits_for_the_merge() {
+        let path = RelPath::parse("src/billing/a.rs").unwrap();
+        let area = QualifiedArea::parse("api:billing").unwrap();
+        let way = HeldWay::InReview {
+            prs: vec![
+                PrRef::parse("acme/api#12").unwrap(),
+                PrRef::parse("acme/web#3").unwrap(),
+            ],
+        };
+        let text = held_by(&path, Some(&handle("alice")), "gh:acme/api#9", &area, &way);
+        for part in [
+            "alice holds for work item gh:acme/api#9",
+            "in review on acme/api#12 and acme/web#3",
+            "free when it merges",
+            "Do not edit it now",
+            "dibs send --to alice",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+        assert!(!text.contains("ask for a grant"), "{text}");
+        let nobody = held_by(&path, None, "4", &area, &way);
+        assert!(nobody.contains("another member holds"), "{nobody}");
+    }
+
+    #[test]
+    fn a_push_to_a_protected_branch_names_who_may_push_and_the_pull_request_way() {
+        let pushers: BTreeSet<Handle> = [handle("alice"), handle("carol")].into();
+        let text = needs_permission("api:refs/heads/main", &pushers, true);
+        assert!(
+            text.contains(
+                "This push goes to api:refs/heads/main, which only alice, carol may push to"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("open a pull request"), "{text}");
+        assert!(
+            !text.contains("Refs #"),
+            "a ticket convention is the team's: {text}"
+        );
+        let unsure = needs_permission("api:refs/heads/main", &pushers, false);
+        assert!(
+            unsure.contains("may update api:refs/heads/main"),
+            "{unsure}"
+        );
+        assert!(unsure.contains("Name the branch you push"), "{unsure}");
+        let nobody = needs_permission("api:refs/heads/main", &BTreeSet::new(), true);
+        assert!(nobody.contains("nobody pushes to directly"), "{nobody}");
+    }
+
+    #[test]
+    fn the_brief_says_when_the_integration_is_silent_and_which_claims_are_in_review() {
+        let me = handle("bob");
+        let status = StatusView {
+            live: vec![ClaimLine {
+                prs: vec![PrRef::parse("acme/api#12").unwrap()],
+                ..claim(3, "bob", &["api:billing"])
+            }],
+            integration_silent_since: Some(OffsetDateTime::UNIX_EPOCH + Duration::minutes(65)),
+            ..StatusView::default()
+        };
+        let text = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: Some(&status),
+            inbox: None,
+            status_age: None,
+            newer: None,
+            now: OffsetDateTime::UNIX_EPOCH + Duration::hours(2),
+        }
+        .text();
+        assert!(
+            text.contains("[DIBS] integration silent since 01:05 UTC: merges complete no claims"),
+            "{text}"
+        );
+        assert!(
+            text.contains("areas api:billing, in review on acme/api#12"),
+            "{text}"
+        );
+        let quiet = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: Some(&StatusView::default()),
+            inbox: None,
+            status_age: None,
+            newer: None,
+            now: OffsetDateTime::UNIX_EPOCH,
+        }
+        .text();
+        assert!(!quiet.contains("integration silent"), "{quiet}");
     }
 
     #[test]

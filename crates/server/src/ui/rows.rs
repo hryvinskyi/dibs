@@ -42,6 +42,15 @@ pub struct ClaimRow {
     pub mine: bool,
     /// Whether the outside tracker closed the item while the claim lasts.
     pub closed_upstream: bool,
+    /// While the claim is in review, the pull requests it recorded; empty while it is worked on.
+    pub prs: Vec<String>,
+}
+
+impl ClaimRow {
+    /// Whether the claim is in review.
+    pub fn in_review(&self) -> bool {
+        !self.prs.is_empty()
+    }
 }
 
 impl ClaimRow {
@@ -61,6 +70,11 @@ impl ClaimRow {
             seen: moment(claim.last_seen, now),
             mine: claim.member == viewer,
             closed_upstream: item.closed,
+            prs: claim
+                .state
+                .review()
+                .map(|review| review.prs().iter().map(ToString::to_string).collect())
+                .unwrap_or_default(),
         }
     }
 }

@@ -27,6 +27,10 @@ struct StatusAnswer {
     ready: ReadyView,
     slots: Vec<SlotView>,
     escalations: Vec<EscalationView>,
+    /// Since when the project's integrations have not called, once that counts as silent; `null`
+    /// while one calls or when there is none.
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    integration_silent_since: Option<OffsetDateTime>,
 }
 
 /// An escalation the caller may read that no arbiter has acknowledged yet.
@@ -109,8 +113,9 @@ struct HoldView {
 }
 
 /// The project's live claims, its stale claims, the areas the live ones hold, the live wide claims
-/// with where each of their areas stands, the caller's ready list, the slots and the escalations
-/// still waiting for an arbiter, each ordered as the use case orders it.
+/// with where each of their areas stands, the caller's ready list, the slots, the escalations
+/// still waiting for an arbiter, each ordered as the use case orders it, and since when the
+/// project's integrations are silent.
 ///
 /// # Errors
 /// `forbidden` for an integration; the answer for the use case's failure.
@@ -140,6 +145,7 @@ pub async fn status(
             .into_iter()
             .map(EscalationView::of)
             .collect(),
+        integration_silent_since: view.integration_silent_since,
     };
     Ok(reply(StatusCode::OK, &answer))
 }

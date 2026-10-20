@@ -13,6 +13,7 @@ use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId}
 use dibs_domain::import::BatchRefused;
 use dibs_domain::item::{CreateRefused, ItemStatus};
 use dibs_domain::message::{AckRefused, ImportanceLimited, RecipientsError};
+use dibs_domain::review::{DropRefused, ReviewRefused};
 use dibs_domain::settings::{AreaLookupError, SettingsError};
 use dibs_domain::slot::{BeatRefused, SlotRefused};
 use dibs_domain::wide::WideScopeError;
@@ -50,6 +51,12 @@ pub enum Missing {
     /// No project of that slug.
     #[error("there is no project '{0}'")]
     Project(ProjectSlug),
+    /// No repository of that id or remote path.
+    #[error("the project lists no repository '{0}'")]
+    Repository(String),
+    /// No branch of that name.
+    #[error("'{0}' is not a branch")]
+    Branch(String),
 }
 
 /// A record that would duplicate one that exists.
@@ -117,6 +124,13 @@ pub enum AppError {
     /// The forced release was refused.
     #[error(transparent)]
     ForceRelease(#[from] ForceReleaseRefused),
+    /// Recording a pull request on a claim was refused; the refusal carries the handle of the
+    /// member in the way and the reference of their item.
+    #[error(transparent)]
+    Review(#[from] Refusal<ReviewRefused>),
+    /// Removing a pull request from a claim was refused.
+    #[error(transparent)]
+    DropPr(#[from] Refusal<DropRefused>),
     /// A slot request was refused; the refusal carries the handle of the member in the way.
     #[error(transparent)]
     Slot(#[from] Refusal<SlotRefused>),
@@ -230,6 +244,18 @@ impl AppError {
             Self::ForceRelease(refused) => match refused {
                 ForceReleaseRefused::NotAdmin => "forbidden",
                 ForceReleaseRefused::NoClaim => "no_claim",
+            },
+            Self::Review(refused) => match &refused.reason {
+                ReviewRefused::HolderOnly(HolderOnly::NoClaim) => "no_claim",
+                ReviewRefused::HolderOnly(HolderOnly::NotHolder { .. }) => "not_holder",
+                ReviewRefused::Stale => "claim_stale",
+                ReviewRefused::RecordedElsewhere { .. } => "pr_recorded",
+                ReviewRefused::UnknownRepository { .. } => "unlisted_repository",
+            },
+            Self::DropPr(refused) => match &refused.reason {
+                DropRefused::HolderOnly(HolderOnly::NoClaim) => "no_claim",
+                DropRefused::HolderOnly(HolderOnly::NotHolder { .. }) => "not_holder",
+                DropRefused::NotRecorded { .. } => "pr_not_recorded",
             },
             Self::Slot(refused) => match refused.reason {
                 SlotRefused::UnknownSlot { .. } => "unknown_slot",

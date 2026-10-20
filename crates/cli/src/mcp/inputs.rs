@@ -13,6 +13,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::message::{Body, Importance, Subject};
+use dibs_domain::review::PrRef;
 use dibs_domain::slot::{Purpose, SlotName};
 use dibs_domain::wide::WideReason;
 
@@ -194,6 +195,35 @@ impl TakeoverInput {
     /// A [`Failure`] when it is empty or not a valid message.
     pub fn reason(&self) -> Result<Body, Failure> {
         body("reason", &self.reason)
+    }
+}
+
+/// `dibs_review`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewInput {
+    /// The item of your claim: its local id or its reference.
+    pub key: ItemKeyInput,
+    /// The pull request, `<owner>/<repo>#<number>` (`acme/api#12`).
+    pub pr: String,
+    /// Whether more pull requests of the item follow this one, so that its merge returns the
+    /// claim to you rather than completing it.
+    #[serde(default)]
+    pub more: bool,
+    /// Remove this pull request from your claim instead, when you recorded it by mistake; with
+    /// none left, the claim is worked on again.
+    #[serde(default)]
+    pub drop: bool,
+}
+
+impl ReviewInput {
+    /// The pull request.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it is not `<owner>/<repo>#<number>`.
+    pub fn pr(&self) -> Result<PrRef, Failure> {
+        PrRef::parse(&self.pr)
+            .map_err(|error| invalid("pr", &format!("the pull request is not valid ({error})")))
     }
 }
 

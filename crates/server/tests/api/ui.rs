@@ -1691,3 +1691,75 @@ async fn a_page_whose_cursor_the_retention_passed_learns_where_to_follow_from() 
         StatusCode::UNPROCESSABLE_ENTITY
     );
 }
+
+#[tokio::test]
+async fn the_board_shows_claims_in_review_with_their_pull_requests_and_a_merge_as_done() {
+    let (world, alice, bob) = team().await;
+    let bot = world.member(&alice, "worker", Role::Importer).await;
+    let session = world.session(&bob, "desk").await;
+    let working = world.item(&bob, Some("gh:acme/web#3"), "Live item").await;
+    let reviewing = world
+        .item(&bob, Some("gh:acme/api#4"), "Reviewed item")
+        .await;
+    claim(&world, &bob, session, working, json!(["web:checkout"])).await;
+    claim(&world, &bob, session, reviewing, json!(["api:billing"])).await;
+    let reviewed = world
+        .post(
+            &bob,
+            &format!("/v1/items/{reviewing}/review"),
+            json!({"pr": "acme/api#17"}),
+        )
+        .await;
+    assert_eq!(reviewed.status, StatusCode::OK, "{}", reviewed.body);
+    let browser = sign_in(&world, &alice).await;
+    let page = browser.get(&world, "/ui/board").await;
+    let progress = page.column("c-prog");
+    assert!(progress.contains("Live item"), "{progress}");
+    let (worked, in_review) = progress.split_once("id=\"c-review\"").unwrap();
+    assert!(!worked.contains("Reviewed item"), "{progress}");
+    assert!(
+        in_review.contains("Reviewed item")
+            && in_review.contains("In review")
+            && in_review.contains("acme/api#17"),
+        "{in_review}"
+    );
+    assert!(!page.text.contains("data-integration-silent"));
+    let status = browser.get(&world, "/ui/").await;
+    assert!(status.text.contains("acme/api#17"), "{}", status.text);
+
+    let merged = world
+        .post(
+            &bot,
+            "/v1/prs/merged",
+            json!({"pr": "acme/api#17", "base": "main", "merged_at": "2026-03-02T10:00:00Z"}),
+        )
+        .await;
+    assert_eq!(merged.body["claim"], "completed", "{}", merged.body);
+    let after = browser.get(&world, "/ui/board").await;
+    assert!(!after.column("c-prog").contains("Reviewed item"));
+    assert!(
+        after.column("c-done").contains("Reviewed item"),
+        "a merge's completion is done today"
+    );
+
+    world.fakes.clock.advance(Duration::minutes(20));
+    let quiet = browser.get(&world, "/ui/board").await;
+    assert!(
+        !quiet.text.contains("data-integration-silent"),
+        "no claim waits for the integration"
+    );
+    world
+        .post(
+            &bob,
+            &format!("/v1/items/{working}/review"),
+            json!({"pr": "acme/web#18"}),
+        )
+        .await;
+    let silent = browser.get(&world, "/ui/board").await;
+    assert!(
+        silent.text.contains("data-integration-silent")
+            && silent.text.contains("Integration silent since"),
+        "{}",
+        silent.text
+    );
+}

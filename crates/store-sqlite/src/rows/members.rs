@@ -125,4 +125,55 @@ impl MemberRows for SqliteTx {
         self.run(statement).await?;
         Ok(())
     }
+
+    async fn last_call(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<Option<OffsetDateTime>> {
+        let statement =
+            sqlx::query("SELECT at FROM member_calls WHERE project_id = ?1 AND member_id = ?2")
+                .bind(int(project.get())?)
+                .bind(int(member.get())?);
+        self.optional(statement)
+            .await?
+            .as_ref()
+            .map(|row| Fields::of(row, "member_calls").time("at"))
+            .transpose()
+    }
+
+    async fn record_call(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        let statement = sqlx::query(
+            "INSERT INTO member_calls (project_id, member_id, at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT (project_id, member_id) DO UPDATE SET at = excluded.at",
+        )
+        .bind(int(project.get())?)
+        .bind(int(member.get())?)
+        .bind(nanos(at)?);
+        self.run(statement).await?;
+        Ok(())
+    }
+
+    async fn last_calls(
+        &mut self,
+        project: ProjectId,
+    ) -> StoreResult<Vec<(MemberId, OffsetDateTime)>> {
+        let statement = sqlx::query(
+            "SELECT member_id, at FROM member_calls WHERE project_id = ?1 ORDER BY member_id",
+        )
+        .bind(int(project.get())?);
+        self.all(statement)
+            .await?
+            .iter()
+            .map(|row| {
+                let f = Fields::of(row, "member_calls");
+                Ok((MemberId(f.number("member_id")?), f.time("at")?))
+            })
+            .collect()
+    }
 }

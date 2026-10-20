@@ -24,11 +24,11 @@ use dibs_domain::settings::SettingsDocument;
 
 use crate::api::{
     Acked, AddDependency, ClaimRequest, Claimed, CreatedItem, Delivered, DependencyChange,
-    EditCheck, EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest, Granted,
-    Heartbeat, Inbox, InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me, Member,
-    MessageStatus, NewItem, NewMember, PostMessage, Posted, ReadyList, RegisterSession, Revoked,
-    Session, SettingsApplied, StartThread, StartThreadBody, Started, Status, TakeOverRequest,
-    TakenOver, ThreadDetail, Threads, TokenRevoked, Versions,
+    DropPrRequest, EditCheck, EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest,
+    Granted, Heartbeat, Inbox, InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me,
+    Member, MessageStatus, NewItem, NewMember, PostMessage, Posted, ReadyList, RegisterSession,
+    ReviewRequest, Reviewed, Revoked, Session, SettingsApplied, StartThread, StartThreadBody,
+    Started, Status, TakeOverRequest, TakenOver, ThreadDetail, Threads, TokenRevoked, Versions,
 };
 use crate::api::{
     Escalated, EscalationRequest, ForceReleaseSlotRequest, MemberRemoved, ReleaseSlotRequest,
@@ -328,6 +328,36 @@ impl Client {
     pub async fn done(&self, id: ItemId) -> Result<Ended, ClientError> {
         self.send(self.request(Method::POST, &format!("/v1/items/{id}/done")))
             .await
+    }
+
+    /// `POST /v1/items/{id}/review`: records a pull request on the caller's claim, which waits in
+    /// review from then on.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn review(
+        &self,
+        id: ItemId,
+        review: &ReviewRequest,
+    ) -> Result<Reviewed, ClientError> {
+        self.send(
+            self.request(Method::POST, &format!("/v1/items/{id}/review"))
+                .json(review),
+        )
+        .await
+    }
+
+    /// `POST /v1/items/{id}/review/drop`: removes a pull request the caller recorded on their
+    /// claim by mistake; with none left the claim is worked on again.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn drop_pr(&self, id: ItemId, drop: &DropPrRequest) -> Result<Reviewed, ClientError> {
+        self.send(
+            self.request(Method::POST, &format!("/v1/items/{id}/review/drop"))
+                .json(drop),
+        )
+        .await
     }
 
     /// `GET /v1/ready`: the caller's ready list and the open items left out of it.

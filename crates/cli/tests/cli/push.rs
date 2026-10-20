@@ -1,7 +1,8 @@
 //! `dibs check --push`, fed git's pre-push lines and run by git itself from a real `pre-push` hook
-//! on a push to a bare repository: a push to a ref a slot another member holds freezes is refused
-//! naming them, anything else is silent, and a server that cannot be reached lets the push go with
-//! one warning.
+//! on a push to a bare repository: a push to a protected branch by a member who is not among its
+//! pushers is refused naming who may push, a push to a ref a slot another member holds freezes is
+//! refused naming them, anything else is silent, and a server that cannot be reached lets the push
+//! go with one warning.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -90,8 +91,9 @@ fn an_unreachable_server_lets_the_push_go_with_one_warning() {
     assert!(warning.contains("did not check this push"), "{warning}");
 }
 
-/// A bare repository beside the checkout, its remote `shared`, and a `pre-push` hook in the
-/// checkout that runs `dibs check --push` as `handle`.
+/// A bare repository beside the checkout standing for `api`: its remote `shared`, fetched from
+/// `api`'s URL and pushed to the bare repository, and a `pre-push` hook in the checkout that runs
+/// `dibs check --push` as `handle` with the hook's arguments.
 fn shared_remote(setup: &Setup, checkout: &Path, handle: &str) -> PathBuf {
     let bare = setup.root.path().join(format!("{handle}-shared.git"));
     let made = std::process::Command::new("git")
@@ -104,12 +106,17 @@ fn shared_remote(setup: &Setup, checkout: &Path, handle: &str) -> PathBuf {
         checkout,
         &["remote", "add", "shared", &bare.to_string_lossy()],
     );
+    git(checkout, &["config", "remote.shared.url", API_REMOTE]);
+    git(
+        checkout,
+        &["config", "remote.shared.pushurl", &bare.to_string_lossy()],
+    );
     let home = setup.home_of(handle);
     let hook = checkout.join(".git/hooks/pre-push");
     fs::write(
         &hook,
         format!(
-            "#!/bin/sh\nDIBS_CONFIG_DIR='{}' DIBS_STATE_DIR='{}' exec '{}' check --push\n",
+            "#!/bin/sh\nDIBS_CONFIG_DIR='{}' DIBS_STATE_DIR='{}' exec '{}' check --push --remote \"$1\" --url \"$2\"\n",
             home.join("config").display(),
             home.join("state").display(),
             env!("CARGO_BIN_EXE_dibs")
@@ -161,5 +168,138 @@ fn git_refuses_a_push_to_main_through_its_pre_push_hook_whatever_the_command_lin
     assert!(
         past.status.success(),
         "--no-verify is the conscious way past it"
+    );
+}
+
+/// The setup with `api`'s `main` protected for alice alone.
+fn protected() -> Setup {
+    let setup = Setup::new();
+    let mut settings = two_repositories();
+    settings["repos"][0]["protected_refs"] =
+        json!([{"ref": "refs/heads/main", "pushers": ["alice"]}]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    setup
+}
+
+#[test]
+fn a_push_to_a_protected_main_is_refused_for_a_member_who_is_no_pusher_and_lets_a_pusher_through() {
+    let setup = protected();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let refused = check(&setup, "bob", &api, MAIN);
+    assert_eq!(status(&refused), 1);
+    let said = text(&refused.stderr);
+    for part in [
+        "api:refs/heads/main",
+        "only alice may push to",
+        "open a pull request",
+        "--no-verify",
+        "breaks the team's rule",
+    ] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+    let branch = check(&setup, "bob", &api, FEATURE);
+    assert_eq!(status(&branch), 0);
+    assert_eq!(text(&branch.stderr), "");
+    let pusher = check(&setup, "alice", &api, MAIN);
+    assert_eq!(status(&pusher), 0, "{}", text(&pusher.stderr));
+    assert_eq!(text(&pusher.stderr), "");
+}
+
+#[test]
+fn git_refuses_a_members_push_to_a_protected_main_through_its_pre_push_hook() {
+    let setup = protected();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    shared_remote(&setup, &api, "bob");
+    let refused = push(&api, &["shared", "main"]);
+    assert!(!refused.status.success(), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains("only alice may push to"),
+        "{}",
+        text(&refused.stderr)
+    );
+    git(&api, &["checkout", "-q", "-b", "bob/7-rounding"]);
+    let branch = push(&api, &["shared", "bob/7-rounding"]);
+    assert!(branch.status.success(), "{}", text(&branch.stderr));
+}
+
+/// Another remote of the checkout, `name`, fetched from `url` and pushed to a bare repository of
+/// its own.
+fn other_remote(setup: &Setup, checkout: &Path, name: &str, url: &str) {
+    let bare = setup.root.path().join(format!("{name}.git"));
+    let made = std::process::Command::new("git")
+        .args(["init", "-q", "--bare", "-b", "main"])
+        .arg(&bare)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{}", text(&made.stderr));
+    git(checkout, &["remote", "add", name, url]);
+    git(
+        checkout,
+        &[
+            "config",
+            &format!("remote.{name}.pushurl"),
+            &bare.to_string_lossy(),
+        ],
+    );
+}
+
+#[test]
+fn a_push_is_judged_by_the_repository_of_the_remote_it_goes_to() {
+    let setup = Setup::new();
+    let mut settings = two_repositories();
+    settings["repos"][0]["protected_refs"] =
+        json!([{"ref": "refs/heads/main", "pushers": ["alice"]}]);
+    settings["repos"][1]["protected_refs"] =
+        json!([{"ref": "refs/heads/main", "pushers": ["bob"]}]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    shared_remote(&setup, &api, "bob");
+    other_remote(&setup, &api, "fork", "https://github.com/bob/api.git");
+    other_remote(&setup, &api, "web", crate::support::WEB_REMOTE);
+    let fork = push(&api, &["fork", "main"]);
+    assert!(
+        fork.status.success(),
+        "a fork protects nothing: {}",
+        text(&fork.stderr)
+    );
+    let web = push(&api, &["web", "main"]);
+    assert!(
+        web.status.success(),
+        "bob may push web's main: {}",
+        text(&web.stderr)
+    );
+    let refused = push(&api, &["shared", "main"]);
+    assert!(!refused.status.success());
+    assert!(
+        text(&refused.stderr).contains("api:refs/heads/main, which only alice may push to"),
+        "{}",
+        text(&refused.stderr)
+    );
+}
+
+#[test]
+fn a_protected_main_is_refused_from_what_the_machine_remembers_while_the_server_is_down() {
+    let setup = protected();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let synced = setup
+        .dibs_as("bob", &api)
+        .args(["sync", "--force", "--quiet"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&synced), 0, "{}", text(&synced.stderr));
+    setup.server.stop();
+    let refused = check(&setup, "bob", &api, MAIN);
+    assert_eq!(status(&refused), 1, "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains("only alice may push to"),
+        "{}",
+        text(&refused.stderr)
+    );
+    let branch = check(&setup, "bob", &api, FEATURE);
+    assert_eq!(status(&branch), 0);
+    assert!(
+        text(&branch.stderr).contains("did not check this push"),
+        "a freeze cannot be judged without the server: {}",
+        text(&branch.stderr)
     );
 }

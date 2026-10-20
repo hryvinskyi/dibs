@@ -6,13 +6,15 @@ use std::fmt::Write as _;
 use time::OffsetDateTime;
 
 use dibs_client::api::{
-    ClaimOutcome, ClaimRequest, Ended, GrantRequest, HeldItem, ItemFilter, Items, NewItem,
-    TakeOverRequest, WideAreaState, WideClaim, WideRequest,
+    ClaimOutcome, ClaimRequest, DropPrRequest, Ended, GrantRequest, HeldItem, ItemFilter, Items,
+    NewItem, ReviewRequest, TakeOverRequest, WideAreaState, WideClaim, WideRequest,
 };
 use dibs_domain::message::Body;
 use dibs_domain::wide::WideReason;
 
-use crate::cli::{ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NewArgs, TakeoverArgs};
+use crate::cli::{
+    ClaimAction, ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NewArgs, ReviewArgs, TakeoverArgs,
+};
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
 use crate::output::{claim_text, escalation_line, item_label, item_line};
@@ -69,6 +71,13 @@ pub async fn status(ctx: &Context) -> Result<(), Failure> {
         }
         if text.is_empty() {
             text.push_str("Nobody holds anything.");
+        }
+        if let Some(since) = status.integration_silent_since {
+            let _ = write!(
+                text,
+                "\nThe integration has been silent since {}: merges complete no claims and pull request statuses go stale until it calls again.",
+                crate::commands::slot::clock(since)
+            );
         }
         text
     });
@@ -136,6 +145,15 @@ pub async fn new(args: NewArgs, ctx: &Context) -> Result<(), Failure> {
 /// # Errors
 /// A refusal naming the member in the way; the [`Failure`] of the call.
 pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
+    if let Some(ClaimAction::Review(review)) = args.action {
+        return start_review(review, ctx).await;
+    }
+    let key = args.key.ok_or_else(|| {
+        Failure::config(
+            "invalid_arguments",
+            "Name the work item to claim: dibs claim <item>.".to_owned(),
+        )
+    })?;
     let wide = match args.reason {
         Some(reason) => {
             WideReason::parse(&reason).map_err(|error| {
@@ -152,7 +170,7 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
         None => None,
     };
     let connection = ctx.connect().await?;
-    let item = connection.resolve(&args.key).await?;
+    let item = connection.resolve(&key).await?;
     let session = connection.session().await?;
     let claimed = connection
         .client
@@ -230,6 +248,65 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
             }
         }
         text
+    });
+    Ok(())
+}
+
+/// Records a pull request on the caller's claim, which waits in review from then on, or removes
+/// one recorded by mistake.
+///
+/// # Errors
+/// A refusal when the caller holds no live claim on the item, another claim recorded the pull
+/// request, the project lists no repository of it, or the claim did not record the one to remove;
+/// the [`Failure`] of the call.
+async fn start_review(args: ReviewArgs, ctx: &Context) -> Result<(), Failure> {
+    let connection = ctx.connect().await?;
+    let item = connection.resolve(&args.key).await?;
+    let reviewed = match (args.pr, args.drop_pr) {
+        (Some(pr), _) => {
+            connection
+                .client
+                .review(
+                    item,
+                    &ReviewRequest {
+                        pr,
+                        more: args.more,
+                    },
+                )
+                .await
+        }
+        (None, Some(pr)) => connection.client.drop_pr(item, &DropPrRequest { pr }).await,
+        (None, None) => {
+            return Err(Failure::config(
+                "invalid_arguments",
+                "Name the pull request to record (--pr) or to remove (--drop-pr).".to_owned(),
+            ));
+        }
+    }
+    .map_err(|error| connection.failed(error))?;
+    ctx.printer.show(&reviewed, || {
+        if !reviewed.claim.in_review() {
+            return format!(
+                "Your claim on {} is no longer in review: you work on it again, with its areas.",
+                item_label(Some(&reviewed.item), item)
+            );
+        }
+        let prs: Vec<String> = reviewed
+            .claim
+            .review
+            .as_ref()
+            .map(|review| review.prs.iter().map(ToString::to_string).collect())
+            .unwrap_or_default();
+        let ends = if reviewed.claim.review.as_ref().is_some_and(|review| review.more) {
+            "its merge returns the claim to you for the next pull request"
+        } else {
+            "the merge of its last pull request completes it"
+        };
+        format!(
+            "Your claim on {} is in review on {}: it keeps its areas and needs no heartbeat while the pull request is open, and {ends}.",
+            item_label(Some(&reviewed.item), item),
+            prs.join(", ")
+        )
     });
     Ok(())
 }

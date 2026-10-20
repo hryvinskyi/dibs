@@ -61,6 +61,7 @@ struct State {
     slots: BTreeMap<ProjectId, SlotBoard>,
     deliveries: BTreeMap<(ProjectId, MemberId, DeliverySubject), Delivery>,
     raised: BTreeMap<(ProjectId, MessageId), (MemberId, OffsetDateTime)>,
+    calls: BTreeMap<(ProjectId, MemberId), OffsetDateTime>,
     events: Vec<Event>,
     last_event: u64,
     pruned_through: BTreeMap<ProjectId, EventId>,
@@ -126,7 +127,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 21] = [
+        let checks: [(&'static str, bool); 22] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -240,6 +241,10 @@ impl State {
                 self.raised.iter().all(|((p, message), (m, _))| {
                     member(*p, *m) && self.messages.contains_key(&(*p, *message))
                 }),
+            ),
+            (
+                "a recorded call",
+                self.calls.keys().all(|(p, m)| member(*p, *m)),
             ),
             ("an event", self.events.iter().all(|e| project(&e.project))),
             ("a settings document", self.settings.keys().all(project)),
@@ -373,6 +378,37 @@ impl MemberRows for MemoryTx {
             record.removed_at = Some(at);
         }
         Ok(())
+    }
+
+    async fn last_call(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<Option<OffsetDateTime>> {
+        Ok(self.work.calls.get(&(project, member)).copied())
+    }
+
+    async fn record_call(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        self.work.calls.insert((project, member), at);
+        Ok(())
+    }
+
+    async fn last_calls(
+        &mut self,
+        project: ProjectId,
+    ) -> StoreResult<Vec<(MemberId, OffsetDateTime)>> {
+        Ok(self
+            .work
+            .calls
+            .iter()
+            .filter(|((p, _), _)| *p == project)
+            .map(|((_, member), at)| (*member, *at))
+            .collect())
     }
 }
 
@@ -1256,12 +1292,10 @@ impl EventRows for MemoryTx {
             .iter()
             .filter(|e| e.project == project && e.at >= since)
             .filter_map(|e| {
-                let EventKind::Completed(completed) = &e.kind else {
-                    return None;
-                };
+                let (item, member) = e.kind.completion()?;
                 let record = CompletionRecord {
-                    item: completed.item,
-                    member: completed.member,
+                    item,
+                    member,
                     at: e.at,
                 };
                 Some((e.id, record))

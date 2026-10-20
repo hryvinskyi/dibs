@@ -40,6 +40,7 @@ pub(crate) fn claim(item: u64, member: MemberId, declared: &[&str], minutes: i64
         claimed_at: at(minutes),
         renewed_at: at(minutes),
         last_seen: at(minutes),
+        state: crate::review::ClaimState::Working,
     }
 }
 

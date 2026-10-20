@@ -15,7 +15,9 @@ use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, Priority, Title};
 use dibs_domain::message::{Importance, Subject};
 use dibs_domain::paths::RelPath;
+use dibs_domain::push::GitFacts;
 use dibs_domain::repo::RepoId;
+use dibs_domain::review::PrRef;
 use dibs_domain::session::HostName;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::slot::{Liveness, Purpose, SlotName};
@@ -77,6 +79,8 @@ pub struct ClaimLine {
     pub holder: Handle,
     /// The areas it declared.
     pub areas: Vec<QualifiedArea>,
+    /// While it is in review, the pull requests it waits for; empty while it is worked on.
+    pub prs: Vec<PrRef>,
 }
 
 /// An area held by a member's live claim.
@@ -190,6 +194,8 @@ pub struct StatusView {
     pub area_held: u64,
     /// The declared slots.
     pub slots: Vec<SlotLine>,
+    /// Since when the project's integrations have not called, once that counts as silent.
+    pub integration_silent_since: Option<OffsetDateTime>,
 }
 
 /// A message that asks the member for an acknowledgement they have not given, as the brief shows
@@ -409,8 +415,13 @@ pub enum PathAnswer {
 }
 
 /// What a member can do about a path another member holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeldWay {
+    /// The holder's claim is in review: the area is free once its pull requests merge.
+    InReview {
+        /// The pull requests it waits for.
+        prs: Vec<PrRef>,
+    },
     /// Message the holder or ask for a grant.
     AskHolder,
     /// The member's wide claim names the area: its holder's acknowledgement of the announcement
@@ -453,6 +464,14 @@ pub trait Workspace {
     /// # Errors
     /// [`PortError::Refused`] when the checkout governs no repository of the settings.
     fn repo(&self, settings: &ProjectSettings) -> Result<RepoId, PortError>;
+
+    /// The checkout's git settings, as a push run from `cwd` reads them: its current branch and
+    /// every setting in force. `None` when git cannot tell. Asked only about a line that pushes,
+    /// in a project that protects a branch.
+    fn git_facts(&self, cwd: &Path) -> Option<GitFacts>;
+
+    /// Whether `dir`, a `git -C` directory relative to `cwd`, lies in this checkout.
+    fn contains_dir(&self, cwd: &Path, dir: &str) -> bool;
 
     /// What this machine remembers about the project.
     fn cache(&self) -> &dyn LocalCache;

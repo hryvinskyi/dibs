@@ -13,6 +13,7 @@ use crate::ids::{ItemId, MemberId};
 use crate::paths::RepoPath;
 use crate::repo::RepoId;
 use crate::reservation::{AddArea, ReservationPlan, SharedPath};
+use crate::review::PrRef;
 use crate::settings::{EditPolicy, ProjectSettings};
 
 /// The answer for one path.
@@ -52,8 +53,13 @@ pub enum Verdict {
 }
 
 /// Why a held path is held, which also says what the member can do about it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum HeldReason {
+    /// The holder's claim is in review: the area is free once its pull requests are merged.
+    InReview {
+        /// The pull requests the holder's claim recorded, in order.
+        prs: Vec<PrRef>,
+    },
     /// The holder works in the area; message them or ask for a grant.
     AskHolder,
     /// The member's live wide claim names the area and its holder has not acknowledged the
@@ -62,9 +68,10 @@ pub enum HeldReason {
 }
 
 impl HeldReason {
-    /// The stable name: `ask_holder` or `awaiting_ack`.
-    pub const fn code(self) -> &'static str {
+    /// The stable name: `in_review`, `ask_holder` or `awaiting_ack`.
+    pub const fn code(&self) -> &'static str {
         match self {
+            Self::InReview { .. } => "in_review",
             Self::AskHolder => "ask_holder",
             Self::AwaitingAck => "awaiting_ack",
         }
@@ -127,14 +134,17 @@ pub enum EditCheckRefused {
 ///    `owner` rule continues at step 3 for its area; every other kind decides here.
 /// 3. The first area of that repository, in declaration order, containing the path. None:
 ///    `Allowed`.
-/// 4. Another member's live claim holds the area: `Granted` when that holder granted me edits in it
-///    for one of my live claims — by a grant, or by acknowledging my wide claim's announcement —
-///    else `HeldBy`, waiting for that acknowledgement when my live wide claim names the area.
+/// 4. Another member's live claim holds the area, working or in review: `Granted` when that holder
+///    granted me edits in it for one of my live claims — by a grant, or by acknowledging my wide
+///    claim's announcement — else `HeldBy`: free once its pull requests merge when the holder's claim
+///    is in review, waiting for that acknowledgement when my live wide claim names the area, else
+///    asking the holder.
 /// 5. Nobody else holds it: `NeedsClaim` when I hold no live claim and the policy requires one,
 ///    else `Allowed`.
 ///
 /// Allowed edits in an area none of my claims holds and none of my live wide claims names add the
-/// area to my target claim (the one most recently claimed or renewed, the lowest item on a tie); an
+/// area to my target claim: of my live claims I am working on, the one most recently claimed or
+/// renewed, the lowest item on a tie; with none, my claims in review by the same rule. An
 /// edit inside my wide scope adds nothing, since a wide claim holds nothing it names, and is
 /// attributed to that wide claim. Edits under a `warn-shared` rule record the path under the target
 /// claim. Nothing already recorded is planned again.
@@ -224,7 +234,7 @@ impl<'a> EditWorld<'a> {
                     member: holder.member,
                     item: holder.item,
                     area: area.clone(),
-                    reason: self.held_reason(area),
+                    reason: self.held_reason(holder, area),
                 },
             };
         }
@@ -253,10 +263,15 @@ impl<'a> EditWorld<'a> {
         Verdict::Allowed
     }
 
-    /// The way on from an area another member holds: their acknowledgement when one of my live
-    /// wide claims names it, else asking them.
-    fn held_reason(&self, area: &QualifiedArea) -> HeldReason {
-        if self.mine.iter().any(|claim| claim.names_wide(area)) {
+    /// The way on from an area another member's claim holds: its pull requests' merge when that
+    /// claim is in review, their acknowledgement when one of my live wide claims names it, else
+    /// asking them.
+    fn held_reason(&self, holder: &Claim, area: &QualifiedArea) -> HeldReason {
+        if let Some(review) = holder.state.review() {
+            HeldReason::InReview {
+                prs: review.prs().iter().cloned().collect(),
+            }
+        } else if self.mine.iter().any(|claim| claim.names_wide(area)) {
             HeldReason::AwaitingAck
         } else {
             HeldReason::AskHolder
@@ -281,8 +296,11 @@ impl<'a> EditWorld<'a> {
         }
     }
 
+    /// The claim new reservations go to: the target among my claims I am working on, else among
+    /// my claims in review.
     fn target(&self) -> Option<&'a Claim> {
-        target_claim(self.mine.iter().copied())
+        target_claim(self.mine.iter().copied().filter(|claim| claim.is_working()))
+            .or_else(|| target_claim(self.mine.iter().copied()))
     }
 
     /// Other members' live claims that recorded this path as shared, each once, ordered.

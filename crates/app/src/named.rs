@@ -18,6 +18,7 @@ use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::item::{ExternalRef, Title};
 use dibs_domain::message::{Author, Importance, Recipients};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
+use dibs_domain::review::{DropRefused, ReviewRefused};
 use dibs_domain::slot::{BeatRefused, SlotRefused};
 
 use crate::error::AppError;
@@ -293,6 +294,36 @@ impl NamesMember for HolderOnly {
         match self {
             Self::NotHolder { member } => Some(*member),
             Self::NoClaim => None,
+        }
+    }
+
+    fn item(&self) -> Option<ItemId> {
+        None
+    }
+}
+
+impl NamesMember for ReviewRefused {
+    fn member(&self) -> Option<MemberId> {
+        match self {
+            Self::HolderOnly(refused) => refused.member(),
+            Self::RecordedElsewhere { member, .. } => Some(*member),
+            Self::Stale | Self::UnknownRepository { .. } => None,
+        }
+    }
+
+    fn item(&self) -> Option<ItemId> {
+        match self {
+            Self::RecordedElsewhere { item, .. } => Some(*item),
+            Self::HolderOnly(_) | Self::Stale | Self::UnknownRepository { .. } => None,
+        }
+    }
+}
+
+impl NamesMember for DropRefused {
+    fn member(&self) -> Option<MemberId> {
+        match self {
+            Self::HolderOnly(refused) => refused.member(),
+            Self::NotRecorded { .. } => None,
         }
     }
 

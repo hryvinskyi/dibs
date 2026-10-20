@@ -19,7 +19,8 @@ use crate::ui::signed_page;
 
 /// The kinds of event after which the status page offers a reload.
 pub const STATUS_CHANGES: &str = "claimed renewed taken_over released completed force_released \
-     reserved wide_claimed wide_granted_by_ack grant_revoked";
+     reserved wide_claimed wide_granted_by_ack grant_revoked review_started pr_merged pr_closed \
+     review_ended completed_by_merge";
 
 #[derive(Template)]
 #[template(path = "status.html")]

@@ -2,19 +2,28 @@
 //! command check uses. It knows the exact refs pushed to whatever the command line said and
 //! whoever typed it, so it covers a push from a terminal and one with no refspec.
 //!
-//! It refuses only on a verdict: a ref frozen by a slot another member holds. Anything else that
-//! keeps it from deciding — no checkout, no token, a server that cannot be reached — lets the push
-//! go with one warning; `git push --no-verify` stays the conscious way past a refusal.
+//! It refuses only on a verdict: a protected branch of the repository pushed to that the member is
+//! not among the pushers of — judged from what this machine remembers, so it holds while the server
+//! cannot be reached — or a ref frozen by a slot another member holds. Anything else that keeps it
+//! from deciding — no checkout, no token, a server that cannot be reached for a freeze, a machine
+//! that remembers nothing yet and cannot reach the server — lets the push go with one warning;
+//! `git push --no-verify` stays the conscious way past a refusal, and for a protected branch it
+//! breaks the team's rule.
 
+use dibs_agent_host::ports::{Workspace, Workspaces};
 use dibs_agent_host::slots::KnownBoard;
 use dibs_agent_host::wording;
+use dibs_domain::handle::Handle;
+use dibs_domain::push::PushProtection;
 use dibs_domain::repo::RepoId;
+use dibs_domain::settings::ProjectSettings;
 use dibs_domain::slot::{CommandVerdict, RepoRef, SlotName, push_verdict};
 
 use crate::commands::check::Governed;
 use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::guard::views;
+use crate::guard::workspace::ClientWorkspaces;
 
 /// The remote refs of the lines git writes to a pre-push hook: `<local ref> <local sha> <remote
 /// ref> <remote sha>`, a deletion included. Lines of another shape are skipped.
@@ -31,20 +40,51 @@ pub fn pushed_refs(stdin: &str) -> Vec<String> {
         .collect()
 }
 
-/// Checks the push `stdin` describes.
+/// The remote a push goes to, as git hands it to its pre-push hook: the remote's name (or the URL,
+/// for a push to one) and the URL it pushes to.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PushedTo<'a> {
+    /// The remote's name, or the URL pushed to when the push named no remote.
+    pub remote: Option<&'a str>,
+    /// The URL pushed to.
+    pub url: Option<&'a str>,
+}
+
+/// Checks the push `stdin` describes, to `to`.
+///
+/// Protected branches are judged first, from the settings and the member this machine remembers,
+/// without the server, so a server that cannot be reached does not let a push to one through; only
+/// a machine that remembers nothing yet asks the server for them. Freezes need the slots' state,
+/// so they are judged only when the server answers.
 ///
 /// # Errors
-/// A refusal naming the slot, its holder, why they hold it and until when, when a ref pushed to is
-/// frozen by a slot another member holds.
-pub async fn check_push(stdin: &str, ctx: &Context) -> Result<(), Failure> {
+/// A refusal naming who may push, when a ref pushed to is a protected branch the member may not
+/// push to; a refusal naming the slot, its holder, why they hold it and until when, when a ref
+/// pushed to is frozen by a slot another member holds.
+pub async fn check_push(stdin: &str, to: PushedTo<'_>, ctx: &Context) -> Result<(), Failure> {
     let refs = pushed_refs(stdin);
     if refs.is_empty() {
         return Ok(());
     }
-    match ctx.checkout() {
-        Ok(Some(_)) => {}
+    let workspaces = ClientWorkspaces::new(ctx.env().clone());
+    let workspace = match workspaces.open(&ctx.cwd) {
+        Ok(Some(workspace)) => workspace,
         Ok(None) => return Ok(()),
-        Err(failure) => return let_through(ctx, &failure),
+        Err(error) => {
+            return let_through(ctx, &Failure::config("invalid_checkout", error.to_string()));
+        }
+    };
+    let remembered = workspace
+        .cache()
+        .settings()
+        .ok()
+        .flatten()
+        .map(|cached| cached.value);
+    if let Some(known) = &remembered
+        && let Some(refusal) =
+            protected(&*workspace, ctx, &known.settings, &known.member, to, &refs)
+    {
+        return Err(Failure::refused("needs_permission", refusal));
     }
     let connection = match ctx.connect().await {
         Ok(connection) => connection,
@@ -54,11 +94,70 @@ pub async fn check_push(stdin: &str, ctx: &Context) -> Result<(), Failure> {
         Ok(governed) => governed,
         Err(failure) => return let_through(ctx, &failure),
     };
+    if remembered.is_none()
+        && let Some(refusal) = protected(
+            &*workspace,
+            ctx,
+            governed.settings(),
+            &connection.me.member.handle,
+            to,
+            &refs,
+        )
+    {
+        return Err(Failure::refused("needs_permission", refusal));
+    }
     match frozen(&connection, &governed, &refs).await {
         Ok(Some(refusal)) => Err(Failure::refused("frozen", refusal)),
         Ok(None) => Ok(()),
         Err(failure) => let_through(ctx, &failure),
     }
+}
+
+/// The refusal of the push, when a ref it goes to is a protected branch of the repository of the
+/// remote pushed to that `member` may not push to. Without the remote, the push is judged as one to
+/// the repository the checkout governs.
+fn protected(
+    workspace: &dyn Workspace,
+    ctx: &Context,
+    settings: &ProjectSettings,
+    member: &Handle,
+    to: PushedTo<'_>,
+    refs: &[String],
+) -> Option<String> {
+    let facts = workspace.git_facts(&ctx.cwd);
+    let here = |dir: &str| workspace.contains_dir(&ctx.cwd, dir);
+    let protection = PushProtection {
+        pusher: member,
+        settings,
+        facts: facts.as_ref(),
+        here: &here,
+    };
+    if !protection.applies() {
+        return None;
+    }
+    let governing = workspace
+        .repo(settings)
+        .ok()
+        .and_then(|repo| settings.repo(&repo));
+    let CommandVerdict::NeedsPermission {
+        target,
+        pushers,
+        certain,
+    } = protection.refs_refusal(to.remote, to.url, refs, governing)?
+    else {
+        return None;
+    };
+    Some(format!(
+        "{} A push with git push --no-verify gets past this check and breaks the team's rule.",
+        wording::needs_permission(&target.to_string(), &pushers, certain)
+    ))
+}
+
+/// The branches of `repo` among the refs pushed to.
+fn targets(repo: &RepoId, refs: &[String]) -> Vec<RepoRef> {
+    refs.iter()
+        .filter_map(|name| RepoRef::of(repo.clone(), name))
+        .collect()
 }
 
 /// The refusal of the push, when a ref it goes to is frozen by a slot another member holds.
@@ -67,11 +166,7 @@ async fn frozen(
     governed: &Governed,
     refs: &[String],
 ) -> Result<Option<String>, Failure> {
-    let repo: &RepoId = governed.repo();
-    let targets: Vec<RepoRef> = refs
-        .iter()
-        .filter_map(|name| RepoRef::of(repo.clone(), name))
-        .collect();
+    let targets = targets(governed.repo(), refs);
     let catalog = governed.settings().slots();
     let freezing: Vec<SlotName> = catalog
         .slots()

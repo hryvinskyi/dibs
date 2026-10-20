@@ -14,6 +14,7 @@ pub mod me;
 pub mod members;
 pub mod messages;
 pub mod ready;
+pub mod review;
 pub mod sessions;
 pub mod slots;
 pub mod status;

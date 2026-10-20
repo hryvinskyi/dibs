@@ -578,6 +578,7 @@ mod tests {
             ready: crate::api::ReadyList::default(),
             slots: Vec::new(),
             escalations: Vec::new(),
+            integration_silent_since: None,
         };
         let earlier: Status =
             serde_json::from_str(r#"{"live": [], "stale": [], "holds": []}"#).unwrap();

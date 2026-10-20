@@ -7,13 +7,15 @@
 //! *Ready* lists the viewer's ready list, soonest first, each card with its priority, its hinted
 //! areas and its tracker's page, and below it the open items that are not ready with what holds
 //! them back: their blockers, or a hinted area another member holds. An item a live claim holds is
-//! in progress instead. *Done today* lists the items completed since the viewer's midnight, newest
+//! in progress instead. *In progress* lists the live claims worked on, and below them those in
+//! review with the pull requests they wait for. *Done today* lists the items completed since the viewer's midnight, newest
 //! first: midnight at the offset the page's script recorded, or UTC's midnight, said on the page,
 //! until it has recorded one. A filter keeps what matches it: the area filter keeps claims that
 //! declare that area and items that hint it, the member filter keeps the claims and completions of
 //! that member; an item nobody holds names no member and a completion no area, so those filters
 //! leave them out. A wide claim is kept by an area it names, and by its member or a member holding
-//! one of its areas.
+//! one of its areas. A banner says since when the project's integrations are silent, while they
+//! are: merges then complete no claims.
 //!
 //! The fragment answers a request without a live session with `401`, never with the sign-in page,
 //! so a script cannot mistake that page for the board; it says what it is in the `X-Dibs-Fragment`
@@ -163,11 +165,14 @@ struct BoardColumns {
     updated: Moment,
     /// The escalations the person may read that wait for an arbiter, newest first.
     escalations: Vec<EscalationBanner>,
+    /// Since when the project's integrations are silent, once that counts.
+    integration_silent: Option<Moment>,
     slots: Vec<SlotRow>,
     wide: Vec<WideRow>,
     ready: Vec<ReadyCard>,
     waiting: Vec<ReadyCard>,
     in_progress: Vec<ClaimRow>,
+    in_review: Vec<ClaimRow>,
     stale: Vec<ClaimRow>,
     done: Vec<DoneCard>,
     day_in_utc: bool,
@@ -283,10 +288,14 @@ async fn columns(
             .map(|held| ClaimRow::of(held, actor.member, now))
             .collect::<Vec<_>>()
     };
+    let live = rows(&view.live);
     Ok(BoardColumns {
         csrf: session.form_token(),
         back: address("/ui/board", filter),
         updated: moment(now, now),
+        integration_silent: view
+            .integration_silent_since
+            .map(|since| moment(since, now)),
         escalations: view
             .escalations
             .iter()
@@ -328,7 +337,12 @@ async fn columns(
             .filter(|card| !card.reasons.iter().any(NotReadyRow::is_claim))
             .filter(|card| filter.keeps_unheld(&card.hints))
             .collect(),
-        in_progress: rows(&view.live),
+        in_progress: live
+            .iter()
+            .filter(|row| !row.in_review())
+            .cloned()
+            .collect(),
+        in_review: live.into_iter().filter(ClaimRow::in_review).collect(),
         stale: rows(&view.stale),
         done: completed
             .iter()
@@ -415,6 +429,7 @@ mod tests {
                 claimed_at: at,
                 renewed_at: at,
                 last_seen: at,
+                state: dibs_domain::review::ClaimState::Working,
             },
             holder: Handle::parse(holder).unwrap(),
         }

@@ -2,15 +2,21 @@
 //! commands of the line, the settings and the state of the slots it touches. The line itself never
 //! leaves the machine.
 //!
-//! The order: a `git push` whose target ref can be read is checked against the refs a slot held by
-//! another member freezes (`Frozen`: waiting is the way on, not taking the slot); then the first
-//! declared slot whose pattern matches any simple command decides (`NeedsSlot`, or `Holding` while
+//! The order: every `git push` is checked first against the protected branches of the repository
+//! it pushes to (`NeedsPermission`: a pull request is the way on), failing closed where its branches
+//! cannot be read; then a push whose target ref can be read against the refs a slot held by another
+//! member freezes (`Frozen`: waiting is the way on, not taking the slot), on a best-effort reading;
+//! then the first declared slot whose pattern matches any simple command decides (`NeedsSlot`, or `Holding` while
 //! the member holds it, unless the slot runs only inside `dibs slot run` and the hold is not kept
 //! by a run or a workflow); with no match the line is `Free`.
 
+use std::collections::BTreeSet;
+
 use time::OffsetDateTime;
 
+use crate::handle::Handle;
 use crate::ids::MemberId;
+use crate::push::{PushProtection, git_pushes};
 use crate::repo::RepoId;
 use crate::slot::command::SimpleCommand;
 use crate::slot::spec::{Purpose, RepoRef, SlotCatalog, SlotName, SlotSpec};
@@ -21,6 +27,17 @@ use crate::slot::state::{Liveness, SlotBoard, SlotHold};
 pub enum CommandVerdict {
     /// Nothing: no slot governs it.
     Free,
+    /// A push that updates, or may update, a protected branch the member is not among the pushers
+    /// of; a pull request is the way there.
+    NeedsPermission {
+        /// The branch.
+        target: RepoRef,
+        /// The members who may push to it, by handle.
+        pushers: BTreeSet<Handle>,
+        /// Whether the push names that branch; `false` when it pushes every branch, or which ones
+        /// it pushes cannot be read.
+        certain: bool,
+    },
     /// A push to a ref another member's held slot freezes.
     Frozen {
         /// The slot.
@@ -55,20 +72,23 @@ pub enum CommandVerdict {
     },
 }
 
-/// Decides what the commands of one line need, for `me` in `repo`.
+/// Decides what the commands of one line need, for `me` in `repo`. `protection` judges pushes
+/// against protected branches; without it, no branch counts as protected.
 pub fn command_verdict(
     commands: &[SimpleCommand],
     repo: &RepoId,
     catalog: &SlotCatalog,
     board: &SlotBoard,
     me: MemberId,
+    protection: Option<&PushProtection<'_>>,
 ) -> CommandVerdict {
     let governed: Vec<&SimpleCommand> = commands.iter().filter(|c| !is_slot_wrapper(c)).collect();
-    let targets: Vec<RepoRef> = governed
-        .iter()
-        .filter_map(|command| push_targets(command, repo))
-        .flatten()
-        .collect();
+    if let Some(refusal) =
+        protection.and_then(|protection| protection.refusal(&git_pushes(&governed)))
+    {
+        return refusal;
+    }
+    let targets = pushed_refs(&governed, repo);
     let pushed = push_verdict(&targets, catalog, board, me);
     if pushed != CommandVerdict::Free {
         return pushed;
@@ -110,11 +130,7 @@ pub fn slots_in_question(
     catalog: &SlotCatalog,
 ) -> Vec<SlotName> {
     let governed: Vec<&SimpleCommand> = commands.iter().filter(|c| !is_slot_wrapper(c)).collect();
-    let targets: Vec<RepoRef> = governed
-        .iter()
-        .filter_map(|command| push_targets(command, repo))
-        .flatten()
-        .collect();
+    let targets = pushed_refs(&governed, repo);
     let mut names: Vec<SlotName> = catalog
         .slots()
         .iter()
@@ -132,10 +148,11 @@ pub fn slots_in_question(
     names
 }
 
-/// What a push of `targets` needs from `me`: [`CommandVerdict::Frozen`] for the first target a slot
-/// held by another member freezes, [`CommandVerdict::Free`] otherwise. A hold of `me` never freezes
-/// their own push. The agent's command check and git's pre-push check both decide here, so a push
-/// is judged the same whoever typed it.
+/// What a push of `targets` needs from `me` once no protected branch refused it:
+/// [`CommandVerdict::Frozen`] for the first target a slot held by another member freezes,
+/// [`CommandVerdict::Free`] otherwise. A hold of `me` never freezes their own push. The agent's
+/// command check and git's pre-push check both decide here and in [`Pusher::refusal`], so a push is
+/// judged the same whoever typed it.
 pub fn push_verdict(
     targets: &[RepoRef],
     catalog: &SlotCatalog,
@@ -154,6 +171,16 @@ pub fn push_verdict(
         }
     }
     CommandVerdict::Free
+}
+
+/// The branches the `git push` commands among `commands` name, in `repo`, as far as the line
+/// alone reads them.
+fn pushed_refs(commands: &[&SimpleCommand], repo: &RepoId) -> Vec<RepoRef> {
+    commands
+        .iter()
+        .filter_map(|command| push_targets(command, repo))
+        .flatten()
+        .collect()
 }
 
 /// The slot held by another member that freezes `target`, with its hold.

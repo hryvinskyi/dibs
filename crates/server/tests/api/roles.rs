@@ -1,5 +1,7 @@
 //! What an integration may call: who it is, the members, the event feed, reading, creating and
-//! importing work items, the ready list, reading the slots and reporting a finished workflow run;
+//! importing work items, the ready list, reading the slots, reporting a finished workflow run,
+//! reporting merged and closed pull requests, and reading the claims in review and the
+//! pull-request status;
 //! never a conversation, a message, an acknowledgement or a slot hold. Every other route of the router answers it
 //! `forbidden`, and each refusal comes before the request is read, so a body that would be refused
 //! for its content still answers `forbidden`.
@@ -61,6 +63,32 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             Some(json!({"workflow": "deploy.yml", "sha": "abc1234", "conclusion": "success"})),
             StatusCode::OK,
         ),
+        (
+            Method::POST,
+            "/v1/prs/merged".into(),
+            Some(
+                json!({"pr": "acme/widgets#7", "base": "main", "merged_at": "2026-03-02T10:00:00Z"}),
+            ),
+            StatusCode::OK,
+        ),
+        (
+            Method::POST,
+            "/v1/prs/closed".into(),
+            Some(json!({"pr": "acme/widgets#7"})),
+            StatusCode::OK,
+        ),
+        (
+            Method::GET,
+            "/v1/review-claims".into(),
+            None,
+            StatusCode::OK,
+        ),
+        (
+            Method::GET,
+            "/v1/pr-status?repo=default&base=main".into(),
+            None,
+            StatusCode::OK,
+        ),
     ];
     for (method, path, body, status) in allowed {
         let answer = world
@@ -99,6 +127,21 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
         ),
         (Method::POST, format!("/v1/items/{item}/release"), None),
         (Method::POST, format!("/v1/items/{item}/done"), None),
+        (
+            Method::POST,
+            format!("/v1/items/{item}/review"),
+            Some(json!({"pr": "acme/widgets#7"})),
+        ),
+        (
+            Method::POST,
+            format!("/v1/items/{item}/review"),
+            Some(json!({})),
+        ),
+        (
+            Method::POST,
+            format!("/v1/items/{item}/review/drop"),
+            Some(json!({"pr": "acme/widgets#7"})),
+        ),
         (
             Method::POST,
             format!("/v1/items/{item}/dependencies"),
