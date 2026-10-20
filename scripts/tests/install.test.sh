@@ -283,10 +283,15 @@ for shell in "${shells[@]}"; do
 
   installer="$as_released"
   dest="$scratch/$shell-as-released"
-  check "the script stamped with the repository's key file installs" 0 install "$shell" Linux x86_64 --version 0.1.0
   case "$(sed -n 2p "$here/../../keys/release.pub")" in
-    RW*) expect_output "and checks the signature against that key" "signature" ;;
-    *) expect_output "while that file holds the placeholder, it says it cannot verify" "carries no release signing key" ;;
+    RW*)
+      check "the script stamped with the repository's key refuses a release that key did not sign" 1 install "$shell" Linux x86_64 --version 0.1.0
+      expect_output "it checked the signature against that key" "does not verify"
+      ;;
+    *)
+      check "the script stamped with the placeholder key file installs" 0 install "$shell" Linux x86_64 --version 0.1.0
+      expect_output "while that file holds the placeholder, it says it cannot verify" "carries no release signing key"
+      ;;
   esac
   installer=""
 done

@@ -176,8 +176,16 @@ fn a_restore_refuses_while_a_server_holds_the_target() {
             .contains("a running server or another restore holds"),
         "{ran:?}"
     );
-    assert!(!target.exists());
+    // The running server may open its database path again, creating an empty file there; what
+    // must not be there is the snapshot.
+    assert!(
+        std::fs::read(&target).map_or(true, |found| found != std::fs::read(&snapshot).unwrap()),
+        "the refused restore wrote nothing"
+    );
     drop(server);
+    if target.exists() {
+        std::fs::remove_file(&target).unwrap();
+    }
 
     let ran = run(
         &place.database(),
