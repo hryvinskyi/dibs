@@ -25,6 +25,7 @@ export const PROJECT = 'widgets';
  * @property {string} url the base URL, `http://127.0.0.1:<port>`
  * @property {string} adminToken the admin `alice`'s token
  * @property {string} memberToken the member `bob`'s token
+ * @property {string} database the path of the server's database file
  * @property {() => Promise<void>} stop ends the server and removes its database
  */
 
@@ -106,6 +107,7 @@ export async function startServer(binary) {
         url: `http://${address}`,
         adminToken: tokenOf(init.stdout),
         memberToken: tokenOf(member.stdout),
+        database: env.DIBS_DATABASE,
         stop,
       };
     } catch (error) {

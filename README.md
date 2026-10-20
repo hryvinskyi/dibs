@@ -330,12 +330,14 @@ The server also serves pages for people at `/ui`, where you sign in with your to
 
 - **Status** (`/ui/`): live claims, stale claims with a take-over form, the areas held, and the wide claims with who
   has acknowledged each of their areas.
-- **Board** (`/ui/board`): your ready list with priorities, likely areas and links to the tracker, the open items that
-  wait with their blockers, what is in progress, what went stale and what was done today, filterable by area and member,
-  with a banner when something changes.
+- **Board** (`/ui/board`): the live wide claims with who has acknowledged them, your ready list with priorities, likely
+  areas and links to the tracker, the open items that wait with their blockers, what is in progress, what went stale and
+  what was done today, filterable by area and member. The columns refresh by themselves when claims or items change;
+  while you are typing a take-over reason they stay as they are and a banner offers a reload instead.
 - **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply. Each conversation
   shows its importance and whether a message in it awaits your acknowledgement; a message that asks for one lists who has
-  acknowledged it and offers you an *Acknowledge* button, and a reply can ask everyone to acknowledge it.
+  acknowledged it, updated as they do, and offers you an *Acknowledge* button, and a reply can ask everyone to acknowledge
+  it.
 
 The pages are rendered on the server and enhanced by a few scripts of its own; they follow the event log live. The
 session cookie is `Secure`, so use them over HTTPS (or on `localhost`).

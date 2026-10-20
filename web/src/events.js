@@ -1,8 +1,8 @@
 // @ts-check
 /**
  * Events of the project's log as the event stream sends them: a frame's data parsed into a typed
- * event, whether an event announces a message of one thread or a change a page shows, and a bounded
- * memory of the event ids already handled.
+ * event, whether an event announces a message of one thread, an acknowledgement in it, or a change
+ * a page shows, and a bounded memory of the event ids already handled.
  */
 
 /** A frame whose data does not have the shape the stream promises. */
@@ -45,11 +45,24 @@ const IMPORTANCES = new Map([
 ]);
 
 /**
+ * A recipient's acknowledgement of a message, as an `acked` event tells it.
+ * @typedef {object} StreamAck
+ * @property {number} thread
+ * @property {number} message
+ * @property {string} member the handle of the recipient who acknowledged it
+ * @property {string} at an RFC 3339 time
+ */
+
+/** The kind of the event that tells an acknowledgement. */
+const ACKED = 'acked';
+
+/**
  * One event of the log.
  * @typedef {object} StreamEvent
  * @property {number} id its position in the log
  * @property {string} kind its stable name, such as `claimed` or `message_posted`
  * @property {StreamMessage | null} message the message it announces, when it announces one
+ * @property {StreamAck | null} ack the acknowledgement it tells, for an `acked` event
  */
 
 /**
@@ -128,6 +141,30 @@ function parseMessage(raw) {
 }
 
 /**
+ * The acknowledgement an `acked` event tells: its payload's ids, the recipient's handle from the
+ * event's `members`, and the event's time.
+ * @param {Record<string, unknown>} raw the event
+ * @returns {StreamAck}
+ */
+function parseAck(raw) {
+  const payload = raw.payload;
+  if (!isRecord(payload)) {
+    throw new ContractError('$.payload', 'an object');
+  }
+  const by = id(payload.by, '$.payload.by');
+  const members = raw.members;
+  if (!isRecord(members)) {
+    throw new ContractError('$.members', 'an object');
+  }
+  return {
+    thread: id(payload.thread, '$.payload.thread'),
+    message: id(payload.message, '$.payload.message'),
+    member: text(members[String(by)], `$.members.${by}`),
+    at: text(raw.at, '$.at'),
+  };
+}
+
+/**
  * Parses the data of one server-sent event.
  * @param {unknown} data the `data` of a `MessageEvent`: JSON text
  * @returns {StreamEvent}
@@ -155,6 +192,7 @@ export function parseEvent(data) {
     id: id(raw.id, '$.id'),
     kind,
     message: raw.message === undefined || raw.message === null ? null : parseMessage(raw.message),
+    ack: kind === ACKED ? parseAck(raw) : null,
   };
 }
 
@@ -168,6 +206,16 @@ export function messageOf(event, thread) {
   return event.kind === 'message_posted' && event.message !== null && event.message.thread === thread
     ? event.message
     : null;
+}
+
+/**
+ * The acknowledgement an event tells, when it is one in this thread.
+ * @param {StreamEvent} event
+ * @param {number} thread
+ * @returns {StreamAck | null}
+ */
+export function ackOf(event, thread) {
+  return event.ack !== null && event.ack.thread === thread ? event.ack : null;
 }
 
 /**

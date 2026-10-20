@@ -837,7 +837,7 @@ async fn the_ready_column_shows_the_imported_ready_list_with_its_reasons() {
                 {"ref": "gh:acme/api#2", "title": "Waits for the rate table",
                  "blocked_by": ["gh:acme/api#3"]},
                 {"ref": "gh:acme/api#3", "title": "Rate table", "priority": 3},
-                {"ref": "gh:acme/api#4", "title": "Touches billing", "areas_hint": ["api:billing"]},
+                {"ref": "gh:acme/api#4", "title": "Touches billing", "priority": 1, "areas_hint": ["api:billing"]},
                 {"ref": "gh:acme/web#5", "title": "Closed upstream while held"}
             ]}),
         )
@@ -867,6 +867,34 @@ async fn the_ready_column_shows_the_imported_ready_list_with_its_reasons() {
     let later = ready.find("Rate table").unwrap();
     assert!(first < later, "soonest first: {ready}");
     assert!(ready.contains(">P0<") && ready.contains(">P3<"), "{ready}");
+    let badge = |reference: &str| {
+        let after =
+            &ready[ready.find(&format!("{reference}</a>")).unwrap() + reference.len() + 4..];
+        after[..after.find("</span></div>").unwrap()].to_owned()
+    };
+    let p0 = badge("gh:acme/api#1");
+    assert!(
+        p0.starts_with(r#"<span class="badge badge--danger""#)
+            && p0.contains("badge__icon--tri")
+            && p0.ends_with(">P0"),
+        "{p0}"
+    );
+    let p1 = badge("gh:acme/api#4");
+    assert!(
+        p1.starts_with(r#"<span class="badge badge--warn""#)
+            && p1.contains("badge__icon--tri")
+            && p1.ends_with(">P1"),
+        "{p1}"
+    );
+    for (reference, priority) in [("gh:acme/api#2", ">P2"), ("gh:acme/api#3", ">P3")] {
+        let plain = badge(reference);
+        assert!(
+            plain.starts_with(r#"<span class="badge badge--neutral""#)
+                && plain.contains("badge__icon--dash")
+                && plain.ends_with(priority),
+            "{plain}"
+        );
+    }
     assert!(
         ready.contains("<span class=\"chip\">api:search</span>"),
         "{ready}"
@@ -878,7 +906,7 @@ async fn the_ready_column_shows_the_imported_ready_list_with_its_reasons() {
     let waiting = &ready[ready.find("Not ready yet").unwrap()..];
     assert!(
         waiting
-            .contains("Blocked by <a class=\"ref\" href=\"https://github.com/acme/api/issues/3\""),
+            .contains("blocked by <a class=\"ref\" href=\"https://github.com/acme/api/issues/3\""),
         "{waiting}"
     );
     assert!(
@@ -1139,4 +1167,278 @@ async fn the_status_page_shows_a_wide_claim_and_who_has_acknowledged_it() {
         "{}",
         after.text
     );
+}
+
+/// The markup a page swaps its fragment into.
+fn region(page: &Page) -> &str {
+    let open = "<div data-board-region>\n";
+    let start = page.text.find(open).unwrap() + open.len();
+    let end = page.text.rfind("</div>\n</main>").unwrap();
+    &page.text[start..end]
+}
+
+#[tokio::test]
+async fn the_board_fragment_is_the_pages_columns_with_its_header_and_form_tokens() {
+    let (world, _alice, bob) = board().await;
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/board").await;
+    assert!(
+        page.text
+            .contains(r#"data-board-view data-stream-url="/ui/events/stream""#),
+        "{}",
+        page.text
+    );
+    assert!(
+        page.text
+            .contains(r#"data-fragment-url="/ui/board/fragment""#)
+    );
+    let fragment = browser.get(&world, "/ui/board/fragment").await;
+    assert_eq!(fragment.status, StatusCode::OK, "{}", fragment.text);
+    assert_eq!(fragment.headers["x-dibs-fragment"], "board");
+    assert_eq!(
+        fragment.headers[header::CONTENT_TYPE],
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(fragment.headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        fragment.headers[header::CONTENT_SECURITY_POLICY],
+        CONTENT_SECURITY_POLICY
+    );
+    assert_eq!(fragment.text, region(&page));
+    assert!(!fragment.text.contains("<html") && !fragment.text.contains("<main"));
+    assert!(fragment.text.contains("Take over claim"));
+    assert_eq!(fragment.form_token(), browser.token);
+    assert!(
+        fragment.text.contains("Ready &#60;item&#62;") && !fragment.text.contains("<item>"),
+        "titles are escaped: {}",
+        fragment.text
+    );
+    let progress = fragment.column("c-prog");
+    assert!(
+        progress.contains(r#"<a class="ref" href="https://github.com/acme/web/issues/3" rel="noopener noreferrer">gh:acme/web#3</a>"#),
+        "an item in progress links to its tracker: {progress}"
+    );
+    assert!(fragment.column("c-stale").contains(
+        r#"<a class="ref" href="https://github.com/acme/api/issues/2" rel="noopener noreferrer">"#
+    ));
+    assert!(fragment.column("c-done").contains(r#"<span class="ref">#"#));
+}
+
+#[tokio::test]
+async fn the_board_fragment_keeps_the_filter_of_its_query() {
+    let (world, _alice, bob) = board().await;
+    let browser = sign_in(&world, &bob).await;
+    let mine = browser.get(&world, "/ui/board?member=bob").await;
+    assert!(
+        mine.text
+            .contains(r#"data-fragment-url="/ui/board/fragment?member=bob""#)
+    );
+    let fragment = browser.get(&world, "/ui/board/fragment?member=bob").await;
+    assert_eq!(fragment.status, StatusCode::OK);
+    assert_eq!(fragment.text, region(&mine));
+    assert!(fragment.column("c-prog").contains("Live item"));
+    assert!(!fragment.column("c-stale").contains("Stale item"));
+    assert!(!fragment.column("c-ready").contains("Ready &#60;item"));
+    let billing = browser
+        .get(&world, "/ui/board/fragment?area=api%3Abilling")
+        .await;
+    assert!(billing.column("c-stale").contains("Stale item"));
+    assert!(!billing.column("c-prog").contains("Live item"));
+    let malformed = browser
+        .get(&world, "/ui/board/fragment?area=a&area=b")
+        .await;
+    assert_eq!(
+        malformed.status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        malformed.text
+    );
+}
+
+#[tokio::test]
+async fn the_board_fragment_answers_401_and_never_the_sign_in_page_without_a_session() {
+    let (world, alice, bob) = board().await;
+    let nobody = fetch(&world, Method::GET, "/ui/board/fragment", None, None).await;
+    assert_eq!(nobody.status, StatusCode::UNAUTHORIZED);
+    assert!(nobody.headers.get(header::LOCATION).is_none());
+    assert!(nobody.headers.get("x-dibs-fragment").is_none());
+    let error: Value = serde_json::from_str(&nobody.text).unwrap();
+    assert_eq!(error["error"]["code"], "unauthorized");
+    let bearer = world.get(&alice, "/ui/board/fragment").await;
+    assert_eq!(bearer.status, StatusCode::UNAUTHORIZED);
+
+    let browser = sign_in(&world, &bob).await;
+    world.fakes.clock.advance(Duration::hours(13));
+    let expired = browser.get(&world, "/ui/board/fragment").await;
+    assert_eq!(expired.status, StatusCode::UNAUTHORIZED);
+    assert!(expired.headers.get(header::LOCATION).is_none());
+    assert!(expired.headers.get("x-dibs-fragment").is_none());
+    assert!(!expired.text.contains("Stale item"));
+}
+
+#[tokio::test]
+async fn the_board_shows_the_live_wide_claims_in_their_own_row() {
+    let (world, alice, bob) = team().await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let alices = world.item(&alice, None, "Invoices").await;
+    let bobs = world.item(&bob, Some("gh:acme/api#9"), "Upgrade").await;
+    claim(
+        &world,
+        &alice,
+        alice_session,
+        alices,
+        json!(["api:billing"]),
+    )
+    .await;
+    let browser = sign_in(&world, &alice).await;
+    let empty = browser.get(&world, "/ui/board").await;
+    assert!(!empty.text.contains("Wide claims"), "no row without one");
+    let made = world
+        .post(
+            &bob,
+            &format!("/v1/items/{bobs}/claim"),
+            json!({"session_id": bob_session,
+                   "wide": {"areas": ["api:billing", "api:search"],
+                            "reason": "Swap <b>the</b> HTTP client"}}),
+        )
+        .await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.body);
+    let page = browser.get(&world, "/ui/board").await;
+    let wide = page.column("b-wide");
+    assert!(
+        wide.contains(r#"<a class="ref" href="https://github.com/acme/api/issues/9" rel="noopener noreferrer">gh:acme/api#9</a>"#),
+        "{wide}"
+    );
+    assert!(wide.contains("<span class=\"member\">bob</span>"), "{wide}");
+    assert!(
+        wide.contains("Swap &#60;b&#62;the&#60;/b&#62; HTTP client") && !wide.contains("<b>the"),
+        "{wide}"
+    );
+    assert!(wide.contains("waiting for alice"), "{wide}");
+    let fragment = browser.get(&world, "/ui/board/fragment").await;
+    assert_eq!(fragment.text, region(&page));
+    assert!(fragment.text.contains("waiting for alice"));
+    let asked = browser.get(&world, "/ui/board?member=alice").await;
+    assert!(
+        asked.text.contains("waiting for alice"),
+        "alice is asked to ack"
+    );
+    let elsewhere = browser.get(&world, "/ui/board?area=web%3Acheckout").await;
+    assert!(!elsewhere.text.contains("Wide claims"));
+    let message = made.body["announced"][0]["message_id"].as_u64().unwrap();
+    world
+        .post(&alice, &format!("/v1/messages/{message}/ack"), json!({}))
+        .await;
+    let acked = browser.get(&world, "/ui/board/fragment").await;
+    assert!(
+        acked.column("b-wide").contains("acknowledged by alice"),
+        "{}",
+        acked.text
+    );
+}
+
+/// The `datetime` of the first time after `marker` in `text`.
+fn time_after<'a>(text: &'a str, marker: &str) -> &'a str {
+    let start = text
+        .find(marker)
+        .unwrap_or_else(|| panic!("no {marker} in {text}"));
+    let rest = &text[start..];
+    let open = rest.find("datetime=\"").unwrap() + "datetime=\"".len();
+    let close = rest[open..].find('"').unwrap() + open;
+    &rest[open..close]
+}
+
+#[tokio::test]
+async fn the_time_the_columns_were_rendered_at_travels_with_the_fragment() {
+    let (world, _alice, bob) = board().await;
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/board").await;
+    let shown = time_after(&page.text, "<span data-updated-slot>");
+    assert_eq!(
+        time_after(region(&page), "<template data-updated-template>"),
+        shown
+    );
+    world.fakes.clock.advance(Duration::minutes(5));
+    let later = browser.get(&world, "/ui/board/fragment").await;
+    let rendered = time_after(&later.text, "<template data-updated-template>");
+    assert_ne!(rendered, shown, "{}", later.text);
+    let then =
+        time::OffsetDateTime::parse(shown, &time::format_description::well_known::Rfc3339).unwrap();
+    let now = time::OffsetDateTime::parse(rendered, &time::format_description::well_known::Rfc3339)
+        .unwrap();
+    assert_eq!(now - then, Duration::minutes(5));
+}
+
+#[tokio::test]
+async fn a_take_over_from_a_filtered_board_returns_to_it_and_never_to_another_site() {
+    let (world, alice, bob) = board().await;
+    let browser = sign_in(&world, &bob).await;
+    let filtered = browser.get(&world, "/ui/board?area=api%3Abilling").await;
+    assert!(
+        filtered
+            .column("c-stale")
+            .contains(r#"<input type="hidden" name="back" value="/ui/board?area=api%3Abilling">"#),
+        "{}",
+        filtered.column("c-stale")
+    );
+    let status = world.get(&bob, "/v1/status").await;
+    let stale = status.body["stale"][0]["item"]["id"].as_u64().unwrap();
+    let path = format!("/ui/items/{stale}/takeover");
+    for foreign in [
+        "https://example.com/ui/board",
+        "//example.com/",
+        "/\\example.com",
+    ] {
+        let missing = browser
+            .post(
+                &world,
+                &path,
+                &[("csrf", &browser.token), ("reason", " "), ("back", foreign)],
+            )
+            .await;
+        assert_eq!(missing.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            missing.text.contains("href=\"/ui/board\""),
+            "{foreign}: {}",
+            missing.text
+        );
+        assert!(!missing.text.contains("example.com"), "{foreign}");
+    }
+    let refused = browser
+        .post(
+            &world,
+            &path,
+            &[
+                ("csrf", &browser.token),
+                ("reason", "taking it"),
+                ("back", "https://example.com/"),
+            ],
+        )
+        .await;
+    assert_eq!(refused.status, StatusCode::SEE_OTHER, "{}", refused.text);
+    assert_eq!(
+        refused.location(),
+        "/ui/board",
+        "a foreign address falls back to the board"
+    );
+    let session = world.session(&alice, "laptop").await;
+    let other = world
+        .item(&alice, Some("gh:acme/api#7"), "Another stale item")
+        .await;
+    claim(&world, &alice, session, other, json!(["api:search"])).await;
+    world.fakes.clock.advance(Duration::hours(2));
+    let kept = browser
+        .post(
+            &world,
+            &format!("/ui/items/{other}/takeover"),
+            &[
+                ("csrf", &browser.token),
+                ("reason", "no heartbeat for a day"),
+                ("back", "/ui/board?area=api%3Asearch&member=alice"),
+            ],
+        )
+        .await;
+    assert_eq!(kept.status, StatusCode::SEE_OTHER, "{}", kept.text);
+    assert_eq!(kept.location(), "/ui/board?area=api%3Asearch&member=alice");
 }

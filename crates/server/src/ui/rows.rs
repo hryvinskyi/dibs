@@ -24,6 +24,8 @@ pub struct ClaimRow {
     pub item_id: u64,
     /// How the item is named.
     pub reference: String,
+    /// The tracker's page for the item, when its reference has one.
+    pub link: Option<String>,
     /// The item's title.
     pub title: String,
     /// The holder's handle.
@@ -50,6 +52,7 @@ impl ClaimRow {
         Self {
             item_id: item.id.0,
             reference: reference(item.id, item.external_ref.as_ref()),
+            link: held.link.clone(),
             title: item.title.to_string(),
             holder: held.claim.holder.to_string(),
             host: claim.host.to_string(),
@@ -93,6 +96,8 @@ impl HoldRow {
 pub struct WideRow {
     /// How the item is named.
     pub reference: String,
+    /// The tracker's page for the item, when its reference has one.
+    pub link: Option<String>,
     /// The item's title.
     pub title: String,
     /// The wide claim's member.
@@ -121,6 +126,7 @@ impl WideRow {
         let item = &wide.held.item.item;
         Self {
             reference: reference(item.id, item.external_ref.as_ref()),
+            link: wide.held.link.clone(),
             title: item.title.to_string(),
             holder: wide.held.claim.holder.to_string(),
             reason: claim
@@ -222,6 +228,8 @@ pub struct ReadyCard {
     pub link: Option<String>,
     /// How soon: 0 to 4, lower is sooner.
     pub priority: u8,
+    /// How the card marks its priority.
+    pub mark: PriorityMark,
     /// The areas the work will probably touch, as `repo:area`.
     pub hints: Vec<String>,
     /// The member whose claim on it went stale, when one did.
@@ -239,6 +247,7 @@ impl ReadyCard {
             title: item.title.to_string(),
             link: entry.link.clone(),
             priority: item.priority.get(),
+            mark: PriorityMark::of(item.priority.get()),
             hints: item.areas_hint.iter().map(ToString::to_string).collect(),
             stale_holder: entry.stale_holder.as_ref().map(ToString::to_string),
             reasons: Vec::new(),
@@ -253,6 +262,7 @@ impl ReadyCard {
             title: item.title.to_string(),
             link: entry.link.clone(),
             priority: item.priority.get(),
+            mark: PriorityMark::of(item.priority.get()),
             hints: item.areas_hint.iter().map(ToString::to_string).collect(),
             stale_holder: None,
             reasons: entry.reasons.iter().map(NotReadyRow::of).collect(),
@@ -260,9 +270,41 @@ impl ReadyCard {
     }
 }
 
+/// How a card marks an item's priority: the soonest as a danger, the next as a warning, the rest
+/// plainly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorityMark {
+    /// Priority 0.
+    Danger,
+    /// Priority 1.
+    Warn,
+    /// Priorities 2 to 4.
+    Neutral,
+}
+
+impl PriorityMark {
+    /// The mark of a priority.
+    pub const fn of(priority: u8) -> Self {
+        match priority {
+            0 => Self::Danger,
+            1 => Self::Warn,
+            _ => Self::Neutral,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn priority_0_is_marked_as_danger_1_as_warning_and_the_rest_plainly() {
+        assert_eq!(PriorityMark::of(0), PriorityMark::Danger);
+        assert_eq!(PriorityMark::of(1), PriorityMark::Warn);
+        for later in 2..=4 {
+            assert_eq!(PriorityMark::of(later), PriorityMark::Neutral);
+        }
+    }
 
     #[test]
     fn an_item_is_named_by_its_reference_or_else_its_id() {

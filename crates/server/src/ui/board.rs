@@ -1,6 +1,7 @@
-//! `GET /ui/board`: the board — what is ready to pick up, what is in progress, what went stale with
-//! a take-over form, and what was done today — filtered by area and by member through the query
-//! string, with a reload banner when the claims or the items change.
+//! `GET /ui/board`: the board — the live wide claims, what is ready to pick up, what is in progress,
+//! what went stale with a take-over form, and what was done today — filtered by area and by member
+//! through the query string. `GET /ui/board/fragment` renders the same columns alone, for the page's
+//! script to swap in when the claims or the items change.
 //!
 //! *Ready* lists the viewer's ready list, soonest first, each card with its priority, its hinted
 //! areas and its tracker's page, and below it the open items that are not ready with what holds
@@ -10,12 +11,17 @@
 //! until it has recorded one. A filter keeps what matches it: the area filter keeps claims that
 //! declare that area and items that hint it, the member filter keeps the claims and completions of
 //! that member; an item nobody holds names no member and a completion no area, so those filters
-//! leave them out.
+//! leave them out. A wide claim is kept by an area it names, and by its member or a member holding
+//! one of its areas.
+//!
+//! The fragment answers a request without a live session with `401`, never with the sign-in page,
+//! so a script cannot mistake that page for the board; it says what it is in the `X-Dibs-Fragment`
+//! header, and its forms carry the session's form token as the page's do.
 
 use askama::Template;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use serde::Deserialize;
 use time::UtcOffset;
@@ -30,8 +36,8 @@ use crate::ui::chrome::{self, Chrome, Section};
 use crate::ui::live::latest_event;
 use crate::ui::moments::{Ago, Moment, moment, start_of_day};
 use crate::ui::render::html;
-use crate::ui::rows::{ClaimRow, NotReadyRow, ReadyCard, reference};
-use crate::ui::session::PageSession;
+use crate::ui::rows::{ClaimRow, NotReadyRow, PriorityMark, ReadyCard, WideRow, reference};
+use crate::ui::session::{PageSession, ScriptSession, UiSession};
 use crate::ui::signed_page;
 use crate::ui::status::STATUS_CHANGES;
 use crate::ui::zone::viewer_offset;
@@ -94,6 +100,23 @@ impl BoardFilter {
         self.area.is_none() && self.keeps_member(member)
     }
 
+    /// Whether a wide claim is kept: it names the area, and the member is its own or holds one of
+    /// its areas.
+    pub fn keeps_wide(&self, row: &WideRow) -> bool {
+        let area = self
+            .area
+            .as_deref()
+            .is_none_or(|area| row.areas.iter().any(|named| named.area == area));
+        let member = self.member.as_deref().is_none_or(|wanted| {
+            row.holder == wanted
+                || row
+                    .areas
+                    .iter()
+                    .any(|named| named.holder.as_deref() == Some(wanted))
+        });
+        area && member
+    }
+
     fn keeps_member(&self, member: &Handle) -> bool {
         self.member
             .as_deref()
@@ -105,9 +128,32 @@ impl BoardFilter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DoneCard {
     reference: String,
+    link: Option<String>,
     title: String,
     member: String,
     at: Moment,
+}
+
+/// The header naming what a fragment answer holds, and its value for the board's columns.
+const FRAGMENT_HEADER: HeaderName = HeaderName::from_static("x-dibs-fragment");
+const BOARD_FRAGMENT: HeaderValue = HeaderValue::from_static("board");
+
+/// The kinds of event after which the board's columns are rendered again.
+const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependency_removed";
+
+/// What the board shows below its filters, as the page and the fragment render it alike.
+#[derive(Debug, Clone)]
+struct BoardColumns {
+    csrf: String,
+    back: String,
+    updated: Moment,
+    wide: Vec<WideRow>,
+    ready: Vec<ReadyCard>,
+    waiting: Vec<ReadyCard>,
+    in_progress: Vec<ClaimRow>,
+    stale: Vec<ClaimRow>,
+    done: Vec<DoneCard>,
+    day_in_utc: bool,
 }
 
 #[derive(Template)]
@@ -119,16 +165,17 @@ struct BoardPage {
     areas: Vec<String>,
     members: Vec<String>,
     repos: Vec<String>,
-    ready: Vec<ReadyCard>,
-    waiting: Vec<ReadyCard>,
-    in_progress: Vec<ClaimRow>,
-    stale: Vec<ClaimRow>,
-    done: Vec<DoneCard>,
-    day_in_utc: bool,
-    updated: Moment,
+    board: BoardColumns,
     after: u64,
     changed_kinds: String,
     reload: String,
+    fragment: String,
+}
+
+#[derive(Template)]
+#[template(path = "board_fragment.html")]
+struct BoardFragment {
+    board: BoardColumns,
 }
 
 /// The board.
@@ -145,44 +192,9 @@ pub async fn page(
     let filter = BoardFilter::new(query.area, query.member);
     let actor = session.actor();
     let after = latest_event(&state, actor).await?;
-    let view = state.app.status.execute(actor).await?;
-    let now = state.clock.now();
-    let zone = viewer_offset(&headers);
-    let since = start_of_day(now, zone.unwrap_or(UtcOffset::UTC));
-    let completed = state.app.list_completed.execute(actor, since).await?;
+    let board = columns(&state, &session, &headers, &filter).await?;
     let people = state.app.list_members.execute(actor).await?;
     let signed = chrome::load(&state, &session, Section::Board).await?;
-    let rows = |held: &[dibs_app::use_cases::HeldItem]| {
-        held.iter()
-            .filter(|held| filter.keeps_claim(&held.claim))
-            .map(|held| ClaimRow::of(held, actor.member, now))
-            .collect::<Vec<_>>()
-    };
-    let ready = view
-        .ready
-        .ready
-        .iter()
-        .map(ReadyCard::ready)
-        .filter(|card| filter.keeps_unheld(&card.hints))
-        .collect();
-    let waiting = view
-        .ready
-        .excluded
-        .iter()
-        .map(ReadyCard::excluded)
-        .filter(|card| !card.reasons.iter().any(NotReadyRow::is_claim))
-        .filter(|card| filter.keeps_unheld(&card.hints))
-        .collect();
-    let done = completed
-        .iter()
-        .filter(|done| filter.keeps_completion(&done.member))
-        .map(|done| DoneCard {
-            reference: reference(done.item.item.id, done.item.item.external_ref.as_ref()),
-            title: done.item.item.title.to_string(),
-            member: done.member.to_string(),
-            at: moment(done.at, now),
-        })
-        .collect();
     let page = BoardPage {
         chrome: signed.chrome,
         filter_area: filter.area().to_owned(),
@@ -203,20 +215,97 @@ pub async fn page(
         } else {
             Vec::new()
         },
-        ready,
-        waiting,
-        in_progress: rows(&view.live),
-        stale: rows(&view.stale),
-        done,
-        day_in_utc: zone.is_none(),
-        updated: moment(now, now),
+        board,
         after,
-        changed_kinds: format!(
-            "{STATUS_CHANGES} item_created item_updated dependency_added dependency_removed"
-        ),
-        reload: reload_link(&filter),
+        changed_kinds: format!("{STATUS_CHANGES} {BOARD_CHANGES}"),
+        reload: address("/ui/board", &filter),
+        fragment: address("/ui/board/fragment", &filter),
     };
     Ok(signed_page(&session, html(StatusCode::OK, &page)))
+}
+
+/// The board's columns alone, filtered as the page is, for the page's script to swap in.
+///
+/// # Errors
+/// `unauthorized` without a live session; `invalid_query` for a malformed query string; the
+/// answer for a use case's failure.
+pub async fn fragment(
+    State(state): State<AppState>,
+    ScriptSession(session): ScriptSession,
+    headers: HeaderMap,
+    query: Result<Query<BoardFilter>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    let filter = BoardFilter::new(query.area, query.member);
+    let board = columns(&state, &session, &headers, &filter).await?;
+    let mut response = html(StatusCode::OK, &BoardFragment { board });
+    if response.status() == StatusCode::OK {
+        let fields = response.headers_mut();
+        fields.insert(FRAGMENT_HEADER, BOARD_FRAGMENT);
+        fields.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    Ok(signed_page(&session, response))
+}
+
+/// Reads what the columns show for the session's member, kept by the filter.
+async fn columns(
+    state: &AppState,
+    session: &UiSession,
+    headers: &HeaderMap,
+    filter: &BoardFilter,
+) -> Result<BoardColumns, ApiError> {
+    let actor = session.actor();
+    let view = state.app.status.execute(actor).await?;
+    let now = state.clock.now();
+    let zone = viewer_offset(headers);
+    let since = start_of_day(now, zone.unwrap_or(UtcOffset::UTC));
+    let completed = state.app.list_completed.execute(actor, since).await?;
+    let rows = |held: &[dibs_app::use_cases::HeldItem]| {
+        held.iter()
+            .filter(|held| filter.keeps_claim(&held.claim))
+            .map(|held| ClaimRow::of(held, actor.member, now))
+            .collect::<Vec<_>>()
+    };
+    Ok(BoardColumns {
+        csrf: session.form_token(),
+        back: address("/ui/board", filter),
+        updated: moment(now, now),
+        wide: view
+            .wide
+            .iter()
+            .map(WideRow::of)
+            .filter(|row| filter.keeps_wide(row))
+            .collect(),
+        ready: view
+            .ready
+            .ready
+            .iter()
+            .map(ReadyCard::ready)
+            .filter(|card| filter.keeps_unheld(&card.hints))
+            .collect(),
+        waiting: view
+            .ready
+            .excluded
+            .iter()
+            .map(ReadyCard::excluded)
+            .filter(|card| !card.reasons.iter().any(NotReadyRow::is_claim))
+            .filter(|card| filter.keeps_unheld(&card.hints))
+            .collect(),
+        in_progress: rows(&view.live),
+        stale: rows(&view.stale),
+        done: completed
+            .iter()
+            .filter(|done| filter.keeps_completion(&done.member))
+            .map(|done| DoneCard {
+                reference: reference(done.item.item.id, done.item.item.external_ref.as_ref()),
+                link: done.link.clone(),
+                title: done.item.item.title.to_string(),
+                member: done.member.to_string(),
+                at: moment(done.at, now),
+            })
+            .collect(),
+        day_in_utc: zone.is_none(),
+    })
 }
 
 /// Every area the settings declare, as `repo:area`, in declaration order.
@@ -232,8 +321,8 @@ fn declared_areas(settings: &ProjectSettings) -> Vec<String> {
         .collect()
 }
 
-/// The board's own address with the filter kept.
-fn reload_link(filter: &BoardFilter) -> String {
+/// A path of the board with the filter kept in its query string.
+fn address(path: &str, filter: &BoardFilter) -> String {
     let mut pairs = Vec::new();
     for (key, value) in [("area", filter.area()), ("member", filter.member())] {
         if !value.is_empty() {
@@ -241,9 +330,9 @@ fn reload_link(filter: &BoardFilter) -> String {
         }
     }
     if pairs.is_empty() {
-        "/ui/board".to_owned()
+        path.to_owned()
     } else {
-        format!("/ui/board?{}", pairs.join("&"))
+        format!("{path}?{}", pairs.join("&"))
     }
 }
 
@@ -334,15 +423,52 @@ mod tests {
     }
 
     #[test]
-    fn the_reload_link_keeps_the_filter_encoded() {
-        assert_eq!(reload_link(&BoardFilter::default()), "/ui/board");
+    fn the_board_addresses_keep_the_filter_encoded() {
+        assert_eq!(address("/ui/board", &BoardFilter::default()), "/ui/board");
         assert_eq!(
-            reload_link(&filter("api:billing", "bob")),
+            address("/ui/board", &filter("api:billing", "bob")),
             "/ui/board?area=api%3Abilling&member=bob"
         );
         assert_eq!(
-            reload_link(&filter("", "a&b=c")),
-            "/ui/board?member=a%26b%3Dc"
+            address("/ui/board/fragment", &filter("", "a&b=c")),
+            "/ui/board/fragment?member=a%26b%3Dc"
         );
+    }
+
+    fn wide(holder: &str, areas: &[(&str, Option<&str>)]) -> WideRow {
+        WideRow {
+            reference: "#1".to_owned(),
+            link: None,
+            title: "Upgrade".to_owned(),
+            holder: holder.to_owned(),
+            reason: "Swap the HTTP client".to_owned(),
+            areas: areas
+                .iter()
+                .map(|(area, held)| crate::ui::rows::WideAreaRow {
+                    area: (*area).to_owned(),
+                    holder: held.map(ToOwned::to_owned),
+                    granted: false,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_wide_claim_is_kept_by_an_area_it_names_and_by_its_member_or_a_holder() {
+        let row = wide(
+            "bob",
+            &[("api:billing", Some("alice")), ("api:search", None)],
+        );
+        assert!(BoardFilter::default().keeps_wide(&row));
+        assert!(filter("api:search", "").keeps_wide(&row));
+        assert!(!filter("web:checkout", "").keeps_wide(&row));
+        assert!(filter("", "bob").keeps_wide(&row));
+        assert!(
+            filter("", "alice").keeps_wide(&row),
+            "alice is asked to ack"
+        );
+        assert!(!filter("", "carol").keeps_wide(&row));
+        assert!(filter("api:billing", "alice").keeps_wide(&row));
+        assert!(!filter("web:checkout", "bob").keeps_wide(&row));
     }
 }

@@ -5,11 +5,12 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 
 use dibs_domain::handle::Handle;
+use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{NamedItem, Names};
+use crate::named::{ItemName, NamedItem, Names};
 use crate::ports::{Store, StoreError};
 use crate::work::Work;
 
@@ -25,12 +26,15 @@ pub struct CompletedItem {
     pub member: Handle,
     /// When.
     pub at: OffsetDateTime,
+    /// The tracker's page for the item, when its reference has one.
+    pub link: Option<String>,
 }
 
 /// Lists the items of the caller's project completed at or after a moment, newest first, at most
 /// [`MAX_COMPLETED`] of them. Items and handles are read in the same transaction as the log.
 pub struct ListCompleted {
     store: Arc<dyn Store>,
+    ref_schemes: Arc<RefSchemeRegistry>,
 }
 
 impl ListCompleted {
@@ -38,6 +42,7 @@ impl ListCompleted {
     pub fn new(deps: &Dependencies) -> Self {
         Self {
             store: deps.store.clone(),
+            ref_schemes: deps.ref_schemes.clone(),
         }
     }
 
@@ -68,10 +73,12 @@ impl ListCompleted {
                             completion.item
                         ),
                     })?;
+            let link = ItemName::of(&item, &self.ref_schemes).link;
             completed.push(CompletedItem {
                 item: names.item(item)?,
                 member: names.handle(completion.member)?,
                 at: completion.at,
+                link,
             });
         }
         Ok(completed)
@@ -130,6 +137,11 @@ mod tests {
             ]
         );
         assert_eq!(found[0].item.created_by.as_str(), "alice");
+        assert_eq!(
+            found[0].link.as_deref(),
+            Some("https://github.com/acme/widgets/issues/3"),
+            "a completion links to its tracker's page"
+        );
         let all = list.execute(&env.bob.actor, START).await.unwrap();
         assert_eq!(all.last().map(|done| done.item.item.id), Some(early));
         assert!(

@@ -16,10 +16,10 @@
   <p class="msg__body">{{ message.body }}</p>
   {% if let Some(ack) = message.ack %}<div class="ack">
     <span class="label">Acknowledgement requested</span>
-    <ul class="ack__list" aria-label="Acknowledgements">
-      {% for entry in ack.entries %}{% if let Some(at) = entry.acked %}<li class="ack__done"><span aria-hidden="true">✓</span> <span class="ack__name">{{ entry.handle }}{% if entry.you %} (you){% endif %}</span> acked <span class="time__rel"><time datetime="{{ at.iso }}" data-clock>{{ at.clock }}</time></span></li>{% else %}<li class="ack__wait"><span aria-hidden="true">○</span> <span class="ack__name">{{ entry.handle }}{% if entry.you %} (you){% endif %}</span> waiting</li>{% endif %}
+    <ul class="ack__list" aria-label="Acknowledgements" data-ack-list>
+      {% for entry in ack.entries %}{% if let Some(at) = entry.acked %}<li class="ack__done" data-ack-member="{{ entry.handle }}"><span aria-hidden="true">✓</span> <span class="ack__name">{{ entry.handle }}{% if entry.you %} (you){% endif %}</span> acked <span class="time__rel"><time datetime="{{ at.iso }}" data-clock>{{ at.clock }}</time></span></li>{% else %}<li class="ack__wait" data-ack-member="{{ entry.handle }}"><span aria-hidden="true">○</span> <span class="ack__name">{{ entry.handle }}{% if entry.you %} (you){% endif %}</span> waiting</li>{% endif %}
       {% endfor %}</ul>
-    {% if ack.may_ack %}<form method="post" action="/ui/threads/{{ id }}/messages/{{ message.id }}/ack"><input type="hidden" name="csrf" value="{{ chrome.csrf }}"><button class="btn btn--primary btn--small" type="submit">Acknowledge</button></form>{% endif %}
+    {% if ack.may_ack %}<form method="post" action="/ui/threads/{{ id }}/messages/{{ message.id }}/ack" data-ack-form><input type="hidden" name="csrf" value="{{ chrome.csrf }}"><button class="btn btn--primary btn--small" type="submit">Acknowledge</button></form>{% endif %}
   </div>{% endif %}
 </li>
 {% endfor %}</ol>
@@ -28,9 +28,11 @@
   <p class="msg__body" data-field="body"></p>
   <div class="ack" data-ack hidden>
     <span class="label">Acknowledgement requested</span>
-    <form method="post" data-ack-form><input type="hidden" name="csrf" value="{{ chrome.csrf }}"><button class="btn btn--primary btn--small" type="submit">Acknowledge</button></form>
+    <ul class="ack__list" aria-label="Acknowledgements" data-ack-list></ul>
+    <form method="post" data-ack-form hidden><input type="hidden" name="csrf" value="{{ chrome.csrf }}"><button class="btn btn--primary btn--small" type="submit">Acknowledge</button></form>
   </div>
 </li></template>
+<template data-ack-done-template><li class="ack__done"><span aria-hidden="true">✓</span> <span class="ack__name"><span data-field="name"></span><span data-field="you" hidden> (you)</span></span> acked <span class="time__rel"><time data-field="time" data-clock></time></span></li></template>
 <a class="live-pill" href="#main" data-live-pill hidden><span data-live-pill-text></span> <span aria-hidden="true">↓</span></a>
 <form class="reply" method="post" action="/ui/threads/{{ id }}/messages" aria-labelledby="reply-h">
   <h2 id="reply-h" class="label">Reply</h2>

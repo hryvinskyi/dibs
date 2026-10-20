@@ -49,6 +49,7 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/login", get(sign_in::form).post(sign_in::sign_in))
         .route("/ui/logout", post(sign_in::sign_out))
         .route("/ui/board", get(board::page))
+        .route("/ui/board/fragment", get(board::fragment))
         .route("/ui/threads", get(threads::list))
         .route("/ui/threads/{id}", get(threads::page))
         .route("/ui/threads/{id}/messages", post(threads::reply))

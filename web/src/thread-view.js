@@ -3,12 +3,14 @@
  * The live thread page: messages posted to the open thread are appended as they arrive, cloned
  * from the page's `<template>` and filled with `textContent`, a raised importance shown with the
  * template's badge for it and, for a message that asks the person to acknowledge it, the
- * template's acknowledge form; a pill counts them and links to the first; a notice shows while the
- * connection is restored, and the page's session-ended banner when the session is gone. Every
- * wording comes from the template.
+ * template's acknowledge form; a pill counts them and links to the first; an acknowledgement
+ * marks its recipient as having acknowledged in the message's list, cloned from the page's
+ * `<template>` for it, and takes the person's own acknowledge button away once they acknowledged;
+ * a notice shows while the connection is restored, and the page's session-ended banner when the
+ * session is gone. Every wording comes from the template.
  */
 
-import { messageOf } from './events.js';
+import { ackOf, messageOf } from './events.js';
 import { follow } from './live-stream.js';
 import { localizeTime } from './local-times.js';
 import { ackAction, offersAck, showsImportance } from './message-marks.js';
@@ -47,10 +49,18 @@ export function mount(root) {
   }
   const list = find(root, '[data-messages]', HTMLElement);
   const template = find(root, 'template[data-message-template]', HTMLTemplateElement);
+  const ackTemplate = find(root, 'template[data-ack-done-template]', HTMLTemplateElement);
   const pill = find(root, '[data-live-pill]', HTMLAnchorElement);
   const pillText = find(root, '[data-live-pill-text]', HTMLElement);
   const notice = find(root, '[data-conn]', HTMLElement);
-  if (list === null || template === null || pill === null || pillText === null || notice === null) {
+  if (
+    list === null ||
+    template === null ||
+    ackTemplate === null ||
+    pill === null ||
+    pillText === null ||
+    notice === null
+  ) {
     console.error('dibs: the thread page is missing a part the live view needs');
     return () => {};
   }
@@ -88,10 +98,13 @@ export function mount(root) {
       }
     }
     const ack = item.querySelector('[data-ack]');
-    const ackForm = item.querySelector('form[data-ack-form]');
-    if (offersAck(message, config.me) && ack instanceof HTMLElement && ackForm instanceof HTMLFormElement) {
-      ackForm.action = ackAction(config.ackAction, message.id);
+    if (message.ackRequired && ack instanceof HTMLElement) {
       ack.hidden = false;
+    }
+    const ackForm = item.querySelector('form[data-ack-form]');
+    if (offersAck(message, config.me) && ackForm instanceof HTMLFormElement) {
+      ackForm.action = ackAction(config.ackAction, message.id);
+      ackForm.hidden = false;
     }
     const time = item.querySelector('time[data-field="time"]');
     if (time !== null) {
@@ -107,6 +120,45 @@ export function mount(root) {
     pill.hidden = false;
   };
 
+  /** @param {import('./events.js').StreamAck} acked */
+  const markAcked = (acked) => {
+    const item = document.getElementById(`m-${acked.message}`);
+    const acks = item !== null && root.contains(item) ? item.querySelector('[data-ack-list]') : null;
+    const entry = ackTemplate.content.firstElementChild?.cloneNode(true);
+    if (item === null || acks === null || !(entry instanceof HTMLElement)) {
+      return;
+    }
+    entry.dataset.ackMember = acked.member;
+    const name = entry.querySelector('[data-field="name"]');
+    if (name !== null) {
+      name.textContent = acked.member;
+    }
+    const you = entry.querySelector('[data-field="you"]');
+    if (you instanceof HTMLElement) {
+      if (acked.member === config.me) {
+        you.hidden = false;
+      } else {
+        you.remove();
+      }
+    }
+    const time = entry.querySelector('time[data-field="time"]');
+    if (time !== null) {
+      time.setAttribute('datetime', acked.at);
+      localizeTime(time, new Date());
+    }
+    const listed = Array.from(acks.querySelectorAll('[data-ack-member]')).find(
+      (element) => element instanceof HTMLElement && element.dataset.ackMember === acked.member,
+    );
+    if (listed === undefined) {
+      acks.append(entry);
+    } else {
+      listed.replaceWith(entry);
+    }
+    if (acked.member === config.me) {
+      item.querySelectorAll('form[data-ack-form]').forEach((form) => form.remove());
+    }
+  };
+
   pill.addEventListener('click', () => {
     pill.hidden = true;
     fresh = 0;
@@ -119,6 +171,10 @@ export function mount(root) {
       const message = messageOf(event, thread);
       if (message !== null) {
         append(message);
+      }
+      const acked = ackOf(event, thread);
+      if (acked !== null) {
+        markAcked(acked);
       }
     },
     onState: (state) => {

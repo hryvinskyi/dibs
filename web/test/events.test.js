@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { ContractError, createSeen, isChange, messageOf, parseEvent } from '../src/events.js';
+import { ContractError, ackOf, createSeen, isChange, messageOf, parseEvent } from '../src/events.js';
 
 const posted = {
   id: 12,
@@ -96,4 +96,41 @@ test('an id is handled once, and the memory forgets the oldest past its limit', 
   assert.equal(seen.has(2), true);
   assert.equal(seen.has(4), true);
   assert.equal(seen.add(4), false);
+});
+
+const acked = {
+  id: 14,
+  at: '2026-03-02T09:05:00Z',
+  kind: 'acked',
+  payload: { thread: 4, message: 9, by: 3 },
+  members: { 3: 'carol' },
+};
+
+test('an acknowledgement parses with the recipient named and the time of its event', () => {
+  const event = parseEvent(JSON.stringify(acked));
+  assert.deepEqual(event.ack, { thread: 4, message: 9, member: 'carol', at: '2026-03-02T09:05:00Z' });
+  assert.equal(event.message, null);
+  assert.deepEqual(ackOf(event, 4), event.ack);
+  assert.equal(ackOf(event, 5), null, 'an acknowledgement in another thread');
+  assert.equal(ackOf(parseEvent(JSON.stringify(posted)), 4), null, 'a message is no acknowledgement');
+  assert.equal(parseEvent(JSON.stringify(posted)).ack, null);
+});
+
+test('an acknowledgement of another shape is a contract error naming where it broke', () => {
+  const cases = [
+    [{ ...acked, payload: 'x' }, '$.payload'],
+    [{ ...acked, payload: { ...acked.payload, by: 0 } }, '$.payload.by'],
+    [{ ...acked, payload: { ...acked.payload, thread: '4' } }, '$.payload.thread'],
+    [{ ...acked, payload: { ...acked.payload, message: undefined } }, '$.payload.message'],
+    [{ ...acked, members: [] }, '$.members'],
+    [{ ...acked, members: { 2: 'bob' } }, '$.members.3'],
+    [{ ...acked, at: undefined }, '$.at'],
+  ];
+  for (const [data, path] of cases) {
+    assert.throws(
+      () => parseEvent(JSON.stringify(data)),
+      (error) => error instanceof ContractError && error.path === path,
+      String(path),
+    );
+  }
 });

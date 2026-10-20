@@ -4,6 +4,7 @@
  * mounts the live views it carries.
  */
 
+import { mount as mountBoard } from './board-view.js';
 import { localizeTimes, rememberZone } from './local-times.js';
 import { mount as mountStatus } from './status-view.js';
 import { mount as mountThread } from './thread-view.js';
@@ -26,6 +27,7 @@ function start() {
   localizeTimes(document);
   mountAll('[data-thread-view]', mountThread);
   mountAll('[data-status-view]', mountStatus);
+  mountAll('[data-board-view]', mountBoard);
 }
 
 if (document.readyState === 'loading') {

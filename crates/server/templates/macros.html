@@ -23,6 +23,18 @@
   <p class="banner__text">Your session ended — sign in again</p>
   <a class="banner__action" href="/ui/login">Sign in</a>
 </div>
-<p class="hint" data-session-ended hidden>What's below is from {% call time(rendered) %}{% endcall %} and no longer updates.</p>{% endmacro %}
+<p class="hint" data-session-ended hidden>What's below is from <span data-updated-slot>{% call time(rendered) %}{% endcall %}</span> and no longer updates.</p>{% endmacro %}
 
 {% macro importance(level) %}{% match level %}{% when Importance::Urgent %}<span class="badge badge--danger"><span class="badge__icon badge__icon--stop" aria-hidden="true"></span>Urgent</span>{% when Importance::High %}<span class="badge badge--warn"><span class="badge__icon badge__icon--tri" aria-hidden="true"></span>High</span>{% when Importance::Normal %}<span class="badge badge--neutral"><span class="badge__icon badge__icon--dash" aria-hidden="true"></span>Normal</span>{% endmatch %}{% endmacro %}
+
+{% macro item_ref(item) %}{% match item.link %}{% when Some with (href) %}<a class="ref" href="{{ href }}" rel="noopener noreferrer">{{ item.reference }}</a>{% when None %}<span class="ref">{{ item.reference }}</span>{% endmatch %}{% endmacro %}
+
+{% macro wide_claims(wide) %}<div class="table-wrap">
+  <table class="table">
+    <thead><tr><th scope="col">Item</th><th scope="col">Member</th><th scope="col">Why</th><th scope="col">Areas</th></tr></thead>
+    <tbody>
+      {% for row in wide %}<tr data-wide-claim><td>{% call item_ref(row) %}{% endcall %}<span class="item-title">{{ row.title }}</span></td><td><span class="member">{{ row.holder }}</span></td><td>{{ row.reason }}</td><td><ul class="chips" aria-label="Areas">{% for area in row.areas %}<li><span class="chip">{{ area.area }}</span> {% if let Some(holder) = area.holder %}{% if area.granted %}<span class="badge badge--neutral">acknowledged by {{ holder }}</span>{% else %}<span class="badge badge--warn">waiting for {{ holder }}</span>{% endif %}{% else %}<span class="muted">free</span>{% endif %}</li>{% endfor %}</ul></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>{% endmacro %}

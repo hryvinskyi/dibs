@@ -47,15 +47,7 @@
 <section class="section" aria-labelledby="wide">
   <div class="section-head"><h2 id="wide">Wide claims</h2><p class="section-head__hint">A change across many areas: it holds none of them, and a holder's acknowledgement lets it edit theirs</p></div>
   {% if wide.is_empty() %}<div class="empty"><p class="empty__title">No wide claims</p><p>A claim announced over many areas shows up here, with who has agreed to it.</p></div>{% else %}
-  <div class="table-wrap">
-  <table class="table">
-    <thead><tr><th scope="col">Item</th><th scope="col">Member</th><th scope="col">Why</th><th scope="col">Areas</th></tr></thead>
-    <tbody>
-      {% for row in wide %}<tr data-wide-claim><td><span class="ref">{{ row.reference }}</span><span class="item-title">{{ row.title }}</span></td><td><span class="member">{{ row.holder }}</span></td><td>{{ row.reason }}</td><td><ul class="chips" aria-label="Areas">{% for area in row.areas %}<li><span class="chip">{{ area.area }}</span> {% if let Some(holder) = area.holder %}{% if area.granted %}<span class="badge badge--neutral">acknowledged by {{ holder }}</span>{% else %}<span class="badge badge--warn">waiting for {{ holder }}</span>{% endif %}{% else %}<span class="muted">free</span>{% endif %}</li>{% endfor %}</ul></td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>{% endif %}
+  {% call ui::wide_claims(wide) %}{% endcall %}{% endif %}
 </section>
 </main>
 {% endblock %}

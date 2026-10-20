@@ -13,7 +13,7 @@ use dibs_domain::wide::standing;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{NamedClaim, NamedItem, Names};
+use crate::named::{ItemName, NamedClaim, NamedItem, Names};
 use crate::ports::{Clock, Store, StoreError};
 use crate::use_cases::ready::{ReadyScope, ReadyView};
 use crate::work::Work;
@@ -25,6 +25,8 @@ pub struct HeldItem {
     pub claim: NamedClaim,
     /// The item.
     pub item: NamedItem,
+    /// The tracker's page for the item, when its reference has one.
+    pub link: Option<String>,
 }
 
 /// An area and the live claim holding it.
@@ -138,9 +140,11 @@ impl Status {
                     .ok_or_else(|| StoreError::Corrupt {
                         what: format!("claim on item {} that does not exist", claim.item),
                     })?;
+            let link = ItemName::of(&item, &self.ref_schemes).link;
             let held = HeldItem {
                 claim: names.claim(claim)?,
                 item: names.item(item)?,
+                link,
             };
             let claim = &held.claim;
             if claim.claim.is_live(now, stale_after) {
@@ -236,5 +240,10 @@ mod tests {
         assert!(view.holds.iter().all(|h| h.member == env.bob.actor.member));
         assert!(view.holds.iter().all(|h| h.holder.as_str() == "bob"));
         assert_eq!(view.live[0].claim.holder.as_str(), "bob");
+        assert_eq!(
+            view.stale[0].link.as_deref(),
+            Some("https://github.com/acme/widgets/issues/1"),
+            "a held item links to its tracker's page"
+        );
     }
 }

@@ -1,0 +1,59 @@
+{% import "macros.html" as ui %}
+{% macro ready_card(card) %}<li class="card">
+  <div class="card__top">{% call ui::item_ref(card) %}{% endcall %}{% match card.mark %}{% when PriorityMark::Danger %}<span class="badge badge--danger" title="Priority {{ card.priority }}: 0 is soonest, 4 latest"><span class="badge__icon badge__icon--tri" aria-hidden="true"></span>P{{ card.priority }}</span>{% when PriorityMark::Warn %}<span class="badge badge--warn" title="Priority {{ card.priority }}: 0 is soonest, 4 latest"><span class="badge__icon badge__icon--tri" aria-hidden="true"></span>P{{ card.priority }}</span>{% when PriorityMark::Neutral %}<span class="badge badge--neutral" title="Priority {{ card.priority }}: 0 is soonest, 4 latest"><span class="badge__icon badge__icon--dash" aria-hidden="true"></span>P{{ card.priority }}</span>{% endmatch %}</div>
+  <p class="card__title">{{ card.title }}</p>
+  {% if !card.hints.is_empty() %}<ul class="chips" aria-label="Areas it will probably touch">{% for area in card.hints %}<li><span class="chip">{{ area }}</span></li>{% endfor %}</ul>{% endif %}
+  {% match card.stale_holder %}{% when Some with (holder) %}<p class="card__meta">Stale claim by <span class="member">{{ holder }}</span>; take it over with a reason</p>{% when None %}{% endmatch %}
+  {% for reason in card.reasons %}{% match reason %}{% when NotReadyRow::BlockedBy with { items } %}<p class="card__blocker"><span aria-hidden="true">⊘</span>blocked by {% for blocker in items %}{% call ui::item_ref(blocker) %}{% endcall %}{% if !loop.last %}, {% endif %}{% endfor %}</p>{% when NotReadyRow::AreaHeld with { area, holder, item } %}<p class="card__blocker"><span aria-hidden="true">⊘</span>{{ area }} is held by {{ holder }} for {% call ui::item_ref(item) %}{% endcall %}</p>{% when NotReadyRow::Claimed with { holder } %}<p class="card__meta">Claimed by <span class="member">{{ holder }}</span></p>{% endmatch %}
+  {% endfor %}
+</li>{% endmacro %}
+<template data-updated-template>{% call ui::time(board.updated) %}{% endcall %}</template>
+{% if !board.wide.is_empty() %}<section class="section" aria-labelledby="b-wide">
+  <div class="section-head"><h2 id="b-wide">Wide claims</h2><p class="section-head__hint">Changes across many areas, and which holders have acknowledged them</p></div>
+  {% call ui::wide_claims(board.wide) %}{% endcall %}
+</section>
+{% endif %}<div class="board">
+<section class="column" aria-labelledby="c-ready">
+  <div class="column__head"><h2 id="c-ready">Ready</h2><span class="column__count">{{ board.ready.len() }}</span></div>
+  <ul class="cards" aria-label="Ready to pick up">
+{% for card in board.ready %}{% call ready_card(card) %}{% endcall %}
+{% endfor %}  </ul>
+{% if !board.waiting.is_empty() %}  <h3 class="column__sub" id="c-waiting">Not ready yet <span class="column__count">{{ board.waiting.len() }}</span></h3>
+  <ul class="cards" aria-labelledby="c-waiting">
+{% for card in board.waiting %}{% call ready_card(card) %}{% endcall %}
+{% endfor %}  </ul>
+{% endif %}</section>
+<section class="column" aria-labelledby="c-prog">
+  <div class="column__head"><h2 id="c-prog">In progress</h2><span class="column__count">{{ board.in_progress.len() }}</span></div>
+  <ul class="cards">
+{% for row in board.in_progress %}<li class="card">
+  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}{% if row.closed_upstream %}<span class="badge badge--info"><span class="badge__icon badge__icon--check" aria-hidden="true"></span>Closed upstream</span>{% endif %}</div>
+  <p class="card__title">{{ row.title }}</p>
+  {% call ui::chips(row.areas) %}{% endcall %}
+  <p class="card__meta"><span class="member">{{ row.holder }}</span><span>heartbeat {% call ui::time(row.seen) %}{% endcall %}</span></p>
+</li>
+{% endfor %}  </ul>
+</section>
+<section class="column" aria-labelledby="c-stale">
+  <div class="column__head"><h2 id="c-stale">Stale</h2><span class="column__count">{{ board.stale.len() }}</span></div>
+  <ul class="cards">
+{% for row in board.stale %}<li class="card card--stale">
+  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}<span class="badge badge--warn"><span class="badge__icon badge__icon--ring-dashed" aria-hidden="true"></span>Stale</span></div>
+  <p class="card__title">{{ row.title }}</p>
+  {% call ui::chips(row.areas) %}{% endcall %}
+  <p class="card__meta"><span class="member">{{ row.holder }}</span><span>last seen {% call ui::time(row.seen) %}{% endcall %}</span></p>
+  {% if !row.mine %}{% call ui::takeover(row, "b-", board.back, board.csrf) %}{% endcall %}{% endif %}
+</li>
+{% endfor %}  </ul>
+</section>
+<section class="column" aria-labelledby="c-done">
+  <div class="column__head"><h2 id="c-done">Done today{% if board.day_in_utc %} <span class="hint">since 00:00 UTC</span>{% endif %}</h2><span class="column__count">{{ board.done.len() }}</span></div>
+  <ul class="cards">
+{% for card in board.done %}<li class="card card--done">
+  <div class="card__top">{% call ui::item_ref(card) %}{% endcall %}<span class="badge badge--neutral"><span class="badge__icon badge__icon--check" aria-hidden="true"></span>Done</span></div>
+  <p class="card__title">{{ card.title }}</p>
+  <p class="card__meta"><span class="member">{{ card.member }}</span><span>{% call ui::time(card.at) %}{% endcall %}</span></p>
+</li>
+{% endfor %}  </ul>
+</section>
+</div>

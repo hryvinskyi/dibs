@@ -1,73 +1,21 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
 {% block title %}Board{% endblock %}
-{% macro item_ref(item) %}{% match item.link %}{% when Some with (href) %}<a class="ref" href="{{ href }}" rel="noopener noreferrer">{{ item.reference }}</a>{% when None %}<span class="ref">{{ item.reference }}</span>{% endmatch %}{% endmacro %}
-{% macro ready_card(card) %}<li class="card">
-  <div class="card__top">{% call item_ref(card) %}{% endcall %}<span class="badge badge--neutral" title="Priority {{ card.priority }}: 0 is soonest, 4 latest">P{{ card.priority }}</span></div>
-  <p class="card__title">{{ card.title }}</p>
-  {% if !card.hints.is_empty() %}<ul class="chips" aria-label="Areas it will probably touch">{% for area in card.hints %}<li><span class="chip">{{ area }}</span></li>{% endfor %}</ul>{% endif %}
-  {% match card.stale_holder %}{% when Some with (holder) %}<p class="card__meta">Stale claim by <span class="member">{{ holder }}</span>; take it over with a reason</p>{% when None %}{% endmatch %}
-  {% for reason in card.reasons %}{% match reason %}{% when NotReadyRow::BlockedBy with { items } %}<p class="card__blocker">Blocked by {% for blocker in items %}{% call item_ref(blocker) %}{% endcall %}{% if !loop.last %}, {% endif %}{% endfor %}</p>{% when NotReadyRow::AreaHeld with { area, holder, item } %}<p class="card__blocker">{{ area }} is held by {{ holder }} for {% call item_ref(item) %}{% endcall %}</p>{% when NotReadyRow::Claimed with { holder } %}<p class="card__meta">Claimed by <span class="member">{{ holder }}</span></p>{% endmatch %}
-  {% endfor %}
-</li>{% endmacro %}
 {% block main %}
-<main id="main" class="page" data-status-view data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-after="{{ after }}" data-changed-kinds="{{ changed_kinds }}">
+<main id="main" class="page" data-board-view data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-after="{{ after }}" data-changed-kinds="{{ changed_kinds }}" data-fragment-url="{{ fragment }}">
 <div class="banner banner--info" role="status" data-changed hidden>
   <span class="banner__icon" aria-hidden="true">↻</span>
   <p class="banner__text">Something changed — reload</p>
   <a class="banner__action" href="{{ reload }}">Reload</a>
 </div>
-{% call ui::session_ended(updated) %}{% endcall %}
-<div class="page-head"><h1>Board</h1><p class="page-head__meta">{% if !repos.is_empty() %}{{ repos|join(", ") }} · {% endif %}updated {% call ui::time(updated) %}{% endcall %}</p></div>
+{% call ui::session_ended(board.updated) %}{% endcall %}
+<div class="page-head"><h1>Board</h1><p class="page-head__meta">{% if !repos.is_empty() %}{{ repos|join(", ") }} · {% endif %}updated <span data-updated-slot>{% call ui::time(board.updated) %}{% endcall %}</span></p></div>
 <form class="filters" method="get" action="/ui/board" aria-label="Filter the board">
   <div class="form-row"><label class="label" for="f-area">Area</label><span class="select-wrap"><select class="select" id="f-area" name="area"><option value="">All areas</option>{% for area in areas %}<option{% if area.as_str() == filter_area.as_str() %} selected{% endif %}>{{ area }}</option>{% endfor %}</select></span></div>
   <div class="form-row"><label class="label" for="f-member">Member</label><span class="select-wrap"><select class="select" id="f-member" name="member"><option value="">Everyone</option>{% for member in members %}<option{% if member.as_str() == filter_member.as_str() %} selected{% endif %}>{{ member }}</option>{% endfor %}</select></span></div>
   <div class="actions"><button class="btn" type="submit">Apply</button><a href="/ui/board">Clear</a></div>
 </form>
-<div class="board">
-<section class="column" aria-labelledby="c-ready">
-  <div class="column__head"><h2 id="c-ready">Ready</h2><span class="column__count">{{ ready.len() }}</span></div>
-  <ul class="cards" aria-label="Ready to pick up">
-{% for card in ready %}{% call ready_card(card) %}{% endcall %}
-{% endfor %}  </ul>
-{% if !waiting.is_empty() %}  <h3 class="column__sub" id="c-waiting">Not ready yet <span class="column__count">{{ waiting.len() }}</span></h3>
-  <ul class="cards" aria-labelledby="c-waiting">
-{% for card in waiting %}{% call ready_card(card) %}{% endcall %}
-{% endfor %}  </ul>
-{% endif %}</section>
-<section class="column" aria-labelledby="c-prog">
-  <div class="column__head"><h2 id="c-prog">In progress</h2><span class="column__count">{{ in_progress.len() }}</span></div>
-  <ul class="cards">
-{% for row in in_progress %}<li class="card">
-  <div class="card__top"><span class="ref">{{ row.reference }}</span>{% if row.closed_upstream %}<span class="badge badge--info"><span class="badge__icon badge__icon--check" aria-hidden="true"></span>Closed upstream</span>{% endif %}</div>
-  <p class="card__title">{{ row.title }}</p>
-  {% call ui::chips(row.areas) %}{% endcall %}
-  <p class="card__meta"><span class="member">{{ row.holder }}</span><span>heartbeat {% call ui::time(row.seen) %}{% endcall %}</span></p>
-</li>
-{% endfor %}  </ul>
-</section>
-<section class="column" aria-labelledby="c-stale">
-  <div class="column__head"><h2 id="c-stale">Stale</h2><span class="column__count">{{ stale.len() }}</span></div>
-  <ul class="cards">
-{% for row in stale %}<li class="card card--stale">
-  <div class="card__top"><span class="ref">{{ row.reference }}</span><span class="badge badge--warn"><span class="badge__icon badge__icon--ring-dashed" aria-hidden="true"></span>Stale</span></div>
-  <p class="card__title">{{ row.title }}</p>
-  {% call ui::chips(row.areas) %}{% endcall %}
-  <p class="card__meta"><span class="member">{{ row.holder }}</span><span>last seen {% call ui::time(row.seen) %}{% endcall %}</span></p>
-  {% if !row.mine %}{% call ui::takeover(row, "b-", "board", chrome.csrf) %}{% endcall %}{% endif %}
-</li>
-{% endfor %}  </ul>
-</section>
-<section class="column" aria-labelledby="c-done">
-  <div class="column__head"><h2 id="c-done">Done today{% if day_in_utc %} <span class="hint">since 00:00 UTC</span>{% endif %}</h2><span class="column__count">{{ done.len() }}</span></div>
-  <ul class="cards">
-{% for card in done %}<li class="card card--done">
-  <div class="card__top"><span class="ref">{{ card.reference }}</span><span class="badge badge--neutral"><span class="badge__icon badge__icon--check" aria-hidden="true"></span>Done</span></div>
-  <p class="card__title">{{ card.title }}</p>
-  <p class="card__meta"><span class="member">{{ card.member }}</span><span>{% call ui::time(card.at) %}{% endcall %}</span></p>
-</li>
-{% endfor %}  </ul>
-</section>
-</div>
+<div data-board-region>
+{% include "board_columns.html" %}</div>
 </main>
 {% endblock %}

@@ -3,6 +3,11 @@
 //!
 //! The browser is one of the person's sessions: the take-over is made from their session labelled
 //! `web` on the host `web`, registered on first use and reused afterwards.
+//!
+//! The form names the page to return to: `status` for the status page, or a path of this service,
+//! such as the board with its filter. Anything else — an address of another site, one a browser
+//! would read as another site's (`//host`, `/\host`), or a value no header can carry — returns
+//! to the board, so the form can never send the person elsewhere.
 
 use axum::Form;
 use axum::extract::rejection::{FormRejection, PathRejection};
@@ -36,12 +41,26 @@ pub struct TakeOverForm {
     back: Option<String>,
 }
 
-/// The page a take-over form returns to: the board when it came from there, else the status page.
-fn back_to(back: Option<&str>) -> &'static str {
+/// The page a form that names no page of its own returns to.
+const BOARD: &str = "/ui/board";
+
+/// The page a take-over form returns to: the status page for `status` or no value, the path the
+/// form names when it is a path of this service, and the board for anything else.
+fn back_to(back: Option<&str>) -> &str {
     match back {
-        Some("board") => "/ui/board",
-        _ => "/ui/",
+        None | Some("status") => "/ui/",
+        Some(path) if is_local_path(path) => path,
+        Some(_) => BOARD,
     }
+}
+
+/// Whether a value is a path of this service that a browser cannot read as another site's: it
+/// starts with one `/`, holds no `\` (which browsers read as `/`), and only visible ASCII.
+fn is_local_path(value: &str) -> bool {
+    value.starts_with('/')
+        && !value.starts_with("//")
+        && !value.contains('\\')
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 /// Takes over the claim and returns to the page the form was on. A refusal — the claim is live
@@ -53,7 +72,8 @@ pub async fn take_over(
     form: Result<Form<TakeOverForm>, FormRejection>,
 ) -> Response {
     let form = form.ok().map(|Form(form)| form);
-    let back = back_to(form.as_ref().and_then(|form| form.back.as_deref()));
+    let back = back_to(form.as_ref().and_then(|form| form.back.as_deref())).to_owned();
+    let back = back.as_str();
     if !session.accepts(form.as_ref().and_then(|form| form.csrf.as_deref())) {
         return notice(
             &state,
@@ -126,10 +146,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_form_returns_to_the_board_or_else_to_the_status_page() {
-        assert_eq!(back_to(Some("board")), "/ui/board");
-        assert_eq!(back_to(Some("status")), "/ui/");
-        assert_eq!(back_to(Some("https://example.com/")), "/ui/");
+    fn a_form_returns_to_the_status_page_or_the_path_it_names() {
         assert_eq!(back_to(None), "/ui/");
+        assert_eq!(back_to(Some("status")), "/ui/");
+        assert_eq!(back_to(Some("/ui/board")), "/ui/board");
+        assert_eq!(
+            back_to(Some("/ui/board?area=api%3Abilling&member=bob")),
+            "/ui/board?area=api%3Abilling&member=bob"
+        );
+    }
+
+    #[test]
+    fn an_address_of_another_site_returns_to_the_board() {
+        for foreign in [
+            "https://example.com/",
+            "//example.com/ui/board",
+            "/\\example.com",
+            "/\\/example.com",
+            "javascript:alert(1)",
+            "ui/board",
+            "board",
+            "",
+            "/ui/board\r\nSet-Cookie: x=1",
+            "/ui/ board",
+        ] {
+            assert_eq!(back_to(Some(foreign)), "/ui/board", "{foreign:?}");
+        }
     }
 }

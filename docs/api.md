@@ -572,10 +572,20 @@ claims and, for each of their areas, whether it is free, acknowledged by its hol
 `/ui/threads` and `/ui/threads/{id}`, with `/ui/events/stream` feeding the open page. They are rendered on the server and
 are not part of the API. The board's *Ready* column is the viewer's ready list, each card with its priority, likely
 areas and a link to its tracker, and below it the open items that are not ready with their blockers or the held area;
-an item its tracker closed while a claim holds it is marked *Closed upstream*. The threads list marks each conversation's
+an item its tracker closed while a claim holds it is marked *Closed upstream*. Above the columns, the live wide claims are
+listed with their reason and, for each area, who has acknowledged them; the area filter keeps the wide claims that name
+the area, the member filter those of the member and those that wait for the member's acknowledgement. When a claim or an
+item changes, the page fetches `GET /ui/board/fragment` with the same query string, once per burst of events and not
+while the tab is hidden, and swaps its columns in, except while a form in them is in use, when it shows its reload
+banner instead. The fragment is the columns' HTML alone, with the forms' session tokens, marked by the header
+`X-Dibs-Fragment: board` and `Cache-Control: no-store`; without a live session it answers `401` with the error shape,
+never the sign-in page; the columns carry the time they were rendered at, which the page's *updated* time shows after a
+swap. A take-over made from the board returns to the board with the same filter; the form's return path is followed
+only when it is a path of this service, and anything else returns to `/ui/board`. The threads list marks each conversation's
 highest importance and whether it holds a message awaiting the viewer's acknowledgement; a thread page marks a raised
 importance on the messages that carry it and, under a message that asks to be acknowledged, lists its recipients with who
-has acknowledged, and offers a recipient who has not an *Acknowledge* button (`POST /ui/threads/{id}/messages/{message}/ack`).
+has acknowledged, updated live from the `acked` events, and offers a recipient who has not an *Acknowledge* button
+(`POST /ui/threads/{id}/messages/{message}/ack`).
 A reply from the page may ask everyone to acknowledge it. Their forms post a token of the session they were rendered for, and the session cookie
 (`dibs_ui`) is `HttpOnly`, `Secure`, `SameSite=Strict` and scoped to `/ui`. A session ends 12 hours after the page last used it. Every page answer
 carries a content security policy that allows only the server's own scripts, styles and connections.

@@ -36,10 +36,10 @@ impl Problem {
 
 #[derive(Template)]
 #[template(path = "notice.html")]
-struct NoticePage {
+struct NoticePage<'a> {
     chrome: Chrome,
     problem: Problem,
-    back: &'static str,
+    back: &'a str,
 }
 
 /// The notice page for `problem`, of this status, linking back to `back`. A failure to read the
@@ -49,7 +49,7 @@ pub async fn notice(
     session: &UiSession,
     status: StatusCode,
     problem: Problem,
-    back: &'static str,
+    back: &str,
 ) -> Response {
     match chrome::load(state, session, Section::Other).await {
         Ok(signed) => html(
@@ -69,7 +69,7 @@ pub async fn refused(
     state: &AppState,
     session: &UiSession,
     error: &ApiError,
-    back: &'static str,
+    back: &str,
 ) -> Response {
     if error.status().is_server_error() {
         return error.clone().into_response();

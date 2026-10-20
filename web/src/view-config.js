@@ -31,6 +31,8 @@ import { ContractError } from './events.js';
 
 /** @typedef {StreamConfig & { kinds: ReadonlySet<string> }} StatusConfig */
 
+/** @typedef {StatusConfig & { fragmentUrl: string }} BoardConfig */
+
 /**
  * @param {DataAttributes} data
  * @param {string} name
@@ -112,6 +114,31 @@ function placeholder(data, name, mark) {
 export function parseStatusConfig(data) {
   const kinds = new Set(required(data, 'changedKinds').split(/\s+/).filter((kind) => kind !== ''));
   return { ...streamConfig(data), kinds };
+}
+
+/**
+ * Whether a value is a path of this service that a browser cannot read as another site's: it
+ * starts with one `/`, holds no `\\` (which browsers read as `/`), and only visible ASCII.
+ * @param {string} value
+ * @returns {boolean}
+ */
+export function isLocalPath(value) {
+  return value.startsWith('/') && !value.startsWith('//') && !value.includes('\\') && /^[\x21-\x7e]+$/.test(value);
+}
+
+/**
+ * The configuration of the board: a page that renders its columns again when the claims or the
+ * items change, from a path of this service.
+ * @param {DataAttributes} data
+ * @returns {BoardConfig}
+ * @throws {ContractError}
+ */
+export function parseBoardConfig(data) {
+  const fragmentUrl = required(data, 'fragmentUrl');
+  if (!isLocalPath(fragmentUrl)) {
+    throw new ContractError('dataset.fragmentUrl', 'a path of this service');
+  }
+  return { ...parseStatusConfig(data), fragmentUrl };
 }
 
 /**

@@ -1,27 +1,14 @@
 // @ts-check
 /**
  * The conversations pages in a real browser: sign in with a token, open a conversation, reply
- * through the form, see a message posted through the API appear without a reload, and acknowledge
- * a message that asks for it.
+ * through the form, see a message posted through the API appear without a reload, acknowledge a
+ * message that asks for it, and see a recipient's acknowledgement arrive without a reload.
  */
 
-import { postMessage, startThread } from './dibs-api.js';
+import { ackMessage, postMessage, startThread } from './dibs-api.js';
 import { watchPolicy } from './csp-watch.js';
 import { expect, test } from './fixtures.js';
-
-/**
- * Signs in on the login page with `token`.
- * @param {import('@playwright/test').Page} page
- * @param {string} baseUrl
- * @param {string} token
- * @returns {Promise<void>}
- */
-async function signIn(page, baseUrl, token) {
-  await page.goto(`${baseUrl}/ui/login`);
-  await page.getByLabel('Paste your token').fill(token);
-  await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(`${baseUrl}/ui/`);
-}
+import { signIn } from './sign-in.js';
 
 test('a member signs in, replies in a conversation and sees a new message arrive live', async ({
   page,
@@ -94,6 +81,36 @@ test('a recipient acknowledges an urgent message, and one that arrives live, in 
   await live.getByRole('button', { name: 'Acknowledge' }).click();
   const reloaded = page.locator('.msg').filter({ hasText: 'Still down; confirm you are holding.' });
   await expect(reloaded.locator('.ack__done')).toContainText('bob (you)');
+});
+
+test("the author sees a recipient's acknowledgement arrive in the list without a reload", async ({
+  page,
+  dibs,
+}) => {
+  const subject = `Freeze the release branch ${Date.now()}`;
+  const threadId = await startThread(dibs.url, dibs.adminToken, {
+    subject,
+    to: ['bob'],
+    body: 'Cutting the release at noon.',
+  });
+  const messageId = await postMessage(dibs.url, dibs.adminToken, threadId, 'No merges until I say so.', {
+    ack_required: true,
+  });
+
+  await signIn(page, dibs.url, dibs.adminToken);
+  await page.goto(`${dibs.url}/ui/threads/${threadId}`);
+  const asked = page.locator(`#m-${messageId}`);
+  const acks = asked.getByRole('list', { name: 'Acknowledgements' });
+  await expect(acks.locator('.ack__wait')).toContainText('bob');
+  await expect(acks.locator('.ack__done')).toHaveCount(0);
+  await expect(asked.getByRole('button', { name: 'Acknowledge' })).toHaveCount(0);
+
+  await page.evaluate(() => document.body.setAttribute('data-e2e-marker', 'same-document'));
+  await ackMessage(dibs.url, dibs.memberToken, messageId);
+  await expect(acks.locator('.ack__done')).toHaveText(/^✓ bob acked \S+/);
+  await expect(acks.locator('.ack__wait')).toHaveCount(0);
+  await expect(acks.locator('.ack__done time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/);
+  await expect(page.locator('body')).toHaveAttribute('data-e2e-marker', 'same-document');
 });
 
 test('a token the server does not know is refused on the login page', async ({ page, dibs }) => {
