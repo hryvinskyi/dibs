@@ -21,7 +21,7 @@ use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::{existing_item, present_member_by_handle};
 use crate::use_cases::handover::Handovers;
 use crate::use_cases::slots::Scene;
-use crate::use_cases::writing::{Posted, SystemPost, system_body};
+use crate::use_cases::writing::{Posted, SystemPost, system_body, titled_body};
 use crate::work::Work;
 
 /// A member removed, and what went with them.
@@ -146,7 +146,11 @@ impl RemoveMember {
             item: None,
             on_behalf_of: admin.map_or(Author::System, Author::Member),
             to: Recipients::Project,
-            body: system_body(&announcement(&member, &who, &released, &slots), None)?,
+            body: if released.is_empty() {
+                system_body(&announcement(&member, &who, &released, &slots), None)?
+            } else {
+                titled_body(&announcement(&member, &who, &released, &slots), None)?
+            },
             importance: Importance::Normal,
             ack_required: false,
         }

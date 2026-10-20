@@ -60,6 +60,9 @@ pub struct DeliverableMessage {
     pub message: NamedMessage,
     /// Whether it awaits the caller's acknowledgement.
     pub awaiting_ack: bool,
+    /// Whether the caller's acknowledgement grants something: it is the announcement of a wide
+    /// claim, whose acknowledgement grants edits.
+    pub ack_grants: bool,
 }
 
 /// How old a message may be and still be delivered while the member works; older ones are left
@@ -229,16 +232,17 @@ async fn deliverable(
         .filter(|(message, _, _)| !delivered.contains(&DeliverySubject::Message(message.id)))
         .collect();
     left.sort_by_key(|(message, _, _)| std::cmp::Reverse((message.created_at, message.id)));
-    left.into_iter()
-        .take(MAX_DELIVERABLE)
-        .map(|(message, thread, awaiting_ack)| {
-            Ok(DeliverableMessage {
-                thread: names.thread(thread)?,
-                message: names.message(message)?,
-                awaiting_ack,
-            })
-        })
-        .collect()
+    let mut answered = Vec::new();
+    for (message, thread, awaiting_ack) in left.into_iter().take(MAX_DELIVERABLE) {
+        let ack_grants = work.wide_ask(project, message.id).await?.is_some();
+        answered.push(DeliverableMessage {
+            thread: names.thread(thread)?,
+            message: names.message(message)?,
+            awaiting_ack,
+            ack_grants,
+        });
+    }
+    Ok(answered)
 }
 
 #[cfg(test)]
@@ -547,6 +551,24 @@ mod tests {
             .unwrap();
         let announced = deliverable_ids(&env, &env.alice.actor).await;
         assert_eq!(announced.len(), 1, "the announcement presses");
+        let entries = Inbox::new(&env.deps)
+            .execute(&env.alice.actor, deliverable_query())
+            .await
+            .unwrap()
+            .deliverable
+            .unwrap();
+        assert!(
+            entries[0].ack_grants,
+            "acknowledging an announcement grants edits"
+        );
+        assert!(
+            entries[0]
+                .message
+                .record
+                .body
+                .as_str()
+                .ends_with(crate::use_cases::writing::TITLE_NOTE)
+        );
         assert_eq!(
             Unacked::new(&env.deps)
                 .execute(&env.alice.actor)

@@ -91,6 +91,7 @@ pub fn parse(hook: HookEvent, input: &[u8]) -> Result<HostEvent, ParseError> {
             cwd,
             thread,
         },
+        EventKind::Stopped => HostEvent::Stopped { session_key, cwd },
     })
 }
 

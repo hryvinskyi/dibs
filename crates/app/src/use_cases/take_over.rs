@@ -21,7 +21,7 @@ use crate::use_cases::common::{existing_item, own_session, remove_claim, resolve
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::use_cases::handover::{Handovers, save_taken_over};
 use crate::use_cases::wide_asks::{Announced, Announcer};
-use crate::use_cases::writing::{Posted, SystemPost, system_body};
+use crate::use_cases::writing::{Posted, SystemPost, titled_body};
 use crate::work::Work;
 
 const SUBJECT_PREFIX: &str = "Taken over: ";
@@ -182,7 +182,7 @@ impl TakeOver {
             item: Some(item.id),
             on_behalf_of: Author::Member(actor.member),
             to: Recipients::Members([takeover.previous.member].into()),
-            body: system_body(
+            body: titled_body(
                 &format!(
                     "{holder} took over your stale claim on work item {} \"{}\". Your claim has ended; the item is theirs now.",
                     named
@@ -336,6 +336,10 @@ mod tests {
         assert!(
             text.ends_with(&format!("Their reason: {}", reason().as_str())),
             "{text}"
+        );
+        assert!(
+            text.contains(crate::use_cases::writing::TITLE_NOTE),
+            "a title is quoted as a member's or a tracker's words: {text}"
         );
         assert_eq!(
             (messages[0].importance, messages[0].ack_required),

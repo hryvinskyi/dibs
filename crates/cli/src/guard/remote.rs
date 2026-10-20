@@ -176,8 +176,15 @@ pub fn session_label_on(
     host: &HostName,
     session: &SessionRef,
 ) -> Result<SessionLabel, RemoteError> {
-    let mut short: String = session
-        .key
+    label_on(host, &short_name(&session.key)).ok_or_else(|| {
+        RemoteError::Config("This machine's name cannot label a session.".to_owned())
+    })
+}
+
+/// The name a host's session is labelled by after the machine's: the first 8 letters, digits, `-`
+/// or `_` of the host's id of it, or `session` when it has none.
+pub fn short_name(key: &dibs_agent_host::SessionKey) -> String {
+    let mut short: String = key
         .as_str()
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -186,9 +193,7 @@ pub fn session_label_on(
     if short.is_empty() {
         short.push_str("session");
     }
-    label_on(host, &short).ok_or_else(|| {
-        RemoteError::Config("This machine's name cannot label a session.".to_owned())
-    })
+    short
 }
 
 /// The checkout governing `cwd`, its configuration refused with a sentence.

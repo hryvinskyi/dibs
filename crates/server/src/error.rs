@@ -393,9 +393,11 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::EditCheck(EditCheckRefused::UnknownRepo { .. })
         | AppError::Recipients(RecipientsError::Empty) => StatusCode::UNPROCESSABLE_ENTITY,
         AppError::Delivery(DeliveryRefused::NotRecipient) => StatusCode::FORBIDDEN,
-        AppError::Delivery(DeliveryRefused::Delivered { .. } | DeliveryRefused::OfferGone) => {
-            StatusCode::CONFLICT
-        }
+        AppError::Delivery(
+            DeliveryRefused::Delivered { .. }
+            | DeliveryRefused::OfferGone
+            | DeliveryRefused::Reserved { .. },
+        ) => StatusCode::CONFLICT,
         AppError::ImportanceLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         AppError::StoredSettings(_) | AppError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -480,6 +482,7 @@ fn details_of(error: &AppError) -> Map<String, Value> {
             details.put("session_id", session);
             details.time("at", *at);
         }
+        AppError::Delivery(DeliveryRefused::Reserved { until }) => details.time("until", *until),
         AppError::ImportanceLimited(limited) => {
             details.put("limit", limited.limit);
             details.time("frees_at", limited.frees_at);

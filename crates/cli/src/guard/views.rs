@@ -180,11 +180,13 @@ pub fn pending_message(entry: &Deliverable) -> PendingMessage {
     remembered_message(&RememberedMessage {
         id: entry.message.id,
         thread: entry.thread.id,
+        item: entry.thread.item,
         author: entry.message.author.clone(),
         system: entry.message.system,
         subject: entry.thread.subject.clone(),
         importance: entry.message.importance,
         awaiting_ack: entry.awaiting_ack,
+        ack_grants: entry.ack_grants,
         body: entry.message.body.as_str().to_owned(),
     })
 }
@@ -194,25 +196,49 @@ fn remembered_message(message: &RememberedMessage) -> PendingMessage {
     PendingMessage {
         message: message.id,
         thread: message.thread,
+        item: message.item,
         sender: message.author.clone(),
         from_dibs: message.system,
         subject: message.subject.clone(),
         importance: message.importance,
         awaiting_ack: message.awaiting_ack,
+        ack_grants: message.ack_grants,
         body: message.body.clone(),
+    }
+}
+
+/// A delivery this machine remembers, as the guard reads it: the message, or else the offer.
+pub fn pending_of(
+    message: Option<&RememberedMessage>,
+    offer: Option<&PendingOffer>,
+) -> Option<Pending> {
+    match (message, offer) {
+        (Some(message), _) => Some(Pending::Message(remembered_message(message))),
+        (None, Some(offer)) => Some(Pending::Offer(OfferLine {
+            slot: offer.slot.clone(),
+            until: offer.until,
+        })),
+        (None, None) => None,
+    }
+}
+
+/// What this machine remembers of a delivery: its message, or its offer.
+pub fn remember_pending(pending: &Pending) -> (Option<RememberedMessage>, Option<PendingOffer>) {
+    match pending {
+        Pending::Message(message) => (Some(deliverable(message)), None),
+        Pending::Offer(offer) => (
+            None,
+            Some(PendingOffer {
+                slot: offer.slot.clone(),
+                until: offer.until,
+            }),
+        ),
     }
 }
 
 /// A claim this machine remembers, as the guard reads it.
 fn claimed(claim: &ClaimedDelivery) -> Option<GuardClaim> {
-    let pending = match (&claim.message, &claim.offer) {
-        (Some(message), _) => Pending::Message(remembered_message(message)),
-        (None, Some(offer)) => Pending::Offer(OfferLine {
-            slot: offer.slot.clone(),
-            until: offer.until,
-        }),
-        (None, None) => return None,
-    };
+    let pending = pending_of(claim.message.as_ref(), claim.offer.as_ref())?;
     Some(GuardClaim {
         pending,
         host: claim.host.clone(),
@@ -224,16 +250,7 @@ fn claimed(claim: &ClaimedDelivery) -> Option<GuardClaim> {
 
 /// A claim made for the guard, as this machine remembers it.
 pub fn remembered(claim: &GuardClaim) -> ClaimedDelivery {
-    let (message, offer) = match &claim.pending {
-        Pending::Message(message) => (Some(deliverable(message)), None),
-        Pending::Offer(offer) => (
-            None,
-            Some(PendingOffer {
-                slot: offer.slot.clone(),
-                until: offer.until,
-            }),
-        ),
-    };
+    let (message, offer) = remember_pending(&claim.pending);
     ClaimedDelivery {
         subject: claim.pending.subject().key(),
         host: claim.host.clone(),
@@ -251,11 +268,13 @@ fn deliverable(message: &PendingMessage) -> RememberedMessage {
     RememberedMessage {
         id: message.message,
         thread: message.thread,
+        item: message.item,
         author: message.sender.clone(),
         system: message.from_dibs,
         subject: message.subject.clone(),
         importance: message.importance,
         awaiting_ack: message.awaiting_ack,
+        ack_grants: message.ack_grants,
         body: message.body.clone(),
     }
 }

@@ -164,6 +164,11 @@ The order of an upgrade:
 `dibs` also checks that the project's plugin is not newer than the binary (the plugin's `min_binary`): a plugin that
 auto-updated ahead of the binary prints the update hint once per session and its hooks still exit 0.
 
+**Release notes for the first release.** The plugin's tool server now starts as `dibs mcp --host <host>` and its hooks
+include the end of a turn (`stop`), which a binary older than that release does not know: its tool server would not
+start and the end of every turn would show a notice. The release raises the plugin's `min_binary` to itself, so a
+plugin that updates ahead of its binary says so once per session; until then the two are released together.
+
 ## The release signing key
 
 The client binaries are not code-signed, so `dibs self-update` takes their origin from a signature instead: each
@@ -447,6 +452,26 @@ waiting areas of a project could not be swept*) and the other projects are swept
 The rule that only a feature claim waits for an area is kept by the service; the database keeps one waiting claim per
 area of a project, but cannot check the kind, which lives in another table than the waits.
 
+## Sessions woken while they wait
+
+A member's session that waits for its person can be woken by a pushed message on a host that can do it, when the
+session opted in ([hosts.md](hosts.md#waking-a-session-that-waits-for-its-person)). Nothing is configured on the
+server. What it sees of such a session:
+
+- the session is registered with `push: true` and registered again every minute while it runs;
+- it registers under the label of the session's hooks when its host names that session, so the hooks and the
+  push are one session to the server;
+- it holds one event stream open, which counts towards the 8 streams a member may hold and the 128 the server
+  serves; a stream the server refuses (`429`, `503 too_many_streams`) is opened again at the next five-minute sweep;
+- it claims each delivery with `POST /v1/messages/{id}/deliver` (or the offer route), as the background sync of the
+  hooks does, and reads `GET /v1/inbox` when the stream says something arrived, and every five minutes;
+- a message about a work item is kept for 60 seconds for the session that holds the item's claim, when that session
+  can be woken and was seen within three minutes; other sessions of the member are answered `409 reserved`
+  meanwhile, and are not counted as having delivered it;
+- it pushes only while the session waits for its person (its hooks stamp each turn's end), only `high` or `urgent`
+  messages whose acknowledgement grants nothing and slot offers, at most three wakes per sender in fifteen minutes;
+  everything else is the hooks' to show, and so is a push nothing showed was seen within five minutes.
+
 ## A pilot's figures
 
 Before a whole team works with dibs, a few people try it for a while, and their admin reads `GET /v1/stats` (`docs/api.md`
@@ -596,3 +621,4 @@ the repository.
 | The board says *Integration silent since …* | Claims wait in review, or pull requests get a status, and no `importer` token has called for 15 minutes: the worker is down, its token was revoked, or it cannot reach the server. Merges complete no claims until it calls again. |
 | An integration reports `410` with `cursor_expired` | It was off for longer than the log keeps events (90 days); it reads the state again and follows the log from `after=0`. |
 | The web pages cannot sign in | The session cookie is `Secure`: use the pages over HTTPS (or `localhost`). |
+| A session opted into pushes hears a message only at its next tool call | Its host did not load the push for the session (see [hosts.md](hosts.md#waking-a-session-that-waits-for-its-person)), or the member holds 8 event streams already and the tool server falls back to reading the inbox every five minutes. |

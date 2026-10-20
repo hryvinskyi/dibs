@@ -157,6 +157,13 @@ pub struct ErrorDetails {
         skip_serializing_if = "Option::is_none"
     )]
     pub last_seen: Option<OffsetDateTime>,
+    /// Until when what was refused is kept for someone else, as the server's clock says.
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub until: Option<OffsetDateTime>,
     /// The state of a closed item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ItemStatus>,

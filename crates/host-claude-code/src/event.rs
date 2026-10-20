@@ -13,29 +13,42 @@ pub struct HookEvent {
     pub name: &'static str,
     /// The neutral event it is.
     pub kind: EventKind,
+    /// Whether text for the agent may go in its reply. `Stop` takes it as feedback that keeps the
+    /// turn going, so nothing is ever put there.
+    pub carries_context: bool,
 }
 
 /// Every event the guard listens to.
-pub const EVENTS: [HookEvent; 4] = [
+pub const EVENTS: [HookEvent; 5] = [
     HookEvent {
         argument: "session-start",
         name: "SessionStart",
         kind: EventKind::SessionStarted,
+        carries_context: true,
     },
     HookEvent {
         argument: "pre-tool-use",
         name: "PreToolUse",
         kind: EventKind::BeforeTool,
+        carries_context: true,
     },
     HookEvent {
         argument: "post-tool-use",
         name: "PostToolUse",
         kind: EventKind::AfterTool,
+        carries_context: true,
     },
     HookEvent {
         argument: "user-prompt-submit",
         name: "UserPromptSubmit",
         kind: EventKind::PromptSubmitted,
+        carries_context: true,
+    },
+    HookEvent {
+        argument: "stop",
+        name: "Stop",
+        kind: EventKind::Stopped,
+        carries_context: false,
     },
 ];
 

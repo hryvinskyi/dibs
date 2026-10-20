@@ -316,7 +316,7 @@ a host.
 
 | Host | Status | What its guard sees |
 |---|---|---|
-| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, each `Bash` command before it runs, every tool after it ran, each prompt; edits another member holds and commands that need a slot another member holds are refused, a teammate's pressing message or a slot offered to you arrives between tool calls, and subagents are told apart |
+| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, each `Bash` command before it runs, every tool after it ran, each prompt; edits another member holds and commands that need a slot another member holds are refused, a teammate's pressing message or a slot offered to you arrives between tool calls (or, opted in, wakes a session that waits for you), and subagents are told apart |
 | Codex CLI | planned | its command hooks |
 | OpenCode | planned | its in-process plugins, through a shim over `dibs hook neutral` |
 
@@ -378,6 +378,44 @@ command line never reaches the server, which is asked only where the slots the c
 between tool calls reaches only the main agent, never a subagent, at most once a minute, and once across all your
 sessions: the first session to claim it shows it. It is framed as a teammate's request that authorises nothing.
 
+#### Waking a session that waits for you (opt-in)
+
+Between tool calls is as soon as the hooks can deliver: a session that waits for your next prompt hears nothing until
+you type. Claude Code's [channels](https://code.claude.com/docs/en/channels) let the plugin's tool server push a
+pressing message or a slot offer into the open session instead, which then starts a turn on it. It is off unless you
+turn it on for a session, in two places at once:
+
+```sh
+DIBS_PUSH_TO_IDLE=1 claude --dangerously-load-development-channels plugin:dibs@dibs
+```
+
+- **Both are needed.** The flag makes Claude Code listen to the plugin's tool server; the variable makes the tool server
+  push. Claude Code drops a push it is not listening for without telling anyone, so with the variable alone the
+  pushes would be lost — and each one is claimed first, so the hooks would not show it either. Set the variable only
+  on a command line that also passes the flag (an alias of the two is the easy way).
+- **Research preview.** Channels are a research preview of Claude Code: the flags and the contract may change, neither
+  flag appears in `claude --help`, and the development flag shows a warning at every start and works only in an
+  interactive session (not with `-p`). They need Claude Code signed in with a claude.ai account or a Console API key;
+  Amazon Bedrock, Google Cloud and Microsoft Foundry sessions get none. On a claude.ai Team or Enterprise plan an
+  owner first turns channels on (`channelsEnabled`); an organisation can then list
+  `{ "marketplace": "dibs", "plugin": "dibs" }` in `allowedChannelPlugins`, after which
+  `claude --channels plugin:dibs@dibs` starts it without the warning. A Pro or Max account without an organisation
+  needs the development flag.
+- **What it pushes**, and when: only while the session waits for you (the plugin's hooks note when a turn ends), and
+  only a `high` or `urgent` message or a slot offered to you — never a `normal` message, and never a wide claim's
+  announcement, whose acknowledgement would grant edits — at most three wakes per sender in fifteen minutes. A busy
+  session hears from its hooks between tool calls as before. A push is framed as the hooks frame a message, as a
+  teammate's words quoted as data that authorise nothing, at the same rate (at most once a minute, never one thing
+  twice, once across all your sessions), and it never asks the agent to acknowledge anything: that is yours to do.
+  The tool server never offers to relay Claude Code's permission prompts, so nothing a teammate writes can approve a
+  tool call. A session woken by a message says you are away, answers only when a decision is needed, never agrees or
+  commits to anything for you, and goes on only with work you already asked for; a permission prompt waits for you.
+- **Nothing is lost.** When nothing shows a push was seen within five minutes — the agent did not read it, you did not
+  type — the session's hooks show it at the next tool call or prompt. When `DIBS_PUSH_TO_IDLE` is set, the brief at the
+  start of a session reminds you that pushes need the flag above.
+- **What it costs.** The tool server keeps one event stream open to the server for the session, and tells the server
+  once a minute that it still runs.
+
 On Windows, Claude Code runs a plugin's hooks with Git Bash, so the plugin needs
 [Git for Windows](https://git-scm.com/downloads/win). Without it the hooks cannot start, and they are declared so
 that a hook that cannot start never blocks a call; the MCP tools work either way.
@@ -425,7 +463,7 @@ dibs slot test settings.toml -- 'cd ops && ./deploy.sh prod'   # what a command 
 dibs slot takeover deploy:prod --purpose "finish it" --reason "the deploy log stopped; checked the hosts"
 dibs sync [--force] [--quiet] [--update] [--report]   # heartbeat and refresh what this machine remembers
 dibs self-update [--version 1.2.3]                # install a newer release, checked against the release key
-dibs mcp                                          # the same operations as MCP tools on stdin and stdout
+dibs mcp [--host <host>]                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook
 dibs doctor                                       # the agent hosts this build supports
 dibs admin member add bob --name "Bob Example" [--github bob-gh] [--role admin|member|importer]

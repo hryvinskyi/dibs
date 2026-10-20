@@ -351,7 +351,8 @@ fn delivers_to(session: &SessionRef) -> bool {
 
 /// Claims, for `session`, the deliveries the freshly cached inbox owes the member that this machine
 /// has not claimed yet, and remembers each one won or lost beside the inbox, so the session's next
-/// hook on its main thread shows what it won. A server that stops answering ends the claims; what
+/// hook on its main thread shows what it won. One kept for a while for another session is not
+/// remembered, so a later sync claims it again once that session had its chance. A server that stops answering ends the claims; what
 /// was claimed until then is remembered.
 async fn claim_deliveries(
     remote: &Remote,
@@ -381,6 +382,10 @@ async fn claim_deliveries(
             Err(error) if error.is_unavailable() => {
                 failure = Some(error);
                 break;
+            }
+            Err(error) if error.code() == "reserved" => {
+                tracing::debug!("a delivery is kept for a while for another session");
+                continue;
             }
             Err(error) => {
                 tracing::debug!(code = error.code(), "a delivery went to another session");

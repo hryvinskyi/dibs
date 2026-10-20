@@ -42,6 +42,7 @@ pub fn hook(host: &str, event: &str, env: &HashMap<String, String>, started: Ins
             event,
             input: &input,
             switched_off: off,
+            pushes: crate::mcp::opted_in(env.get(crate::mcp::PUSH_VAR).map(String::as_str)),
         },
     );
     let mut stdout = std::io::stdout().lock();

@@ -880,6 +880,8 @@ pub struct DeliverableView {
     pub message: MessageView,
     /// Whether it awaits the caller's acknowledgement.
     pub awaiting_ack: bool,
+    /// Whether acknowledging it grants something, as a wide claim's announcement grants edits.
+    pub ack_grants: bool,
 }
 
 impl DeliverableView {
@@ -889,6 +891,7 @@ impl DeliverableView {
             thread: ThreadView::of(entry.thread),
             message: MessageView::of(entry.message),
             awaiting_ack: entry.awaiting_ack,
+            ack_grants: entry.ack_grants,
         }
     }
 }

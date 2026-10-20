@@ -46,6 +46,20 @@ struct HostReport {
     id: &'static str,
     capabilities: BTreeMap<&'static str, bool>,
     installed: Vec<ProbeReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push: Option<PushReport>,
+}
+
+/// What pushing to a session that waits needs on a host that can do it.
+#[derive(Serialize)]
+struct PushReport {
+    /// The variable that opts a session in.
+    opt_in: &'static str,
+    /// Whether this environment opts in.
+    opted_in: bool,
+    /// The variable through which the host names the session it started the tool server for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_var: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -132,6 +146,11 @@ fn host_report(adapter: &dyn HostAdapter, env: &HashMap<String, String>) -> Host
             .iter()
             .map(|probe| probe_report(probe, env))
             .collect(),
+        push: adapter.push_extension().map(|extension| PushReport {
+            opt_in: crate::mcp::PUSH_VAR,
+            opted_in: crate::mcp::opted_in(env.get(crate::mcp::PUSH_VAR).map(String::as_str)),
+            session_var: extension.session_var(),
+        }),
     }
 }
 
@@ -215,6 +234,18 @@ fn text(report: &Report) -> String {
             .map(|(name, _)| *name)
             .collect();
         let _ = writeln!(out, "  {}: carries {}", host.id, can.join(", "));
+        if let Some(push) = &host.push {
+            let _ = writeln!(
+                out,
+                "    pushes to a waiting session: {} ({}=1 for the session)",
+                if push.opted_in {
+                    "opted in"
+                } else {
+                    "not opted in"
+                },
+                push.opt_in
+            );
+        }
         if host.installed.is_empty() {
             let _ = writeln!(
                 out,

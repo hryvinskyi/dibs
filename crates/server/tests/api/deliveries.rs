@@ -62,6 +62,14 @@ async fn a_message_is_delivered_by_the_first_session_that_claims_it_and_never_ag
     let urgent = team.send(&team.alice, "bob", "urgent").await;
     team.send(&team.alice, "bob", "normal").await;
     assert_eq!(team.deliverable(&team.bob).await, [urgent]);
+    let asked = world
+        .get(&team.bob, "/v1/inbox?unread=true&unacked=1&deliverable=1")
+        .await;
+    assert_eq!(
+        asked.body["deliverable"][0]["ack_grants"], false,
+        "acknowledging a plain message grants nothing: {}",
+        asked.body
+    );
     let plain = world.get(&team.bob, "/v1/inbox").await;
     assert_eq!(plain.body.get("deliverable"), None, "only when asked for");
     let first = world.session(&team.bob, "laptop").await;
@@ -271,4 +279,68 @@ async fn acknowledging_an_ended_wide_announcement_grants_nothing_and_says_so() {
     assert_eq!(acked.status, StatusCode::CREATED, "{}", acked.body);
     assert_eq!(acked.body["granted"], json!([]));
     assert_eq!(acked.body["announcement_ended"], true);
+}
+
+#[tokio::test]
+async fn a_message_about_an_item_is_kept_a_minute_for_the_session_that_can_be_woken_and_holds_it() {
+    let team = Team::new().await;
+    let world = &team.world;
+    let bob = &team.bob;
+    let register = |host: &'static str, push: bool| async move {
+        let answer = world
+            .post(
+                bob,
+                "/v1/sessions",
+                json!({"host": host, "label": format!("{host}/mcp"), "agent": "mcp", "push": push}),
+            )
+            .await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        answer.body["session_id"].as_u64().unwrap()
+    };
+    let working = register("laptop", true).await;
+    let neighbour = register("desktop", true).await;
+    let item = world
+        .item(&team.alice, Some("gh:acme/widgets#42"), "Rework the schema")
+        .await;
+    let claimed = world
+        .post(
+            bob,
+            &format!("/v1/items/{item}/claim"),
+            json!({"session_id": working}),
+        )
+        .await;
+    assert!(claimed.status.is_success(), "{}", claimed.body);
+    let started = world
+        .post(
+            &team.alice,
+            "/v1/threads",
+            json!({
+                "subject": "The schema", "to": ["bob"], "item": item, "label": "laptop/mcp",
+                "body": "Rebase before you migrate.", "importance": "urgent",
+            }),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::CREATED, "{}", started.body);
+    let message = started.body["message"]["id"].as_u64().unwrap();
+    let deliver = |session: u64| async move {
+        world
+            .post(
+                bob,
+                &format!("/v1/messages/{message}/deliver"),
+                json!({"session_id": session}),
+            )
+            .await
+    };
+    let kept = deliver(neighbour).await;
+    assert_error(&kept, StatusCode::CONFLICT, "reserved");
+    assert!(
+        kept.body["error"]["details"]["until"].is_string(),
+        "{}",
+        kept.body
+    );
+    world.fakes.clock.advance(Duration::seconds(61));
+    let after = deliver(neighbour).await;
+    assert_eq!(after.status, StatusCode::CREATED, "{}", after.body);
+    assert_eq!(after.body["delivery"]["session_id"], neighbour);
+    assert_error(&deliver(working).await, StatusCode::CONFLICT, "delivered");
 }

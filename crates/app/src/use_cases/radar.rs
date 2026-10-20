@@ -30,7 +30,7 @@ use crate::error::{AppError, Missing};
 use crate::named::{ItemName, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::common::existing_item;
-use crate::use_cases::writing::{Posted, SystemPost, system_body};
+use crate::use_cases::writing::{Posted, SystemPost, titled_body};
 use crate::work::Work;
 
 /// The checkout a member's request comes from: its repository and the branch it is on.
@@ -478,7 +478,7 @@ impl Radar<'_> {
             item: Some(first.item.id),
             on_behalf_of: Author::System,
             to: Recipients::Members(holders),
-            body: system_body(&lead, None)?,
+            body: titled_body(&lead, None)?,
             importance: overlap.kind().importance(),
             ack_required: false,
         }

@@ -32,6 +32,7 @@ tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
 rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
 semver = "1.0.28"
 rand = "0.10.3"
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
@@ -44,6 +45,13 @@ url = "2.5.8"
 
 [[bench]]
 name = "warm_hook"
+harness = false
+
+# The Claude Code hooks that stamp whether a session works or waits, measured through this binary.
+# The source lives beside the adapter, the one crate that may name the host in code.
+[[bench]]
+name = "claude_code_hook"
+path = "../host-claude-code/cli-benches/hook.rs"
 harness = false
 
 # The Claude Code hooks and the plugin's hook wrapper, run through this binary against the test

@@ -29,7 +29,7 @@ use crate::use_cases::acks::{people, reached};
 use crate::use_cases::common::existing_item;
 use crate::use_cases::readable::{may_read_thread, readable_thread};
 use crate::use_cases::slots::Scene;
-use crate::use_cases::writing::{Posted, SystemPost, system_body};
+use crate::use_cases::writing::{Posted, SystemPost, system_body, titled_body};
 use crate::work::Work;
 
 /// What to escalate, and why.
@@ -258,7 +258,11 @@ impl Case<'_> {
             item: self.subject.item(),
             on_behalf_of: Author::Member(self.by),
             to: Recipients::members(reach.clone())?,
-            body: system_body(&lead, Some(("Why", self.reason.as_str())))?,
+            body: if self.subject.item().is_some() {
+                titled_body(&lead, Some(("Why", self.reason.as_str())))?
+            } else {
+                system_body(&lead, Some(("Why", self.reason.as_str())))?
+            },
             importance: Importance::Urgent,
             ack_required: true,
         }
@@ -583,6 +587,10 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("Why: We both need billing today; who goes first?"));
+        assert!(
+            text.contains(crate::use_cases::writing::TITLE_NOTE),
+            "a title is quoted as a member's or a tracker's words: {text}"
+        );
         let asked: Vec<String> = thread.acks[&first.message]
             .iter()
             .map(|ack| ack.handle.to_string())

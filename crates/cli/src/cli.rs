@@ -110,7 +110,7 @@ pub enum Command {
     Sync(SyncArgs),
     /// Serve the same operations as tools over the Model Context Protocol on standard input and
     /// output, for an agent that can call tools.
-    Mcp,
+    Mcp(McpArgs),
     /// Replace this dibs with a newer release, checked against the release key built into it.
     SelfUpdate(SelfUpdateArgs),
     /// Manage the project (admins only).
@@ -125,11 +125,21 @@ impl Command {
     /// run, and the pre-push check while the guard is switched off.
     pub fn reports_after(&self, switched_off: bool) -> bool {
         match self {
-            Self::Sync(_) | Self::Mcp | Self::SelfUpdate(_) => false,
+            Self::Sync(_) | Self::Mcp(_) | Self::SelfUpdate(_) => false,
             Self::Check(args) => !(args.push && switched_off),
             _ => true,
         }
     }
+}
+
+/// `dibs mcp`.
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// The agent host that starts the server. A host that can wake a session waiting for its
+    /// person gets what it needs for that when `DIBS_PUSH_TO_IDLE=1` is set for the session;
+    /// otherwise the server is the same for every host.
+    #[arg(long)]
+    pub host: Option<String>,
 }
 
 /// `dibs sync`.
@@ -799,6 +809,7 @@ mod tests {
             &["dibs", "sync"][..],
             &["dibs", "sync", "--report"],
             &["dibs", "mcp"],
+            &["dibs", "mcp", "--host", "neutral"],
             &["dibs", "self-update"],
         ] {
             assert!(!reports(line, false), "{line:?}");

@@ -32,7 +32,7 @@ use crate::use_cases::handover::Handovers;
 use crate::use_cases::radar::{MergedInto, Radar};
 use crate::use_cases::slots::Scene;
 use crate::use_cases::wide_asks::Announcer;
-use crate::use_cases::writing::{Posted, SystemPost, system_body};
+use crate::use_cases::writing::{Posted, SystemPost, titled_body};
 use crate::work::Work;
 
 /// What a holder asks: record this pull request on their claim of `item`.
@@ -415,7 +415,7 @@ impl ReportPr {
             item: Some(item.id),
             on_behalf_of: Author::System,
             to: Recipients::Members([claim.member].into()),
-            body: system_body(&lead(&named, item.title.as_str()), None)?,
+            body: titled_body(&lead(&named, item.title.as_str()), None)?,
             importance: Importance::Normal,
             ack_required: false,
         }

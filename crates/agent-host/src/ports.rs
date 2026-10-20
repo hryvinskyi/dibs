@@ -239,6 +239,8 @@ pub struct PendingMessage {
     pub message: MessageId,
     /// Its thread.
     pub thread: ThreadId,
+    /// The work item its thread is about, when it is about one.
+    pub item: Option<ItemId>,
     /// Who wrote it: a member's handle, or `dibs`.
     pub sender: Handle,
     /// Whether dibs wrote it, in the project's name; it may quote a member's words.
@@ -249,6 +251,9 @@ pub struct PendingMessage {
     pub importance: Importance,
     /// Whether it awaits the member's acknowledgement.
     pub awaiting_ack: bool,
+    /// Whether acknowledging it grants something, as the announcement of a wide claim grants
+    /// edits.
+    pub ack_grants: bool,
     /// Its text, whole.
     pub body: String,
 }
@@ -358,13 +363,70 @@ pub struct SlotOfferState {
     pub until: OffsetDateTime,
 }
 
-/// What one session was shown between its tool calls.
+/// What one session was shown between its tool calls, and pushed to it while it waited.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionLedger {
     /// When something was last put in front of its agent.
     pub last_injection: Option<OffsetDateTime>,
-    /// What was put there, newest last, as the server names it.
+    /// What was put there between tool calls, newest last, as the server names it.
     pub shown: Vec<String>,
+    /// What was pushed while the session waited and is not yet known to have reached its agent.
+    pub pushed: Vec<PushedDelivery>,
+    /// The pushes that woke the session, newest last, within the window the push budget counts.
+    pub wakes: Vec<Wake>,
+}
+
+/// A delivery pushed to a session while it waited, which the session's hooks show once if nothing
+/// shows it was seen by `due`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushedDelivery {
+    /// What was pushed.
+    pub pending: Pending,
+    /// Whether the push was written to the host; one that was not is the hooks' to show at once,
+    /// whoever is there.
+    pub written: bool,
+    /// When the hooks show it unless it was seen.
+    pub due: OffsetDateTime,
+}
+
+/// A push that woke a session, by whom.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wake {
+    /// Who wrote what was pushed: a member's handle, or `dibs`.
+    pub sender: Handle,
+    /// When.
+    pub at: OffsetDateTime,
+}
+
+/// What shows that a pushed delivery reached the agent or its person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Seen {
+    /// The agent read or marked read this conversation.
+    Thread(ThreadId),
+    /// The agent acknowledged this message.
+    Message(MessageId),
+    /// The agent took, left or looked at this slot.
+    Slot(SlotName),
+    /// The person submitted a prompt: they are there.
+    Person,
+}
+
+/// Whether a session's agent is at work or waits for its person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    /// It works: a prompt was submitted or a tool ran.
+    Working,
+    /// It finished its turn and waits for its person.
+    Waiting,
+}
+
+/// When a session's agent was last at work and when it last began to wait, as its hooks stamped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionActivity {
+    /// The last prompt or tool.
+    pub working: Option<OffsetDateTime>,
+    /// The last end of a turn.
+    pub waiting: Option<OffsetDateTime>,
 }
 
 /// Another member who edited a shared file under a live claim, and the item they hold.
@@ -634,6 +696,13 @@ pub trait DeliveryLedger {
     /// The session's ledger, its lock taken until the answer is dropped; `None` when another
     /// process holds the lock or it cannot be taken, in which case nothing is shown.
     fn open(&self, session: &SessionRef) -> Option<Box<dyn LedgerEntry + '_>>;
+
+    /// Stamps that the session is at work or waits, at `at`, without waiting for any lock or for
+    /// the disk; a stamp that cannot be written is left out.
+    fn stamp(&self, session: &SessionRef, activity: Activity, at: OffsetDateTime);
+
+    /// The session's last stamps; none that cannot be read.
+    fn activity(&self, session: &SessionRef) -> SessionActivity;
 }
 
 /// One session's ledger, locked.

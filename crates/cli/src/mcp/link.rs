@@ -28,7 +28,7 @@ use crate::mcp::inputs::{
     SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
 };
 
-/// The kind of agent the sessions of the tool server report.
+/// The kind of agent the sessions of a tool server that pushes nothing report.
 const AGENT: &str = "mcp";
 
 /// How often a waiting slot take asks again.
@@ -44,29 +44,86 @@ pub enum Sent {
     Posted(Posted),
 }
 
+/// How the tool server's session is registered: under which name after the machine's, as which
+/// kind of agent, and whether it can be woken while idle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Registration {
+    /// The name after the machine's in its label.
+    pub name: String,
+    /// The kind of agent it reports.
+    pub agent: &'static str,
+    /// Whether it can be woken while idle.
+    pub push: bool,
+}
+
+impl Registration {
+    /// The session of a tool server that pushes nothing: `<host>/mcp-<pid>`, an `mcp` agent.
+    pub fn own() -> Self {
+        Self {
+            name: format!("mcp-{}", std::process::id()),
+            agent: AGENT,
+            push: false,
+        }
+    }
+}
+
 /// A signed-in connection and the session the tool server registered on it.
 pub struct Link {
     connection: Connection,
     session: SessionId,
     label: SessionLabel,
     cwd: PathBuf,
+    registration: Registration,
 }
 
 impl Link {
-    /// Signs in and registers this process's session, labelled `<host>/mcp-<pid>`.
+    /// Signs in and registers this process's session as `registration` says, and remembers it on
+    /// this machine, so the hooks of a session registered under the same label find it.
     ///
     /// # Errors
     /// The [`Failure`] of signing in or of registering.
-    pub async fn open(ctx: &Context) -> Result<Self, Failure> {
+    pub async fn open(ctx: &Context, registration: Registration) -> Result<Self, Failure> {
         let connection = ctx.connect().await?;
-        let name = format!("mcp-{}", std::process::id());
-        let session = connection.register(AGENT, &name).await?;
+        let session = connection
+            .register(registration.agent, &registration.name, registration.push)
+            .await?;
+        if let Err(error) = connection.state.remember_session(&session) {
+            tracing::debug!(error = %error, "the session could not be remembered");
+        }
         Ok(Self {
             connection,
             session: session.session_id,
             label: session.label,
             cwd: ctx.cwd.clone(),
+            registration,
         })
+    }
+
+    /// Registers the session again, which keeps its id and tells the server it still runs.
+    ///
+    /// # Errors
+    /// The [`Failure`] of the call.
+    pub async fn announce(&self) -> Result<(), Failure> {
+        let registration = &self.registration;
+        self.connection
+            .register(registration.agent, &registration.name, registration.push)
+            .await
+            .map(|_| ())
+    }
+
+    /// The signed-in connection.
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// The session the tool server registered.
+    pub fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Its label.
+    pub fn label(&self) -> &SessionLabel {
+        &self.label
     }
 
     /// The live and stale claims and the areas held.

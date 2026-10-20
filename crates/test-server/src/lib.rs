@@ -29,12 +29,14 @@ use tokio::runtime::Runtime;
 
 use dibs_app::fakes::Fakes;
 use dibs_app::use_cases::{
-    CreateMemberInput, FootprintInput, FootprintRecorded, InitProjectInput, NewMember, UseCases,
+    Addressees, CreateMemberInput, FootprintInput, FootprintRecorded, InitProjectInput, NewMember,
+    StartThreadInput, UseCases,
 };
 use dibs_app::{Actor, Dependencies};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
 use dibs_domain::member::{DisplayName, Role};
+use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
 use dibs_domain::paths::RelPath;
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::radar::{BranchName, CommitSha, FootprintBase};
@@ -136,10 +138,52 @@ pub struct TestServer {
     runtime: Runtime,
     fakes: Fakes,
     app: Arc<UseCases>,
-    shutdown: Arc<Shutdown>,
+    notifier: Arc<BroadcastNotifier>,
+    versions: ClientVersions,
+    shutdown: Mutex<Arc<Shutdown>>,
     address: SocketAddr,
     traffic: Arc<Traffic>,
     _dir: TempDir,
+}
+
+/// What one listener serves: the router over the use cases, with its own shutdown.
+struct Listening {
+    app: Arc<UseCases>,
+    notifier: Arc<BroadcastNotifier>,
+    versions: ClientVersions,
+    fakes: Fakes,
+    traffic: Arc<Traffic>,
+}
+
+impl Listening {
+    /// Serves on `listener` until the shutdown it answers is stopped.
+    fn serve(self, listener: tokio::net::TcpListener) -> Arc<Shutdown> {
+        let shutdown = Arc::new(Shutdown::new());
+        let streams = EventStreams::new(
+            self.notifier,
+            shutdown.signal(),
+            StreamOptions {
+                heartbeat: StdDuration::from_secs(1),
+                ..StreamOptions::default()
+            },
+        );
+        let options = HttpOptions {
+            clock: self.fakes.clock.clone(),
+            tokens: self.fakes.tokens.clone(),
+            versions: self.versions,
+            ..HttpOptions::default()
+        };
+        let service = router(self.app, streams, options)
+            .layer(middleware::from_fn_with_state(self.traffic, record))
+            .into_make_service_with_connect_info::<SocketAddr>();
+        let mut stop = shutdown.signal();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, service)
+                .with_graceful_shutdown(async move { stop.stopped().await })
+                .await;
+        });
+        shutdown
+    }
 }
 
 impl TestServer {
@@ -178,7 +222,7 @@ impl TestServer {
         let path = dir.path().join("dibs.db");
         let traffic = Arc::new(Traffic::default());
         let logged = traffic.clone();
-        let (app, shutdown, address) = runtime.block_on(async {
+        let (app, notifier, shutdown, address) = runtime.block_on(async {
             let result: Setup<_> = async {
                 let store = Arc::new(
                     SqliteStore::open(&path)
@@ -192,35 +236,19 @@ impl TestServer {
                     ..fakes.dependencies()
                 };
                 let app = Arc::new(UseCases::new(&deps));
-                let shutdown = Arc::new(Shutdown::new());
-                let streams = EventStreams::new(
-                    notifier,
-                    shutdown.signal(),
-                    StreamOptions {
-                        heartbeat: StdDuration::from_secs(1),
-                        ..StreamOptions::default()
-                    },
-                );
-                let options = HttpOptions {
-                    clock: fakes.clock.clone(),
-                    tokens: fakes.tokens.clone(),
-                    versions,
-                    ..HttpOptions::default()
-                };
-                let service = router(app.clone(), streams, options)
-                    .layer(middleware::from_fn_with_state(logged, record))
-                    .into_make_service_with_connect_info::<SocketAddr>();
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
                     .map_err(failed("an ephemeral port"))?;
                 let address = listener.local_addr().map_err(failed("the bound address"))?;
-                let mut stop = shutdown.signal();
-                tokio::spawn(async move {
-                    let _ = axum::serve(listener, service)
-                        .with_graceful_shutdown(async move { stop.stopped().await })
-                        .await;
-                });
-                Ok((app, shutdown, address))
+                let shutdown = Listening {
+                    app: app.clone(),
+                    notifier: notifier.clone(),
+                    versions: versions.clone(),
+                    fakes: fakes.clone(),
+                    traffic: logged,
+                }
+                .serve(listener);
+                Ok((app, notifier, shutdown, address))
             }
             .await;
             result
@@ -229,7 +257,9 @@ impl TestServer {
             runtime,
             fakes,
             app,
-            shutdown,
+            notifier,
+            versions,
+            shutdown: Mutex::new(shutdown),
             address,
             traffic,
             _dir: dir,
@@ -267,9 +297,81 @@ impl TestServer {
         self.traffic.delay_ms.store(millis, Ordering::SeqCst);
     }
 
-    /// Stops serving: from now on the server cannot be reached.
+    /// Stops serving: from now on the server cannot be reached, its event streams closed.
     pub fn stop(&self) {
-        self.shutdown.stop();
+        self.current_shutdown().stop();
+    }
+
+    /// Serves again on the same address and database after [`stop`](Self::stop), as a server
+    /// that was restarted: what happened meanwhile is in its log.
+    ///
+    /// # Errors
+    /// When the address cannot be bound again within ten seconds.
+    pub fn start_again(&self) -> Setup<()> {
+        let listener = self.runtime.block_on(async {
+            let deadline = tokio::time::Instant::now() + StdDuration::from_secs(10);
+            loop {
+                match tokio::net::TcpListener::bind(self.address).await {
+                    Ok(listener) => return Ok(listener),
+                    Err(error) if tokio::time::Instant::now() >= deadline => {
+                        return Err(failed("the same address again")(error));
+                    }
+                    Err(_) => tokio::time::sleep(StdDuration::from_millis(50)).await,
+                }
+            }
+        })?;
+        let _entered = self.runtime.enter();
+        let shutdown = Listening {
+            app: self.app.clone(),
+            notifier: self.notifier.clone(),
+            versions: self.versions.clone(),
+            fakes: self.fakes.clone(),
+            traffic: self.traffic.clone(),
+        }
+        .serve(listener);
+        *self
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = shutdown;
+        Ok(())
+    }
+
+    /// Starts a conversation from `from` to the member `to`, through the use cases rather than a
+    /// route, so it is written while the server is stopped too, and answers its message's id.
+    ///
+    /// # Errors
+    /// When a value is malformed or the message is refused.
+    pub fn message(
+        &self,
+        from: &Person,
+        to: &str,
+        subject: &str,
+        body: &str,
+        importance: Importance,
+    ) -> Setup<u64> {
+        let started = self
+            .runtime
+            .block_on(self.app.start_thread.execute(
+                &from.actor,
+                StartThreadInput {
+                    subject: Subject::parse(subject).map_err(failed("a subject"))?,
+                    to: Addressees::Members(vec![Handle::parse(to).map_err(failed("a handle"))?]),
+                    item: None,
+                    label: SessionLabel::parse("web").map_err(failed("a label"))?,
+                    body: Body::parse(body).map_err(failed("a body"))?,
+                    importance,
+                    ack_required: false,
+                },
+            ))
+            .map_err(failed("the message is posted"))?;
+        Ok(started.message.record.id.0)
+    }
+
+    fn current_shutdown(&self) -> Arc<Shutdown> {
+        self.shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The server's base URL, `http://127.0.0.1:<port>`.
@@ -386,7 +488,7 @@ impl TestServer {
 
 impl Drop for TestServer {
     fn drop(&mut self) {
-        self.shutdown.stop();
+        self.current_shutdown().stop();
     }
 }
 

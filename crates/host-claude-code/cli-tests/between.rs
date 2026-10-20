@@ -25,7 +25,7 @@ impl Setup {
         self.server.settings(&self.alice, settings).unwrap();
     }
 
-    fn run_hook(&self, handle: &str, cwd: &Path, event: &str, stdin: &str) -> Output {
+    pub(crate) fn run_hook(&self, handle: &str, cwd: &Path, event: &str, stdin: &str) -> Output {
         self.dibs(handle, cwd)
             .args(["hook", "claude-code", event])
             .write_stdin(stdin.to_owned())
@@ -34,7 +34,7 @@ impl Setup {
     }
 
     /// The `dibs sync` a hook of `session` would start, run in the foreground.
-    fn sync_for(&self, handle: &str, cwd: &Path, session: &str) {
+    pub(crate) fn sync_for(&self, handle: &str, cwd: &Path, session: &str) {
         let out = self
             .dibs(handle, cwd)
             .args([
@@ -50,7 +50,7 @@ impl Setup {
         assert!(out.status.success(), "{}", text(&out.stderr));
     }
 
-    fn send_urgent(&self, from: &str, to: &str, cwd: &Path, body: &str) {
+    pub(crate) fn send_urgent(&self, from: &str, to: &str, cwd: &Path, body: &str) {
         let out = self
             .dibs(from, cwd)
             .args([
@@ -96,13 +96,13 @@ fn after(cwd: &Path, agent: Option<&str>) -> String {
     hook_input("PostToolUse", cwd, extra)
 }
 
-fn after_for(cwd: &Path, session: &str) -> String {
+pub(crate) fn after_for(cwd: &Path, session: &str) -> String {
     let mut value: Value = serde_json::from_str(&after(cwd, None)).unwrap();
     value["session_id"] = json!(session);
     value.to_string()
 }
 
-fn context(value: &Value) -> Option<String> {
+pub(crate) fn context(value: &Value) -> Option<String> {
     value["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .map(str::to_owned)

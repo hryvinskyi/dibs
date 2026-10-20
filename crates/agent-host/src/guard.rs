@@ -43,8 +43,8 @@ use crate::delivery;
 use crate::event::{EventKind, HostEvent, Thread, ToolCall};
 use crate::outcome::GuardOutcome;
 use crate::ports::{
-    Cached, Clock, CoordinationGateway, KnownSettings, PathAnswer, PortError, SessionRef,
-    Workspace, Workspaces,
+    Activity, Cached, Clock, CoordinationGateway, KnownSettings, PathAnswer, PortError, Seen,
+    SessionRef, Workspace, Workspaces,
 };
 use crate::registry::HostRegistry;
 use crate::slots::KnownBoard;
@@ -66,6 +66,8 @@ pub struct HookRequest<'a> {
     pub input: &'a [u8],
     /// Whether the guard is switched off on this machine.
     pub switched_off: bool,
+    /// Whether the session opted into pushes while it waits for its person.
+    pub pushes: bool,
 }
 
 /// What a hook run answers.
@@ -129,7 +131,7 @@ impl<'a> Guard<'a> {
                 GuardOutcome::silent()
             }
             _ if request.switched_off => GuardOutcome::silent(),
-            Ok(event) => self.decide(adapter, &event),
+            Ok(event) => self.decide(adapter, &event, request.pushes),
             Err(error) => GuardOutcome::notice(wording::unreadable(&error.to_string())),
         };
         HookAnswer {
@@ -153,8 +155,14 @@ impl<'a> Guard<'a> {
         }
     }
 
-    /// The outcome of one event of the host `adapter` speaks for.
-    pub fn decide(&self, adapter: &dyn HostAdapter, event: &HostEvent) -> GuardOutcome {
+    /// The outcome of one event of the host `adapter` speaks for, in a session that opted into
+    /// pushes or not.
+    pub fn decide(
+        &self,
+        adapter: &dyn HostAdapter,
+        event: &HostEvent,
+        pushes: bool,
+    ) -> GuardOutcome {
         let session = SessionRef {
             host: adapter.id(),
             key: event.session_key().clone(),
@@ -164,11 +172,17 @@ impl<'a> Guard<'a> {
             Ok(None) => return GuardOutcome::silent(),
             Err(error) => return GuardOutcome::notice(wording::failed(&error.to_string())),
         };
+        let capabilities = adapter.capabilities();
+        let push_notice = adapter
+            .push_extension()
+            .filter(|_| pushes && capabilities.push_to_idle)
+            .map(|extension| extension.opt_in_notice());
         let run = Run {
             workspace: workspace.as_ref(),
-            capabilities: adapter.capabilities(),
+            capabilities,
             session,
             now: self.clock.now(),
+            push_notice,
         };
         run.event(event)
     }
@@ -180,19 +194,27 @@ struct Run<'w> {
     capabilities: Capabilities,
     session: SessionRef,
     now: OffsetDateTime,
+    /// What the brief says of pushes, when the session opted into them.
+    push_notice: Option<&'static str>,
 }
 
 impl Run<'_> {
     fn event(&self, event: &HostEvent) -> GuardOutcome {
+        self.stamp(event);
         let decided = match event {
             HostEvent::SessionStarted { .. } => self.session_started().map(Judged::plain),
             HostEvent::BeforeTool { cwd, call, .. } => self.before_tool(cwd, call),
-            HostEvent::AfterTool { thread, .. } => Ok(Judged::plain(
-                self.deliver(*thread, self.capabilities.context_after_tool),
-            )),
-            HostEvent::PromptSubmitted { thread, .. } => Ok(Judged::plain(
-                self.deliver(*thread, self.capabilities.context_at_prompt),
-            )),
+            HostEvent::AfterTool { thread, .. } => Ok(Judged::plain(self.deliver(
+                *thread,
+                self.capabilities.context_after_tool,
+                false,
+            ))),
+            HostEvent::PromptSubmitted { thread, .. } => Ok(Judged::plain(self.deliver(
+                *thread,
+                self.capabilities.context_at_prompt,
+                true,
+            ))),
+            HostEvent::Stopped { .. } => return GuardOutcome::silent(),
         };
         let outcome = match decided {
             Ok(judged) => self.counted(judged),
@@ -203,6 +225,22 @@ impl Run<'_> {
         }
         let starting = matches!(event, HostEvent::SessionStarted { .. });
         self.keep_up(outcome, starting)
+    }
+
+    /// Stamps, on a host that can wake a session, whether the session works or waits: a push goes
+    /// only to a session that waits. The stamp waits for no lock and no disk.
+    fn stamp(&self, event: &HostEvent) {
+        if !self.capabilities.push_to_idle {
+            return;
+        }
+        let activity = match event {
+            HostEvent::SessionStarted { .. } | HostEvent::Stopped { .. } => Activity::Waiting,
+            HostEvent::AfterTool { .. } | HostEvent::PromptSubmitted { .. } => Activity::Working,
+            HostEvent::BeforeTool { .. } => return,
+        };
+        self.workspace
+            .ledger()
+            .stamp(&self.session, activity, self.now);
     }
 
     fn session_started(&self) -> Result<GuardOutcome, Problem> {
@@ -248,8 +286,13 @@ impl Run<'_> {
             newer: cache.newer_release(),
             now: self.now,
         };
+        let mut text = brief.text();
+        if let Some(push) = self.push_notice {
+            text.push('\n');
+            text.push_str(push);
+        }
         Ok(GuardOutcome::NoObjection {
-            context: Some(Text::new(brief.text())),
+            context: Some(Text::new(text)),
             notice,
         })
     }
@@ -404,16 +447,16 @@ impl Run<'_> {
     }
 
     /// What a session may be shown between its tool calls or with a prompt: only on the main
-    /// thread of a host that carries it there, only what the background sync won for this session,
-    /// read from this machine without waiting for anything, once a minute at most and never twice.
-    fn deliver(&self, thread: Thread, carried: bool) -> GuardOutcome {
+    /// thread of a host that carries it there, only what the background sync won for this session
+    /// and was not pushed to it, or what was pushed to it while it waited and is due because
+    /// nothing showed it was seen, read from this
+    /// machine without waiting for anything, once a minute at most and never twice. A prompt shows
+    /// the person is there, so what was pushed to the session no longer waits to be shown.
+    fn deliver(&self, thread: Thread, carried: bool, prompt: bool) -> GuardOutcome {
         if !carried || thread != Thread::Main {
             return GuardOutcome::silent();
         }
         let cache = self.workspace.cache();
-        let Some(inbox) = cache.inbox() else {
-            return GuardOutcome::silent();
-        };
         let Some(member) = cache
             .settings()
             .ok()
@@ -422,17 +465,37 @@ impl Run<'_> {
         else {
             return GuardOutcome::silent();
         };
-        let won = delivery::won_by(&inbox.value, &self.session);
-        if won.is_empty() {
-            return GuardOutcome::silent();
-        }
+        let won = cache
+            .inbox()
+            .map(|inbox| delivery::won_by(&inbox.value, &self.session))
+            .unwrap_or_default();
         let Some(entry) = self.workspace.ledger().open(&self.session) else {
             return GuardOutcome::silent();
         };
-        let Some((show, ledger)) = delivery::choose(&entry.read(), &won, &member, self.now) else {
+        let read = entry.read();
+        let ledger = if prompt {
+            delivery::after_seen(&read, &Seen::Person)
+        } else {
+            read.clone()
+        };
+        let mut candidates = delivery::due_pushes(&ledger, self.now);
+        for pending in won {
+            let subject = pending.subject();
+            let pushed = ledger
+                .pushed
+                .iter()
+                .any(|pushed| pushed.pending.subject() == subject);
+            if !pushed && !candidates.iter().any(|known| known.subject() == subject) {
+                candidates.push(pending);
+            }
+        }
+        let Some((show, after)) = delivery::choose(&ledger, &candidates, &member, self.now) else {
+            if ledger != read {
+                entry.write(&ledger);
+            }
             return GuardOutcome::silent();
         };
-        if !entry.write(&ledger) {
+        if !entry.write(&after) {
             return GuardOutcome::silent();
         }
         GuardOutcome::context(wording::delivered(&show))

@@ -5,7 +5,7 @@
 use std::fmt;
 
 use thiserror::Error;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::ids::{MemberId, MessageId, SessionId};
 use crate::slot::SlotName;
@@ -92,6 +92,56 @@ pub struct Delivery {
     pub at: OffsetDateTime,
 }
 
+/// How long a message about a work item is kept for the session that holds the item's claim, from
+/// when it was posted: the agent working on the item hears it rather than a neighbouring session.
+pub const RESERVED_FOR: Duration = Duration::seconds(60);
+
+/// How recently a session that can be woken while idle must have announced itself for a message to
+/// be kept for it.
+pub const PUSH_SEEN_WITHIN: Duration = Duration::minutes(3);
+
+/// How often a session that can be woken while idle announces itself while it runs, well within
+/// [`PUSH_SEEN_WITHIN`].
+pub const PUSH_ANNOUNCE_EVERY: Duration = Duration::minutes(1);
+
+/// The session that took or last renewed the member's live claim on the item a message is about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimSession {
+    /// The session.
+    pub session: SessionId,
+    /// Whether it can be woken while idle.
+    pub push: bool,
+    /// When it last announced itself.
+    pub last_seen: OffsetDateTime,
+}
+
+/// That a message is kept, until `until`, for the one session that may deliver it meanwhile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reservation {
+    /// The session it is kept for.
+    pub session: SessionId,
+    /// When anyone of the member's sessions may deliver it again.
+    pub until: OffsetDateTime,
+}
+
+/// The reservation of a message posted at `posted_at` about an item whose claim, held by the
+/// recipient, `holder` took: kept for that session for [`RESERVED_FOR`], when it can be woken while
+/// idle and announced itself within [`PUSH_SEEN_WITHIN`] of `now`. A session seen in the future
+/// (another clock running ahead) counts as seen. `None` when nothing is kept.
+pub fn reservation(
+    posted_at: OffsetDateTime,
+    holder: Option<&ClaimSession>,
+    now: OffsetDateTime,
+) -> Option<Reservation> {
+    let holder =
+        holder.filter(|holder| holder.push && now - holder.last_seen <= PUSH_SEEN_WITHIN)?;
+    let until = posted_at + RESERVED_FOR;
+    (now < until).then_some(Reservation {
+        session: holder.session,
+        until,
+    })
+}
+
 /// Why a session may not deliver a subject.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DeliveryRefused {
@@ -111,16 +161,26 @@ pub enum DeliveryRefused {
         /// When.
         at: OffsetDateTime,
     },
+    /// The message is about a work item another session of the member works on, and is kept for
+    /// that session for a while.
+    #[error("this message is kept for a while for the session of yours that works on its item")]
+    Reserved {
+        /// When it may be delivered by any session of the member.
+        until: OffsetDateTime,
+    },
 }
 
 /// Decides whether `session` of `member` may deliver `subject` at `now`, given the member's
-/// delivery of it so far: the first claim wins, and every claim after it is refused, whichever
-/// session makes it.
+/// delivery of it so far and the reservation that keeps it for one session: the first claim wins,
+/// and every claim after it is refused, whichever session makes it; while a reservation stands,
+/// only its session may make the first.
 ///
 /// # Errors
-/// [`DeliveryRefused::Delivered`] when a delivery of the subject to the member exists.
+/// [`DeliveryRefused::Delivered`] when a delivery of the subject to the member exists;
+/// [`DeliveryRefused::Reserved`] while it is kept for another session.
 pub fn decide_delivery(
     existing: Option<&Delivery>,
+    reserved: Option<&Reservation>,
     member: MemberId,
     subject: DeliverySubject,
     session: SessionId,
@@ -131,6 +191,9 @@ pub fn decide_delivery(
             session: first.session,
             at: first.at,
         });
+    }
+    if let Some(kept) = reserved.filter(|kept| kept.session != session && now < kept.until) {
+        return Err(DeliveryRefused::Reserved { until: kept.until });
     }
     Ok(Delivery {
         member,
@@ -184,6 +247,7 @@ mod tests {
         let now = OffsetDateTime::UNIX_EPOCH + Duration::days(1);
         let first = decide_delivery(
             None,
+            None,
             MemberId(1),
             DeliverySubject::Message(MessageId(7)),
             SessionId(10),
@@ -195,6 +259,7 @@ mod tests {
             assert_eq!(
                 decide_delivery(
                     Some(&first),
+                    None,
                     MemberId(1),
                     DeliverySubject::Message(MessageId(7)),
                     session,
@@ -206,5 +271,102 @@ mod tests {
                 })
             );
         }
+    }
+
+    fn holder(push: bool, seen_ago: i64) -> ClaimSession {
+        ClaimSession {
+            session: SessionId(20),
+            push,
+            last_seen: OffsetDateTime::UNIX_EPOCH + Duration::days(1) - Duration::seconds(seen_ago),
+        }
+    }
+
+    #[test]
+    fn a_message_about_an_item_is_kept_for_a_minute_for_the_running_session_that_works_on_it() {
+        let posted = OffsetDateTime::UNIX_EPOCH + Duration::days(1);
+        let kept = reservation(posted, Some(&holder(true, 30)), posted).unwrap();
+        assert_eq!(
+            kept,
+            Reservation {
+                session: SessionId(20),
+                until: posted + RESERVED_FOR
+            }
+        );
+        assert_eq!(RESERVED_FOR, Duration::seconds(60));
+        assert!(
+            reservation(
+                posted,
+                Some(&holder(true, 30)),
+                posted + Duration::seconds(59)
+            )
+            .is_some()
+        );
+        assert_eq!(
+            reservation(
+                posted,
+                Some(&holder(true, 30)),
+                posted + Duration::seconds(60)
+            ),
+            None,
+            "the window is over"
+        );
+        assert_eq!(
+            reservation(posted, Some(&holder(false, 0)), posted),
+            None,
+            "a session that cannot be woken while idle hears it between its tool calls anyway"
+        );
+        assert_eq!(
+            reservation(posted, Some(&holder(true, 181)), posted),
+            None,
+            "a session that stopped announcing itself has most likely ended"
+        );
+        assert!(
+            reservation(posted, Some(&holder(true, -600)), posted).is_some(),
+            "a clock ahead"
+        );
+        assert_eq!(reservation(posted, None, posted), None);
+        assert!(PUSH_ANNOUNCE_EVERY < PUSH_SEEN_WITHIN);
+    }
+
+    #[test]
+    fn while_a_message_is_kept_only_its_session_delivers_it_and_after_the_window_anyone_may() {
+        let posted = OffsetDateTime::UNIX_EPOCH + Duration::days(1);
+        let kept = Reservation {
+            session: SessionId(20),
+            until: posted + RESERVED_FOR,
+        };
+        let subject = DeliverySubject::Message(MessageId(7));
+        let decide = |session: SessionId, at: OffsetDateTime| {
+            decide_delivery(None, Some(&kept), MemberId(1), subject.clone(), session, at)
+        };
+        assert_eq!(
+            decide(SessionId(21), posted + Duration::seconds(10)),
+            Err(DeliveryRefused::Reserved { until: kept.until })
+        );
+        assert_eq!(
+            decide(SessionId(20), posted + Duration::seconds(10))
+                .unwrap()
+                .session,
+            SessionId(20)
+        );
+        assert_eq!(
+            decide(SessionId(21), kept.until).unwrap().session,
+            SessionId(21)
+        );
+        let first = decide(SessionId(20), posted).unwrap();
+        assert!(
+            matches!(
+                decide_delivery(
+                    Some(&first),
+                    Some(&kept),
+                    MemberId(1),
+                    subject.clone(),
+                    SessionId(20),
+                    posted
+                ),
+                Err(DeliveryRefused::Delivered { .. })
+            ),
+            "once delivered, never again, the kept session included"
+        );
     }
 }

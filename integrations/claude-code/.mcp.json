@@ -2,7 +2,7 @@
   "mcpServers": {
     "dibs": {
       "command": "dibs",
-      "args": ["mcp"]
+      "args": ["mcp", "--host", "claude-code"]
     }
   }
 }

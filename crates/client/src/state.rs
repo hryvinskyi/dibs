@@ -9,7 +9,10 @@
 //! - `cache/<scope>/inbox.json` — the conversations with unread messages, the messages awaiting the
 //!   member's acknowledgement and those still to be delivered, the slots offered to them, when they
 //!   were fetched, and the deliveries this machine claimed;
-//! - `sessions/<scope>/delivery-<digest>.{json,lock}` — what one agent session was shown, and when;
+//! - `sessions/<scope>/delivery-<digest>.{json,lock}` — what one agent session was shown, and when,
+//!   and what was pushed to it while it waited;
+//! - `sessions/<scope>/activity-<digest>.{working,waiting}` — when that session last worked and last
+//!   began to wait for its person;
 //! - `cache/<scope>/held.json` — areas edit checks found the member holding, each with when;
 //! - `cache/<scope>/heartbeat`, `warned`, `sync-started` — when the last heartbeat was sent, when
 //!   the person was last warned about an unreachable server, when a background sync was last
@@ -34,7 +37,7 @@ use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{MessageId, SessionId, ThreadId};
+use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::message::{Importance, SessionLabel, Subject};
 use dibs_domain::settings::SettingsDocument;
 
@@ -122,6 +125,9 @@ pub struct RememberedMessage {
     pub id: MessageId,
     /// Its thread.
     pub thread: ThreadId,
+    /// The work item its thread is about, when it is about one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<ItemId>,
     /// Who wrote it.
     pub author: Handle,
     /// Whether dibs wrote it, in the project's name.
@@ -133,6 +139,9 @@ pub struct RememberedMessage {
     pub importance: Importance,
     /// Whether it awaits the member's acknowledgement.
     pub awaiting_ack: bool,
+    /// Whether acknowledging it grants something.
+    #[serde(default)]
+    pub ack_grants: bool,
     /// Its text.
     pub body: String,
 }
@@ -347,6 +356,24 @@ impl StateDir {
         Ok((
             self.sessions.join(format!("delivery-{name}.json")),
             self.sessions.join(format!("delivery-{name}.lock")),
+        ))
+    }
+
+    /// The files of one agent session's stamps — when it last worked and when it last began to
+    /// wait for its person — named as [`delivery_files`](Self::delivery_files) names its ledger:
+    /// `sessions/<scope>/activity-<digest>.working` and `.waiting`.
+    ///
+    /// # Errors
+    /// The file system's failure to make the directory.
+    pub fn activity_files(&self, host: &str, session: &str) -> io::Result<(PathBuf, PathBuf)> {
+        let (ledger, _) = self.delivery_files(host, session)?;
+        let name = ledger
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().replacen("delivery-", "activity-", 1))
+            .unwrap_or_default();
+        Ok((
+            self.sessions.join(format!("{name}.working")),
+            self.sessions.join(format!("{name}.waiting")),
         ))
     }
 

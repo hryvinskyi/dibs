@@ -489,5 +489,8 @@ fn doctor_lists_claude_code_with_what_it_carries() {
         .unwrap_or_else(|| panic!("{}", text(&out.stdout)));
     assert_eq!(host["capabilities"]["deny_edit"], true);
     assert_eq!(host["capabilities"]["tells_subagent"], true);
-    assert_eq!(host["capabilities"]["push_to_idle"], false);
+    assert_eq!(
+        host["capabilities"]["push_to_idle"], true,
+        "through its channel, once a session opts in"
+    );
 }

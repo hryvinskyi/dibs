@@ -1332,6 +1332,9 @@ pub struct Deliverable {
     /// Whether it awaits the caller's acknowledgement.
     #[serde(default)]
     pub awaiting_ack: bool,
+    /// Whether acknowledging it grants something, as a wide claim's announcement grants edits.
+    #[serde(default)]
+    pub ack_grants: bool,
 }
 
 /// A delivery claimed for one of the caller's sessions.

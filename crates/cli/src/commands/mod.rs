@@ -46,7 +46,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Read(args) => messages::read(args, ctx).await,
         Command::Slot(command) => slot::run(command, ctx).await,
         Command::Sync(args) => sync::sync(args, ctx).await,
-        Command::Mcp => crate::mcp::serve(ctx).await,
+        Command::Mcp(args) => crate::mcp::serve(args, ctx).await,
         Command::SelfUpdate(args) => self_update::self_update(args, ctx).await,
         Command::Admin(command) => admin::run(command, ctx).await,
     }

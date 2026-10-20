@@ -9,6 +9,7 @@
 //! | `pre-tool-use` | `PreToolUse` | `BeforeTool` |
 //! | `post-tool-use` | `PostToolUse` | `AfterTool` |
 //! | `user-prompt-submit` | `UserPromptSubmit` | `PromptSubmitted` |
+//! | `stop` | `Stop` | `Stopped` |
 //!
 //! **Input** is the object Claude Code writes to the hook's standard input: `session_id` and `cwd`
 //! always; `hook_event_name`, which must name the same event when present; `tool_name` and
@@ -23,15 +24,21 @@
 //!
 //! - a refusal before a tool runs is `hookSpecificOutput.permissionDecision: "deny"` with the
 //!   reason in `permissionDecisionReason`;
-//! - text for the agent is `hookSpecificOutput.additionalContext`, with `hookEventName`;
+//! - text for the agent is `hookSpecificOutput.additionalContext`, with `hookEventName`, on every
+//!   event but `Stop`, which reads it as feedback that keeps the turn going;
 //! - a line for the person is `systemMessage`;
 //! - nothing to say is no output at all.
+//!
+//! **A session waiting for its person** is woken through the [`channel`]: the tool server, run as
+//! `dibs mcp --host claude-code` and opted in for the session, pushes what would otherwise wait
+//! for the next tool call.
 //!
 //! No other `permissionDecision` is ever written. `"allow"` would skip the permission prompt the
 //! person's own settings ask for, and `"ask"` would add one they did not; "no objection" leaves
 //! Claude Code to decide exactly as it would without dibs. Claude Code reads exit status `2` as a
 //! block, so no reply uses it.
 
+pub mod channel;
 mod event;
 mod input;
 mod reply;
@@ -43,7 +50,9 @@ use dibs_agent_host::adapter::{HostAdapter, HostId, HostReply, ParseError, Probe
 use dibs_agent_host::capabilities::Capabilities;
 use dibs_agent_host::event::HostEvent;
 use dibs_agent_host::outcome::GuardOutcome;
+use dibs_agent_host::push::McpExtension;
 
+use crate::channel::ClaudeChannel;
 use crate::event::HookEvent;
 
 /// The Claude Code host.
@@ -68,7 +77,7 @@ impl HostAdapter for ClaudeCode {
             context_after_tool: true,
             context_at_prompt: true,
             tells_subagent: true,
-            push_to_idle: false,
+            push_to_idle: true,
         }
     }
 
@@ -93,5 +102,9 @@ impl HostAdapter for ClaudeCode {
                 meaning: "plugins installed from the dibs marketplace",
             },
         ]
+    }
+
+    fn push_extension(&self) -> Option<Box<dyn McpExtension>> {
+        Some(Box::new(ClaudeChannel))
     }
 }

@@ -11,6 +11,7 @@ use thiserror::Error;
 use crate::capabilities::Capabilities;
 use crate::event::HostEvent;
 use crate::outcome::GuardOutcome;
+use crate::push::McpExtension;
 
 /// A host's id: the name `dibs hook <host> <event>` takes and the agent label its sessions report.
 /// It is 1 to 32 characters of lowercase ASCII letters, digits and `-`, starting with a letter or
@@ -113,5 +114,11 @@ pub trait HostAdapter: Send + Sync {
     /// What shows the host's integration is installed on a machine; nothing by default.
     fn probes(&self) -> Vec<Probe> {
         Vec::new()
+    }
+
+    /// What the host adds to the tool server to wake a session waiting for its person: present
+    /// exactly when [`Capabilities::push_to_idle`] is set. None by default.
+    fn push_extension(&self) -> Option<Box<dyn McpExtension>> {
+        None
     }
 }

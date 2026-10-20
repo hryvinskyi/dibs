@@ -39,7 +39,7 @@ use crate::use_cases::common::existing_item;
 use crate::use_cases::escalate::{Case, item_about};
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::use_cases::wide_asks::Announcer;
-use crate::use_cases::writing::{Posted, SystemPost, SystemReply, system_body};
+use crate::use_cases::writing::{Posted, SystemPost, SystemReply, system_body, titled_body};
 use crate::work::Work;
 
 pub use narrow::{HandedOver, NarrowClaim, NarrowClaimInput, NarrowedClaim};
@@ -273,7 +273,7 @@ impl Handovers<'_> {
             },
             after = format_duration(self.settings.yield_escalates_after()),
         );
-        let body = system_body(&lead, None)?;
+        let body = titled_body(&lead, None)?;
         if let Some(thread) = pair.request
             && work.thread(project, thread).await?.is_some()
         {
@@ -381,7 +381,7 @@ impl Handovers<'_> {
             item: Some(handed.to),
             on_behalf_of: Author::System,
             to: Recipients::Members([receiving.member].into()),
-            body: system_body(&lead, None)?,
+            body: titled_body(&lead, None)?,
             importance: Importance::High,
             ack_required: false,
         }

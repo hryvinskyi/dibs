@@ -66,6 +66,7 @@ pub fn render(event: Option<HookEvent>, outcome: &GuardOutcome) -> HostReply {
         },
         GuardOutcome::NoObjection { context, notice } => Output {
             specific: event
+                .filter(|event| event.carries_context)
                 .zip(context.as_ref())
                 .map(|(event, context)| Specific {
                     additional_context: Some(context.as_str()),

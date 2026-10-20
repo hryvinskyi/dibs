@@ -18,3 +18,5 @@ serde_json = "1.0.154"
 
 [dev-dependencies]
 dibs-agent-host = { path = "../agent-host", features = ["conformance"] }
+dibs-domain = { path = "../domain" }
+time = "0.3.55"

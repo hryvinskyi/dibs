@@ -110,6 +110,13 @@ pub enum HostEvent {
         /// The thread it reaches.
         thread: Thread,
     },
+    /// The main agent finished its turn and the session waits for its person.
+    Stopped {
+        /// The session.
+        session_key: SessionKey,
+        /// Its working directory.
+        cwd: PathBuf,
+    },
 }
 
 impl HostEvent {
@@ -120,6 +127,7 @@ impl HostEvent {
             Self::BeforeTool { .. } => EventKind::BeforeTool,
             Self::AfterTool { .. } => EventKind::AfterTool,
             Self::PromptSubmitted { .. } => EventKind::PromptSubmitted,
+            Self::Stopped { .. } => EventKind::Stopped,
         }
     }
 
@@ -129,7 +137,8 @@ impl HostEvent {
             Self::SessionStarted { session_key, .. }
             | Self::BeforeTool { session_key, .. }
             | Self::AfterTool { session_key, .. }
-            | Self::PromptSubmitted { session_key, .. } => session_key,
+            | Self::PromptSubmitted { session_key, .. }
+            | Self::Stopped { session_key, .. } => session_key,
         }
     }
 
@@ -139,7 +148,8 @@ impl HostEvent {
             Self::SessionStarted { cwd, .. }
             | Self::BeforeTool { cwd, .. }
             | Self::AfterTool { cwd, .. }
-            | Self::PromptSubmitted { cwd, .. } => cwd,
+            | Self::PromptSubmitted { cwd, .. }
+            | Self::Stopped { cwd, .. } => cwd,
         }
     }
 }
@@ -156,24 +166,29 @@ pub enum EventKind {
     AfterTool,
     /// [`HostEvent::PromptSubmitted`].
     PromptSubmitted,
+    /// [`HostEvent::Stopped`].
+    Stopped,
 }
 
 impl EventKind {
     /// Every kind.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::SessionStarted,
         Self::BeforeTool,
         Self::AfterTool,
         Self::PromptSubmitted,
+        Self::Stopped,
     ];
 
-    /// The kind's name: `session_started`, `before_tool`, `after_tool`, `prompt_submitted`.
+    /// The kind's name: `session_started`, `before_tool`, `after_tool`, `prompt_submitted`,
+    /// `stopped`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SessionStarted => "session_started",
             Self::BeforeTool => "before_tool",
             Self::AfterTool => "after_tool",
             Self::PromptSubmitted => "prompt_submitted",
+            Self::Stopped => "stopped",
         }
     }
 }

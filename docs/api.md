@@ -77,7 +77,7 @@ cause of an internal failure and answers `internal`.
 | `403` | `forbidden`, `not_holder` (details: `holder`; for a slot and a review too), `not_grantor`, `not_a_recipient` (an acknowledgement or a delivery for somebody a message did not reach), `not_author` |
 | `404` | `not_found` (also: a record of another project, and a conversation the caller may not read), `unknown_slot` (`slot`) |
 | `405` | `method_not_allowed` |
-| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`; for an area another claim waits for also `waiting`, `own`), `kind_fixed` (`kind`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal`, `claim_stale`, `pr_recorded` (`item`, `item_ref`, `holder`), `pr_not_recorded` (`pr`) |
+| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`; for an area another claim waits for also `waiting`, `own`), `kind_fixed` (`kind`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `reserved` (`until`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal`, `claim_stale`, `pr_recorded` (`item`, `item_ref`, `holder`), `pr_not_recorded` (`pr`) |
 | `410` | `cursor_expired` (details: `pruned_through`) |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
@@ -233,7 +233,8 @@ day.
 
 `POST /v1/sessions`, body `{ "host": "laptop", "label": "laptop/cli", "agent": "cli", "push": false }`; `host`, `label`
 and `agent` are required, `push` (default `false`) says the session can be woken while idle. Answers `200` with the
-session. A label registers once per member; registering it again updates the session and keeps its id.
+session. A label registers once per member; registering it again updates the session, keeps its id and counts as the
+session's sign of life: a session that can be woken registers again every minute while it runs.
 
 `POST /v1/heartbeat`, body `{ "session_id": 7, "repo": "api", "branch": "bob/42-refunds" }`, answers
 `{ "refreshed": [12] }`: the items whose claims the heartbeat kept alive. A claim is *live* while its holder was seen
@@ -784,7 +785,8 @@ acknowledgement they have not given. A conversation the caller may not read is r
 does not exist. Every inbox answer carries `"offers": [{ "slot": "deploy:prod", "until": "…" }, …]`: the slots offered
 to the caller now, each theirs if they take it before `until` (what time changed about the slots is applied first).
 With `deliverable=1` the answer also carries `"deliverable": [{ "thread": thread, "message": message, "awaiting_ack":
-true }, …]`, newest first, at most 20: the messages still to be delivered to the caller's agent while it works — written
+true, "ack_grants": false }, …]`, newest first, at most 20 (`ack_grants` is `true` for a wide claim's announcement, whose
+acknowledgement grants edits, so a client never asks an agent to acknowledge it unattended): the messages still to be delivered to the caller's agent while it works — written
 by someone else within the last day, reaching the caller, `high` or `urgent` and unread or awaiting the caller's
 acknowledgement, and not yet delivered to any of the caller's sessions. A wide claim's announcement whose wide claim has
 ended is in neither `unacked` nor `deliverable`, and is not counted as awaiting an acknowledgement: it asks for nothing
@@ -799,13 +801,19 @@ starting a thread, and held to the same hourly limit), answers `201 { "message":
 
 ### Delivery to a running session
 
-A pressing message or a slot offered to a member reaches their agent between its tool calls (the guard's hooks show it).
-A member runs several sessions, so each subject is delivered once per member: the first of their sessions to claim it
-delivers it, and every later claim, from any session, is refused. Claiming appends no event.
+A pressing message or a slot offered to a member reaches their agent between its tool calls (the guard's hooks show it),
+or is pushed to a session that waits for its person by a tool server that can wake it. A member runs several sessions,
+so each subject is delivered once per member: the first of their sessions to claim it delivers it, and every later
+claim, from any session, is refused. Claiming appends no event.
+
+A message in a conversation about a work item is kept, for 60 seconds after it was posted, for the session that took or
+last renewed the caller's live claim on that item, when that session can be woken while idle (`push: true`) and was
+registered or seen within the last three minutes. Meanwhile a claim from any other of the caller's sessions is refused
+with `reserved`; afterwards the first claim wins as usual.
 
 `POST /v1/messages/{id}/deliver`, body `{ "session_id": 9 }`, claims a message for the caller's session `session_id`.
 Answers `201 { "delivery": { "subject": "41", "session_id": 9, "at": "…" } }`. Refusals: `delivered` (`409`, details
-the `session_id` that claimed it and `at`), `not_a_recipient` (`403`) for a message the caller wrote or was not sent,
+the `session_id` that claimed it and `at`), `reserved` (`409`, details `until`, when another session may claim it), `not_a_recipient` (`403`) for a message the caller wrote or was not sent,
 `not_found` for a message in a conversation the caller may not read or a session that is not theirs.
 
 `POST /v1/slots/{name}/offer/deliver`, body `{ "session_id": 9, "until": "2026-03-02T09:05:00Z" }`, claims the offer of

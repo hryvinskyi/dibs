@@ -193,7 +193,7 @@ impl Connection {
     /// # Errors
     /// The [`Failure`] of the call.
     pub async fn session(&self) -> Result<SessionId, Failure> {
-        let session = self.register(AGENT, AGENT).await?;
+        let session = self.register(AGENT, AGENT, false).await?;
         if let Err(error) = self.state.remember_session(&session) {
             tracing::debug!(error = %error, "the session could not be remembered");
         }
@@ -201,17 +201,18 @@ impl Connection {
     }
 
     /// Registers a session of the given kind of agent, labelled `<host>/<name>` (registering the
-    /// same label again keeps its id). The session cannot be woken while idle.
+    /// same label again keeps its id and counts as its sign of life), saying whether it can be
+    /// woken while idle.
     ///
     /// # Errors
     /// The [`Failure`] of the call, or a configuration one when the agent kind or the machine's
     /// name cannot make a valid label.
-    pub async fn register(&self, agent: &str, name: &str) -> Result<Session, Failure> {
+    pub async fn register(&self, agent: &str, name: &str, push: bool) -> Result<Session, Failure> {
         let request = RegisterSession {
             host: host_name()?,
             label: label_named(name)?,
             agent: AgentLabel::parse(agent).map_err(|_| unnamed_machine())?,
-            push: false,
+            push,
         };
         self.client
             .register_session(&request)

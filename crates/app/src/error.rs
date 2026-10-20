@@ -218,6 +218,7 @@ impl AppError {
                 DeliveryRefused::NotRecipient => "not_a_recipient",
                 DeliveryRefused::OfferGone => "offer_gone",
                 DeliveryRefused::Delivered { .. } => "delivered",
+                DeliveryRefused::Reserved { .. } => "reserved",
             },
             Self::ImportanceLimited(_) => "importance_limited",
             Self::Claim(refused) => match refused.reason {

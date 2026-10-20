@@ -3,7 +3,8 @@
 //! <event>` and acts on the reply.
 //!
 //! Protocol 1. The event is the command's argument: `session-started`, `before-tool`,
-//! `after-tool` or `prompt-submitted`. The input on standard input is one JSON object:
+//! `after-tool`, `prompt-submitted` or `stopped` (the main agent finished its turn and the session
+//! waits for its person). The input on standard input is one JSON object:
 //!
 //! ```json
 //! {"protocol": 1, "session": "s-1", "cwd": "/work/api", "thread": "main",
@@ -137,6 +138,7 @@ impl HostAdapter for Neutral {
                 cwd,
                 thread,
             },
+            EventName::Stopped => HostEvent::Stopped { session_key, cwd },
         })
     }
 
@@ -165,6 +167,7 @@ enum EventName {
     BeforeTool,
     AfterTool,
     PromptSubmitted,
+    Stopped,
 }
 
 impl EventName {
@@ -174,6 +177,7 @@ impl EventName {
             "before-tool" => Some(Self::BeforeTool),
             "after-tool" => Some(Self::AfterTool),
             "prompt-submitted" => Some(Self::PromptSubmitted),
+            "stopped" => Some(Self::Stopped),
             _ => None,
         }
     }
@@ -280,6 +284,14 @@ pub fn fixtures() -> crate::conformance::Fixtures {
                 session_key: key("s-1"),
                 cwd: PathBuf::from("/work"),
                 thread: Thread::Unknown,
+            },
+        ),
+        EventFixture::parses(
+            "stopped",
+            br#"{"protocol":1,"session":"s-1","cwd":"/work"}"#,
+            HostEvent::Stopped {
+                session_key: key("s-1"),
+                cwd: PathBuf::from("/work"),
             },
         ),
         EventFixture::parses(

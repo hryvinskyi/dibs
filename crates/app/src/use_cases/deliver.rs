@@ -6,9 +6,12 @@ use std::sync::Arc;
 
 use time::OffsetDateTime;
 
-use dibs_domain::delivery::{Delivery, DeliveryRefused, DeliverySubject, decide_delivery};
+use dibs_domain::delivery::{
+    ClaimSession, Delivery, DeliveryRefused, DeliverySubject, Reservation, decide_delivery,
+    reservation,
+};
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::{MessageId, SessionId};
+use dibs_domain::ids::{ItemId, MessageId, SessionId};
 use dibs_domain::slot::SlotName;
 
 use crate::actor::Actor;
@@ -38,7 +41,10 @@ pub enum DeliveryAsk {
 /// Claims the delivery of a message or an offer for one session of the caller, in one
 /// transaction. A message must reach the caller (they are one of its recipients, never its
 /// author); an offer must stand, to the caller, with that deadline, after what time alone changed
-/// about the slots is applied. Claiming records no event: it changes nothing anyone else sees.
+/// about the slots is applied. A message about a work item the caller holds a live claim on is
+/// kept, for a while after it was posted, for the session that took or last renewed that claim
+/// when that session can be woken while idle and is running. Claiming records no event: it
+/// changes nothing anyone else sees.
 pub struct ClaimDelivery {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -64,8 +70,9 @@ impl ClaimDelivery {
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for a session that is not
     /// the caller's or a message they may not read; [`AppError::Delivery`] when the message does
-    /// not reach them, the offer does not stand, or the subject was delivered to them already;
-    /// [`AppError::Store`] when the store fails.
+    /// not reach them, the offer does not stand, the subject was delivered to them already, or the
+    /// message is kept for another of their sessions; [`AppError::StoredSettings`] when the stored
+    /// settings cannot be read; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
@@ -77,14 +84,21 @@ impl ClaimDelivery {
         let project = actor.project;
         let mut work = Work::begin_for(&*self.store, actor).await?;
         own_session(&mut work, actor, session).await?;
-        let subject = match ask {
+        let (subject, kept) = match ask {
             DeliveryAsk::Message(id) => {
                 let (message, thread) = readable_message(&mut work, actor, id).await?;
                 let people = people(&mut work).await?;
                 if !reached(&thread, &message, &people).contains(&actor.member) {
                     return Err(DeliveryRefused::NotRecipient.into());
                 }
-                DeliverySubject::Message(id)
+                let kept = match thread.item {
+                    Some(item) => {
+                        self.kept_for(&mut work, actor, item, message.created_at, now)
+                            .await?
+                    }
+                    None => None,
+                };
+                (DeliverySubject::Message(id), kept)
             }
             DeliveryAsk::Offer { slot, until } => {
                 let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
@@ -96,14 +110,52 @@ impl ClaimDelivery {
                     work.commit(&*self.notifier).await?;
                     return Err(DeliveryRefused::OfferGone.into());
                 }
-                DeliverySubject::Offer { slot, until }
+                (DeliverySubject::Offer { slot, until }, None)
             }
         };
         let existing = work.delivery(project, actor.member, &subject).await?;
-        let delivery = decide_delivery(existing.as_ref(), actor.member, subject, session, now)?;
+        let delivery = decide_delivery(
+            existing.as_ref(),
+            kept.as_ref(),
+            actor.member,
+            subject,
+            session,
+            now,
+        )?;
         work.insert_delivery(project, &delivery).await?;
         work.commit(&*self.notifier).await?;
         Ok(delivery)
+    }
+
+    /// The session a message posted at `posted_at` about `item` is kept for: the one that took or
+    /// last renewed the caller's live claim on the item, as the domain's rule reads it.
+    async fn kept_for(
+        &self,
+        work: &mut Work,
+        actor: &Actor,
+        item: ItemId,
+        posted_at: OffsetDateTime,
+        now: OffsetDateTime,
+    ) -> Result<Option<Reservation>, AppError> {
+        let Some(claim) = work.claim(actor.project, item).await? else {
+            return Ok(None);
+        };
+        if claim.member != actor.member {
+            return Ok(None);
+        }
+        let settings = work.project_settings(&self.hot_rules).await?;
+        if !claim.is_live(now, settings.stale_after()) {
+            return Ok(None);
+        }
+        let holder = work
+            .session(actor.project, claim.session)
+            .await?
+            .map(|session| ClaimSession {
+                session: session.id,
+                push: session.push,
+                last_seen: session.last_seen,
+            });
+        Ok(reservation(posted_at, holder.as_ref(), now))
     }
 }
 
@@ -115,12 +167,70 @@ mod tests {
     use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
     use dibs_domain::slot::Purpose;
 
+    use dibs_domain::session::{AgentLabel, HostName};
+
     use super::*;
     use crate::use_cases::testing::{Env, session};
     use crate::use_cases::{
-        Addressees, HoldMode, ReleaseSlot, ReleaseSlotInput, StartThread, StartThreadInput,
-        TakeSlot, TakeSlotInput,
+        Addressees, ClaimItem, ClaimItemInput, HoldMode, RegisterSession, RegisterSessionInput,
+        ReleaseSlot, ReleaseSlotInput, StartThread, StartThreadInput, TakeSlot, TakeSlotInput,
     };
+
+    /// Registers a session of bob's that can be woken while idle, or not.
+    async fn bobs(env: &Env, label: &str, push: bool) -> SessionId {
+        RegisterSession::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                RegisterSessionInput {
+                    host: HostName::parse("laptop").unwrap(),
+                    label: SessionLabel::parse(label).unwrap(),
+                    agent: AgentLabel::parse("mcp").unwrap(),
+                    push,
+                },
+            )
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// Bob claims `item` from `session`.
+    async fn bob_claims(env: &Env, item: ItemId, session: SessionId) {
+        ClaimItem::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                ClaimItemInput {
+                    wide: None,
+                    item,
+                    session,
+                    areas: Vec::new(),
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    /// An urgent message from alice to bob about `item`.
+    async fn about(env: &Env, item: Option<ItemId>) -> MessageId {
+        StartThread::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                StartThreadInput {
+                    subject: Subject::parse("The schema changes").unwrap(),
+                    to: Addressees::Members(vec![Handle::parse("bob").unwrap()]),
+                    item,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("Rebase before you migrate.").unwrap(),
+                    importance: Importance::Urgent,
+                    ack_required: false,
+                },
+            )
+            .await
+            .unwrap()
+            .message
+            .record
+            .id
+    }
 
     async fn urgent_to_bob(env: &Env) -> MessageId {
         StartThread::new(&env.deps)
@@ -306,6 +416,122 @@ mod tests {
                 .code(),
             "offer_gone",
             "a lapsed offer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_about_an_item_is_kept_a_minute_for_the_session_that_can_be_woken_and_works_on_it()
+     {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#42").await;
+        let working = bobs(&env, "laptop/mcp-1", true).await;
+        let neighbour = bobs(&env, "laptop/mcp-2", true).await;
+        bob_claims(&env, item, working).await;
+        let message = about(&env, Some(item)).await;
+        let posted = env.now();
+        let claim = ClaimDelivery::new(&env.deps);
+        env.advance(Duration::seconds(30));
+        let refused = claim
+            .execute(&env.bob.actor, neighbour, DeliveryAsk::Message(message))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "reserved");
+        assert!(matches!(
+            refused,
+            AppError::Delivery(DeliveryRefused::Reserved { until }) if until == posted + Duration::seconds(60)
+        ));
+        let won = claim
+            .execute(&env.bob.actor, working, DeliveryAsk::Message(message))
+            .await
+            .unwrap();
+        assert_eq!(won.session, working);
+
+        let later = about(&env, Some(item)).await;
+        env.advance(Duration::seconds(60));
+        assert_eq!(
+            claim
+                .execute(&env.bob.actor, neighbour, DeliveryAsk::Message(later))
+                .await
+                .unwrap()
+                .session,
+            neighbour,
+            "once the minute is over, the first session to claim it delivers it"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_is_kept_without_an_item_a_claim_of_the_recipient_or_a_running_session_that_can_be_woken()
+     {
+        let env = Env::new().await;
+        let claim = ClaimDelivery::new(&env.deps);
+        let first = |message: MessageId, session: SessionId| {
+            let claim = &claim;
+            let actor = env.bob.actor.clone();
+            async move {
+                claim
+                    .execute(&actor, session, DeliveryAsk::Message(message))
+                    .await
+                    .map(|delivery| delivery.session)
+            }
+        };
+        let neighbour = bobs(&env, "laptop/mcp-2", true).await;
+
+        let no_item = about(&env, None).await;
+        assert_eq!(first(no_item, neighbour).await.unwrap(), neighbour);
+
+        let item = env.item("gh:acme/widgets#42").await;
+        let unclaimed = about(&env, Some(item)).await;
+        assert_eq!(
+            first(unclaimed, neighbour).await.unwrap(),
+            neighbour,
+            "nobody holds the item"
+        );
+
+        let hooked = bobs(&env, "laptop/5b9c0e1a", false).await;
+        bob_claims(&env, item, hooked).await;
+        let to_hooks = about(&env, Some(item)).await;
+        assert_eq!(
+            first(to_hooks, neighbour).await.unwrap(),
+            neighbour,
+            "the claim's session cannot be woken while idle"
+        );
+
+        let working = bobs(&env, "laptop/mcp-1", true).await;
+        bob_claims(&env, item, working).await;
+        let kept = about(&env, Some(item)).await;
+        assert_eq!(
+            first(kept, neighbour).await.unwrap_err().code(),
+            "reserved",
+            "the renewed claim names the session that can be woken"
+        );
+        env.advance(Duration::minutes(4));
+        let gone_quiet = about(&env, Some(item)).await;
+        assert_eq!(
+            first(gone_quiet, neighbour).await.unwrap(),
+            neighbour,
+            "the claim's session stopped announcing itself"
+        );
+
+        let alices = env.item("gh:acme/widgets#43").await;
+        ClaimItem::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                ClaimItemInput {
+                    wide: None,
+                    item: alices,
+                    session: env.alice.session,
+                    areas: Vec::new(),
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        bobs(&env, "laptop/mcp-1", true).await;
+        let others = about(&env, Some(alices)).await;
+        assert_eq!(
+            first(others, neighbour).await.unwrap(),
+            neighbour,
+            "the item is another member's"
         );
     }
 }

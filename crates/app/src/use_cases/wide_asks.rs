@@ -26,7 +26,7 @@ use crate::named::{ItemName, NamedGrant, Names};
 use crate::ports::{IdGen, StoreError};
 use crate::records::GrantRecord;
 use crate::use_cases::common::existing_item;
-use crate::use_cases::writing::{Posted, SystemPost};
+use crate::use_cases::writing::{Posted, SystemPost, TITLE_NOTE};
 use crate::work::Work;
 
 /// How many areas the text of an announcement lists by name before it counts the rest.
@@ -210,7 +210,8 @@ fn body(
         text,
         "\nYou hold {listed}. A wide claim holds none of the areas it names, so {from}'s edits there wait for your answer.\
          \nAcknowledge this message (dibs_ack, or dibs ack {message}) to grant {from} edits in {listed} for that work item; the grant ends when either claim ends.\
-         \nIf the change should not happen there now, do not acknowledge it: reply in this thread instead."
+         \nIf the change should not happen there now, do not acknowledge it: reply in this thread instead.\
+         \n{TITLE_NOTE}"
     );
     Body::parse(&text).map_err(|_| unwritable("the text of an announcement"))
 }
