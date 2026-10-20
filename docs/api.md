@@ -46,7 +46,8 @@ Roles: `member` and `admin` are people; `importer` is an integration that feeds 
 integration holds no claim, receives no message and reads no conversation. Its token may call exactly the routes marked
 *any* and *import* below — `GET /v1/version`, `GET /v1/me`, `GET /v1/members`, `GET /v1/events`, `GET`, `POST` and `PUT /v1/items`,
 `GET /v1/items/{id}`, `GET /v1/ready`, `GET /v1/slots` and `GET /v1/slots/{name}`, `POST /v1/slots/{name}/run-finished`,
-`POST /v1/prs/merged`, `POST /v1/prs/closed`, `GET /v1/review-claims` and `GET /v1/pr-status` — and every other route
+`POST /v1/prs/merged`, `POST /v1/prs/closed`, `POST /v1/prs/state`, `GET /v1/review-claims`, `GET /v1/claims`,
+`GET /v1/pr-status` and `PUT /v1/items/{id}/footprint` — and every other route
 answers it `403 forbidden`. An integration's calls are recorded, at most one a minute: `GET /v1/status` says when they
 all went silent, while the project's reviews rely on them. Routes marked *people*,
 *import* and *admin* answer `403 forbidden` to a role they do not name before they read the request.
