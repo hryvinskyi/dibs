@@ -7,7 +7,8 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 
 use crate::area::QualifiedArea;
-use crate::ids::{ItemId, MemberId, SessionId};
+use crate::handover::{ClaimKind, PendingArea, pending_elsewhere};
+use crate::ids::{ItemId, MemberId, SessionId, ThreadId};
 use crate::member::Role;
 use crate::radar::BranchName;
 use crate::repo::RepoId;
@@ -44,6 +45,11 @@ pub struct Claim {
     /// The branch its work is on in each repository, the last one its holder's checkout was seen
     /// on there.
     pub branches: BTreeMap<RepoId, BranchName>,
+    /// Whether its work is a feature or debt work; fixed when the claim is made.
+    pub kind: ClaimKind,
+    /// The areas it declared that another member's debt claim holds, each waiting to be handed
+    /// over from that claim. Disjoint from `areas`, and only a feature claim has any.
+    pub pending: BTreeMap<QualifiedArea, PendingArea>,
 }
 
 impl Claim {
@@ -63,6 +69,32 @@ impl Claim {
     /// not held.
     pub fn holds(&self, area: &QualifiedArea) -> bool {
         self.areas.contains(area)
+    }
+
+    /// Whether the claim waits for the area to be handed over to it.
+    pub fn waits_for(&self, area: &QualifiedArea) -> bool {
+        self.pending.contains_key(area)
+    }
+
+    /// The conversation that asks the debt claim on `from` for the areas this claim waits for from
+    /// it, when one was started.
+    pub fn request_from(&self, from: ItemId) -> Option<ThreadId> {
+        self.pending
+            .values()
+            .filter(|pending| pending.from == from)
+            .find_map(|pending| pending.request)
+    }
+
+    /// Records `thread` as the conversation asking the debt claim on `from` for every area this
+    /// claim waits for from it.
+    pub fn note_request(&mut self, from: ItemId, thread: ThreadId) {
+        for pending in self
+            .pending
+            .values_mut()
+            .filter(|pending| pending.from == from)
+        {
+            pending.request = Some(thread);
+        }
     }
 
     /// Whether the claim is wide and its scope names the area.
@@ -109,6 +141,10 @@ pub struct ClaimRequest {
     /// The scope to announce the claim over, for a wide claim. A renewal adds these areas to the
     /// scope the claim had and takes this reason; without one, the claim keeps the scope it had.
     pub wide: Option<WideScope>,
+    /// The kind of a new claim; `None` for a feature. A claim keeps the kind it was made with: a
+    /// renewal naming another kind is refused, and a takeover without one carries on the previous
+    /// claim's kind.
+    pub kind: Option<ClaimKind>,
 }
 
 /// What a successful claim did.
@@ -135,6 +171,18 @@ impl ClaimOutcome {
     pub fn claim(&self) -> &Claim {
         match self {
             Self::New { claim } | Self::Renewed { claim, .. } => claim,
+        }
+    }
+
+    /// The same outcome for the claim as it was stored in the end.
+    #[must_use]
+    pub fn with_claim(self, claim: Claim) -> Self {
+        match self {
+            Self::New { .. } => Self::New { claim },
+            Self::Renewed { dropped_areas, .. } => Self::Renewed {
+                claim,
+                dropped_areas,
+            },
         }
     }
 }
@@ -192,16 +240,49 @@ pub enum ClaimRefused {
         /// The area.
         area: QualifiedArea,
     },
+    /// A declared area waits already to be handed over to another claim: the requester's own, or
+    /// another member's.
+    #[error("{}", waited_text(area, *item, *own))]
+    AreaWaited {
+        /// The area.
+        area: QualifiedArea,
+        /// The member of the claim that waits for it.
+        member: MemberId,
+        /// That claim's item.
+        item: ItemId,
+        /// Whether that claim is the requester's own.
+        own: bool,
+    },
+    /// The request names another kind than the claim was made with.
+    #[error(
+        "the claim was made as {}; release it and claim again to change it",
+        kind.code()
+    )]
+    KindFixed {
+        /// The kind the claim has.
+        kind: ClaimKind,
+    },
+}
+
+/// How a refusal says that another claim already waits for an area.
+fn waited_text(area: &QualifiedArea, item: ItemId, own: bool) -> String {
+    if own {
+        format!("your claim #{item} already waits for {area} to be handed over")
+    } else {
+        format!("the area {area} is waited for by another member's claim #{item}")
+    }
 }
 
 /// Decides a claim on an item.
 ///
 /// `current` is the item's stored claim, `others` the project's other claims (stale ones are
 /// ignored). An area belongs to one member at a time: a requested area another member's live claim
-/// holds refuses the whole claim. The same member may hold an area under several claims. A wide
-/// claim holds none of the areas its scope names, so another member's wide claim never refuses an
-/// area; but one area is named by one live wide claim at a time, and a claim never both holds and
-/// names one area.
+/// holds refuses the whole claim — unless this is a feature claim and that holder's is debt work:
+/// then the area is pending on the new claim, waiting to be handed over. An area is pending for one
+/// claim at a time, so a requested area another claim already waits for refuses the whole claim
+/// too. The same member may hold an area under several claims. A wide claim holds none of the areas
+/// its scope names, so another member's wide claim never refuses an area; but one area is named by
+/// one live wide claim at a time, and a claim never both holds (or waits for) and names one area.
 ///
 /// # Errors
 /// [`ClaimRefused`] naming the first conflict: the item first, then the areas in order.
@@ -215,16 +296,34 @@ pub fn decide_claim(
     let stale_after = settings.stale_after();
     match current {
         Some(existing) if existing.member == request.by => {
-            check_areas(&request.areas, others, request, now, settings)?;
+            if request.kind.is_some_and(|kind| kind != existing.kind) {
+                return Err(ClaimRefused::KindFixed {
+                    kind: existing.kind,
+                });
+            }
+            let live = existing.is_live(now, stale_after);
+            let own_held = if live {
+                existing.areas.clone()
+            } else {
+                BTreeSet::new()
+            };
+            let takes = check_areas(
+                &request.areas,
+                others,
+                request,
+                existing.kind,
+                &own_held,
+                now,
+                settings,
+            )?;
             let (kept, mut dropped_areas) =
-                keep_free_areas(&existing.areas, others, request, now, settings);
-            let mut areas = kept;
-            areas.extend(request.areas.iter().cloned());
+                keep_free_areas(&existing.areas, others, request, !live, now, settings);
+            let (areas, pending) = declare(kept, existing.pending.clone(), &request.areas, &takes);
             let (wide, dropped_wide) = settle_wide(
                 existing.wide.as_ref(),
                 others,
                 request,
-                &areas,
+                &held_or_waited(&areas, &pending),
                 now,
                 settings,
             )?;
@@ -233,6 +332,7 @@ pub fn decide_claim(
                 session: request.session,
                 host: request.host.clone(),
                 areas,
+                pending,
                 wide,
                 renewed_at: now,
                 last_seen: now,
@@ -253,10 +353,28 @@ pub fn decide_claim(
             last_seen: existing.last_seen,
         }),
         None => {
-            check_areas(&request.areas, others, request, now, settings)?;
-            let (wide, _) = settle_wide(None, others, request, &request.areas, now, settings)?;
+            let kind = request.kind.unwrap_or_default();
+            let takes = check_areas(
+                &request.areas,
+                others,
+                request,
+                kind,
+                &BTreeSet::new(),
+                now,
+                settings,
+            )?;
+            let (areas, pending) =
+                declare(BTreeSet::new(), BTreeMap::new(), &request.areas, &takes);
+            let (wide, _) = settle_wide(
+                None,
+                others,
+                request,
+                &held_or_waited(&areas, &pending),
+                now,
+                settings,
+            )?;
             Ok(ClaimOutcome::New {
-                claim: new_claim(request, request.areas.clone(), wide, now),
+                claim: new_claim(request, kind, areas, pending, wide, now),
             })
         }
     }
@@ -268,11 +386,13 @@ pub struct Takeover {
     /// The stale claim that ends.
     pub previous: Claim,
     /// The claim to store. It declares the requested areas and those of the previous claim that
-    /// nobody else holds now, and carries on the previous claim's wide scope as far as no other
-    /// live wide claim names it now.
+    /// nobody else holds or waits for now, carries on the previous claim's kind unless the request
+    /// names one, the areas the previous claim waited for when it is a feature claim, and the
+    /// previous claim's wide scope as far as no other live wide claim names it now.
     pub claim: Claim,
     /// Areas of the previous claim it does not get: another member's live claim holds them,
-    /// another live wide claim names them, or the settings no longer declare them.
+    /// another claim waits for them to be handed over, another live wide claim names them, or the
+    /// settings no longer declare them.
     pub dropped_areas: BTreeSet<QualifiedArea>,
 }
 
@@ -325,6 +445,18 @@ pub enum TakeoverRefused {
         /// The area.
         area: QualifiedArea,
     },
+    /// A requested area waits already to be handed over to another claim.
+    #[error("{}", waited_text(area, *item, *own))]
+    AreaWaited {
+        /// The area.
+        area: QualifiedArea,
+        /// The member of the claim that waits for it.
+        member: MemberId,
+        /// That claim's item.
+        item: ItemId,
+        /// Whether that claim is the requester's own.
+        own: bool,
+    },
 }
 
 /// Decides an explicit takeover of the item's claim. Only another member's stale claim can be taken.
@@ -348,22 +480,36 @@ pub fn decide_takeover(
             last_seen: previous.last_seen,
         });
     }
-    check_areas(&request.areas, others, request, now, settings)?;
-    let (mut areas, mut dropped_areas) =
-        keep_free_areas(&previous.areas, others, request, now, settings);
-    areas.extend(request.areas.iter().cloned());
+    let kind = request.kind.unwrap_or(previous.kind);
+    let takes = check_areas(
+        &request.areas,
+        others,
+        request,
+        kind,
+        &BTreeSet::new(),
+        now,
+        settings,
+    )?;
+    let (kept, mut dropped_areas) =
+        keep_free_areas(&previous.areas, others, request, true, now, settings);
+    let inherited = if kind.takes_from(ClaimKind::Debt) {
+        previous.pending.clone()
+    } else {
+        BTreeMap::new()
+    };
+    let (areas, pending) = declare(kept, inherited, &request.areas, &takes);
     let (wide, dropped_wide) = settle_wide(
         previous.wide.as_ref(),
         others,
         request,
-        &areas,
+        &held_or_waited(&areas, &pending),
         now,
         settings,
     )?;
     dropped_areas.extend(dropped_wide);
     Ok(Takeover {
         previous: previous.clone(),
-        claim: new_claim(request, areas, wide, now),
+        claim: new_claim(request, kind, areas, pending, wide, now),
         dropped_areas,
     })
 }
@@ -424,6 +570,50 @@ pub fn decide_release(current: Option<&Claim>, by: MemberId) -> Result<Released,
 pub fn decide_complete(current: Option<&Claim>, by: MemberId) -> Result<Completed, HolderOnly> {
     holder_only(current, by).map(|claim| Completed {
         claim: claim.clone(),
+    })
+}
+
+/// A claim its holder narrowed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Narrowed {
+    /// The claim to store: it neither holds nor waits for the areas any more, and was seen now.
+    pub claim: Claim,
+    /// The areas it gave up: those asked for that it held or waited for, in order.
+    pub areas: BTreeSet<QualifiedArea>,
+    /// The waits it gave up, by area, as they stood.
+    pub withdrawn: BTreeMap<QualifiedArea, PendingArea>,
+}
+
+/// Decides a narrowing: the holder gives areas of their claim up, live or stale, and stops waiting
+/// for any of them that are pending. An area the claim neither holds nor waits for is no part of
+/// it, so asking for it changes nothing.
+///
+/// # Errors
+/// [`HolderOnly`] when nobody or somebody else holds the item.
+pub fn decide_narrow(
+    current: Option<&Claim>,
+    by: MemberId,
+    areas: &BTreeSet<QualifiedArea>,
+    now: OffsetDateTime,
+) -> Result<Narrowed, HolderOnly> {
+    let mut claim = holder_only(current, by)?.clone();
+    let given: BTreeSet<QualifiedArea> = areas
+        .iter()
+        .filter(|area| claim.holds(area) || claim.waits_for(area))
+        .cloned()
+        .collect();
+    let mut withdrawn = BTreeMap::new();
+    for area in &given {
+        claim.areas.remove(area);
+        if let Some(pending) = claim.pending.remove(area) {
+            withdrawn.insert(area.clone(), pending);
+        }
+    }
+    claim.last_seen = now;
+    Ok(Narrowed {
+        claim,
+        areas: given,
+        withdrawn,
     })
 }
 
@@ -493,7 +683,9 @@ where
 
 fn new_claim(
     request: &ClaimRequest,
+    kind: ClaimKind,
     areas: BTreeSet<QualifiedArea>,
+    pending: BTreeMap<QualifiedArea, PendingArea>,
     wide: Option<WideScope>,
     now: OffsetDateTime,
 ) -> Claim {
@@ -509,32 +701,99 @@ fn new_claim(
         last_seen: now,
         state: ClaimState::Working,
         branches: BTreeMap::new(),
+        kind,
+        pending,
     }
 }
 
+/// Checks each requested area for a claim of `kind`, answering, for those other members hold only
+/// under debt claims this claim may wait for, the item of the lowest of those claims. One live
+/// claim of another member that a claim of `kind` does not take from refuses the area, whatever
+/// else holds it. `own_held` are the areas the
+/// requester's own live claim on the item already holds: another claim waiting for one of those
+/// waits for this claim, which keeps it.
 fn check_areas(
     areas: &BTreeSet<QualifiedArea>,
     others: &[Claim],
     request: &ClaimRequest,
+    kind: ClaimKind,
+    own_held: &BTreeSet<QualifiedArea>,
     now: OffsetDateTime,
     settings: &ProjectSettings,
-) -> Result<(), AreaConflict> {
+) -> Result<BTreeMap<QualifiedArea, ItemId>, AreaConflict> {
+    let mut takes = BTreeMap::new();
     for area in areas {
         if settings.area(area).is_none() {
             return Err(AreaConflict::Unknown { area: area.clone() });
         }
-        let other_items = others.iter().filter(|claim| claim.item != request.item);
-        if let Some(holder) =
-            held_by_other(area, request.by, other_items, now, settings.stale_after())
+        let other_items = || others.iter().filter(|claim| claim.item != request.item);
+        if !own_held.contains(area)
+            && let Some(waiting) = pending_elsewhere(area, request.item, other_items())
         {
-            return Err(AreaConflict::Held {
+            return Err(AreaConflict::Waited {
                 area: area.clone(),
-                member: holder.member,
-                item: holder.item,
+                member: waiting.member,
+                item: waiting.item,
+                own: waiting.member == request.by,
             });
         }
+        let mut holders: Vec<&Claim> = other_items()
+            .filter(|claim| {
+                claim.member != request.by
+                    && claim.is_live(now, settings.stale_after())
+                    && claim.holds(area)
+            })
+            .collect();
+        holders.sort_by_key(|claim| claim.item);
+        if let Some(blocking) = holders.iter().find(|holder| !kind.takes_from(holder.kind)) {
+            return Err(AreaConflict::Held {
+                area: area.clone(),
+                member: blocking.member,
+                item: blocking.item,
+            });
+        }
+        if let Some(holder) = holders.first() {
+            takes.insert(area.clone(), holder.item);
+        }
     }
-    Ok(())
+    Ok(takes)
+}
+
+/// The areas a claim holds and waits for once the requested areas are declared on top of `held`
+/// and `pending`: a requested area another claim holds and this one may take waits for it — a wait
+/// for that same claim keeps when it was asked for — and every other one is held and waits no
+/// more.
+fn declare(
+    mut held: BTreeSet<QualifiedArea>,
+    mut pending: BTreeMap<QualifiedArea, PendingArea>,
+    requested: &BTreeSet<QualifiedArea>,
+    takes: &BTreeMap<QualifiedArea, ItemId>,
+) -> (
+    BTreeSet<QualifiedArea>,
+    BTreeMap<QualifiedArea, PendingArea>,
+) {
+    for area in requested {
+        match takes.get(area) {
+            Some(from) => {
+                if pending.get(area).is_none_or(|entry| entry.from != *from) {
+                    pending.insert(area.clone(), PendingArea::waiting_for(*from));
+                }
+            }
+            None => {
+                pending.remove(area);
+                held.insert(area.clone());
+            }
+        }
+    }
+    (held, pending)
+}
+
+/// The areas a claim holds or waits for, which its wide scope may not name.
+fn held_or_waited(
+    held: &BTreeSet<QualifiedArea>,
+    pending: &BTreeMap<QualifiedArea, PendingArea>,
+) -> BTreeSet<QualifiedArea> {
+    held.iter().chain(pending.keys()).cloned().collect()
 }
 
 /// A requested area that cannot be declared.
@@ -543,6 +802,12 @@ enum AreaConflict {
         area: QualifiedArea,
         member: MemberId,
         item: ItemId,
+    },
+    Waited {
+        area: QualifiedArea,
+        member: MemberId,
+        item: ItemId,
+        own: bool,
     },
     Unknown {
         area: QualifiedArea,
@@ -561,6 +826,17 @@ impl From<AreaConflict> for ClaimRefused {
     fn from(conflict: AreaConflict) -> Self {
         match conflict {
             AreaConflict::Held { area, member, item } => Self::AreaHeld { area, member, item },
+            AreaConflict::Waited {
+                area,
+                member,
+                item,
+                own,
+            } => Self::AreaWaited {
+                area,
+                member,
+                item,
+                own,
+            },
             AreaConflict::Unknown { area } => Self::UnknownArea { area },
             AreaConflict::WideOverlap { area, member, item } => {
                 Self::WideOverlap { area, member, item }
@@ -574,6 +850,17 @@ impl From<AreaConflict> for TakeoverRefused {
     fn from(conflict: AreaConflict) -> Self {
         match conflict {
             AreaConflict::Held { area, member, item } => Self::AreaHeld { area, member, item },
+            AreaConflict::Waited {
+                area,
+                member,
+                item,
+                own,
+            } => Self::AreaWaited {
+                area,
+                member,
+                item,
+                own,
+            },
             AreaConflict::Unknown { area } => Self::UnknownArea { area },
             AreaConflict::WideOverlap { area, member, item } => {
                 Self::WideOverlap { area, member, item }
@@ -642,24 +929,25 @@ fn settle_wide(
     Ok((WideScope::new(names, reason).ok(), dropped))
 }
 
-/// Splits inherited areas into those the request may keep and those it may not.
+/// Splits inherited areas into those the request may keep and those it may not: an area the
+/// settings no longer declare, or another member's live claim holds, is not kept, nor, when the
+/// claim they come from is stale, one another live claim waits for, which that claim gets instead.
+/// A stale claim's wait takes nothing: it is withdrawn when the pending areas are settled.
 fn keep_free_areas(
     inherited: &BTreeSet<QualifiedArea>,
     others: &[Claim],
     request: &ClaimRequest,
+    inherited_stale: bool,
     now: OffsetDateTime,
     settings: &ProjectSettings,
 ) -> (BTreeSet<QualifiedArea>, BTreeSet<QualifiedArea>) {
+    let other_items = || others.iter().filter(|claim| claim.item != request.item);
     inherited.iter().cloned().partition(|area| {
         settings.area(area).is_some()
-            && held_by_other(
-                area,
-                request.by,
-                others.iter().filter(|claim| claim.item != request.item),
-                now,
-                settings.stale_after(),
-            )
-            .is_none()
+            && held_by_other(area, request.by, other_items(), now, settings.stale_after()).is_none()
+            && !(inherited_stale
+                && pending_elsewhere(area, request.item, other_items())
+                    .is_some_and(|waiting| waiting.is_live(now, settings.stale_after())))
     })
 }
 

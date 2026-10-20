@@ -42,6 +42,8 @@ pub(crate) fn claim(item: u64, member: MemberId, declared: &[&str], minutes: i64
         last_seen: at(minutes),
         state: crate::review::ClaimState::Working,
         branches: std::collections::BTreeMap::new(),
+        kind: crate::handover::ClaimKind::Feature,
+        pending: std::collections::BTreeMap::new(),
     }
 }
 
@@ -53,6 +55,7 @@ pub(crate) fn request(item: u64, by: MemberId, declared: &[&str]) -> ClaimReques
         host: HostName::parse("desktop").unwrap(),
         areas: areas(declared),
         wide: None,
+        kind: None,
     }
 }
 

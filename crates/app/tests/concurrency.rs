@@ -134,6 +134,7 @@ mod concurrency {
                     item: items(n),
                     session: race.racers[n].session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+                    kind: None,
                 };
                 tasks.push(tokio::spawn(async move {
                     let racer = &race.racers[n];
@@ -257,6 +258,7 @@ mod concurrency {
                     item,
                     session: race.racers[0].session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await
@@ -276,6 +278,7 @@ mod concurrency {
                             session: racer.session,
                             areas: Vec::new(),
                             reason: Body::parse("Picking this up.").unwrap(),
+                            kind: None,
                         },
                     )
                     .await

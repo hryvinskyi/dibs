@@ -77,7 +77,7 @@ cause of an internal failure and answers `internal`.
 | `403` | `forbidden`, `not_holder` (details: `holder`; for a slot and a review too), `not_grantor`, `not_a_recipient` (an acknowledgement or a delivery for somebody a message did not reach), `not_author` |
 | `404` | `not_found` (also: a record of another project, and a conversation the caller may not read), `unknown_slot` (`slot`) |
 | `405` | `method_not_allowed` |
-| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal`, `claim_stale`, `pr_recorded` (`item`, `item_ref`, `holder`), `pr_not_recorded` (`pr`) |
+| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`; for an area another claim waits for also `waiting`, `own`), `kind_fixed` (`kind`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal`, `claim_stale`, `pr_recorded` (`item`, `item_ref`, `holder`), `pr_not_recorded` (`pr`) |
 | `410` | `cursor_expired` (details: `pruned_through`) |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
@@ -106,7 +106,8 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/items/{id}/dependencies` | people | Record that the item is blocked by another. |
 | `DELETE /v1/items/{id}/dependencies` | people | Remove that the item is blocked by another. |
 | `GET /v1/ready` | any | The work the caller can pick up now, and why the other open items wait. |
-| `POST /v1/items/{id}/claim` | people | Claim an item, or renew your claim; with `wide`, a wide claim over many areas. |
+| `POST /v1/items/{id}/claim` | people | Claim an item, or renew your claim; with `wide`, a wide claim over many areas; with `kind: "debt"`, debt work a feature may take areas from. |
+| `POST /v1/items/{id}/claim/narrow` | people | Give areas of your claim up; one another claim waits for is handed over to it. |
 | `POST /v1/items/{id}/takeover` | people | Take over another member's stale claim. |
 | `POST /v1/items/{id}/release` | people | Release your claim. |
 | `POST /v1/items/{id}/done` | people | Complete your claim. |
@@ -165,7 +166,9 @@ item     { id, ref | null, title, status: "open" | "claimed" | "done" | "dropped
            source_status | null, closed, source | null, created_by, created_at }
 item ref { id, ref | null, title, link | null }
 claim    { item, holder, session_id, host, areas: ["repo:area", …], wide: { areas: ["repo:area", …], reason } | null,
-           claimed_at, renewed_at, last_seen, state, review, branches: { "<repo id>": "<branch>", … } }
+           claimed_at, renewed_at, last_seen, state, review, branches: { "<repo id>": "<branch>", … },
+           kind: "feature" | "debt",
+           pending: { "repo:area": { from, asked_at | null, escalated_at | null }, … } }
 grant    { id, item, area, from, to, created_at }
 thread   { id, subject, item | null, author, system, to_project, to: [handle, …], created_at }
 message  { id, thread, author, system, label, body, importance: "normal" | "high" | "urgent", ack_required,
@@ -184,7 +187,8 @@ mentions another item: `link` is the tracker's page for its reference (a `gh` re
 A message's `importance` says how much it asks for its recipients' attention, and `ack_required` whether it asks each of
 them to acknowledge it; `acks` is in a thread read only, for a message that asks.
 
-**What dibs writes.** Some messages no member typed: a wide claim's announcements, the notice to a member whose stale
+**What dibs writes.** Some messages no member typed: a wide claim's announcements, the request to hand an area over to a
+feature claim and the notice that it was handed over, the notice to a member whose stale
 claim was taken over, whose slot hold an admin ended or another member took over, whose slot hold expired or whose offer
 lapsed, an escalation, and the notice that a member left. dibs writes them itself, in the project's name: `author` is
 `"dibs"`, `system` is `true` and `label` is `dibs`. When a member's action caused one, that member starts its thread
@@ -358,10 +362,74 @@ it: `repo:area`, or a bare name that exactly one repository declares. Answers
 included); a renewal adds the requested areas to those held and lists in `dropped_areas` those it no longer holds
 because another member holds them now, another live wide claim names them now, or the settings dropped them. Refusals:
 `held` (another member's live claim holds the item), `stale` (their claim is stale: only a takeover may take it),
-`area_held` (another member's live claim holds an area), `unknown_area`, `invalid_area`, `ambiguous_area`,
-`item_closed`. An area belongs to one member at a time. A claim on a blocked item is made all the same — dependent work
+`area_held` (another member's live claim holds an area, or another claim already waits for it to be handed over; see
+below), `kind_fixed`, `unknown_area`, `invalid_area`, `ambiguous_area`, `item_closed`, `invalid_request` for a `kind`
+that is neither `feature` nor `debt`. An area belongs to one member at a time. A claim on a blocked item is made all the same — dependent work
 is often started in parallel — and `blocked_by` lists, as item refs, the items it waits for that are neither done nor
 closed, for the client to warn about. `item` is the claimed item as an item ref, so a client names it by its reference.
+
+**Taking an area from debt work.** A claim is of a `kind`: `feature` (the default) or `debt`, for work that only pays
+off debt — refactoring, clean-up. The body's `kind` applies to a new claim. A renewal keeps the kind the claim has; one
+that names another kind is refused with `kind_fixed` (`409`, `details.kind` the kind the claim has): "The claim was
+made as debt; release it and claim again to change it." A takeover carries the previous claim's kind on unless its body
+names one. A feature claim that declares an area other members hold **only under live debt claims** is not refused: the
+area is **pending** on it, waiting to be handed over, and listed in the claim's `pending` by area, with `from` the item
+of the debt claim it waits for (the lowest, when one member holds it under several), `asked_at`, `escalated_at`. The
+answer's `pending` names each one: `[{ "area": "default:billing", "holder": "alice", "item": item ref, "asked": true }]`.
+Each area waits on its own, so one claim may hold some of its areas at once and wait for others. The claim is atomic
+all the same: when any declared area answers `area_held` the whole claim is refused and nothing waits. That is so when
+another member holds the area under any claim a feature does not take from — a feature claim, even beside debt claims
+of the same member — and when another claim already waits for the area, since an area waits for one claim at a time:
+then `details.waiting` is `true` and the message says who waits, "The area default:billing is waited for by another
+member's claim #42." (`details.holder` its member, `details.item` its item), or, when the claim that waits is the
+caller's own, "Your claim #42 already waits for default:billing to be handed over." (`details.own` `true`, no
+`holder`). A debt claim never takes an area, and one feature never takes an area from another: those keep the refusal,
+and the negotiation goes by message. A wide claim holds none of its named areas, so a feature claim takes such an area at
+once; the areas a wide debt claim holds under `areas` are pending like any debt claim's. Nothing is decided by the
+item's `priority`; the request shows it.
+
+In the same transaction the debt claim's holder is asked, once per pair of claims: a conversation about their item,
+started by the feature claim's member and addressed to them, whose message dibs writes, `urgent` and asking to be
+acknowledged, under the subject "Yield default:billing to gh:acme/widgets#42, priority 1", and `yield_requested` is
+appended for each area. Its text asks them to tell their person and, once the person agrees, to commit what they have
+in those areas, push their branch, give them up with `dibs claim narrow <item> --area <area>` and list the files they
+hand over in that conversation. A later area the same feature claim waits for from the same debt claim, a request asked
+again after a review, and a reclaim while the conversation is open, add a message to that conversation rather than
+start another. A debt claim **in review** is not asked — its files sit in a pull request under review — until it is
+worked on again; the area stays pending, with `asked_at` `null`, and a request asked before the claim went into review
+counts no more from the moment the review starts, so that it is asked again, with a fresh wait, once the claim is back.
+
+An area is **handed over** only once no live claim of another member holds it any more, in the same transaction as
+whatever lets the last one go: a debt claim narrows it away (`POST /v1/items/{id}/claim/narrow`), completes, is
+released, force-released or taken over, its member is removed, a merge completes it, or it goes stale (the server's
+sweep, every 30 seconds, applies that). The area then moves to the feature claim's `areas`, the debt claim drops it,
+`area_handed_over` is appended, and the feature claim's holder is told in a `high` message from dibs. When the debt
+claim the wait was on lets go and another debt claim still holds the area, the wait turns to that claim and asks it
+afresh. A wait also ends without a handover, appending `wait_withdrawn` with its `reason`, and the debt holder asked is
+told in the request's conversation, in a `normal` message, that "The request for default:billing no longer stands":
+`stale` (the waiting claim went stale), `narrowed` (its holder gave the area up), `ended` (the waiting claim ended, or a
+takeover made it debt work) or `holder_changed` (a claim a feature does not take from holds the area now).
+
+A request that waited the project's `yield_escalates_after` (30 minutes unless the settings say otherwise) without the
+area being handed over is escalated by the sweep, once per pair of claims, to the project's arbiters and the debt
+claim's holder, about the debt claim's item, sent for the feature claim's member (`escalated`). When an escalation of
+that item already stands, the request is added to its conversation instead, in an `urgent` message from dibs. When no
+arbiter would receive it — the project names none who is a person of it, other than the feature claim's member — each
+of its areas appends `yield_unescalated` with `reason: "no_arbiters"`, the server logs a warning, and it is not tried
+again.
+
+`POST /v1/items/{id}/claim/narrow`, body `{ "areas": ["billing"] }`, gives areas of the caller's claim up, live or stale:
+the claim neither holds nor waits for them any more, the grants its holder gave in them end, and an area another claim
+waited for is handed over to it in the same transaction. Answers
+
+```json
+{ "claim": claim, "item": item ref, "areas": ["default:billing"],
+  "handed_over": [{ "area": "default:billing", "to": item ref, "holder": "bob" }] }
+```
+
+`areas` lists what it gave up and appends `claim_narrowed`; a wait it gave up appends `wait_withdrawn` (`narrowed`)
+and tells the debt holder asked; an area the claim neither holds nor waits for changes nothing, so a repeat answers `areas: []` and appends nothing. Refusals: `not_holder` (`403`, `details.holder`),
+`no_claim` (`409`), `unknown_area`, `invalid_area`, `ambiguous_area`, `invalid_request` for a missing `areas`.
 
 **Wide claims.** A change that cuts across many areas at once (a dependency upgrade, a rename across packages) is claimed
 wide: `{ "session_id": 7, "wide": { "areas": ["billing", "search"], "reason": "Upgrade the HTTP client" } }`, the
@@ -395,7 +463,8 @@ member's name. Refusals: `wide_overlap` (`409`: another live wide claim names an
 item and the area), `wide_and_held` (`422`: the claim would both hold and name an area), `invalid_wide` (`422`: no area
 named), `invalid_request` for a missing or invalid `wide.reason` or a missing `wide.areas`, and the area refusals above.
 
-`POST /v1/items/{id}/takeover`, body `{ "session_id": 7, "reason": "…", "areas": [] }`, takes over another member's
+`POST /v1/items/{id}/takeover`, body `{ "session_id": 7, "reason": "…", "areas": [], "kind": "feature" }` (`kind`
+optional: without it the new claim keeps the previous claim's kind), takes over another member's
 stale claim and tells them the reason in a conversation about the item: a `high` message from dibs, asking for no
 acknowledgement, that names the new holder and quotes the reason. Answers
 `{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31, "item": item ref, "announced": [] }`. Refusals: `not_stale` (the claim is
@@ -613,10 +682,13 @@ edits are attributed to record it (see [Branches and overlaps](#branches-and-ove
 | `allowed` | The caller may edit. | |
 | `allowed_with_note` | The caller may edit; a hot-file rule has something to say. | `rule`, `note`, `touched_by: [{ holder, item, item_ref }]` |
 | `needs_claim` | The path is governed, the policy requires a claim, and the caller holds none that covers it. | |
-| `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason`: `in_review` (the holder's claim is in review; `prs` lists its pull requests, and the area is free when they merge), `ask_holder` (message them or ask for a grant), or `awaiting_ack` (the caller's live wide claim names the area and the holder has not acknowledged its announcement yet) |
+| `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason`, the first that applies: `in_review` (the holder's claim is in review; `prs` lists its pull requests, and the area is free when they merge), `awaiting_ack` (the caller's live wide claim names the area and the holder has not acknowledged its announcement yet), `awaiting_handover` (the caller's live claim waits for the holder's debt claim to hand the area over; `escalates_at` says when the request goes to the arbiters if the area is not handed over by then, absent before the holder was asked and once it was escalated), `ask_holder` with `waiting: { holder, item, item_ref }` (another member's claim already waits for the holder to hand the area over), `ask_handover` (the holder's claim is debt work and the caller's live feature claim did not declare the area: declaring it on the claim `claim` names, `dibs claim <claim> --area <area>`, asks for it), or `ask_holder` (message them or ask for a grant) |
 | `granted` | The holder granted the caller edits in the area, by a grant or by acknowledging the caller's wide claim's announcement. | `by`, `area` |
 
-A path that no area or rule governs is `allowed`. Refusals: `unknown_repo` (`422`), `invalid_request` for a missing
+An edit allowed in an area none of the caller's claims holds adds the area to the caller's live claim most recently
+claimed or renewed that does not wait for it (one being worked on before one in review), never to a claim whose wide
+scope names it; an area another member's claim waits for is added to none. A path that no area or rule governs is
+`allowed`. Refusals: `unknown_repo` (`422`), `invalid_request` for a missing
 field or a path that is not a relative path, `not_found` for a session that is not the caller's.
 
 ### Grants
@@ -863,6 +935,11 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `branch_recorded` | `item`, `member`, `repo`, `branch` (the branch the claim's work is on there now) |
 | `footprint_changed` | `item`, `member`, `repo`, `branch`, `paths` (how many), `truncated` |
 | `overlap_found` | `kind` (`same_file`, `contract`, `main_moved`), `items`, `pr` (`main_moved`; else `null`), `paths` (the first 100) |
+| `yield_requested` | `area`, `from` (the debt claim's item), `to` (the item of the feature claim that waits for it) |
+| `area_handed_over` | `area`, `from` (the debt claim's item), `to` (the item of the feature claim that holds it now) |
+| `claim_narrowed` | `item`, `member`, `areas` (what the claim no longer holds or waits for) |
+| `wait_withdrawn` | `area`, `from` (the debt claim's item), `to` (the waiting claim's item), `reason` (`stale`, `narrowed`, `ended`, `holder_changed`) |
+| `yield_unescalated` | `area`, `from`, `to`, `reason` (`no_arbiters`) |
 
 `item_updated` is appended when one of an item's reported facts actually changed; read the item for what it says now.
 `wide_claimed` is appended when a claim becomes wide or its scope grows; a renewal that names nothing new appends none.
@@ -908,6 +985,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 |---|---|
 | `stale_after` | How long a claim stays live without a sign of life: `24h`; 1 hour to 30 days; default 24 hours. |
 | `heartbeat_every` | How often a session sends a heartbeat: `1m`; 1 to 15 minutes; default 1 minute. |
+| `yield_escalates_after` | How long a request to hand an area over from debt work to a feature claim waits before it is escalated to the arbiters: `30m`; 5 minutes to 24 hours; default 30 minutes. A top-level setting in either layout. |
 | `edit_policy` | `require-claim` (default): a governed path needs a live claim. `advise`: it does not. |
 | `raised_per_hour` | How many `high` or `urgent` messages one member may write within an hour: 1 to 1000; default 10. What dibs writes itself is not counted. |
 | `areas` | For a project with one repository: `[{ "name": "billing", "paths": ["packages/billing/**"] }]`. |
@@ -1042,7 +1120,9 @@ events after its cursor, so the page reads its state again and follows the strea
 a banner for each escalation the viewer may read that waits for an
 arbiter, linking to its conversation. The board's *Ready* column is the viewer's ready list, each card with its priority, likely
 areas and a link to its tracker, and below it the open items that are not ready with their blockers or the held area;
-an item its tracker closed while a claim holds it is marked *Closed upstream*. Above the columns, the live wide claims are
+an item its tracker closed while a claim holds it is marked *Closed upstream*. A claim made as debt work carries a *Debt* badge on the board and the
+status page, and a claim that waits for areas lists each as *waiting for default:billing from alice*; the pages read
+them again when an area is handed over, a wait ends or a claim is narrowed. Above the columns, the live wide claims are
 listed with their reason and, for each area, who has acknowledged them; the area filter keeps the wide claims that name
 the area, the member filter those of the member and those that wait for the member's acknowledgement. When a claim or an
 item changes, the page fetches `GET /ui/board/fragment` with the same query string, once per burst of events and not

@@ -28,6 +28,7 @@ mod contract {
     };
     use dibs_domain::grant::Grant;
     use dibs_domain::handle::Handle;
+    use dibs_domain::handover::{ClaimKind, PendingArea};
     use dibs_domain::ids::{
         EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
     };
@@ -114,6 +115,9 @@ mod contract {
         claims_are_kept_live_or_stale_and_replaced_per_item,
         a_claim_in_review_keeps_its_pull_requests_start_and_whether_more_follow,
         a_claim_keeps_the_branch_of_each_repository,
+        a_claim_keeps_its_kind_and_the_areas_it_waits_for,
+        an_area_waits_for_one_claim_of_a_project_at_a_time,
+        projects_with_a_waiting_claim_are_listed,
         footprints_keep_their_paths_and_are_replaced_per_item_and_repository,
         footprint_paths_are_found_by_path_within_their_repository_and_project,
         overlaps_are_one_per_key_and_go_with_any_item_they_name,
@@ -245,6 +249,8 @@ mod contract {
             last_seen: at(12),
             state: ClaimState::Working,
             branches: std::collections::BTreeMap::new(),
+            kind: ClaimKind::Feature,
+            pending: std::collections::BTreeMap::new(),
         }
     }
 
@@ -876,6 +882,118 @@ mod contract {
         };
         tx.save_claim(A, &fewer).await.unwrap();
         assert_eq!(tx.claims(A).await.unwrap(), vec![fewer]);
+    }
+
+    async fn a_claim_keeps_its_kind_and_the_areas_it_waits_for(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let debt = Claim {
+            kind: ClaimKind::Debt,
+            ..claim(SECOND, BOB, BOB_LAPTOP, &["api:billing", "api:search"])
+        };
+        let mut waiting = claim(FIRST, ALICE, ALICE_LAPTOP, &["web:checkout"]);
+        waiting.pending.insert(
+            QualifiedArea::parse("api:billing").unwrap(),
+            PendingArea::waiting_for(SECOND),
+        );
+        waiting.pending.insert(
+            QualifiedArea::parse("api:search").unwrap(),
+            PendingArea {
+                from: SECOND,
+                asked_at: Some(at(20)),
+                escalated_at: Some(at(50)),
+                request: Some(ThreadId(70)),
+            },
+        );
+        tx.save_claim(A, &debt).await.unwrap();
+        tx.save_claim(A, &waiting).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.claim(A, FIRST).await.unwrap(), Some(waiting.clone()));
+        assert_eq!(tx.claim(A, SECOND).await.unwrap(), Some(debt.clone()));
+        assert_eq!(tx.claims(A).await.unwrap(), vec![waiting.clone(), debt]);
+        let handed = Claim {
+            areas: areas(&["web:checkout", "api:billing"]),
+            pending: [(
+                QualifiedArea::parse("api:search").unwrap(),
+                PendingArea::waiting_for(SECOND),
+            )]
+            .into(),
+            ..waiting
+        };
+        tx.save_claim(A, &handed).await.unwrap();
+        assert_eq!(
+            tx.claim(A, FIRST).await.unwrap(),
+            Some(handed),
+            "a replaced claim waits for what it waits for now, and nothing else"
+        );
+        tx.delete_claim(A, FIRST).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.claim(A, FIRST).await.unwrap(), None);
+        assert!(tx.pending_projects().await.unwrap().is_empty());
+    }
+
+    async fn an_area_waits_for_one_claim_of_a_project_at_a_time(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let billing = QualifiedArea::parse("api:billing").unwrap();
+        let waiting = |item, member, session, from| {
+            let mut made = claim(item, member, session, &[]);
+            made.pending
+                .insert(billing.clone(), PendingArea::waiting_for(from));
+            made
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.save_claim(A, &waiting(FIRST, ALICE, ALICE_LAPTOP, THIRD))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert!(is_duplicate(
+            tx.save_claim(A, &waiting(SECOND, BOB, BOB_LAPTOP, THIRD))
+                .await
+        ));
+        drop(tx);
+        let other = ItemId(40);
+        let mut tx = store.begin().await.unwrap();
+        tx.save_claim(A, &waiting(FIRST, ALICE, ALICE_LAPTOP, SECOND))
+            .await
+            .unwrap();
+        tx.insert_item(B, &item(other, None, DAVE)).await.unwrap();
+        tx.save_claim(B, &waiting(GADGET, DAVE, DAVE_LAPTOP, other))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim(A, FIRST).await.unwrap().map(|claim| claim.pending),
+            Some([(billing.clone(), PendingArea::waiting_for(SECOND))].into()),
+            "its own claim saved again, and the same area in another project"
+        );
+        assert_eq!(tx.pending_projects().await.unwrap(), [A, B]);
+    }
+
+    async fn projects_with_a_waiting_claim_are_listed(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        assert!(tx.pending_projects().await.unwrap().is_empty());
+        tx.save_claim(A, &claim(FIRST, ALICE, ALICE_LAPTOP, &["api:billing"]))
+            .await
+            .unwrap();
+        tx.save_claim(B, &claim(GADGET, DAVE, DAVE_LAPTOP, &["api:billing"]))
+            .await
+            .unwrap();
+        assert!(
+            tx.pending_projects().await.unwrap().is_empty(),
+            "a claim that waits for nothing"
+        );
+        let mut waiting = claim(SECOND, BOB, BOB_LAPTOP, &[]);
+        waiting.pending.insert(
+            QualifiedArea::parse("api:billing").unwrap(),
+            PendingArea::waiting_for(FIRST),
+        );
+        tx.save_claim(A, &waiting).await.unwrap();
+        assert_eq!(tx.pending_projects().await.unwrap(), [A]);
     }
 
     fn rel_paths(texts: &[&str]) -> BTreeSet<RelPath> {

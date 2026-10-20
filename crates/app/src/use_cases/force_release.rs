@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use dibs_domain::claim::decide_force_release;
@@ -13,17 +14,21 @@ use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{EndedClaim, ItemName, Names};
-use crate::ports::{Clock, EventNotifier, Store};
+use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
+use crate::use_cases::handover::Handovers;
 use crate::work::Work;
 
-/// Ends any member's claim on an item at an admin's word; the item is open again.
+/// Ends any member's claim on an item at an admin's word; the item is open again. In the same
+/// transaction every area another claim waited for it to hand over moves to that claim.
 pub struct ForceRelease {
     ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
+    hot_rules: Arc<HotRuleRegistry>,
 }
 
 impl ForceRelease {
@@ -33,7 +38,9 @@ impl ForceRelease {
             ref_schemes: deps.ref_schemes.clone(),
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
+            hot_rules: deps.hot_rules.clone(),
         }
     }
 
@@ -59,7 +66,14 @@ impl ForceRelease {
                 by: Some(actor.member),
             }),
         };
-        end_claim(&mut work, &forced.claim, ending, now).await?;
+        let settings = work.project_settings(&self.hot_rules).await?;
+        let handovers = Handovers {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        };
+        end_claim(&mut work, &forced.claim, ending, &handovers).await?;
         let ended = EndedClaim {
             claim: Names::load(&mut work).await?.claim(forced.claim)?,
             item: ItemName::of(&item, &self.ref_schemes),
@@ -84,6 +98,7 @@ mod tests {
                     item,
                     session: env.bob.session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await

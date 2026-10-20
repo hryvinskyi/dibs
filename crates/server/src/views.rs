@@ -333,6 +333,23 @@ pub struct ClaimView {
     /// The branch its work is on in each repository, by repository id, as its holder's checkout
     /// was last seen.
     pub branches: BTreeMap<RepoId, BranchName>,
+    /// `feature` or `debt`.
+    pub kind: &'static str,
+    /// The areas it waits for another member's debt claim to hand over, by area.
+    pub pending: BTreeMap<QualifiedArea, PendingView>,
+}
+
+/// An area a claim waits for.
+#[derive(Debug, Serialize)]
+pub struct PendingView {
+    /// The item of the debt claim it waits for.
+    pub from: ItemId,
+    /// When that claim's holder was asked to hand it over; `null` while they have not been.
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    pub asked_at: Option<OffsetDateTime>,
+    /// When the unanswered request went to the arbiters; `null` until it did.
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    pub escalated_at: Option<OffsetDateTime>,
 }
 
 /// The review of a claim in review.
@@ -378,6 +395,21 @@ impl ClaimView {
             state: claim.state.code(),
             review: claim.state.review().map(ReviewView::of),
             branches: claim.branches,
+            kind: claim.kind.code(),
+            pending: claim
+                .pending
+                .into_iter()
+                .map(|(area, pending)| {
+                    (
+                        area,
+                        PendingView {
+                            from: pending.from,
+                            asked_at: pending.asked_at,
+                            escalated_at: pending.escalated_at,
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -537,11 +569,27 @@ pub enum VerdictView {
         /// The way on: `in_review`, the holder's claim is in review and the area is free once its
         /// pull requests merge; `ask_holder`, message the holder or ask for a grant;
         /// `awaiting_ack`, the caller's wide claim names the area and the holder has not
-        /// acknowledged its announcement.
+        /// acknowledged its announcement; `awaiting_handover`, the caller's claim waits for the
+        /// holder's debt claim to hand the area over; `ask_handover`, the holder's claim is debt
+        /// work, and declaring the area on the caller's feature claim `claim` asks for it.
         reason: &'static str,
         /// For `in_review`, the pull requests the holder's claim recorded; empty otherwise.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         prs: Vec<PrRef>,
+        /// For `ask_handover`, the item of the caller's feature claim to declare the area on.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        claim: Option<ItemId>,
+        /// For `ask_holder`, the claim of another member that already waits for the holder to
+        /// hand the area over, when one does.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        waiting: Option<Box<HolderView>>,
+        /// For `awaiting_handover`, when the request goes to the arbiters if the area is not
+        /// handed over by then; absent before the holder was asked and once it was escalated.
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "time::serde::rfc3339::option::serialize"
+        )]
+        escalates_at: Option<OffsetDateTime>,
     },
     /// The holder granted the member edits in the area.
     Granted {
@@ -590,9 +638,39 @@ impl PathVerdictView {
                 item_ref: named.item_ref,
                 area,
                 reason: reason.code(),
+                claim: match &reason {
+                    HeldReason::AskHandover { claim } => Some(*claim),
+                    HeldReason::InReview { .. }
+                    | HeldReason::AskHolder { .. }
+                    | HeldReason::AwaitingAck
+                    | HeldReason::AwaitingHandover { .. } => None,
+                },
+                waiting: match (&reason, named.waiting) {
+                    (
+                        HeldReason::AskHolder {
+                            waiting: Some(waiting),
+                        },
+                        Some((holder, item_ref)),
+                    ) => Some(Box::new(HolderView {
+                        holder,
+                        item: waiting.item,
+                        item_ref,
+                    })),
+                    _ => None,
+                },
+                escalates_at: match &reason {
+                    HeldReason::AwaitingHandover { escalates_at } => *escalates_at,
+                    HeldReason::InReview { .. }
+                    | HeldReason::AskHolder { .. }
+                    | HeldReason::AwaitingAck
+                    | HeldReason::AskHandover { .. } => None,
+                },
                 prs: match reason {
                     HeldReason::InReview { prs } => prs,
-                    HeldReason::AskHolder | HeldReason::AwaitingAck => Vec::new(),
+                    HeldReason::AskHolder { .. }
+                    | HeldReason::AwaitingAck
+                    | HeldReason::AwaitingHandover { .. }
+                    | HeldReason::AskHandover { .. } => Vec::new(),
                 },
             },
             Verdict::Granted { area, .. } => VerdictView::Granted {
@@ -971,6 +1049,8 @@ mod tests {
                 RepoId::parse("api").unwrap(),
                 BranchName::parse("alice/5-rates").unwrap(),
             )]),
+            kind: dibs_domain::handover::ClaimKind::Feature,
+            pending: std::collections::BTreeMap::new(),
         };
         let view = serde_json::to_value(ClaimView::of(NamedClaim {
             claim: claim.clone(),
@@ -988,7 +1068,9 @@ mod tests {
                 "last_seen": "2026-01-02T03:05:00Z",
                 "state": "working",
                 "review": null,
-                "branches": {"api": "alice/5-rates"}
+                "branches": {"api": "alice/5-rates"},
+                "kind": "feature",
+                "pending": {}
             })
         );
         let reviewing = Claim {
@@ -1000,7 +1082,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
-            ..claim
+            ..claim.clone()
         };
         let view = serde_json::to_value(ClaimView::of(NamedClaim {
             claim: reviewing,
@@ -1011,6 +1093,35 @@ mod tests {
         assert_eq!(
             view["review"],
             json!({"prs": ["acme/api#12"], "since": "2026-01-03T10:00:00Z", "more": true})
+        );
+        let debt_view = serde_json::to_value(ClaimView::of(NamedClaim {
+            claim: Claim {
+                kind: dibs_domain::handover::ClaimKind::Debt,
+                ..claim.clone()
+            },
+            holder: handle("alice"),
+        }))
+        .unwrap();
+        assert_eq!(debt_view["kind"], "debt");
+        let mut waiting = claim;
+        waiting.pending.insert(
+            QualifiedArea::parse("api:search").unwrap(),
+            dibs_domain::handover::PendingArea {
+                from: ItemId(7),
+                asked_at: Some(datetime!(2026-01-02 03:06:00 UTC)),
+                escalated_at: None,
+                request: Some(ThreadId(40)),
+            },
+        );
+        let view = serde_json::to_value(ClaimView::of(NamedClaim {
+            claim: waiting,
+            holder: handle("alice"),
+        }))
+        .unwrap();
+        assert_eq!(view["kind"], "feature");
+        assert_eq!(
+            view["pending"],
+            json!({"api:search": {"from": 7, "asked_at": "2026-01-02T03:06:00Z", "escalated_at": null}})
         );
     }
 
@@ -1096,13 +1207,14 @@ mod tests {
                     member: MemberId(2),
                     item: ItemId(3),
                     area: QualifiedArea::parse("api:billing").unwrap(),
-                    reason: HeldReason::AskHolder,
+                    reason: HeldReason::AskHolder { waiting: None },
                 },
             },
             member: Some(handle("bob")),
             item_ref: Some(ExternalRef::parse("gh:acme/api#3").unwrap()),
             touched_by: Vec::new(),
             touched_refs: Vec::new(),
+            waiting: None,
         };
         assert_eq!(
             serde_json::to_value(PathVerdictView::of(named)).unwrap(),
@@ -1128,12 +1240,51 @@ mod tests {
             item_ref: None,
             touched_by: Vec::new(),
             touched_refs: Vec::new(),
+            waiting: None,
         };
         let view = serde_json::to_value(PathVerdictView::of(reviewing)).unwrap();
         assert_eq!(
             (&view["reason"], &view["prs"]),
             (&json!("in_review"), &json!(["acme/api#12"]))
         );
+        let held_while_waited = |reason| NamedVerdict {
+            verdict: PathVerdict {
+                path: RepoPath::parse("api:src/billing/a.rs").unwrap(),
+                verdict: Verdict::HeldBy {
+                    member: MemberId(2),
+                    item: ItemId(3),
+                    area: QualifiedArea::parse("api:billing").unwrap(),
+                    reason,
+                },
+            },
+            member: Some(handle("bob")),
+            item_ref: None,
+            touched_by: Vec::new(),
+            touched_refs: Vec::new(),
+            waiting: Some((handle("carol"), None)),
+        };
+        let view = serde_json::to_value(PathVerdictView::of(held_while_waited(
+            HeldReason::AskHolder {
+                waiting: Some(Holder {
+                    member: MemberId(4),
+                    item: ItemId(9),
+                }),
+            },
+        )))
+        .unwrap();
+        assert_eq!(view["reason"], "ask_holder");
+        assert_eq!(
+            view["waiting"],
+            json!({"holder": "carol", "item": 9, "item_ref": null})
+        );
+        let view = serde_json::to_value(PathVerdictView::of(held_while_waited(
+            HeldReason::AwaitingHandover {
+                escalates_at: Some(datetime!(2026-01-02 03:36:00 UTC)),
+            },
+        )))
+        .unwrap();
+        assert_eq!(view["escalates_at"], "2026-01-02T03:36:00Z");
+        assert!(view.get("waiting").is_none());
     }
 
     #[test]
@@ -1161,6 +1312,7 @@ mod tests {
             item_ref: None,
             touched_by: vec![handle("alice"), handle("bob")],
             touched_refs: vec![Some(ExternalRef::parse("gh:acme/api#4").unwrap()), None],
+            waiting: None,
         };
         assert_eq!(
             serde_json::to_value(PathVerdictView::of(named)).unwrap()["touched_by"],

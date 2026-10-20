@@ -226,6 +226,7 @@ mod scenario {
             item,
             session,
             areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+            kind: None,
         };
         let outcome = app
             .claim_item
@@ -393,6 +394,7 @@ mod scenario {
                     session: team.bob_session,
                     areas: Vec::new(),
                     reason: Body::parse("You have been away a day; finishing it.").unwrap(),
+                    kind: None,
                 },
             )
             .await

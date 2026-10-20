@@ -4,7 +4,7 @@
 //! A server holds its database file for as long as it runs (see [`crate::hold`]), so a second
 //! server, a restore or a migration refuses that file meanwhile. Stopping goes in this order: the
 //! listener closes, so no connection is accepted any more; the event streams end; the requests in
-//! flight are given [`SHUTDOWN_GRACE`] to finish; the slot sweep stops, finishing a sweep it is
+//! flight are given [`SHUTDOWN_GRACE`] to finish; the sweep stops, finishing a sweep it is
 //! running, the retention stops, finishing a pass it is running, and the snapshot schedule stops,
 //! finishing a snapshot it is writing; the write-ahead log is checkpointed into the database; the
 //! store closes.
@@ -149,7 +149,7 @@ pub async fn serve(
     };
     stopping.stop();
     if let Err(error) = sweeper.await {
-        tracing::error!(error = %error, "the slot sweep ended abnormally");
+        tracing::error!(error = %error, "the sweep ended abnormally");
     }
     if let Err(error) = retention.await {
         tracing::error!(error = %error, "the retention ended abnormally");

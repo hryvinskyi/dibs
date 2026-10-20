@@ -1812,3 +1812,40 @@ async fn the_board_names_each_overlap_between_live_claims_and_drops_it_when_a_cl
     let after = browser.get(&world, "/ui/board").await;
     assert!(!after.text.contains("data-overlap"), "{}", after.text);
 }
+
+#[tokio::test]
+async fn the_board_shows_debt_work_and_the_areas_a_claim_waits_for() {
+    let (world, alice, bob) = team().await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let debt = world
+        .item(&alice, Some("gh:acme/api#7"), "Tidy the invoices")
+        .await;
+    let feature = world
+        .item(&bob, Some("gh:acme/api#42"), "Currency on invoices")
+        .await;
+    let held = world
+        .post(
+            &alice,
+            &format!("/v1/items/{debt}/claim"),
+            json!({"session_id": alice_session, "areas": ["api:billing"], "kind": "debt"}),
+        )
+        .await;
+    assert_eq!(held.status, StatusCode::OK, "{}", held.body);
+    claim(&world, &bob, bob_session, feature, json!(["api:billing"])).await;
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/board").await;
+    assert_eq!(page.status, StatusCode::OK);
+    let progress = page.column("c-prog");
+    assert!(progress.contains("data-debt"), "{progress}");
+    assert!(
+        progress.contains("waiting for api:billing from alice"),
+        "{progress}"
+    );
+    let status = browser.get(&world, "/ui/").await;
+    assert!(status.text.contains("waiting for api:billing from alice"));
+    assert!(
+        page.text.contains("wait_withdrawn"),
+        "the board refreshes on it"
+    );
+}

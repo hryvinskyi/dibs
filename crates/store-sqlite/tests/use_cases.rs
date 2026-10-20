@@ -14,13 +14,14 @@ mod use_cases {
     use dibs_app::ports::Store;
     use dibs_app::use_cases::{
         Addressees, ClaimItemInput, ClaimMade, CreateItemInput, CreateMemberInput, DeliveryAsk,
-        EventCursor, HoldMode, InitProjectInput, ItemQuery, NewMember, RegisterSessionInput,
-        ReleaseSlotInput, StartThreadInput, TakeOverInput, TakeSlotInput, TookKind, TookSlot,
-        UseCases,
+        EventCursor, HoldMode, InitProjectInput, ItemQuery, NarrowClaimInput, NewMember,
+        RegisterSessionInput, ReleaseSlotInput, StartThreadInput, TakeOverInput, TakeSlotInput,
+        TookKind, TookSlot, UseCases,
     };
     use dibs_app::{Actor, AppError, Dependencies};
     use dibs_domain::claim::{ClaimOutcome, ClaimRefused, TakeoverRefused};
     use dibs_domain::handle::Handle;
+    use dibs_domain::handover::ClaimKind;
     use dibs_domain::ids::{ItemId, MemberId, ProjectId, SessionId};
     use dibs_domain::item::{ExternalRef, Title};
     use dibs_domain::member::{DisplayName, Role};
@@ -202,6 +203,7 @@ mod use_cases {
                     item,
                     session: race.racers[n].session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+                    kind: None,
                 };
                 tasks.push(tokio::spawn(async move {
                     let racer = &race.racers[n];
@@ -456,6 +458,103 @@ mod use_cases {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn one_feature_claim_wins_a_debt_held_area_and_receives_it_when_the_debt_claim_narrows() {
+        let race = Race::new().await;
+        let app = &race.world.app;
+        let admin_session = register(app, &race.admin, 99).await;
+        let debt = create_item(app, &race.admin, 99).await;
+        app.claim_item
+            .execute(
+                &race.admin,
+                ClaimItemInput {
+                    item: debt,
+                    session: admin_session,
+                    areas: vec!["billing".to_owned()],
+                    wide: None,
+                    kind: Some(ClaimKind::Debt),
+                },
+            )
+            .await
+            .unwrap();
+        let mut items = Vec::new();
+        for n in 0..RACERS {
+            items.push(create_item(app, &race.admin, n).await);
+        }
+        let results = race.claim_all(&items, &["billing"]).await;
+        let winners: Vec<(MemberId, ItemId)> = results
+            .iter()
+            .filter_map(|(member, result)| {
+                result
+                    .as_ref()
+                    .ok()
+                    .map(|made| (*member, made.outcome.claim().item))
+            })
+            .collect();
+        assert_eq!(
+            winners.len(),
+            1,
+            "one claim waits for the area: {results:?}"
+        );
+        let (winner, waiting) = winners[0];
+        assert!(
+            results
+                .iter()
+                .filter(|(member, _)| *member != winner)
+                .all(|(_, result)| matches!(
+                    result,
+                    Err(AppError::Claim(Refusal {
+                        reason: ClaimRefused::AreaWaited { member, own: false, .. },
+                        ..
+                    })) if *member == winner
+                )),
+            "the others are told the area waits for the winner: {results:?}"
+        );
+        let mut tx = race.world.store.begin().await.unwrap();
+        let project = race.admin.project;
+        let stored = tx.claim(project, waiting).await.unwrap().unwrap();
+        assert!(
+            stored
+                .pending
+                .get(&dibs_domain::area::QualifiedArea::parse("default:billing").unwrap())
+                .is_some_and(|pending| pending.from == debt && pending.asked_at.is_some())
+        );
+        drop(tx);
+        let narrowed = app
+            .narrow_claim
+            .execute(
+                &race.admin,
+                NarrowClaimInput {
+                    item: debt,
+                    areas: vec!["billing".to_owned()],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(narrowed.handed_over.len(), 1);
+        let mut tx = race.world.store.begin().await.unwrap();
+        let received = tx.claim(project, waiting).await.unwrap().unwrap();
+        assert!(received.pending.is_empty());
+        assert_eq!(received.areas.len(), 1);
+        assert!(tx.pending_projects().await.unwrap().is_empty());
+        drop(tx);
+        let names = race.world.event_names(project).await;
+        let tail: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|name| {
+                matches!(
+                    *name,
+                    "yield_requested" | "claim_narrowed" | "area_handed_over"
+                )
+            })
+            .collect();
+        assert_eq!(
+            tail,
+            ["yield_requested", "claim_narrowed", "area_handed_over"]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
     async fn a_stale_claim_is_taken_over_once() {
         let race = Race::new().await;
         let app = &race.world.app;
@@ -468,6 +567,7 @@ mod use_cases {
                     item,
                     session: race.racers[0].session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await
@@ -483,6 +583,7 @@ mod use_cases {
                     session: racer.session,
                     areas: Vec::new(),
                     reason: Body::parse("Picking this up.").unwrap(),
+                    kind: None,
                 };
                 race.world.app.take_over.execute(&racer.actor, input).await
             }));
@@ -527,6 +628,7 @@ mod use_cases {
                     item,
                     session: alices_session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await
@@ -567,6 +669,7 @@ mod use_cases {
                         item,
                         session: daves_session,
                         areas: Vec::new(),
+                        kind: None,
                     },
                 )
                 .await
@@ -778,6 +881,7 @@ mod use_cases {
                     session,
                     areas: Vec::new(),
                     wide: None,
+                    kind: None,
                 },
             )
             .await
@@ -897,6 +1001,7 @@ mod use_cases {
                         session,
                         areas: Vec::new(),
                         wide: None,
+                        kind: None,
                     },
                 )
                 .await
@@ -1122,6 +1227,7 @@ mod use_cases {
                     session,
                     areas: Vec::new(),
                     wide: None,
+                    kind: None,
                 },
             )
             .await
@@ -1208,6 +1314,7 @@ mod use_cases {
                             session,
                             areas: Vec::new(),
                             wide: None,
+                            kind: None,
                         },
                     )
                     .await

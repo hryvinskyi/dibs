@@ -28,6 +28,7 @@ use crate::named::{ItemName, NamedClaim, Names, refuse};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::existing_item;
+use crate::use_cases::handover::Handovers;
 use crate::use_cases::radar::{MergedInto, Radar};
 use crate::use_cases::slots::Scene;
 use crate::use_cases::wide_asks::Announcer;
@@ -55,10 +56,13 @@ pub struct ReviewedClaim {
 }
 
 /// Records a pull request on the caller's claim: the claim is in review and keeps its areas, and it
-/// no longer goes stale while the pull request is open.
+/// no longer goes stale while the pull request is open. A request to hand one of its areas over
+/// asked before is no longer counted, in the same transaction, so that it is asked again once the
+/// claim is worked on again.
 pub struct StartReview {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
     ref_schemes: Arc<RefSchemeRegistry>,
@@ -70,6 +74,7 @@ impl StartReview {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
             ref_schemes: deps.ref_schemes.clone(),
@@ -123,6 +128,14 @@ impl StartReview {
             )
             .await?;
         }
+        Handovers {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        }
+        .settle(&mut work)
+        .await?;
         let reviewed = ReviewedClaim {
             claim: Names::load(&mut work).await?.claim(started.claim)?,
             item: ItemName::of(&item, &self.ref_schemes),
@@ -182,7 +195,9 @@ pub enum PrReportOutcome {
 /// also moves the base under every live branch measured against that branch from an older base
 /// that changes a path it changed — the merged branch's own claim's other branches included — each
 /// such moved base announced once, whether or not a claim recorded the pull request. The merged
-/// branch's footprint of a claim that stays live goes: its work is in the base.
+/// branch's footprint of a claim that stays live goes: its work is in the base. A debt claim the
+/// report completes hands the areas other claims wait for over to them, and one that is worked on
+/// again is asked for them, in the same transaction.
 pub struct ReportPr {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -341,7 +356,18 @@ impl ReportPr {
                         member: claim.member,
                     }),
                 };
-                end_claim(&mut work, &claim, ending, now).await?;
+                end_claim(
+                    &mut work,
+                    &claim,
+                    ending,
+                    &Handovers {
+                        ids: &*self.ids,
+                        schemes: &self.ref_schemes,
+                        settings: &settings,
+                        now,
+                    },
+                )
+                .await?;
                 self.tell(&mut work, &claim, "Done by merge: ", |item, title| {
                     format!(
                         "Pull request {pr} merged; the claim on work item {item} \"{title}\" is done. Its areas are free and the item is done."
@@ -351,6 +377,14 @@ impl ReportPr {
                 PrReportOutcome::Completed(claim.item)
             }
         };
+        Handovers {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        }
+        .settle(&mut work)
+        .await?;
         let stays = !matches!(outcome, PrReportOutcome::Completed(_));
         if let Some(repo) = merged_branch.filter(|_| stays) {
             radar.drop_footprint(&mut work, claim.item, &repo).await?;
@@ -401,7 +435,8 @@ pub struct DropPrInput {
 }
 
 /// Removes a pull request the caller recorded on their claim by mistake. With none left the claim
-/// is worked on again, seen now.
+/// is worked on again, seen now, and a debt holder among the claims it holds areas for is asked
+/// to hand over what another claim waits for.
 pub struct DropPr {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -476,6 +511,14 @@ impl DropPr {
                 now,
             }
             .announce_due(&mut work)
+            .await?;
+            Handovers {
+                ids: &*self.ids,
+                schemes: &self.ref_schemes,
+                settings: &settings,
+                now,
+            }
+            .settle(&mut work)
             .await?;
         }
         let reviewed = ReviewedClaim {

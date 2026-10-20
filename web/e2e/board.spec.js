@@ -4,8 +4,9 @@
  * through the API moves it to In progress without a reload and the page's updated time with it,
  * a take-over reason the person is typing survives the events that arrive meanwhile, the board
  * catching up once the form is left, a slot taken through the API shows as held in the Slots
- * strip without a reload, and an overlap of two members' branches an integration reports shows
- * as a banner without a reload.
+ * strip without a reload, an overlap of two members' branches an integration reports shows
+ * as a banner without a reload, and a feature claim's wait for an area held by debt work shows,
+ * and goes once the area is handed over, without a reload.
  */
 
 import { ageClaim } from './claim-age.js';
@@ -14,6 +15,7 @@ import {
   claimItem,
   heartbeatOn,
   importItems,
+  narrowClaim,
   openSession,
   reportFootprint,
   takeSlot,
@@ -198,5 +200,42 @@ test('an overlap of two branches reported through the API shows as a banner with
   }
   const banner = page.locator('[data-overlap]', { hasText: shared });
   await expect(banner).toContainText(`${refs[0]} (alice) and ${refs[1]} (bob) change the same files`);
+  await expectSameDocument(page);
+});
+
+test('a feature claim waiting for an area debt work holds shows the wait until the handover, without a reload', async ({
+  page,
+  dibs,
+}) => {
+  const number = Date.now();
+  const name = `ledger${number}`;
+  const area = `default:${name}`;
+  await applySettings(dibs.url, dibs.adminToken, { areas: [{ name, paths: [`packages/${name}/**`] }] });
+  const [debtId, featureId] = await importItems(dibs.url, dibs.adminToken, [
+    { ref: `gh:acme/widgets#${number}`, title: `Tidy the ledger ${number}` },
+    { ref: `gh:acme/widgets#${number + 1}`, title: `Currency in the ledger ${number}` },
+  ]);
+  if (debtId === undefined || featureId === undefined) {
+    throw new Error('the import created fewer items than asked');
+  }
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/board`);
+  await markDocument(page);
+  const progress = column(page, 'In progress');
+  const aliceSession = await openSession(dibs.url, dibs.adminToken, 'laptop-debt');
+  await claimItem(dibs.url, dibs.adminToken, debtId, aliceSession, { areas: [area], kind: 'debt' });
+  const debtCard = progress.locator('.card').filter({ hasText: `Tidy the ledger ${number}` });
+  await expect(debtCard.locator('[data-debt]')).toHaveText('Debt');
+
+  const bobSession = await openSession(dibs.url, dibs.memberToken, 'laptop-feature');
+  await claimItem(dibs.url, dibs.memberToken, featureId, bobSession, { areas: [area] });
+  const featureCard = progress.locator('.card').filter({ hasText: `Currency in the ledger ${number}` });
+  await expect(featureCard.locator('[data-waiting]')).toHaveText(`waiting for ${area} from alice`);
+  await expect(featureCard.locator('[data-debt]')).toHaveCount(0);
+
+  await narrowClaim(dibs.url, dibs.adminToken, debtId, [area]);
+  await expect(featureCard.locator('[data-waiting]')).toHaveCount(0);
+  await expect(featureCard).toContainText(area);
   await expectSameDocument(page);
 });

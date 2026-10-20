@@ -346,7 +346,7 @@ fn conversation_about(thread: ThreadId) -> String {
 }
 
 /// How an item reads in an escalation: its reference, or `#<id>`, and its title.
-fn item_about(item: &ItemRecord, schemes: &RefSchemeRegistry) -> String {
+pub(crate) fn item_about(item: &ItemRecord, schemes: &RefSchemeRegistry) -> String {
     let name = ItemName::of(item, schemes);
     let label = name
         .external_ref
@@ -521,6 +521,7 @@ mod tests {
                     session: carol.session,
                     areas: vec!["billing".to_owned()],
                     wide: None,
+                    kind: None,
                 },
             )
             .await

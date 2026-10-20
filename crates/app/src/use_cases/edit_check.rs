@@ -65,13 +65,23 @@ impl EditVerdicts {
             } else {
                 None
             };
+            let waiting_ref = match &verdict.verdict {
+                Verdict::HeldBy {
+                    reason:
+                        edit::HeldReason::AskHolder {
+                            waiting: Some(waiting),
+                        },
+                    ..
+                } => item_ref(work, waiting.item).await?,
+                _ => None,
+            };
             let mut touched_refs = Vec::new();
             if let Verdict::AllowedWithNote { touched_by, .. } = &verdict.verdict {
                 for holder in touched_by {
                     touched_refs.push(item_ref(work, holder.item).await?);
                 }
             }
-            verdicts.push(names.verdict(verdict, reference, touched_refs)?);
+            verdicts.push(names.verdict(verdict, reference, touched_refs, waiting_ref)?);
         }
         Ok(Self {
             verdicts,
@@ -268,6 +278,7 @@ mod tests {
                     item,
                     session: who.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+                    kind: None,
                 },
             )
             .await
@@ -373,6 +384,7 @@ mod tests {
                     item,
                     session: laptop,
                     areas: vec!["billing".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -405,7 +417,7 @@ mod tests {
                 member: env.alice.actor.member,
                 item: alices,
                 area: area("default:billing"),
-                reason: HeldReason::AskHolder,
+                reason: HeldReason::AskHolder { waiting: None },
             }]
         );
         let alice = Some(Handle::parse("alice").unwrap());

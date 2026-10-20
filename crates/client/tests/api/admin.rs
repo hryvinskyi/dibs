@@ -120,6 +120,7 @@ fn an_admin_force_releases_any_claim() {
                 wide: None,
                 session_id: bob_session,
                 areas: Vec::new(),
+                kind: None,
             },
         )
         .await

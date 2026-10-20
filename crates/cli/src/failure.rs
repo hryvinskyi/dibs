@@ -107,6 +107,8 @@ impl From<ClientError> for Failure {
         {
             if code == "wide_overlap" {
                 message.push_str(&format!(" It is in the wide claim of {holder}"));
+            } else if details.is_some_and(|details| details.waiting) {
+                message.push_str(&format!(" It is waited for by {holder}"));
             } else {
                 message.push_str(&format!(" It is held by {holder}"));
             }
@@ -269,6 +271,38 @@ mod tests {
             "The area api:billing is held by another member. It is held by alice on item gh:acme/web#12."
         );
         assert!(Failure::config("x", "Y.").details.is_none());
+    }
+
+    #[test]
+    fn an_area_another_claim_waits_for_names_who_waits_and_ones_own_wait_names_nobody() {
+        let failure = Failure::from(ClientError::Conflict {
+            code: "area_held".to_owned(),
+            message: "The area api:billing is waited for by another member's claim #12.".to_owned(),
+            details: Box::new(ErrorDetails {
+                holder: Some("carol".parse().unwrap()),
+                item: Some(dibs_domain::ids::ItemId(12)),
+                waiting: true,
+                ..ErrorDetails::default()
+            }),
+        });
+        assert_eq!(
+            failure.message,
+            "The area api:billing is waited for by another member's claim #12. It is waited for by carol on item 12."
+        );
+        let own = Failure::from(ClientError::Conflict {
+            code: "area_held".to_owned(),
+            message: "Your claim #12 already waits for api:billing to be handed over.".to_owned(),
+            details: Box::new(ErrorDetails {
+                item: Some(dibs_domain::ids::ItemId(12)),
+                waiting: true,
+                own: true,
+                ..ErrorDetails::default()
+            }),
+        });
+        assert_eq!(
+            own.message,
+            "Your claim #12 already waits for api:billing to be handed over."
+        );
     }
 
     #[test]

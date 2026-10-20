@@ -72,6 +72,7 @@ mod tests {
                         item,
                         session: who.session,
                         areas: Vec::new(),
+                        kind: None,
                     },
                 )
                 .await

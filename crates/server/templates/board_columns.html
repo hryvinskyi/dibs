@@ -55,16 +55,17 @@
   <div class="column__head"><h2 id="c-prog">In progress</h2><span class="column__count">{{ board.in_progress.len() }}</span></div>
   <ul class="cards">
 {% for row in board.in_progress %}<li class="card">
-  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}{% if row.closed_upstream %}<span class="badge badge--info"><span class="badge__icon badge__icon--check" aria-hidden="true"></span>Closed upstream</span>{% endif %}</div>
+  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}{% call ui::claim_kind(row) %}{% endcall %}{% if row.closed_upstream %}<span class="badge badge--info"><span class="badge__icon badge__icon--check" aria-hidden="true"></span>Closed upstream</span>{% endif %}</div>
   <p class="card__title">{{ row.title }}</p>
   {% call ui::chips(row.areas) %}{% endcall %}
+  {% call ui::waits(row) %}{% endcall %}
   <p class="card__meta"><span class="member">{{ row.holder }}</span><span>heartbeat {% call ui::time(row.seen) %}{% endcall %}</span></p>
 </li>
 {% endfor %}  </ul>
 {% if !board.in_review.is_empty() %}  <h3 class="column__sub" id="c-review">In review <span class="column__count">{{ board.in_review.len() }}</span></h3>
   <ul class="cards" aria-labelledby="c-review">
 {% for row in board.in_review %}<li class="card" data-in-review>
-  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}<span class="badge badge--review"><span class="badge__icon badge__icon--half" aria-hidden="true"></span>In review</span></div>
+  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}{% call ui::claim_kind(row) %}{% endcall %}<span class="badge badge--review"><span class="badge__icon badge__icon--half" aria-hidden="true"></span>In review</span></div>
   <p class="card__title">{{ row.title }}</p>
   {% call ui::chips(row.areas) %}{% endcall %}
   <p class="card__meta"><span class="member">{{ row.holder }}</span><span>{{ row.prs|join(", ") }}</span></p>
@@ -75,7 +76,7 @@
   <div class="column__head"><h2 id="c-stale">Stale</h2><span class="column__count">{{ board.stale.len() }}</span></div>
   <ul class="cards">
 {% for row in board.stale %}<li class="card card--stale">
-  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}<span class="badge badge--warn"><span class="badge__icon badge__icon--ring-dashed" aria-hidden="true"></span>Stale</span></div>
+  <div class="card__top">{% call ui::item_ref(row) %}{% endcall %}{% call ui::claim_kind(row) %}{% endcall %}<span class="badge badge--warn"><span class="badge__icon badge__icon--ring-dashed" aria-hidden="true"></span>Stale</span></div>
   <p class="card__title">{{ row.title }}</p>
   {% call ui::chips(row.areas) %}{% endcall %}
   <p class="card__meta"><span class="member">{{ row.holder }}</span><span>last seen {% call ui::time(row.seen) %}{% endcall %}</span></p>

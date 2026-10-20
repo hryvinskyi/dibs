@@ -26,10 +26,10 @@ use crate::api::{
     Acked, AddDependency, ClaimRequest, Claimed, CreatedItem, Delivered, DependencyChange,
     DropPrRequest, EditCheck, EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest,
     Granted, Heartbeat, Inbox, InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me,
-    Member, MessageStatus, NewItem, NewMember, OnBranch, PostMessage, Posted, ReadyList,
-    RegisterSession, ReviewRequest, Reviewed, Revoked, Session, SettingsApplied, StartThread,
-    StartThreadBody, Started, Status, TakeOverRequest, TakenOver, ThreadDetail, Threads,
-    TokenRevoked, Versions,
+    Member, MessageStatus, NarrowRequest, Narrowed, NewItem, NewMember, OnBranch, PostMessage,
+    Posted, ReadyList, RegisterSession, ReviewRequest, Reviewed, Revoked, Session, SettingsApplied,
+    StartThread, StartThreadBody, Started, Status, TakeOverRequest, TakenOver, ThreadDetail,
+    Threads, TokenRevoked, Versions,
 };
 use crate::api::{
     Escalated, EscalationRequest, ForceReleaseSlotRequest, MemberRemoved, ReleaseSlotRequest,
@@ -301,6 +301,23 @@ impl Client {
         self.send(
             self.request(Method::POST, &format!("/v1/items/{id}/claim"))
                 .json(claim),
+        )
+        .await
+    }
+
+    /// `POST /v1/items/{id}/claim/narrow`: gives areas of the caller's claim up; an area another
+    /// claim waited for is handed over to it.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn narrow(
+        &self,
+        id: ItemId,
+        narrow: &NarrowRequest,
+    ) -> Result<Narrowed, ClientError> {
+        self.send(
+            self.request(Method::POST, &format!("/v1/items/{id}/claim/narrow"))
+                .json(narrow),
         )
         .await
     }

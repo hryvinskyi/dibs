@@ -811,4 +811,60 @@ mod migrations {
             );
         }
     }
+
+    #[tokio::test]
+    async fn yield_carries_every_claim_over_as_a_feature_waiting_for_nothing() {
+        use dibs_domain::handover::{ClaimKind, PendingArea};
+
+        let (_dir, path) = database_at(9, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let project = ProjectId(1);
+        let claims = tx.claims(project).await.unwrap();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            claims
+                .iter()
+                .all(|claim| claim.kind == ClaimKind::Feature && claim.pending.is_empty()),
+            "every claim of before is a feature that waits for nothing"
+        );
+        assert!(tx.pending_projects().await.unwrap().is_empty());
+        let debt = Claim {
+            kind: ClaimKind::Debt,
+            ..claims[1].clone()
+        };
+        tx.save_claim(project, &debt).await.unwrap();
+        let mut waiting = claims[0].clone();
+        waiting.pending.insert(
+            QualifiedArea::parse("default:billing").unwrap(),
+            PendingArea::waiting_for(debt.item),
+        );
+        tx.save_claim(project, &waiting).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim(project, waiting.item).await.unwrap(),
+            Some(waiting.clone())
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for update in [
+            "UPDATE claims SET kind = 'chore' WHERE item_id = 52",
+            "UPDATE claim_pending SET from_item_id = item_id",
+            "UPDATE claim_pending SET escalated_at = 5, asked_at = NULL",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{update}"
+            );
+        }
+    }
 }

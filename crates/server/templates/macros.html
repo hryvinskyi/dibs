@@ -4,6 +4,10 @@
 
 {% macro chips(areas) %}{% if areas.is_empty() %}<span class="muted">No areas</span>{% else %}<ul class="chips" aria-label="Areas">{% for area in areas.iter() %}<li><span class="chip">{{ area }}</span></li>{% endfor %}</ul>{% endif %}{% endmacro %}
 
+{% macro claim_kind(row) %}{% if row.debt %}<span class="badge badge--neutral" data-debt><span class="badge__icon badge__icon--dash" aria-hidden="true"></span>Debt</span>{% endif %}{% endmacro %}
+
+{% macro waits(row) %}{% if !row.waiting.is_empty() %}<ul class="chips" aria-label="Waiting for" data-waiting>{% for wait in row.waiting %}<li><span class="badge badge--warn">waiting for {{ wait.area }}{% if let Some(from) = wait.from %} from {{ from }}{% endif %}</span></li>{% endfor %}</ul>{% endif %}{% endmacro %}
+
 {% macro takeover(row, prefix, back, csrf) %}<details class="takeover">
   <summary class="btn btn--small">Take over</summary>
   <form class="takeover__form" method="post" action="/ui/items/{{ row.item_id }}/takeover">

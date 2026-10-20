@@ -357,6 +357,12 @@ pub struct Claim {
     /// The branch its work is on in each repository, by repository id.
     #[serde(default)]
     pub branches: BTreeMap<RepoId, BranchName>,
+    /// Whether its work is a feature or debt work.
+    #[serde(default)]
+    pub kind: ClaimKind,
+    /// The areas it waits for another member's debt claim to hand over.
+    #[serde(default)]
+    pub pending: BTreeMap<QualifiedArea, PendingArea>,
 }
 
 impl Claim {
@@ -364,6 +370,33 @@ impl Claim {
     pub fn in_review(&self) -> bool {
         self.state == WorkState::InReview
     }
+}
+
+/// What a claim's work is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimKind {
+    /// A feature: it may take an area from debt work.
+    #[default]
+    Feature,
+    /// Debt work only: it gives its areas up to a feature that needs them.
+    Debt,
+    /// A kind this client does not know yet.
+    #[serde(other)]
+    Other,
+}
+
+/// An area a claim waits for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingArea {
+    /// The item of the debt claim it waits for.
+    pub from: ItemId,
+    /// When that claim's holder was asked to hand it over.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub asked_at: Option<OffsetDateTime>,
+    /// When the unanswered request went to the arbiters.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub escalated_at: Option<OffsetDateTime>,
 }
 
 /// Where a claim's work stands.
@@ -445,6 +478,10 @@ pub struct ClaimRequest {
     /// For a wide claim, the areas it names and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wide: Option<WideRequest>,
+    /// The kind of a new claim; the server makes it a feature when this is absent, and a renewal
+    /// keeps the kind it has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ClaimKind>,
 }
 
 /// The `wide` part of a claim: the areas to announce a change over, holding none of them.
@@ -514,6 +551,54 @@ pub struct Claimed {
     /// The areas the claim holds that other members' live wide claims name.
     #[serde(default)]
     pub inside_wide: Vec<InsideWide>,
+    /// The areas the claim waits for another member's debt claim to hand over.
+    #[serde(default)]
+    pub pending: Vec<PendingNote>,
+}
+
+/// An area a claim waits for, with the debt claim that holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingNote {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The debt claim's holder.
+    pub holder: Handle,
+    /// The debt claim's item.
+    pub item: ItemName,
+    /// Whether the holder was asked to hand it over; not while their claim is in review.
+    pub asked: bool,
+}
+
+/// `POST /v1/items/{id}/claim/narrow`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NarrowRequest {
+    /// The areas to give up, as a person names them.
+    pub areas: Vec<String>,
+}
+
+/// An area a narrowing handed over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandedOver {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The item of the claim that holds it now.
+    pub to: ItemName,
+    /// That claim's holder.
+    pub holder: Handle,
+}
+
+/// `POST /v1/items/{id}/claim/narrow`'s answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Narrowed {
+    /// The claim as it stands now.
+    pub claim: Claim,
+    /// The item.
+    pub item: ItemName,
+    /// The areas it gave up.
+    pub areas: BTreeSet<QualifiedArea>,
+    /// The areas given up that another claim waited for, each with where it went.
+    #[serde(default)]
+    pub handed_over: Vec<HandedOver>,
 }
 
 /// `POST /v1/items/{id}/takeover`.
@@ -525,6 +610,9 @@ pub struct TakeOverRequest {
     pub reason: Body,
     /// The areas.
     pub areas: Vec<String>,
+    /// The new claim's kind; the server carries on the previous claim's kind when this is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ClaimKind>,
 }
 
 /// `POST /v1/items/{id}/takeover`'s answer.
@@ -867,6 +955,11 @@ pub enum HeldReason {
     /// The caller's wide claim names the area: wait for the holder to acknowledge its
     /// announcement.
     AwaitingAck,
+    /// The caller's claim waits for the holder's debt claim to hand the area over.
+    AwaitingHandover,
+    /// The holder's claim is debt work: declaring the area on the caller's feature claim asks for
+    /// it.
+    AskHandover,
     /// A way this client does not know yet.
     #[serde(other)]
     Other,
@@ -905,6 +998,19 @@ pub enum Verdict {
         /// For a holder in review, the pull requests their claim waits for.
         #[serde(default)]
         prs: Vec<PrRef>,
+        /// For a debt holder, the item of the caller's feature claim to declare the area on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claim: Option<ItemId>,
+        /// Another member's claim that already waits for the holder to hand the area over.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        waiting: Option<Toucher>,
+        /// When the caller's request goes to the arbiters if the area is not handed over by then.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "time::serde::rfc3339::option"
+        )]
+        escalates_at: Option<OffsetDateTime>,
     },
     /// The holder granted the member edits in the area.
     Granted {

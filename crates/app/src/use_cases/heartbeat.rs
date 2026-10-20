@@ -135,6 +135,7 @@ mod tests {
                     item,
                     session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await

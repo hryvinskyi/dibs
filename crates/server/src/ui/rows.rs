@@ -7,6 +7,7 @@ use dibs_app::named::ItemName;
 use dibs_app::use_cases::{
     AreaHold, ExcludedEntry, HeldItem, NamedNotReady, ReadyEntry, WideClaimStatus,
 };
+use dibs_domain::handover::ClaimKind;
 use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::item::ExternalRef;
 
@@ -44,6 +45,19 @@ pub struct ClaimRow {
     pub closed_upstream: bool,
     /// While the claim is in review, the pull requests it recorded; empty while it is worked on.
     pub prs: Vec<String>,
+    /// Whether the claim is debt work.
+    pub debt: bool,
+    /// The areas it waits for, each with the holder of the debt claim it waits for.
+    pub waiting: Vec<WaitRow>,
+}
+
+/// An area a claim waits for another member's debt claim to hand over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitRow {
+    /// The area, as `repo:area`.
+    pub area: String,
+    /// The handle of the debt claim's holder, when that claim is among the claims shown.
+    pub from: Option<String>,
 }
 
 impl ClaimRow {
@@ -54,11 +68,32 @@ impl ClaimRow {
 }
 
 impl ClaimRow {
-    /// The row of a held item, seen by `viewer` at `now`.
-    pub fn of(held: &HeldItem, viewer: MemberId, now: OffsetDateTime) -> Self {
+    /// The row of a held item, seen by `viewer` at `now`; `claims` are the project's claims shown
+    /// beside it, to name the holders of the debt claims it waits for.
+    pub fn of(
+        held: &HeldItem,
+        claims: &[&HeldItem],
+        viewer: MemberId,
+        now: OffsetDateTime,
+    ) -> Self {
         let claim = &held.claim.claim;
         let item = &held.item.item;
+        let holder_of = |from: ItemId| {
+            claims
+                .iter()
+                .find(|other| other.claim.claim.item == from)
+                .map(|other| other.claim.holder.to_string())
+        };
         Self {
+            debt: claim.kind == ClaimKind::Debt,
+            waiting: claim
+                .pending
+                .iter()
+                .map(|(area, pending)| WaitRow {
+                    area: area.to_string(),
+                    from: holder_of(pending.from),
+                })
+                .collect(),
             item_id: item.id.0,
             reference: reference(item.id, item.external_ref.as_ref()),
             link: held.link.clone(),

@@ -308,6 +308,7 @@ mod tests {
                     item: a,
                     session: env.bob.session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await
@@ -326,6 +327,7 @@ mod tests {
                     item: b,
                     session: env.alice.session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await

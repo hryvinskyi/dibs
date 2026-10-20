@@ -6,8 +6,9 @@ use std::path::PathBuf;
 
 use dibs_client::api::{
     Acked, ClaimRequest, Claimed, CreatedItem, DropPrRequest, EditCheck, Ended, Granted, Inbox,
-    InboxRequest, Items, MarkedRead, PostMessage, Posted, ReadyList, ReviewRequest, Reviewed,
-    StartThread, Started, Status, TakeOverRequest, TakenOver, ThreadDetail,
+    InboxRequest, Items, MarkedRead, NarrowRequest, Narrowed, PostMessage, Posted, ReadyList,
+    ReviewRequest, Reviewed, StartThread, Started, Status, TakeOverRequest, TakenOver,
+    ThreadDetail,
 };
 use dibs_client::api::{
     Escalated, EscalationRequest, HoldMode, ReleaseSlotRequest, SlotAnswer, SlotReleased, Slots,
@@ -22,8 +23,8 @@ use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::mcp::inputs::{
     AckInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget, GrantInput, InboxInput,
-    ItemsInput, KeyInput, NewInput, ReviewInput, SendInput, Sending, SlotInput, SlotTakeInput,
-    TakeoverInput, ThreadInput,
+    ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, Sending, SlotInput,
+    SlotTakeInput, TakeoverInput, ThreadInput,
 };
 
 /// The kind of agent the sessions of the tool server report.
@@ -112,10 +113,22 @@ impl Link {
         let wide = input.wide()?;
         let request = ClaimRequest {
             session_id: self.session,
+            kind: input.kind(),
             areas: input.areas,
             wide,
         };
         self.call(self.connection.client.claim(item, &request))
+            .await
+    }
+
+    /// Gives areas of the caller's claim up; an area another claim waited for moves to it.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, a refusal, or of the call.
+    pub async fn narrow(&self, input: NarrowInput) -> Result<Narrowed, Failure> {
+        let item = self.resolve(&input.key.key("key")?).await?;
+        let request = NarrowRequest { areas: input.areas };
+        self.call(self.connection.client.narrow(item, &request))
             .await
     }
 
@@ -130,6 +143,7 @@ impl Link {
         let request = TakeOverRequest {
             session_id: self.session,
             reason,
+            kind: input.kind(),
             areas: input.areas,
         };
         self.call(self.connection.client.take_over(item, &request))

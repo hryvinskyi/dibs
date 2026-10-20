@@ -2,7 +2,8 @@
 /**
  * The server's JSON API as the cases use it: start a conversation and post a message as a member,
  * each optionally raised in importance or asking to be acknowledged; acknowledge a message; import
- * items as an integration does; open a session and claim an item from it; send a session's
+ * items as an integration does; open a session and claim an item from it, or give areas of a
+ * claim up; send a session's
  * heartbeat from a checkout on a branch; report what a claim's branch changes as an integration
  * does; apply settings, take a slot, and escalate a work item to the project's arbiters.
  * Answers are parsed into the few values a case needs; a body of another shape is an error.
@@ -156,15 +157,36 @@ export async function openSession(baseUrl, token, host) {
 }
 
 /**
- * Claims an item from a session.
+ * Claims an item from a session, with the areas and the kind given (none, and a feature, when left
+ * out).
  * @param {string} baseUrl
  * @param {string} token the member's token
  * @param {number} itemId
  * @param {number} sessionId
+ * @param {{ areas?: string[], kind?: 'feature' | 'debt' }} [claim]
  * @returns {Promise<void>}
  */
-export async function claimItem(baseUrl, token, itemId, sessionId) {
-  await send(baseUrl, token, 'POST', `/v1/items/${itemId}/claim`, { session_id: sessionId, areas: [] }, 200);
+export async function claimItem(baseUrl, token, itemId, sessionId, claim = {}) {
+  await send(
+    baseUrl,
+    token,
+    'POST',
+    `/v1/items/${itemId}/claim`,
+    { session_id: sessionId, areas: claim.areas ?? [], ...(claim.kind ? { kind: claim.kind } : {}) },
+    200,
+  );
+}
+
+/**
+ * Gives areas of the caller's claim up.
+ * @param {string} baseUrl
+ * @param {string} token the holder's token
+ * @param {number} itemId
+ * @param {string[]} areas
+ * @returns {Promise<void>}
+ */
+export async function narrowClaim(baseUrl, token, itemId, areas) {
+  await send(baseUrl, token, 'POST', `/v1/items/${itemId}/claim/narrow`, { areas }, 200);
 }
 
 /**

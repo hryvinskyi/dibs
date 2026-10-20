@@ -65,7 +65,7 @@ fn held(member: MemberId, item: u64, text: &str) -> Verdict {
         member,
         item: ItemId(item),
         area: area(text),
-        reason: HeldReason::AskHolder,
+        reason: HeldReason::AskHolder { waiting: None },
     }
 }
 
@@ -86,6 +86,32 @@ fn in_review_reason(prs: &[&str]) -> HeldReason {
             .map(|text| crate::review::PrRef::parse(text).unwrap())
             .collect(),
     }
+}
+
+/// The claim as debt work.
+fn debt(claim: Claim) -> Claim {
+    Claim {
+        kind: crate::handover::ClaimKind::Debt,
+        ..claim
+    }
+}
+
+/// The claim waiting for the area from the claim on `from`.
+fn waiting(mut claim: Claim, text: &str, from: u64) -> Claim {
+    claim.pending.insert(
+        area(text),
+        crate::handover::PendingArea::waiting_for(ItemId(from)),
+    );
+    claim
+}
+
+/// The claim's wait for `api:billing` asked at minute `asked`, escalated at `escalated`.
+fn asked(mut claim: Claim, asked: i64, escalated: Option<i64>) -> Claim {
+    if let Some(pending) = claim.pending.get_mut(&area("api:billing")) {
+        pending.asked_at = Some(at(asked));
+        pending.escalated_at = escalated.map(at);
+    }
+    claim
 }
 
 fn scope(named: &[&str]) -> crate::wide::WideScope {
@@ -120,6 +146,9 @@ fn verdict_table() {
         wide: Some(scope(&["api:billing", "api:search"])),
         ..claim(1, ALICE, &[], 0)
     };
+    let bob_debt = || debt(bob_billing());
+    let alice_waiting =
+        |item: u64, from: u64| waiting(claim(item, ALICE, &[], 0), "api:billing", from);
     let lock_note = || Verdict::AllowedWithNote {
         rule: kind("regenerate"),
         note: note("regenerate it; never merge by hand"),
@@ -580,6 +609,136 @@ fn verdict_table() {
             name: "another repository's hot rules do not apply",
             claims: vec![alice_plain()],
             path: "web:composer.lock",
+            ..Case::default()
+        },
+        Case {
+            name: "my feature claim waits for the debt holder to hand the area over",
+            claims: vec![alice_waiting(1, 2), bob_debt()],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: HeldReason::AwaitingHandover { escalates_at: None },
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "a debt holder my feature claim did not ask: declaring the area asks them",
+            claims: vec![
+                claim(5, ALICE, &[], 0),
+                claim(9, ALICE, &[], 10),
+                bob_debt(),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: HeldReason::AskHandover { claim: ItemId(9) },
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "another member's claim already waits for the area: ask the holder, naming it",
+            claims: vec![
+                claim(9, ALICE, &[], 0),
+                bob_debt(),
+                waiting(claim(4, crate::testing::CAROL, &[], 0), "api:billing", 2),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: HeldReason::AskHolder {
+                    waiting: Some(Holder {
+                        member: crate::testing::CAROL,
+                        item: ItemId(4),
+                    }),
+                },
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "an asked wait says when it goes to the arbiters",
+            claims: vec![asked(alice_waiting(1, 2), 3, None), bob_debt()],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: HeldReason::AwaitingHandover {
+                    escalates_at: Some(at(33)),
+                },
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "an escalated wait has nothing left to wait for but the handover",
+            claims: vec![asked(alice_waiting(1, 2), 3, Some(40)), bob_debt()],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: HeldReason::AwaitingHandover { escalates_at: None },
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "a debt holder and only my own debt claim: ask the holder",
+            claims: vec![debt(claim(1, ALICE, &[], 0)), bob_debt()],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: held(BOB, 2, "api:billing"),
+            ..Case::default()
+        },
+        Case {
+            name: "a debt holder in review: free when its pull requests merge, not asked",
+            claims: vec![alice_waiting(1, 2), reviewing(bob_debt(), &["acme/api#7"])],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: in_review_reason(&["acme/api#7"]),
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "my wide claim names the area a debt claim holds: wait for the ack",
+            claims: vec![alice_wide(), bob_debt()],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: HeldReason::AwaitingAck,
+            },
+            touch: Vec::new(),
+            ..Case::default()
+        },
+        Case {
+            name: "a stale debt holder: the area is not added to the claim waiting for it",
+            claims: vec![
+                alice_waiting(5, 2),
+                claim(9, ALICE, &[], -10),
+                debt(claim(2, BOB, &["api:billing"], stale)),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            add_areas: vec![add(9, "api:billing")],
+            touch: vec![9],
+            ..Case::default()
+        },
+        Case {
+            name: "another member's claim waits for an area nobody holds: no reservation",
+            claims: vec![
+                alice_plain(),
+                waiting(claim(3, BOB, &[], 0), "api:billing", 2),
+                debt(claim(2, crate::testing::CAROL, &["api:billing"], stale)),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            touch: vec![1],
             ..Case::default()
         },
     ];

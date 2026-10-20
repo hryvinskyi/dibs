@@ -92,6 +92,7 @@ mod support {
                 host: HostName::parse("laptop").unwrap(),
                 areas: areas.iter().map(|a| self.area(a)).collect(),
                 wide: None,
+                kind: None,
             }
         }
 
@@ -181,7 +182,7 @@ fn two_members_claim_edit_grant_and_release() {
             member: ALICE,
             item: ItemId(1),
             area: world.area("api:billing"),
-            reason: HeldReason::AskHolder,
+            reason: HeldReason::AskHolder { waiting: None },
         }
     );
 

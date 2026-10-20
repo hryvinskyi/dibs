@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
-use dibs_client::api::{GrantRequest, ItemFilter, NewItem, Recipients, WideRequest};
+use dibs_client::api::{ClaimKind, GrantRequest, ItemFilter, NewItem, Recipients, WideRequest};
 use dibs_domain::escalation::EscalationReason;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
@@ -142,6 +142,21 @@ pub struct ClaimInput {
     /// each member holding one is asked to acknowledge, which lets you edit there.
     #[serde(default)]
     pub wide: Option<WideClaimInput>,
+    /// Set it when the work is debt only — refactoring, clean-up — and no feature: a feature
+    /// claim that needs one of its areas takes it, once you hand it over. Applies to a new claim;
+    /// a renewal keeps the kind the claim has.
+    #[serde(default)]
+    pub debt: bool,
+}
+
+/// `dibs_narrow`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NarrowInput {
+    /// The item of your claim: its local id or its reference.
+    pub key: ItemKeyInput,
+    /// The areas to give up, named like `dibs_claim`'s areas.
+    pub areas: Vec<String>,
 }
 
 /// The `wide` part of `dibs_claim`.
@@ -155,6 +170,11 @@ pub struct WideClaimInput {
 }
 
 impl ClaimInput {
+    /// The kind of a new claim, as the client sends it: debt work, or the server's default.
+    pub fn kind(&self) -> Option<ClaimKind> {
+        self.debt.then_some(ClaimKind::Debt)
+    }
+
     /// The wide part of the claim as the client sends it.
     ///
     /// # Errors
@@ -186,9 +206,31 @@ pub struct TakeoverInput {
     /// The areas you will change, as for `dibs_claim`.
     #[serde(default)]
     pub areas: Vec<String>,
+    /// The kind of the new claim: `feature` or `debt`. Leave it out to keep the kind the stale
+    /// claim had.
+    #[serde(default)]
+    pub kind: Option<KindInput>,
+}
+
+/// The kind a claim is made as.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum KindInput {
+    /// A feature.
+    Feature,
+    /// Debt work.
+    Debt,
 }
 
 impl TakeoverInput {
+    /// The kind of the new claim, as the client sends it.
+    pub fn kind(&self) -> Option<ClaimKind> {
+        self.kind.map(|kind| match kind {
+            KindInput::Feature => ClaimKind::Feature,
+            KindInput::Debt => ClaimKind::Debt,
+        })
+    }
+
     /// The reason, as the message the previous holder receives.
     ///
     /// # Errors
@@ -671,6 +713,18 @@ mod tests {
         let misspelt = serde_json::from_value::<ClaimInput>(json!({"key": 1, "area": ["billing"]}));
         assert!(misspelt.is_err());
         assert!(serde_json::from_value::<ClaimInput>(json!({"areas": []})).is_err());
+        assert_eq!(
+            parse::<ClaimInput>(json!({"key": 4, "debt": true})).kind(),
+            Some(ClaimKind::Debt)
+        );
+        assert_eq!(parse::<ClaimInput>(json!({"key": 4})).kind(), None);
+        assert!(
+            serde_json::from_value::<NarrowInput>(json!({"key": 4})).is_err(),
+            "a narrowing names the areas it gives up"
+        );
+        assert!(
+            serde_json::from_value::<NarrowInput>(json!({"key": 4, "areas": ["billing"]})).is_ok()
+        );
     }
 
     #[test]

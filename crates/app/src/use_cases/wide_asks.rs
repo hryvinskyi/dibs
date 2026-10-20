@@ -298,6 +298,7 @@ mod tests {
                     session: who.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
                     wide: None,
+                    kind: None,
                 },
             )
             .await
@@ -313,6 +314,7 @@ mod tests {
                 areas: named.iter().map(|a| (*a).to_owned()).collect(),
                 reason: dibs_domain::wide::WideReason::parse("Upgrade the HTTP client").unwrap(),
             }),
+            kind: None,
         }
     }
 
@@ -632,6 +634,7 @@ mod tests {
                     session: env.alice.session,
                     areas: Vec::new(),
                     reason: Body::parse("Bob is away; I finish the upgrade.").unwrap(),
+                    kind: None,
                 },
             )
             .await

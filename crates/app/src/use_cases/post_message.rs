@@ -307,6 +307,7 @@ mod tests {
                         session: env.alice.session,
                         areas: vec![area.to_owned()],
                         wide: None,
+                        kind: None,
                     },
                 )
                 .await
@@ -324,6 +325,7 @@ mod tests {
                         areas: vec!["billing".to_owned(), "search".to_owned()],
                         reason: WideReason::parse("Rename the client").unwrap(),
                     }),
+                    kind: None,
                 },
             )
             .await

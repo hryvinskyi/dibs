@@ -325,6 +325,9 @@ pub fn answer(verdict: &Verdict) -> PathAnswer {
             area,
             reason,
             prs,
+            claim,
+            waiting,
+            escalates_at,
         } => PathAnswer::HeldBy {
             holder: holder.clone(),
             item: *item,
@@ -333,7 +336,21 @@ pub fn answer(verdict: &Verdict) -> PathAnswer {
             way: match reason {
                 HeldReason::InReview => HeldWay::InReview { prs: prs.clone() },
                 HeldReason::AwaitingAck => HeldWay::AwaitingAck,
-                HeldReason::AskHolder | HeldReason::Other => HeldWay::AskHolder,
+                HeldReason::AwaitingHandover => HeldWay::AwaitingHandover {
+                    escalates_at: *escalates_at,
+                },
+                HeldReason::AskHandover => {
+                    claim.map_or(HeldWay::AskHolder, |claim| HeldWay::AskHandover { claim })
+                }
+                HeldReason::AskHolder => match waiting {
+                    Some(waiting) => HeldWay::WaitedFor {
+                        waiter: waiting.holder.clone(),
+                        claim: waiting.item,
+                        claim_ref: waiting.item_ref.clone(),
+                    },
+                    None => HeldWay::AskHolder,
+                },
+                HeldReason::Other => HeldWay::AskHolder,
             },
         },
         Verdict::Granted { by, area } => PathAnswer::Granted {
@@ -361,6 +378,45 @@ mod tests {
     use dibs_client::ErrorDetails;
 
     use super::*;
+
+    #[test]
+    fn a_debt_holders_verdict_carries_the_way_to_the_handover() {
+        let held = |reason, claim| {
+            answer(&Verdict::HeldBy {
+                holder: None,
+                item: dibs_domain::ids::ItemId(7),
+                item_ref: None,
+                area: dibs_domain::area::QualifiedArea::parse("api:billing").unwrap(),
+                reason,
+                prs: Vec::new(),
+                claim,
+                waiting: None,
+                escalates_at: None,
+            })
+        };
+        let way = |answer: PathAnswer| match answer {
+            PathAnswer::HeldBy { way, .. } => way,
+            other => panic!("not held: {other:?}"),
+        };
+        assert_eq!(
+            way(held(HeldReason::AwaitingHandover, None)),
+            HeldWay::AwaitingHandover { escalates_at: None }
+        );
+        assert_eq!(
+            way(held(
+                HeldReason::AskHandover,
+                Some(dibs_domain::ids::ItemId(42))
+            )),
+            HeldWay::AskHandover {
+                claim: dibs_domain::ids::ItemId(42)
+            }
+        );
+        assert_eq!(
+            way(held(HeldReason::AskHandover, None)),
+            HeldWay::AskHolder,
+            "without the claim to declare it on, the holder is asked"
+        );
+    }
 
     #[test]
     fn a_server_that_gives_no_decision_is_unavailable_and_a_refusal_is_not() {

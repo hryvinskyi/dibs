@@ -142,6 +142,48 @@ impl SystemPost {
     }
 }
 
+/// A message dibs adds to a conversation that exists, written by dibs under the label `dibs`: it
+/// reaches that conversation's readers, as the conversation's start did.
+pub(crate) struct SystemReply {
+    /// The conversation.
+    pub(crate) thread: ThreadId,
+    /// The id of the message, from [`IdGen`].
+    pub(crate) message: MessageId,
+    /// The text.
+    pub(crate) body: Body,
+    /// How much it asks for attention.
+    pub(crate) importance: Importance,
+    /// Whether it asks each recipient to acknowledge it.
+    pub(crate) ack_required: bool,
+}
+
+impl SystemReply {
+    /// Stores the message and records it.
+    pub(crate) async fn send(self, work: &mut Work, now: OffsetDateTime) -> Result<(), AppError> {
+        let message = MessageRecord {
+            id: self.message,
+            thread: self.thread,
+            author: Author::System,
+            label: dibs_label()?,
+            body: self.body,
+            importance: self.importance,
+            ack_required: self.ack_required,
+            created_at: now,
+        };
+        write_message(work, &message, 0, now).await?;
+        work.record(
+            now,
+            EventKind::MessagePosted(MessagePosted {
+                thread: self.thread,
+                message: message.id,
+                author: None,
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
 /// A subject dibs composed, cut to the characters a subject holds.
 fn fit_subject(text: &str) -> Result<Subject, AppError> {
     let shortened: String = text.chars().take(SUBJECT_MAX_CHARS).collect();

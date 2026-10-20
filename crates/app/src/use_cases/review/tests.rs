@@ -54,6 +54,7 @@ async fn claim(env: &Env, who: &Person, item: ItemId, areas: &[&str]) {
                 item,
                 session: who.session,
                 areas: areas.iter().map(|area| (*area).to_owned()).collect(),
+                kind: None,
             },
         )
         .await
@@ -374,6 +375,7 @@ async fn a_holder_in_review_is_asked_by_a_wide_claim_once_back_at_work() {
                     areas: vec!["billing".to_owned()],
                     reason: dibs_domain::wide::WideReason::parse("Rename the money type").unwrap(),
                 }),
+                kind: None,
             },
         )
         .await

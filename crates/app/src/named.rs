@@ -11,7 +11,7 @@ use std::fmt;
 use time::OffsetDateTime;
 
 use dibs_domain::claim::{Claim, ClaimRefused, HolderOnly, TakeoverRefused};
-use dibs_domain::edit::{PathVerdict, Verdict};
+use dibs_domain::edit::{HeldReason, PathVerdict, Verdict};
 use dibs_domain::event::Event;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MemberId};
@@ -111,6 +111,9 @@ pub struct NamedVerdict {
     /// The references of the items of `touched_by`, in the same order: `None` for an item without
     /// one.
     pub touched_refs: Vec<Option<ExternalRef>>,
+    /// For a held path another member's claim already waits for, the handle of that claim's member
+    /// and its item's reference, when it has one.
+    pub waiting: Option<(Handle, Option<ExternalRef>)>,
 }
 
 /// Who wrote a message or started a thread, as a result names them: a member by handle, or dibs.
@@ -249,17 +252,21 @@ impl NamesMember for ClaimRefused {
             | Self::Stale { member, .. }
             | Self::AreaHeld { member, .. }
             | Self::WideOverlap { member, .. } => Some(*member),
-            Self::UnknownArea { .. } | Self::WideAndHeld { .. } => None,
+            Self::AreaWaited { member, own, .. } => (!own).then_some(*member),
+            Self::UnknownArea { .. } | Self::WideAndHeld { .. } | Self::KindFixed { .. } => None,
         }
     }
 
     fn item(&self) -> Option<ItemId> {
         match self {
-            Self::AreaHeld { item, .. } | Self::WideOverlap { item, .. } => Some(*item),
+            Self::AreaHeld { item, .. }
+            | Self::AreaWaited { item, .. }
+            | Self::WideOverlap { item, .. } => Some(*item),
             Self::HeldBy { .. }
             | Self::Stale { .. }
             | Self::UnknownArea { .. }
-            | Self::WideAndHeld { .. } => None,
+            | Self::WideAndHeld { .. }
+            | Self::KindFixed { .. } => None,
         }
     }
 }
@@ -270,6 +277,7 @@ impl NamesMember for TakeoverRefused {
             Self::NotStale { member, .. }
             | Self::AreaHeld { member, .. }
             | Self::WideOverlap { member, .. } => Some(*member),
+            Self::AreaWaited { member, own, .. } => (!own).then_some(*member),
             Self::NothingToTake
             | Self::OwnClaim
             | Self::UnknownArea { .. }
@@ -279,7 +287,9 @@ impl NamesMember for TakeoverRefused {
 
     fn item(&self) -> Option<ItemId> {
         match self {
-            Self::AreaHeld { item, .. } | Self::WideOverlap { item, .. } => Some(*item),
+            Self::AreaHeld { item, .. }
+            | Self::AreaWaited { item, .. }
+            | Self::WideOverlap { item, .. } => Some(*item),
             Self::NotStale { .. }
             | Self::NothingToTake
             | Self::OwnClaim
@@ -505,7 +515,18 @@ impl Names {
         verdict: PathVerdict,
         item_ref: Option<ExternalRef>,
         touched_refs: Vec<Option<ExternalRef>>,
+        waiting_ref: Option<ExternalRef>,
     ) -> Result<NamedVerdict, AppError> {
+        let waiting = match &verdict.verdict {
+            Verdict::HeldBy {
+                reason:
+                    HeldReason::AskHolder {
+                        waiting: Some(waiting),
+                    },
+                ..
+            } => Some((self.handle(waiting.member)?, waiting_ref)),
+            _ => None,
+        };
         let (member, touched_by) = match &verdict.verdict {
             Verdict::HeldBy { member, .. } => (Some(self.handle(*member)?), Vec::new()),
             Verdict::Granted { by, .. } => (Some(self.handle(*by)?), Vec::new()),
@@ -524,6 +545,7 @@ impl Names {
             item_ref,
             touched_by,
             touched_refs,
+            waiting,
         })
     }
 }

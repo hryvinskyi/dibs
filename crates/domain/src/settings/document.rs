@@ -21,6 +21,10 @@ pub struct SettingsDocument {
     /// How often a session sends a heartbeat (`1m`; 1 to 15 minutes; default 1 minute).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_every: Option<String>,
+    /// How long a request to hand an area over from debt work to a feature waits before it is
+    /// escalated to the arbiters (`30m`; 5 minutes to 24 hours; default 30 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub yield_escalates_after: Option<String>,
     /// Whether a governed path needs a live claim (`require-claim`, the default) or only advises
     /// (`advise`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

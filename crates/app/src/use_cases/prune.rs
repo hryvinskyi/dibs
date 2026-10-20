@@ -171,6 +171,7 @@ mod tests {
                     session: who.session,
                     areas: Vec::new(),
                     wide: None,
+                    kind: None,
                 },
             )
             .await

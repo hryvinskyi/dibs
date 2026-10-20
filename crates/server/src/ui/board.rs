@@ -153,7 +153,7 @@ const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependen
      settings_changed slot_taken slot_renewed slot_queued slot_left slot_offered \
      slot_offer_lapsed slot_released slot_expired slot_force_released slot_stalled slot_resumed \
      slot_stall_taken_over escalated acked thread_started member_removed overlap_found \
-     footprint_changed";
+     footprint_changed yield_requested area_handed_over wait_withdrawn claim_narrowed";
 
 /// An escalation waiting for an arbiter, as the board's banner shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,10 +350,11 @@ async fn columns(
     let zone = viewer_offset(headers);
     let since = start_of_day(now, zone.unwrap_or(UtcOffset::UTC));
     let completed = state.app.list_completed.execute(actor, since).await?;
+    let shown: Vec<&dibs_app::use_cases::HeldItem> = view.live.iter().chain(&view.stale).collect();
     let rows = |held: &[dibs_app::use_cases::HeldItem]| {
         held.iter()
             .filter(|held| filter.keeps_claim(&held.claim))
-            .map(|held| ClaimRow::of(held, actor.member, now))
+            .map(|held| ClaimRow::of(held, &shown, actor.member, now))
             .collect::<Vec<_>>()
     };
     let live = rows(&view.live);
@@ -500,6 +501,8 @@ mod tests {
                 last_seen: at,
                 state: dibs_domain::review::ClaimState::Working,
                 branches: std::collections::BTreeMap::new(),
+                kind: dibs_domain::handover::ClaimKind::Feature,
+                pending: std::collections::BTreeMap::new(),
             },
             holder: Handle::parse(holder).unwrap(),
         }

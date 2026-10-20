@@ -70,6 +70,7 @@ mod tests {
                     item,
                     session: env.bob.session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await

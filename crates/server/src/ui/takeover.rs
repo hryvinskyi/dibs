@@ -135,6 +135,7 @@ async fn take(
                 session: browser.id,
                 areas: Vec::new(),
                 reason,
+                kind: None,
             },
         )
         .await?;

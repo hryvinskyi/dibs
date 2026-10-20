@@ -55,6 +55,7 @@ async fn claim(env: &Env, who: &Person, item: ItemId) {
                 item,
                 session: who.session,
                 areas: Vec::new(),
+                kind: None,
             },
         )
         .await
@@ -485,6 +486,7 @@ async fn a_merge_moves_the_base_under_every_branch_behind_it_its_authors_other_w
                 item: alices_other,
                 session: second,
                 areas: Vec::new(),
+                kind: None,
             },
         )
         .await
@@ -769,6 +771,7 @@ async fn two_sessions_of_one_machine_on_two_branches_never_move_each_others_clai
                     item,
                     session: at,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await
@@ -887,6 +890,7 @@ async fn a_takeover_clears_the_previous_holders_footprints_and_overlaps() {
                 session: env.alice.session,
                 areas: Vec::new(),
                 reason: dibs_domain::message::Body::parse("bob is away this week").unwrap(),
+                kind: None,
             },
         )
         .await

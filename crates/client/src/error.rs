@@ -175,6 +175,12 @@ pub struct ErrorDetails {
     /// Seconds to wait before trying again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after: Option<u64>,
+    /// Whether the area is in the way because another claim waits for it, rather than holds it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waiting: bool,
+    /// Whether the claim that waits for it is the caller's own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub own: bool,
 }
 
 #[derive(Deserialize)]

@@ -15,7 +15,7 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 21] = [
+const TOOLS: [&str; 22] = [
     "dibs_ack",
     "dibs_check",
     "dibs_claim",
@@ -24,6 +24,7 @@ const TOOLS: [&str; 21] = [
     "dibs_grant",
     "dibs_inbox",
     "dibs_items",
+    "dibs_narrow",
     "dibs_new",
     "dibs_read",
     "dibs_ready",
@@ -904,4 +905,55 @@ fn a_slot_taken_through_the_tools_is_the_members_and_a_second_member_waits_for_i
     );
     let unknown = alice.tool("dibs_slot_release", json!({"slot": "Bad Name"}));
     assert!(unknown.error().contains("`slot`"), "{}", unknown.text);
+}
+
+#[test]
+fn a_debt_claim_through_the_tools_hands_its_area_over_by_narrowing() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#7", "title": "Tidy billing"}),
+    );
+    bob.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#42", "title": "Currency"}),
+    );
+    let debt = alice.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#7", "areas": ["billing"], "debt": true}),
+    );
+    assert_eq!(debt.ok()["claim"]["kind"], "debt");
+    let waiting = bob.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#42", "areas": ["billing"]}),
+    );
+    let made = waiting.ok();
+    assert_eq!(made["pending"][0]["area"], "api:billing");
+    assert_eq!(made["pending"][0]["holder"], "alice");
+    let held = bob.tool("dibs_check", json!({"paths": ["src/billing/a.rs"]}));
+    assert_eq!(held.ok()["verdicts"][0]["reason"], "awaiting_handover");
+
+    let narrowed = alice.tool(
+        "dibs_narrow",
+        json!({"key": "gh:acme/api#7", "areas": ["billing"]}),
+    );
+    let answer = narrowed.ok();
+    assert_eq!(answer["areas"], json!(["api:billing"]));
+    assert_eq!(answer["handed_over"][0]["holder"], "bob");
+    let free = bob.tool("dibs_check", json!({"paths": ["src/billing/a.rs"]}));
+    assert_eq!(free.ok()["verdicts"][0]["verdict"], "allowed");
+    let not_theirs = bob.tool(
+        "dibs_narrow",
+        json!({"key": "gh:acme/api#7", "areas": ["billing"]}),
+    );
+    assert!(not_theirs.is_error, "{}", not_theirs.text);
+    setup.server.advance(time::Duration::hours(2));
+    let taken = bob.tool(
+        "dibs_takeover",
+        json!({"key": "gh:acme/api#7", "reason": "alice is away", "kind": "feature"}),
+    );
+    assert_eq!(taken.ok()["claim"]["kind"], "feature");
 }

@@ -314,7 +314,8 @@ note = "a migration runs inside dibs slot run"
 - Removing a slot from the settings ends its hold, its queue and its offer in the same change.
 
 The server sweeps the slots every 30 seconds — expiries, stalls, lapsed offers, silent waiters, and the offer to the
-next waiter — for every project with a hold, a waiter or an offer. The sweep stops when the server is told to stop,
+next waiter — for every project with a hold, a waiter or an offer (the same sweep then applies the
+[waiting areas](#feature-work-over-debt-work)). The sweep stops when the server is told to stop,
 after the requests in flight, and finishes a sweep it is running before the write-ahead log is checkpointed. An admin
 ends any hold with `dibs admin slot force-release <slot> --reason …`; the holder is sent the reason.
 
@@ -413,6 +414,34 @@ from the integration and the settings.
   `HEAD` of the directory `GIT_DIR` names, or of the nearest `.git` (a linked worktree's `.git` file is followed). A
   repository that keeps its refs in a reftable has a `HEAD` that names no branch (`refs/heads/.invalid`), so its claims
   record no branch and get no footprint.
+
+## Feature work over debt work
+
+A claim is of a kind, `feature` (the default) or `debt` (`dibs claim <item> --debt`, MCP `dibs_claim` with
+`debt: true`), so that feature work does not wait days behind a clean-up. A feature claim that declares an area other
+members hold only under debt claims waits for it instead of being refused, and dibs asks the debt holder, in an
+`urgent` message that asks to be acknowledged, to tell their person and, once they agree, to commit, push and hand the
+area over with `dibs claim narrow <item> --area …` (MCP `dibs_narrow`). One feature claim's areas waited for from one
+debt claim share one conversation. The area moves to the feature claim once no other member's claim holds it, in the
+transaction that lets the last one go — the narrowing, the debt claim's completion, release, takeover or merge, the
+removal of its member — and the feature claim's holder is told. A debt claim in review is not asked until it is worked
+on again. Two features, or debt work asking a feature, keep the plain refusal; who takes over the debt in the files
+handed over is the team's own rule. A claim keeps the kind it was made with: to change it, release and claim again
+(`dibs takeover --debt` or `--feature` names the kind of a taken-over claim).
+
+The same 30-second sweep that applies the slots applies what time changes here, for every project with a claim that
+waits for an area: an area whose debt claim went stale is handed over, a feature claim gone stale stops waiting and the
+debt holder is told the request no longer stands, and a request that waited the project's `yield_escalates_after`
+(30 minutes unless the settings say otherwise; 5 minutes to 24 hours) without the area being handed over is escalated
+once to the project's `arbiters` and the debt holder, or added to an escalation of that item that stands. **For an
+escalation to reach anybody, the project needs at least one arbiter who is a member of it, other than the member whose
+claim waits.** Without one, the server logs *requests to hand areas over waited past the project's limit and reached no
+arbiter: name arbiters in the settings*, the log records `yield_unescalated`, and the request is not tried again; it
+still stands, and the area still moves once the debt claim lets it go. A failure to sweep one project is logged (*the
+waiting areas of a project could not be swept*) and the other projects are swept all the same.
+
+The rule that only a feature claim waits for an area is kept by the service; the database keeps one waiting claim per
+area of a project, but cannot check the kind, which lives in another table than the waits.
 
 ## Restoring
 

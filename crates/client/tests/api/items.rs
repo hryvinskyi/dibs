@@ -89,6 +89,7 @@ fn an_item_is_created_once_found_by_its_reference_and_claimed() {
                     wide: None,
                     session_id: laptop.session_id,
                     areas: vec!["billing".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -152,6 +153,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
                     wide: None,
                     session_id: alice_session,
                     areas: vec!["api:billing".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -164,6 +166,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
                     wide: None,
                     session_id: bob_session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await
@@ -182,6 +185,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
                     wide: None,
                     session_id: bob_session,
                     areas: vec!["billing".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -198,6 +202,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
                     wide: None,
                     session_id: bob_session,
                     areas: vec!["nowhere".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -232,6 +237,7 @@ fn edit_checks_answer_per_path_and_ungoverned_paths_need_no_server() {
                     wide: None,
                     session_id: alice_session,
                     areas: vec!["billing".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -305,6 +311,7 @@ fn a_holder_grants_another_member_edits_for_their_item() {
                     wide: None,
                     session_id: session,
                     areas: vec![area.to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -368,6 +375,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
                     wide: None,
                     session_id: alice_session,
                     areas: vec!["checkout".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -380,6 +388,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
                     session_id: bob_session,
                     reason: "picking it up".parse().unwrap(),
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await
@@ -398,6 +407,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
                     session_id: bob_session,
                     reason: "alice is away".parse().unwrap(),
                     areas: vec!["checkout".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -419,6 +429,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
                 wide: None,
                 session_id: bob_session,
                 areas: Vec::new(),
+                kind: None,
             },
         )
         .await
@@ -468,6 +479,7 @@ fn the_ready_list_and_the_dependencies_are_read_and_written() {
                     wide: None,
                     session_id: session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await
@@ -515,6 +527,7 @@ fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
                     session_id: alice_session,
                     areas: vec!["billing".to_owned()],
                     wide: None,
+                    kind: None,
                 },
             )
             .await
@@ -529,6 +542,7 @@ fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
                         areas: vec!["billing".to_owned(), "search".to_owned()],
                         reason: "Upgrade the HTTP client".to_owned(),
                     }),
+                    kind: None,
                 },
             )
             .await
@@ -596,6 +610,7 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
                     wide: None,
                     session_id: laptop.session_id,
                     areas: vec!["billing".to_owned()],
+                    kind: None,
                 },
             )
             .await
@@ -652,5 +667,95 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
             .await
             .unwrap_err();
         assert_eq!(refused.code(), "not_holder");
+    });
+}
+
+#[test]
+fn a_feature_claim_waits_for_a_debt_held_area_and_receives_it_when_it_is_narrowed() {
+    use dibs_client::api::{ClaimKind, HeldReason, NarrowRequest};
+
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    run(async {
+        let debt = alice
+            .create_item(&new_item("gh:acme/api#7", "Tidy billing"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let feature = bob
+            .create_item(&new_item("gh:acme/api#42", "Currency"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let alice_session = session(&alice, "laptop/cli").await.session_id;
+        let bob_session = session(&bob, "desk/cli").await.session_id;
+        let held = alice
+            .claim(
+                debt,
+                &ClaimRequest {
+                    session_id: alice_session,
+                    areas: vec!["billing".to_owned()],
+                    wide: None,
+                    kind: Some(ClaimKind::Debt),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(held.claim.kind, ClaimKind::Debt);
+        let waiting = bob
+            .claim(
+                feature,
+                &ClaimRequest {
+                    session_id: bob_session,
+                    areas: vec!["billing".to_owned()],
+                    wide: None,
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(waiting.claim.kind, ClaimKind::Feature);
+        assert!(waiting.claim.areas.is_empty());
+        let pending = waiting.claim.pending.values().next().unwrap();
+        assert_eq!(pending.from, debt);
+        assert!(pending.asked_at.is_some());
+        assert_eq!(waiting.pending[0].holder.as_str(), "alice");
+        assert!(waiting.pending[0].asked);
+        let request = EditCheckRequest {
+            session_id: bob_session,
+            repo: RepoId::parse("api").unwrap(),
+            paths: paths(&["src/billing/a.rs"]),
+            reserve: true,
+            branch: None,
+        };
+        let verdicts = bob.edit_check(&request).await.unwrap().verdicts;
+        assert!(
+            matches!(
+                verdicts[0].verdict,
+                Verdict::HeldBy {
+                    reason: HeldReason::AwaitingHandover,
+                    claim: None,
+                    ..
+                }
+            ),
+            "{verdicts:?}"
+        );
+        let narrowed = alice
+            .narrow(
+                debt,
+                &NarrowRequest {
+                    areas: vec!["billing".to_owned()],
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(narrowed.areas.len(), 1);
+        assert_eq!(narrowed.handed_over[0].holder.as_str(), "bob");
+        assert_eq!(narrowed.handed_over[0].to.id, feature);
+        let allowed = bob.edit_check(&request).await.unwrap().verdicts;
+        assert_eq!(allowed[0].verdict, Verdict::Allowed, "{allowed:?}");
     });
 }

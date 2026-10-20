@@ -85,7 +85,7 @@ mod sqlite_file {
             "SELECT group_concat(version || ':' || success) FROM _sqlx_migrations",
         )
         .await;
-        assert_eq!(applied, "1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1,9:1");
+        assert_eq!(applied, "1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1,9:1,10:1");
         assert_eq!(scalar(&path, "PRAGMA journal_mode").await, "wal");
     }
 

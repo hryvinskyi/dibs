@@ -9,7 +9,8 @@
 //! record by a key unique across projects and return the project with it ([`TokenRows::token_by_hash`],
 //! [`UiSessionRows::ui_session`]), create, look up or list projects themselves ([`ProjectRows`]),
 //! sweep expired browser sessions of every project ([`UiSessionRows::delete_expired_ui_sessions`]),
-//! or find the projects whose slots are in use ([`SlotRows::busy_slot_projects`]).
+//! or find the projects whose slots are in use ([`SlotRows::busy_slot_projects`]) or whose claims
+//! wait for areas ([`ClaimRows::pending_projects`]).
 
 use std::collections::BTreeSet;
 
@@ -281,10 +282,14 @@ pub trait ClaimRows: Send {
     async fn claim(&mut self, project: ProjectId, item: ItemId) -> StoreResult<Option<Claim>>;
     /// Every claim, live and stale, ordered by item.
     async fn claims(&mut self, project: ProjectId) -> StoreResult<Vec<Claim>>;
-    /// Stores the claim, replacing the item's previous one.
+    /// Stores the claim, replacing the item's previous one, with the areas it waits for. A claim
+    /// waiting for an area another claim of the project waits for fails with
+    /// [`StoreError::Duplicate`].
     async fn save_claim(&mut self, project: ProjectId, claim: &Claim) -> StoreResult<()>;
-    /// Removes the item's claim.
+    /// Removes the item's claim, with the areas it waits for.
     async fn delete_claim(&mut self, project: ProjectId, item: ItemId) -> StoreResult<()>;
+    /// Every project with a claim that waits for an area, ordered by id.
+    async fn pending_projects(&mut self) -> StoreResult<Vec<ProjectId>>;
     /// Every path recorded as shared, ordered by claim and path.
     async fn shared_paths(&mut self, project: ProjectId) -> StoreResult<Vec<SharedPath>>;
     /// Records a path as shared under a claim; recording it twice keeps one record.

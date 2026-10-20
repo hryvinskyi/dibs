@@ -428,6 +428,28 @@ pub enum HeldWay {
     /// The member's wide claim names the area: its holder's acknowledgement of the announcement
     /// grants the edit.
     AwaitingAck,
+    /// The member's feature claim waits for the holder's debt claim to hand the area over.
+    AwaitingHandover {
+        /// When the request goes to the arbiters if the area is not handed over by then, when the
+        /// server says.
+        escalates_at: Option<OffsetDateTime>,
+    },
+    /// Another member's claim already waits for the holder to hand the area over: message the
+    /// holder.
+    WaitedFor {
+        /// The member whose claim waits.
+        waiter: Handle,
+        /// That claim's item.
+        claim: ItemId,
+        /// That item's reference, when it has one.
+        claim_ref: Option<ExternalRef>,
+    },
+    /// The holder's claim is debt work: declaring the area on the member's feature claim asks the
+    /// holder to hand it over.
+    AskHandover {
+        /// The item of the member's feature claim, as the command line takes it.
+        claim: ItemId,
+    },
 }
 
 /// One session of one host, as the guard names it to its ports.

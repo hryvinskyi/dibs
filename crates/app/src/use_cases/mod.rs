@@ -21,6 +21,7 @@ mod force_release;
 mod get_item;
 mod grant;
 mod grant_endings;
+mod handover;
 mod heartbeat;
 mod inbox;
 mod init_project;
@@ -66,7 +67,7 @@ pub use ack::{AckMessage, Acknowledged};
 pub use add_dependency::{AddDependency, DependencyChange, DependencyInput};
 pub use apply_settings::{AppliedSettings, ApplySettings};
 pub use authenticate::Authenticate;
-pub use claim_item::{ClaimItem, ClaimItemInput, ClaimMade, WideInput, WideNote};
+pub use claim_item::{ClaimItem, ClaimItemInput, ClaimMade, PendingNote, WideInput, WideNote};
 pub use close_ui_session::CloseUiSession;
 pub use common::NewMember;
 pub use complete::Complete;
@@ -80,6 +81,9 @@ pub use follow_events::{FollowEvents, FollowPage, FollowedEvent};
 pub use force_release::ForceRelease;
 pub use get_item::{GetItem, ItemView};
 pub use grant::{Grant, GrantInput, GrantResult};
+pub use handover::{
+    HandedOver, HandoverSweep, NarrowClaim, NarrowClaimInput, NarrowedClaim, TickHandovers,
+};
 pub use heartbeat::{Heartbeat, HeartbeatOutcome};
 pub use inbox::{
     DELIVERABLE_FOR, DeliverableMessage, Inbox, InboxQuery, InboxView, MAX_DELIVERABLE,
@@ -163,6 +167,8 @@ pub struct UseCases {
     pub take_over: TakeOver,
     /// See [`Release`].
     pub release: Release,
+    /// See [`NarrowClaim`].
+    pub narrow_claim: NarrowClaim,
     /// See [`Complete`].
     pub complete: Complete,
     /// See [`StartReview`].
@@ -257,6 +263,8 @@ pub struct UseCases {
     pub slots: Slots,
     /// See [`TickSlots`].
     pub tick_slots: TickSlots,
+    /// See [`TickHandovers`].
+    pub tick_handovers: TickHandovers,
 }
 
 impl UseCases {
@@ -279,6 +287,7 @@ impl UseCases {
             claim_item: ClaimItem::new(deps),
             take_over: TakeOver::new(deps),
             release: Release::new(deps),
+            narrow_claim: NarrowClaim::new(deps),
             complete: Complete::new(deps),
             start_review: StartReview::new(deps),
             drop_pr: DropPr::new(deps),
@@ -326,6 +335,7 @@ impl UseCases {
             slot_run_finished: SlotRunFinished::new(deps),
             slots: Slots::new(deps),
             tick_slots: TickSlots::new(deps),
+            tick_handovers: TickHandovers::new(deps),
         }
     }
 }

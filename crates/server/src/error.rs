@@ -310,6 +310,8 @@ fn status_of(error: &AppError) -> StatusCode {
                 ClaimRefused::HeldBy { .. }
                 | ClaimRefused::Stale { .. }
                 | ClaimRefused::AreaHeld { .. }
+                | ClaimRefused::AreaWaited { .. }
+                | ClaimRefused::KindFixed { .. }
                 | ClaimRefused::WideOverlap { .. },
             ..
         })
@@ -319,6 +321,7 @@ fn status_of(error: &AppError) -> StatusCode {
                 | TakeoverRefused::OwnClaim
                 | TakeoverRefused::NotStale { .. }
                 | TakeoverRefused::AreaHeld { .. }
+                | TakeoverRefused::AreaWaited { .. }
                 | TakeoverRefused::WideOverlap { .. },
             ..
         })
@@ -446,6 +449,33 @@ fn details_of(error: &AppError) -> Map<String, Value> {
                 details.put("item_ref", reference);
             }
         }
+        AppError::Claim(Refusal {
+            reason: ClaimRefused::AreaWaited {
+                area, item, own, ..
+            },
+            member,
+            item_ref,
+        })
+        | AppError::Takeover(Refusal {
+            reason: TakeoverRefused::AreaWaited {
+                area, item, own, ..
+            },
+            member,
+            item_ref,
+        }) => {
+            details.put("area", area);
+            details.holder(member.as_ref());
+            details.put("item", item);
+            if let Some(reference) = item_ref {
+                details.put("item_ref", reference);
+            }
+            details.put("waiting", true);
+            details.put("own", own);
+        }
+        AppError::Claim(Refusal {
+            reason: ClaimRefused::KindFixed { kind },
+            ..
+        }) => details.put("kind", kind.code()),
         AppError::Delivery(DeliveryRefused::Delivered { session, at }) => {
             details.put("session_id", session);
             details.time("at", *at);

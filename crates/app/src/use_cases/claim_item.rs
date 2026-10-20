@@ -8,6 +8,7 @@ use dibs_domain::claim::{Claim, ClaimOutcome, ClaimRequest, decide_claim};
 use dibs_domain::dependency::blockers;
 use dibs_domain::event::{Claimed, EventKind, Renewed, WideClaimed};
 use dibs_domain::handle::Handle;
+use dibs_domain::handover::ClaimKind;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MessageId, SessionId};
 use dibs_domain::item::ItemStatus;
@@ -23,6 +24,7 @@ use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::ItemRecord;
 use crate::use_cases::common::{existing_item, own_session, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
+use crate::use_cases::handover::{Handovers, save_claimed};
 use crate::use_cases::wide_asks::{Announced, Announcer};
 use crate::work::Work;
 
@@ -38,6 +40,9 @@ pub struct ClaimItemInput {
     pub areas: Vec<String>,
     /// The scope to announce, for a wide claim.
     pub wide: Option<WideInput>,
+    /// The kind of a new claim; `None` for a feature. A renewal keeps the claim's kind, and one
+    /// that names another is refused.
+    pub kind: Option<ClaimKind>,
 }
 
 /// The scope of a wide claim, as a person names it.
@@ -62,6 +67,20 @@ pub struct WideNote {
     pub message: Option<MessageId>,
 }
 
+/// An area the claim declared that another member's debt claim holds: the claim waits for it to be
+/// handed over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingNote {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The handle of the debt claim's holder.
+    pub holder: Handle,
+    /// The debt claim's item.
+    pub item: ItemName,
+    /// Whether the holder has been asked to hand it over; not while their claim is in review.
+    pub asked: bool,
+}
+
 /// What a claim did, with the claiming member's handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimMade {
@@ -80,6 +99,8 @@ pub struct ClaimMade {
     /// The areas the claim holds that other members' live wide claims name. The claim is made; the
     /// caller is told that those members will ask for the edits there.
     pub inside_wide: Vec<WideNote>,
+    /// The areas the claim waits for, each with the debt claim that holds it.
+    pub pending: Vec<PendingNote>,
 }
 
 /// Claims a work item for the caller, or renews the caller's own claim on it.
@@ -94,6 +115,10 @@ pub struct ClaimMade {
 /// sent the announcement that asks for their acknowledgement. A claim that comes to hold an area
 /// another member's live wide claim names is not refused; its member is sent that wide claim's
 /// announcement in the same transaction, and the answer says so.
+///
+/// A feature claim that declares an area another member's debt claim holds waits for that area
+/// instead of being refused, and in the same transaction the debt claim's holder is asked to hand
+/// it over — unless their claim is in review, when they are asked once it is worked on again.
 pub struct ClaimItem {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -149,6 +174,7 @@ impl ClaimItem {
             host: session.host,
             areas: resolve_areas(&settings, &input.areas)?,
             wide: wide_scope(&settings, input.wide)?,
+            kind: input.kind,
         };
         let current = work.claim(project, item.id).await?;
         let others = work.claims(project).await?;
@@ -157,7 +183,7 @@ impl ClaimItem {
             Err(reason) => return Err(refuse(&mut work, reason).await),
         };
         let claim = outcome.claim();
-        work.save_claim(project, claim).await?;
+        save_claimed(&mut work, claim).await?;
         let event = match &outcome {
             ClaimOutcome::New { claim } => {
                 work.set_item_status(project, item.id, ItemStatus::Claimed)
@@ -191,11 +217,25 @@ impl ClaimItem {
         }
         .announce_due(&mut work)
         .await?;
+        Handovers {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        }
+        .settle(&mut work)
+        .await?;
+        let outcome = match work.claim(project, item.id).await? {
+            Some(stored) => outcome.with_claim(stored),
+            None => outcome,
+        };
+        let claim = outcome.claim();
         let names = Names::load(&mut work).await?;
         let holder = names.handle(actor.member)?;
         let inside_wide = self
             .wide_notes(&mut work, &names, claim, &sent, &settings, now)
             .await?;
+        let pending = self.pending_notes(&mut work, &names, claim).await?;
         let blocked_by = self.blockers_of(&mut work, item.id).await?;
         work.commit(&*self.notifier).await?;
         let announced = sent
@@ -209,7 +249,31 @@ impl ClaimItem {
             item: ItemName::of(&item, &self.ref_schemes),
             announced,
             inside_wide,
+            pending,
         })
+    }
+
+    /// The areas `claim` waits for, each with the debt claim that holds it.
+    async fn pending_notes(
+        &self,
+        work: &mut Work,
+        names: &Names,
+        claim: &Claim,
+    ) -> Result<Vec<PendingNote>, AppError> {
+        let project = work.project_id();
+        let mut notes = Vec::with_capacity(claim.pending.len());
+        for (area, pending) in &claim.pending {
+            let Some(holding) = work.claim(project, pending.from).await? else {
+                continue;
+            };
+            notes.push(PendingNote {
+                area: area.clone(),
+                holder: names.handle(holding.member)?,
+                item: ItemName::of(&existing_item(work, pending.from).await?, &self.ref_schemes),
+                asked: pending.asked_at.is_some(),
+            });
+        }
+        Ok(notes)
     }
 
     /// The areas `claim` holds that other members' live wide claims name, each with the
@@ -329,6 +393,7 @@ mod tests {
             session,
             areas: areas.iter().map(|a| (*a).to_owned()).collect(),
             wide: None,
+            kind: None,
         }
     }
 

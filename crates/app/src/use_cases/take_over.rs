@@ -6,6 +6,7 @@ use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use dibs_domain::claim::{ClaimRequest, Takeover, decide_takeover};
 use dibs_domain::event::{EventKind, TakenOver};
+use dibs_domain::handover::{AreaMove, ClaimKind, WithdrawReason, Withdrawal};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId, ThreadId};
 use dibs_domain::message::{Author, Body, Importance, Recipients};
@@ -18,6 +19,7 @@ use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::claim_item::widened;
 use crate::use_cases::common::{existing_item, own_session, remove_claim, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
+use crate::use_cases::handover::{Handovers, save_taken_over};
 use crate::use_cases::wide_asks::{Announced, Announcer};
 use crate::use_cases::writing::{Posted, SystemPost, system_body};
 use crate::work::Work;
@@ -35,6 +37,8 @@ pub struct TakeOverInput {
     pub areas: Vec<String>,
     /// Why, as told to the previous holder.
     pub reason: Body,
+    /// The kind of the new claim; `None` carries on the previous claim's kind.
+    pub kind: Option<ClaimKind>,
 }
 
 /// The takeover made.
@@ -61,6 +65,9 @@ pub struct TakenOverClaim {
 /// acknowledgement, so it reaches them while they work. A live claim is never taken over. A wide
 /// scope the new claim carries on is announced to the holders of its areas in the new member's
 /// name, since what they acknowledged before granted the previous member, and those grants end.
+/// An area another claim waited for the previous claim to hand over is not carried on: it moves
+/// to the claim waiting for it. The areas a previous feature claim waited for carry on with it,
+/// unless the new claim is debt work, which waits for nothing: those waits end.
 pub struct TakeOver {
     ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
@@ -115,6 +122,7 @@ impl TakeOver {
             host: session.host.clone(),
             areas: resolve_areas(&settings, &input.areas)?,
             wide: None,
+            kind: input.kind,
         };
         let current = work.claim(project, item.id).await?;
         let others = work.claims(project).await?;
@@ -122,8 +130,37 @@ impl TakeOver {
             Ok(takeover) => takeover,
             Err(reason) => return Err(refuse(&mut work, reason).await),
         };
+        let ended: Vec<Withdrawal> = takeover
+            .previous
+            .pending
+            .iter()
+            .filter(|(area, _)| !takeover.claim.waits_for(area))
+            .map(|(area, pending)| Withdrawal {
+                moved: AreaMove {
+                    area: area.clone(),
+                    from: pending.from,
+                    to: item.id,
+                },
+                reason: WithdrawReason::Ended,
+                request: pending.request,
+            })
+            .collect();
+        let handovers = Handovers {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        };
+        if !ended.is_empty() {
+            let names = Names::load(&mut work).await?;
+            for withdrawal in &ended {
+                handovers
+                    .withdraw(&mut work, &names, &others, withdrawal)
+                    .await?;
+            }
+        }
         remove_claim(&mut work, &takeover.previous).await?;
-        work.save_claim(project, &takeover.claim).await?;
+        save_taken_over(&mut work, &takeover.claim).await?;
         work.record(
             now,
             EventKind::TakenOver(TakenOver {
@@ -166,6 +203,7 @@ impl TakeOver {
             work.record(now, widened).await?;
         }
         end_orphaned_grants(&mut work, now).await?;
+        handovers.settle(&mut work).await?;
         let announced = Announcer {
             ids: &*self.ids,
             schemes: &self.ref_schemes,
@@ -218,6 +256,7 @@ mod tests {
                     item,
                     session: env.bob.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+                    kind: None,
                 },
             )
             .await
@@ -230,6 +269,7 @@ mod tests {
             session: env.alice.session,
             areas: areas.iter().map(|a| (*a).to_owned()).collect(),
             reason: reason(),
+            kind: None,
         }
     }
 
@@ -387,6 +427,7 @@ mod tests {
                     item: alices,
                     session: env.alice.session,
                     areas: Vec::new(),
+                    kind: None,
                 },
             )
             .await

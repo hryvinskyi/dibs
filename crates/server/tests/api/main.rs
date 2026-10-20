@@ -20,6 +20,8 @@ mod edit_check;
 #[cfg(test)]
 mod events;
 #[cfg(test)]
+mod handover;
+#[cfg(test)]
 mod items;
 #[cfg(test)]
 mod people;

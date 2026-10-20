@@ -16,7 +16,8 @@ use crate::failure::Failure;
 use crate::mcp::answer;
 use crate::mcp::inputs::{
     AckInput, CheckInput, ClaimInput, EscalateInput, GrantInput, InboxInput, ItemsInput, KeyInput,
-    NewInput, ReviewInput, SendInput, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
+    NarrowInput, NewInput, ReviewInput, SendInput, SlotInput, SlotTakeInput, TakeoverInput,
+    ThreadInput,
 };
 use crate::mcp::link::Link;
 
@@ -103,7 +104,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Claim a work item, with the areas of the code you will change, before you edit its files. Claiming an item you already hold renews the claim and replaces its areas. If another member holds the item or an area, the answer is a refusal that names the holder: pick other work, or message the holder with dibs_send. Do not edit the files anyway. A claim on an item that waits for unfinished work is made all the same, and blocked_by in the answer names what it waits for: tell your person, and check with whoever works on those items. For a change across many areas (an upgrade, a rename), give wide with the areas and a reason: a wide claim holds none of them, each member holding one is asked to acknowledge (announced lists them), and your edits in their area wait for that acknowledgement. inside_wide in an answer names areas you hold that someone's wide claim names: read their announcement and acknowledge it if the change may go ahead there."
+        description = "Claim a work item, with the areas of the code you will change, before you edit its files. Claiming an item you already hold renews the claim and replaces its areas. If another member holds the item or an area, the answer is a refusal that names the holder: pick other work, or message the holder with dibs_send. Do not edit the files anyway. A claim on an item that waits for unfinished work is made all the same, and blocked_by in the answer names what it waits for: tell your person, and check with whoever works on those items. For a change across many areas (an upgrade, a rename), give wide with the areas and a reason: a wide claim holds none of them, each member holding one is asked to acknowledge (announced lists them), and your edits in their area wait for that acknowledgement. inside_wide in an answer names areas you hold that someone's wide claim names: read their announcement and acknowledge it if the change may go ahead there. Give debt: true when the work is debt only (refactoring, clean-up): a feature claim may then take your areas once you hand them over. A feature claim over an area another member's debt claim holds is not refused: the area waits for them to hand it over (pending in the answer), dibs asks them, and you edit there only once it is yours."
     )]
     async fn dibs_claim(&self, Parameters(input): Parameters<ClaimInput>) -> CallToolResult {
         self.perform(|link| async move { link.claim(input).await })
@@ -111,7 +112,15 @@ impl Tools {
     }
 
     #[tool(
-        description = "Take over another member's claim that has gone stale (dibs_status lists them). Use it only for a stale claim, and always give a reason: it is sent to the member who held it. A claim that is still live is refused; message its holder instead."
+        description = "Give areas of your claim up (areas, named like dibs_claim's). When dibs asks you to hand an area over to a feature claim, tell your person; once they agree, commit what you have there, push your branch, then narrow your claim by that area: it moves to the feature claim at once. Then list the files you handed over in the conversation that asked, so the two of you do not fix the same thing."
+    )]
+    async fn dibs_narrow(&self, Parameters(input): Parameters<NarrowInput>) -> CallToolResult {
+        self.perform(|link| async move { link.narrow(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Take over another member's claim that has gone stale (dibs_status lists them). Use it only for a stale claim, and always give a reason: it is sent to the member who held it. A claim that is still live is refused; message its holder instead. The new claim keeps the kind the stale one had unless you give kind (feature or debt)."
     )]
     async fn dibs_takeover(&self, Parameters(input): Parameters<TakeoverInput>) -> CallToolResult {
         self.perform(|link| async move { link.take_over(input).await })
@@ -143,7 +152,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Ask whether you may edit files, before you edit them. Give the paths, relative to the working directory or absolute. Each path gets a verdict: allowed, allowed_with_note (read the note), needs_claim (claim an item with dibs_claim first), held_by (another member holds its area: its reason says the way on — in_review means it is free when the holder's pull request merges, otherwise message them with dibs_send or ask for a grant) or granted. Edit only where the verdict permits it. This changes nothing.",
+        description = "Ask whether you may edit files, before you edit them. Give the paths, relative to the working directory or absolute. Each path gets a verdict: allowed, allowed_with_note (read the note), needs_claim (claim an item with dibs_claim first), held_by (another member holds its area: its reason says the way on — in_review means it is free when the holder's pull request merges, awaiting_handover means your claim waits for its debt holder to hand it over (escalates_at says when it goes to the arbiters), ask_handover means it is debt work and declaring the area on your claim with dibs_claim asks for it, waiting names another member's claim that already waits for it, otherwise message them with dibs_send or ask for a grant) or granted. Edit only where the verdict permits it. This changes nothing.",
         annotations(read_only_hint = true)
     )]
     async fn dibs_check(&self, Parameters(input): Parameters<CheckInput>) -> CallToolResult {
@@ -276,6 +285,7 @@ mod tests {
                 "dibs_grant",
                 "dibs_inbox",
                 "dibs_items",
+                "dibs_narrow",
                 "dibs_new",
                 "dibs_read",
                 "dibs_ready",

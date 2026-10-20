@@ -142,6 +142,7 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
             post(routes::dependencies::add).delete(routes::dependencies::remove),
         )
         .route("/v1/items/{id}/claim", post(routes::claims::claim))
+        .route("/v1/items/{id}/claim/narrow", post(routes::claims::narrow))
         .route("/v1/items/{id}/takeover", post(routes::claims::take_over))
         .route("/v1/items/{id}/release", post(routes::claims::release))
         .route("/v1/items/{id}/done", post(routes::claims::done))

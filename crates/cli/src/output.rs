@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use dibs_client::api::{
-    Claim, HeldReason, Item, ItemName, Message, OpenEscalation, OverlapInfo, PathVerdict,
-    ThreadSummary, Unacked, Verdict,
+    Claim, ClaimKind, HeldReason, Item, ItemName, Message, OpenEscalation, OverlapInfo,
+    PathVerdict, ThreadSummary, Unacked, Verdict,
 };
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
@@ -105,15 +105,28 @@ pub fn item_label(named: Option<&ItemName>, id: ItemId) -> String {
 /// What a claim holds: `alice on laptop, areas api:billing`.
 pub fn claim_text(claim: &Claim) -> String {
     let mut text = format!("{} on {}", claim.holder, claim.host);
+    if claim.kind == ClaimKind::Debt {
+        text.push_str(", debt work");
+    }
     if !claim.areas.is_empty() {
         let areas: Vec<String> = claim.areas.iter().map(ToString::to_string).collect();
         let _ = write!(text, ", areas {}", areas.join(", "));
+    }
+    if !claim.pending.is_empty() {
+        let waiting: Vec<String> = claim.pending.keys().map(ToString::to_string).collect();
+        let _ = write!(text, ", waiting for {}", waiting.join(", "));
     }
     if let Some(review) = &claim.review {
         let prs: Vec<String> = review.prs.iter().map(ToString::to_string).collect();
         let _ = write!(text, ", in review on {}", prs.join(", "));
     }
     text
+}
+
+/// A time of day in UTC, `HH:MM UTC`.
+fn clock(at: time::OffsetDateTime) -> String {
+    let at = at.to_offset(time::UtcOffset::UTC);
+    format!("{:02}:{:02} UTC", at.hour(), at.minute())
 }
 
 /// One line for a verdict: `src/billing/a.rs: held by bob (item 3, area api:billing)`.
@@ -146,6 +159,9 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
             area,
             reason,
             prs,
+            claim,
+            waiting,
+            escalates_at,
         } => {
             let who = holder
                 .as_ref()
@@ -161,9 +177,28 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
                 HeldReason::AwaitingAck => format!(
                     "your wide claim names it; waiting for {who}'s acknowledgement, which grants the edit"
                 ),
-                HeldReason::AskHolder | HeldReason::Other => {
-                    "message them or ask for a grant".to_owned()
-                }
+                HeldReason::AwaitingHandover => match escalates_at {
+                    Some(at) => format!(
+                        "your claim waits for {who} to hand it over; it goes to the arbiters at {}",
+                        clock(*at)
+                    ),
+                    None => format!("your claim waits for {who} to hand it over"),
+                },
+                HeldReason::AskHandover => match claim {
+                    Some(claim) => format!(
+                        "debt work; dibs claim {claim} --area {area} asks {who} to hand it over"
+                    ),
+                    None => "message them or ask for a grant".to_owned(),
+                },
+                HeldReason::AskHolder => match waiting {
+                    Some(waiting) => format!(
+                        "{}'s claim on item {} already waits for it; message {who}",
+                        waiting.holder,
+                        waiting.item_label()
+                    ),
+                    None => "message them or ask for a grant".to_owned(),
+                },
+                HeldReason::Other => "message them or ask for a grant".to_owned(),
             };
             format!("held by {who} (item {item}, area {area}); {way}")
         }

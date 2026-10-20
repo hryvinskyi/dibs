@@ -524,6 +524,7 @@ mod tests {
                     session: env.alice.session,
                     areas: vec!["billing".to_owned()],
                     wide: None,
+                    kind: None,
                 },
             )
             .await
@@ -539,6 +540,7 @@ mod tests {
                         areas: vec!["billing".to_owned(), "search".to_owned()],
                         reason: WideReason::parse("Upgrade the HTTP client").unwrap(),
                     }),
+                    kind: None,
                 },
             )
             .await

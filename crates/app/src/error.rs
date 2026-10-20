@@ -223,7 +223,8 @@ impl AppError {
             Self::Claim(refused) => match refused.reason {
                 ClaimRefused::HeldBy { .. } => "held",
                 ClaimRefused::Stale { .. } => "stale",
-                ClaimRefused::AreaHeld { .. } => "area_held",
+                ClaimRefused::AreaHeld { .. } | ClaimRefused::AreaWaited { .. } => "area_held",
+                ClaimRefused::KindFixed { .. } => "kind_fixed",
                 ClaimRefused::UnknownArea { .. } => "unknown_area",
                 ClaimRefused::WideOverlap { .. } => "wide_overlap",
                 ClaimRefused::WideAndHeld { .. } => "wide_and_held",
@@ -232,7 +233,9 @@ impl AppError {
                 TakeoverRefused::NothingToTake => "nothing_to_take",
                 TakeoverRefused::OwnClaim => "own_claim",
                 TakeoverRefused::NotStale { .. } => "not_stale",
-                TakeoverRefused::AreaHeld { .. } => "area_held",
+                TakeoverRefused::AreaHeld { .. } | TakeoverRefused::AreaWaited { .. } => {
+                    "area_held"
+                }
                 TakeoverRefused::UnknownArea { .. } => "unknown_area",
                 TakeoverRefused::WideOverlap { .. } => "wide_overlap",
                 TakeoverRefused::WideAndHeld { .. } => "wide_and_held",

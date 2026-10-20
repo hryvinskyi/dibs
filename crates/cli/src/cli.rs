@@ -71,7 +71,7 @@ pub enum Command {
     /// Create a work item for a reference, or show the one it already names.
     New(NewArgs),
     /// Claim a work item, or renew your claim, with the areas you will change; `dibs claim review`
-    /// records the pull request of a claim you hold.
+    /// records the pull request of a claim you hold, and `dibs claim narrow` gives areas of it up.
     Claim(ClaimArgs),
     /// Take over another member's stale claim, telling them why.
     Takeover(TakeoverArgs),
@@ -229,6 +229,11 @@ pub struct ClaimArgs {
     /// Why the wide change is made, as the members it asks read it.
     #[arg(long, requires = "wide")]
     pub reason: Option<String>,
+    /// The work is debt only — refactoring, clean-up — not a feature: a feature claim that needs
+    /// one of its areas takes it, after you hand it over. Applies to a new claim; a renewal keeps
+    /// the kind the claim has.
+    #[arg(long)]
+    pub debt: bool,
 }
 
 /// What `dibs claim` does with a claim the member holds.
@@ -238,6 +243,21 @@ pub enum ClaimAction {
     /// edits the files under review, and needs no heartbeat while the pull request is open. Its
     /// merge completes the claim, unless `--more` says more pull requests of the item follow.
     Review(ReviewArgs),
+    /// Give areas of your claim up. An area another member's feature claim waits for moves to it
+    /// at once: commit and push what you have there first, and list the files you hand over in
+    /// the conversation that asked for it.
+    Narrow(NarrowArgs),
+}
+
+/// `dibs claim narrow`.
+#[derive(Debug, Args)]
+pub struct NarrowArgs {
+    /// The item: its local id or its reference.
+    #[arg(value_parser = ItemKey::parse)]
+    pub key: ItemKey,
+    /// An area to give up: `repo:area`, or a name one repository declares. Repeat it for several.
+    #[arg(long = "area", required = true)]
+    pub areas: Vec<String>,
 }
 
 /// `dibs claim review`.
@@ -292,6 +312,12 @@ pub struct TakeoverArgs {
     /// An area you will change. Repeat it for several.
     #[arg(long = "area")]
     pub areas: Vec<String>,
+    /// Make the new claim debt work; without it, the claim keeps the kind the stale one had.
+    #[arg(long)]
+    pub debt: bool,
+    /// Make the new claim a feature; without it, the claim keeps the kind the stale one had.
+    #[arg(long, conflicts_with = "debt")]
+    pub feature: bool,
 }
 
 /// `dibs check`.
@@ -798,6 +824,35 @@ mod tests {
             ])
             .is_err()
         );
+        let Invocation::Service(Command::Claim(debt)) =
+            Cli::try_parse_from(["dibs", "claim", "42", "--area", "billing", "--debt"])
+                .unwrap()
+                .command
+        else {
+            panic!("not a claim");
+        };
+        assert!(debt.debt);
+        let Invocation::Service(Command::Claim(narrow)) = Cli::try_parse_from([
+            "dibs",
+            "claim",
+            "narrow",
+            "42",
+            "--area",
+            "billing",
+            "--area",
+            "api:search",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not a claim");
+        };
+        let Some(ClaimAction::Narrow(narrow)) = narrow.action else {
+            panic!("not a narrowing");
+        };
+        assert_eq!(narrow.key.to_string(), "42");
+        assert_eq!(narrow.areas, ["billing", "api:search"]);
+        assert!(Cli::try_parse_from(["dibs", "claim", "narrow", "42"]).is_err());
         assert!(Cli::try_parse_from(["dibs", "claim"]).is_err());
         assert!(Cli::try_parse_from(["dibs", "claim", "review", "42"]).is_err());
         assert!(

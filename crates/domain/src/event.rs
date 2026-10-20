@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 
 use crate::area::QualifiedArea;
 use crate::escalation::EscalationSubject;
+use crate::handover::WithdrawReason;
 use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
 use crate::item::{ExternalRef, Title};
 use crate::paths::RepoPath;
@@ -135,6 +136,18 @@ pub enum EventKind {
     /// The radar found an overlap it had not announced: its message went to the holders it
     /// concerns.
     OverlapFound(OverlapFound),
+    /// A debt claim's holder was asked to hand an area over to the feature claim that waits for
+    /// it.
+    YieldRequested(AreaPassing),
+    /// An area moved from a debt claim to the feature claim that waited for it.
+    AreaHandedOver(AreaPassing),
+    /// A claim's holder gave areas of it up.
+    ClaimNarrowed(ClaimNarrowed),
+    /// A claim stopped waiting for an area it was not handed; the debt holder asked was told that
+    /// the request no longer stands.
+    WaitWithdrawn(WaitWithdrawn),
+    /// A request to hand an area over waited past the project's limit and could not be escalated.
+    YieldUnescalated(YieldUnescalated),
 }
 
 impl EventKind {
@@ -185,6 +198,11 @@ impl EventKind {
             Self::BranchRecorded(_) => "branch_recorded",
             Self::FootprintChanged(_) => "footprint_changed",
             Self::OverlapFound(_) => "overlap_found",
+            Self::YieldRequested(_) => "yield_requested",
+            Self::AreaHandedOver(_) => "area_handed_over",
+            Self::ClaimNarrowed(_) => "claim_narrowed",
+            Self::WaitWithdrawn(_) => "wait_withdrawn",
+            Self::YieldUnescalated(_) => "yield_unescalated",
         }
     }
 
@@ -245,7 +263,12 @@ impl EventKind {
             Self::CompletedByMerge(e) => vec![Some(e.member)],
             Self::BranchRecorded(e) => vec![Some(e.member)],
             Self::FootprintChanged(e) => vec![Some(e.member)],
-            Self::OverlapFound(_) => Vec::new(),
+            Self::OverlapFound(_)
+            | Self::YieldRequested(_)
+            | Self::AreaHandedOver(_)
+            | Self::WaitWithdrawn(_)
+            | Self::YieldUnescalated(_) => Vec::new(),
+            Self::ClaimNarrowed(e) => vec![Some(e.member)],
         };
         named.into_iter().flatten().collect()
     }
@@ -296,7 +319,12 @@ impl EventKind {
             | Self::CompletedByMerge(_)
             | Self::BranchRecorded(_)
             | Self::FootprintChanged(_)
-            | Self::OverlapFound(_) => None,
+            | Self::OverlapFound(_)
+            | Self::YieldRequested(_)
+            | Self::AreaHandedOver(_)
+            | Self::ClaimNarrowed(_)
+            | Self::WaitWithdrawn(_)
+            | Self::YieldUnescalated(_) => None,
         }
     }
 
@@ -352,7 +380,12 @@ impl EventKind {
             | Self::CompletedByMerge(_)
             | Self::BranchRecorded(_)
             | Self::FootprintChanged(_)
-            | Self::OverlapFound(_) => None,
+            | Self::OverlapFound(_)
+            | Self::YieldRequested(_)
+            | Self::AreaHandedOver(_)
+            | Self::ClaimNarrowed(_)
+            | Self::WaitWithdrawn(_)
+            | Self::YieldUnescalated(_) => None,
         }
     }
 
@@ -817,6 +850,64 @@ impl OverlapFound {
     pub const MAX_PATHS: usize = 100;
 }
 
+/// An area on its way from a debt claim to a feature claim. Carries the area and the two items;
+/// the claims are read for their holders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaPassing {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The item of the debt claim that holds it, or held it.
+    pub from: ItemId,
+    /// The item of the feature claim that waits for it, or holds it now.
+    pub to: ItemId,
+}
+
+/// A claim's holder gave areas of it up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimNarrowed {
+    /// The item of the claim.
+    pub item: ItemId,
+    /// Its holder.
+    pub member: MemberId,
+    /// The areas it no longer holds or waits for.
+    pub areas: BTreeSet<QualifiedArea>,
+}
+
+/// A claim stopped waiting for an area it was not handed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitWithdrawn {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The item of the debt claim it waited for.
+    pub from: ItemId,
+    /// The item of the claim that waited.
+    pub to: ItemId,
+    /// Why it stopped waiting.
+    pub reason: WithdrawReason,
+}
+
+/// Why a request to hand an area over could not be escalated. Serialised as `no_arbiters`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnescalatedReason {
+    /// The project names no arbiter, other than the member it would be sent for, who is a person
+    /// of the project.
+    NoArbiters,
+}
+
+/// A request to hand an area over that could not be escalated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YieldUnescalated {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The item of the debt claim that holds it.
+    pub from: ItemId,
+    /// The item of the claim that waits for it.
+    pub to: ItemId,
+    /// Why.
+    pub reason: UnescalatedReason,
+}
+
 /// An admin deleted a conversation. Carries the id only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadDeleted {
@@ -1169,6 +1260,81 @@ mod tests {
             kinds[2].members().is_empty(),
             "an overlap names items, not members"
         );
+    }
+
+    #[test]
+    fn handover_events_round_trip_and_carry_areas_items_and_the_narrowing_holder_only() {
+        let passing = AreaPassing {
+            area: area("api:billing"),
+            from: ItemId(7),
+            to: ItemId(4),
+        };
+        let kinds = [
+            EventKind::YieldRequested(passing.clone()),
+            EventKind::AreaHandedOver(passing),
+            EventKind::ClaimNarrowed(ClaimNarrowed {
+                item: ItemId(7),
+                member: ALICE,
+                areas: BTreeSet::from([area("api:billing"), area("api:search")]),
+            }),
+            EventKind::WaitWithdrawn(WaitWithdrawn {
+                area: area("api:billing"),
+                from: ItemId(7),
+                to: ItemId(4),
+                reason: WithdrawReason::HolderChanged,
+            }),
+            EventKind::YieldUnescalated(YieldUnescalated {
+                area: area("api:billing"),
+                from: ItemId(7),
+                to: ItemId(4),
+                reason: UnescalatedReason::NoArbiters,
+            }),
+        ];
+        let names: Vec<&str> = kinds.iter().map(EventKind::name).collect();
+        assert_eq!(
+            names,
+            [
+                "yield_requested",
+                "area_handed_over",
+                "claim_narrowed",
+                "wait_withdrawn",
+                "yield_unescalated"
+            ]
+        );
+        for kind in &kinds {
+            let value = serde_json::to_value(kind).unwrap();
+            assert_eq!(value["kind"], kind.name());
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(&back, kind);
+            assert_eq!(
+                (
+                    kind.message(),
+                    kind.thread(),
+                    kind.slot(),
+                    kind.completion()
+                ),
+                (None, None, None, None)
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&kinds[0]).unwrap()["payload"],
+            serde_json::json!({"area": "api:billing", "from": 7, "to": 4})
+        );
+        assert_eq!(
+            serde_json::to_value(&kinds[2]).unwrap()["payload"],
+            serde_json::json!({"item": 7, "member": 1, "areas": ["api:billing", "api:search"]})
+        );
+        assert_eq!(
+            serde_json::to_value(&kinds[3]).unwrap()["payload"],
+            serde_json::json!({"area": "api:billing", "from": 7, "to": 4, "reason": "holder_changed"})
+        );
+        assert_eq!(
+            serde_json::to_value(&kinds[4]).unwrap()["payload"]["reason"],
+            "no_arbiters"
+        );
+        assert!(kinds[0].members().is_empty() && kinds[1].members().is_empty());
+        assert!(kinds[3].members().is_empty() && kinds[4].members().is_empty());
+        assert_eq!(kinds[2].members(), BTreeSet::from([ALICE]));
     }
 
     #[test]

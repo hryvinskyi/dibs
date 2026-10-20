@@ -150,6 +150,7 @@ mod tests {
                     item,
                     session: who.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+                    kind: None,
                 },
             )
             .await

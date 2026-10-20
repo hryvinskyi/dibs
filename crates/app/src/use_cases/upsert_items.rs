@@ -548,6 +548,7 @@ mod tests {
                     item: held,
                     session: env.bob.session,
                     areas: vec!["billing".to_owned()],
+                    kind: None,
                 },
             )
             .await

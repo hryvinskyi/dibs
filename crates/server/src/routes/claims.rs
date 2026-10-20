@@ -1,5 +1,5 @@
-//! `POST /v1/items/{id}/claim`, `/takeover`, `/release` and `/done`: taking, taking over and ending
-//! a claim on a work item.
+//! `POST /v1/items/{id}/claim`, `/claim/narrow`, `/takeover`, `/release` and `/done`: taking,
+//! narrowing, taking over and ending a claim on a work item.
 
 use std::collections::BTreeSet;
 
@@ -11,17 +11,20 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
 use dibs_app::named::{EndedClaim, NamedClaim};
-use dibs_app::use_cases::{Announced, ClaimItemInput, TakeOverInput, WideInput, WideNote};
+use dibs_app::use_cases::{
+    Announced, ClaimItemInput, NarrowClaimInput, PendingNote, TakeOverInput, WideInput, WideNote,
+};
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::ClaimOutcome;
 use dibs_domain::handle::Handle;
+use dibs_domain::handover::ClaimKind;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::message::Body;
 use dibs_domain::wide::WideReason;
 
 use crate::auth::Authed;
 use crate::error::ApiError;
-use crate::fields::{item_in_path, parse_required, required, session_in_body};
+use crate::fields::{item_in_path, parse, parse_required, required, session_in_body};
 use crate::http::AppState;
 use crate::views::{ClaimView, ItemNameView, reply};
 
@@ -31,6 +34,7 @@ pub struct ClaimBody {
     session_id: Option<u64>,
     areas: Option<Vec<String>>,
     wide: Option<WideBody>,
+    kind: Option<String>,
 }
 
 /// The `wide` object of a claim's body.
@@ -114,16 +118,45 @@ struct ClaimAnswer {
     announced: Vec<AnnouncedView>,
     /// The areas the claim holds that other members' live wide claims name.
     inside_wide: Vec<InsideWideView>,
+    /// The areas the claim waits for another member's debt claim to hand over.
+    pending: Vec<PendingNoteView>,
+}
+
+/// An area the claim waits for.
+#[derive(Serialize)]
+struct PendingNoteView {
+    area: QualifiedArea,
+    /// The debt claim's holder.
+    holder: Handle,
+    /// The debt claim's item.
+    item: ItemNameView,
+    /// Whether the holder was asked to hand it over; not while their claim is in review.
+    asked: bool,
+}
+
+impl PendingNoteView {
+    fn of(note: PendingNote) -> Self {
+        Self {
+            area: note.area,
+            holder: note.holder,
+            item: ItemNameView::of(note.item),
+            asked: note.asked,
+        }
+    }
 }
 
 /// Claims the item for the caller, or renews the caller's own claim. `areas` are named as a person
 /// names them: `repo:area`, or a bare name exactly one repository declares. A blocked item is
 /// claimed all the same; `blocked_by` names what it waits for. With `wide: {areas, reason}` the
 /// claim is wide: it holds none of those areas, and each holder of one is sent an announcement to
-/// acknowledge, which `announced` lists; a renewal adds to the scope it had.
+/// acknowledge, which `announced` lists; a renewal adds to the scope it had. `kind` is `feature`
+/// (the default) or `debt`, for a new claim; a renewal keeps the kind it has. A feature claim over
+/// an area other members hold only under debt claims waits for it, which `pending` lists; a
+/// renewal naming another kind than the claim has is refused.
 ///
 /// # Errors
-/// `held`, `stale`, `area_held` or `wide_overlap` (`409`, naming the member in the way);
+/// `held`, `stale`, `area_held` or `wide_overlap` (`409`, naming the member in the way; an area
+/// another claim waits for is `area_held` with `waiting`); `kind_fixed` (`409`);
 /// `wide_and_held`, `invalid_wide`, `item_closed`, `unknown_area`, `invalid_area`,
 /// `ambiguous_area`, `not_found`, `forbidden` for an integration; `invalid_request` for a malformed
 /// body.
@@ -142,6 +175,7 @@ pub async fn claim(
         session: session_in_body("session_id", body.session_id)?,
         areas: body.areas.unwrap_or_default(),
         wide: body.wide.map(WideBody::input).transpose()?,
+        kind: kind_in_body(body.kind.as_deref())?,
     };
     let made = state.app.claim_item.execute(&actor, input).await?;
     let (name, claim, dropped_areas) = match made.outcome {
@@ -166,6 +200,75 @@ pub async fn claim(
             .into_iter()
             .map(InsideWideView::of)
             .collect(),
+        pending: made.pending.into_iter().map(PendingNoteView::of).collect(),
+    };
+    Ok(reply(StatusCode::OK, &answer))
+}
+
+/// The body of `POST /v1/items/{id}/claim/narrow`.
+#[derive(Deserialize)]
+pub struct NarrowBody {
+    areas: Option<Vec<String>>,
+}
+
+/// An area a narrowing handed over.
+#[derive(Serialize)]
+struct HandedOverView {
+    area: QualifiedArea,
+    /// The item of the claim that holds it now.
+    to: ItemNameView,
+    /// That claim's holder.
+    holder: Handle,
+}
+
+#[derive(Serialize)]
+struct NarrowAnswer {
+    /// The claim as it stands now.
+    claim: ClaimView,
+    /// The item.
+    item: ItemNameView,
+    /// The areas it gave up.
+    areas: BTreeSet<QualifiedArea>,
+    /// The areas given up that another claim waited for, each with where it went.
+    handed_over: Vec<HandedOverView>,
+}
+
+/// Gives `areas` of the caller's claim up, live or stale: the claim neither holds nor waits for
+/// them any more, and an area another claim waited for is handed over to it in the same
+/// transaction. An area the claim neither holds nor waits for changes nothing, so a repeat answers
+/// the same claim and gives nothing up.
+///
+/// # Errors
+/// `forbidden` for an integration; `not_holder` (`403`, naming the holder), `no_claim` (`409`),
+/// `unknown_area`, `invalid_area`, `ambiguous_area`, `not_found`; `invalid_request` for a missing
+/// `areas`.
+pub async fn narrow(
+    State(state): State<AppState>,
+    Authed(actor): Authed,
+    path: Result<Path<String>, PathRejection>,
+    body: Result<Json<NarrowBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    actor.require_person()?;
+    let item = path_item(path)?;
+    let Json(body) = body?;
+    let input = NarrowClaimInput {
+        item,
+        areas: required("areas", body.areas)?,
+    };
+    let narrowed = state.app.narrow_claim.execute(&actor, input).await?;
+    let answer = NarrowAnswer {
+        claim: ClaimView::of(narrowed.claim),
+        item: ItemNameView::of(narrowed.item),
+        areas: narrowed.areas,
+        handed_over: narrowed
+            .handed_over
+            .into_iter()
+            .map(|handed| HandedOverView {
+                area: handed.area,
+                to: ItemNameView::of(handed.to),
+                holder: handed.holder,
+            })
+            .collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }
@@ -176,6 +279,7 @@ pub struct TakeOverBody {
     session_id: Option<u64>,
     reason: Option<String>,
     areas: Option<Vec<String>>,
+    kind: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -191,8 +295,14 @@ struct TakeOverAnswer {
     announced: Vec<AnnouncedView>,
 }
 
+/// The `kind` of a body, when it names one.
+fn kind_in_body(text: Option<&str>) -> Result<Option<ClaimKind>, ApiError> {
+    text.map(|text| parse("kind", text, ClaimKind::parse))
+        .transpose()
+}
+
 /// Takes over another member's stale claim; the previous holder is sent `reason` in a thread about
-/// the item.
+/// the item. `kind` names the new claim's kind; without it, the previous claim's kind carries on.
 ///
 /// # Errors
 /// `not_stale` (naming the holder), `own_claim`, `nothing_to_take`, `area_held` (`409`);
@@ -213,6 +323,7 @@ pub async fn take_over(
         session: session_in_body("session_id", body.session_id)?,
         areas: body.areas.unwrap_or_default(),
         reason: parse_required("reason", body.reason.as_deref(), Body::parse)?,
+        kind: kind_in_body(body.kind.as_deref())?,
     };
     let taken = state.app.take_over.execute(&actor, input).await?;
     let answer = TakeOverAnswer {

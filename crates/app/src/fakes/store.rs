@@ -156,6 +156,7 @@ impl State {
                     item(*p, *i)
                         && member(*p, c.member)
                         && self.sessions.contains_key(&(*p, c.session))
+                        && c.pending.values().all(|pending| item(*p, pending.from))
                 }),
             ),
             (
@@ -688,6 +689,17 @@ impl ClaimRows for MemoryTx {
     }
 
     async fn save_claim(&mut self, project: ProjectId, claim: &Claim) -> StoreResult<()> {
+        let waited_for_twice = self.work.claims.iter().any(|((p, item), other)| {
+            *p == project
+                && *item != claim.item
+                && other
+                    .pending
+                    .keys()
+                    .any(|area| claim.pending.contains_key(area))
+        });
+        if waited_for_twice {
+            return Err(StoreError::Duplicate);
+        }
         self.work
             .claims
             .insert((project, claim.item), claim.clone());
@@ -697,6 +709,17 @@ impl ClaimRows for MemoryTx {
     async fn delete_claim(&mut self, project: ProjectId, item: ItemId) -> StoreResult<()> {
         self.work.claims.remove(&(project, item));
         Ok(())
+    }
+
+    async fn pending_projects(&mut self) -> StoreResult<Vec<ProjectId>> {
+        let projects: BTreeSet<ProjectId> = self
+            .work
+            .claims
+            .iter()
+            .filter(|(_, claim)| !claim.pending.is_empty())
+            .map(|((project, _), _)| *project)
+            .collect();
+        Ok(projects.into_iter().collect())
     }
 
     async fn shared_paths(&mut self, project: ProjectId) -> StoreResult<Vec<SharedPath>> {

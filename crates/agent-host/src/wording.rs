@@ -71,6 +71,36 @@ pub fn held_by(
         (None, HeldWay::AwaitingAck) => format!(
             "{path} is in the area {area}, which another member holds for work item {item}. Your wide claim names it, and the edit waits for the holder to acknowledge it. Do not edit it now: go on where the areas are free, or message the holder."
         ),
+        (holder, HeldWay::AwaitingHandover { escalates_at }) => {
+            let who = holder.map_or_else(|| "its holder".to_owned(), ToString::to_string);
+            let deadline = escalates_at.map_or_else(
+                || "dibs asks them, and takes it to the project's arbiters if it is not handed over in time".to_owned(),
+                |at| format!("dibs asked them, and takes it to the project's arbiters at {} if it is not handed over by then", clock(at)),
+            );
+            format!(
+                "{path} is in the area {area}, which {who} holds for debt work on work item {item}. Your claim waits for it to be handed over: {deadline}. Do not edit it now: go on where your areas are free; dibs tells you when {area} is yours."
+            )
+        }
+        (holder, HeldWay::AskHandover { claim }) => {
+            let who = holder.map_or_else(|| "its holder".to_owned(), ToString::to_string);
+            format!(
+                "{path} is in the area {area}, which {who} holds for debt work on work item {item}. Feature work takes an area from debt work: declare it on your claim with dibs claim {claim} --area {area} (MCP: dibs_claim with that area), and dibs asks {who} to hand it over. Do not edit it until it is yours."
+            )
+        }
+        (
+            holder,
+            HeldWay::WaitedFor {
+                waiter,
+                claim,
+                claim_ref,
+            },
+        ) => {
+            let who = holder.map_or_else(|| "another member".to_owned(), ToString::to_string);
+            format!(
+                "{path} is in the area {area}, which {who} holds for work item {item}, and {waiter}'s claim on work item {} already waits for it to be handed over. Do not edit it now: message {who} (dibs_send, or dibs send --to {who}) or {waiter} to agree on the change, or pick other work.",
+                item_name(*claim, claim_ref.as_ref())
+            )
+        }
     }
 }
 
@@ -766,6 +796,62 @@ mod tests {
             assert!(waiting.contains("Do not edit it now"), "{waiting}");
             assert!(!waiting.contains("ask for a grant"), "{waiting}");
         }
+    }
+
+    #[test]
+    fn a_path_a_debt_claim_holds_says_how_the_handover_goes() {
+        let path = RelPath::parse("src/billing/a.rs").unwrap();
+        let area = QualifiedArea::parse("api:billing").unwrap();
+        let waiting = held_by(
+            &path,
+            Some(&handle("alice")),
+            "gh:acme/api#7",
+            &area,
+            &HeldWay::AwaitingHandover {
+                escalates_at: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(35)),
+            },
+        );
+        for part in [
+            "alice holds for debt work on work item gh:acme/api#7",
+            "Your claim waits for it to be handed over",
+            "takes it to the project's arbiters at 00:35 UTC",
+            "Do not edit it now",
+        ] {
+            assert!(waiting.contains(part), "{part}: {waiting}");
+        }
+        let waited = held_by(
+            &path,
+            Some(&handle("alice")),
+            "gh:acme/api#7",
+            &area,
+            &HeldWay::WaitedFor {
+                waiter: handle("carol"),
+                claim: ItemId(12),
+                claim_ref: None,
+            },
+        );
+        for part in [
+            "carol's claim on work item 12 already waits for it to be handed over",
+            "message alice",
+        ] {
+            assert!(waited.contains(part), "{part}: {waited}");
+        }
+        assert!(!waited.contains("dibs claim"), "{waited}");
+        let ask = held_by(
+            &path,
+            None,
+            "gh:acme/api#7",
+            &area,
+            &HeldWay::AskHandover { claim: ItemId(42) },
+        );
+        for part in [
+            "its holder holds for debt work",
+            "dibs claim 42 --area api:billing",
+            "Do not edit it until it is yours",
+        ] {
+            assert!(ask.contains(part), "{part}: {ask}");
+        }
+        assert!(!ask.contains("ask for a grant"), "{ask}");
     }
 
     #[test]

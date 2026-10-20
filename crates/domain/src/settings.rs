@@ -119,6 +119,7 @@ impl RepoSpec {
 pub struct ProjectSettings {
     stale_after: Duration,
     heartbeat_every: Duration,
+    yield_escalates_after: Duration,
     edit_policy: EditPolicy,
     raised_per_hour: u32,
     lists_repositories: bool,
@@ -142,6 +143,12 @@ pub enum SettingsError {
     /// `heartbeat_every` is outside 1 to 15 minutes.
     #[error("heartbeat_every is between 1 and 15 minutes")]
     HeartbeatEveryOutOfRange,
+    /// `yield_escalates_after` is not a duration.
+    #[error("yield_escalates_after: {0}")]
+    YieldEscalatesAfter(DurationError),
+    /// `yield_escalates_after` is outside 5 minutes to 24 hours.
+    #[error("yield_escalates_after is between 5 minutes and 24 hours")]
+    YieldEscalatesAfterOutOfRange,
     /// `raised_per_hour` is outside 1 to 1000.
     #[error("raised_per_hour is between 1 and 1000")]
     RaisedPerHourOutOfRange,
@@ -416,6 +423,9 @@ const DEFAULT_STALE_AFTER: Duration = Duration::hours(24);
 const DEFAULT_HEARTBEAT_EVERY: Duration = Duration::minutes(1);
 const STALE_AFTER_RANGE: (Duration, Duration) = (Duration::hours(1), Duration::days(30));
 const HEARTBEAT_EVERY_RANGE: (Duration, Duration) = (Duration::minutes(1), Duration::minutes(15));
+const DEFAULT_YIELD_ESCALATES_AFTER: Duration = Duration::minutes(30);
+const YIELD_ESCALATES_AFTER_RANGE: (Duration, Duration) =
+    (Duration::minutes(5), Duration::hours(24));
 
 /// How many high or urgent messages one member may write within an hour, unless the settings say.
 pub const DEFAULT_RAISED_PER_HOUR: u32 = 10;
@@ -438,7 +448,8 @@ impl ProjectSettings {
     /// Validates a settings document.
     ///
     /// The rules: `stale_after` between 1 hour and 30 days (default 24 hours); `heartbeat_every`
-    /// between 1 and 15 minutes (default 1 minute); `raised_per_hour` between 1 and 1000 (default
+    /// between 1 and 15 minutes (default 1 minute); `yield_escalates_after` between 5 minutes and
+    /// 24 hours (default 30 minutes); `raised_per_hour` between 1 and 1000 (default
     /// 10); either top-level areas and rules or a `repos`
     /// list, never both; repository ids and remotes unique; area names unique within their
     /// repository, each area with at least one glob; each hot rule with at least one glob, a kind
@@ -473,6 +484,13 @@ impl ProjectSettings {
             HEARTBEAT_EVERY_RANGE,
             SettingsError::HeartbeatEvery,
             SettingsError::HeartbeatEveryOutOfRange,
+        )?;
+        let yield_escalates_after = parse_in_range(
+            document.yield_escalates_after.as_deref(),
+            DEFAULT_YIELD_ESCALATES_AFTER,
+            YIELD_ESCALATES_AFTER_RANGE,
+            SettingsError::YieldEscalatesAfter,
+            SettingsError::YieldEscalatesAfterOutOfRange,
         )?;
         let raised_per_hour = document.raised_per_hour.unwrap_or(DEFAULT_RAISED_PER_HOUR);
         if !RAISED_PER_HOUR_RANGE.contains(&raised_per_hour) {
@@ -545,6 +563,7 @@ impl ProjectSettings {
         Ok(Self {
             stale_after,
             heartbeat_every,
+            yield_escalates_after,
             edit_policy: document.edit_policy.unwrap_or_default(),
             raised_per_hour,
             lists_repositories,
@@ -567,6 +586,12 @@ impl ProjectSettings {
     /// How often a session sends a heartbeat.
     pub fn heartbeat_every(&self) -> Duration {
         self.heartbeat_every
+    }
+
+    /// How long a request to hand an area over from debt work waits before it is escalated to the
+    /// arbiters.
+    pub fn yield_escalates_after(&self) -> Duration {
+        self.yield_escalates_after
     }
 
     /// The edit policy.
@@ -729,6 +754,8 @@ impl ProjectSettings {
         let mut document = SettingsDocument {
             stale_after: Some(format_duration(self.stale_after)),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
+            yield_escalates_after: (self.yield_escalates_after != DEFAULT_YIELD_ESCALATES_AFTER)
+                .then(|| format_duration(self.yield_escalates_after)),
             edit_policy: Some(self.edit_policy),
             raised_per_hour: (self.raised_per_hour != DEFAULT_RAISED_PER_HOUR)
                 .then_some(self.raised_per_hour),
@@ -943,6 +970,7 @@ mod tests {
         let parsed = settings("{}");
         assert_eq!(parsed.stale_after(), Duration::hours(24));
         assert_eq!(parsed.heartbeat_every(), Duration::minutes(1));
+        assert_eq!(parsed.yield_escalates_after(), Duration::minutes(30));
         assert_eq!(parsed.edit_policy(), EditPolicy::RequireClaim);
         assert!(!parsed.lists_repositories());
         assert_eq!(parsed.repos().len(), 1);
@@ -980,6 +1008,20 @@ mod tests {
             (
                 r#"{"heartbeat_every":"1"}"#,
                 Some(SettingsError::HeartbeatEvery(DurationError::Malformed)),
+            ),
+            (r#"{"yield_escalates_after":"5m"}"#, None),
+            (r#"{"yield_escalates_after":"24h"}"#, None),
+            (
+                r#"{"yield_escalates_after":"4m59s"}"#,
+                Some(SettingsError::YieldEscalatesAfterOutOfRange),
+            ),
+            (
+                r#"{"yield_escalates_after":"24h1s"}"#,
+                Some(SettingsError::YieldEscalatesAfterOutOfRange),
+            ),
+            (
+                r#"{"yield_escalates_after":"soon"}"#,
+                Some(SettingsError::YieldEscalatesAfter(DurationError::Malformed)),
             ),
             (r#"{"raised_per_hour":1}"#, None),
             (r#"{"raised_per_hour":1000}"#, None),
@@ -1292,6 +1334,7 @@ mod tests {
     fn settings_round_trip_through_their_document() {
         let documents = [
             "{}",
+            r#"{"yield_escalates_after":"45m"}"#,
             r#"{"stale_after":"2d","heartbeat_every":"5m","edit_policy":"advise",
                 "areas":[{"name":"billing","paths":["packages/billing/**","docs/billing.md"]}],
                 "hot":[{"paths":["**/*.lock"],"kind":"regenerate","note":"run the generator"},
@@ -1310,6 +1353,25 @@ mod tests {
             ProjectSettings::parse(&written, &HotRuleRegistry::standard()).unwrap(),
             listed
         );
+    }
+
+    #[test]
+    fn the_wait_before_a_yield_is_escalated_is_read_in_both_layouts_and_written_back() {
+        for json in [
+            r#"{"yield_escalates_after":"1h","areas":[{"name":"billing","paths":["b/**"]}]}"#,
+            r#"{"yield_escalates_after":"1h","repos":[{"id":"api","remote":"example.com/acme/api",
+                "areas":[{"name":"billing","paths":["b/**"]}]}]}"#,
+        ] {
+            let parsed = settings(json);
+            assert_eq!(parsed.yield_escalates_after(), Duration::hours(1), "{json}");
+            let written = parsed.to_document();
+            assert_eq!(written.yield_escalates_after.as_deref(), Some("1h"));
+            assert_eq!(
+                ProjectSettings::parse(&written, &HotRuleRegistry::standard()).unwrap(),
+                parsed
+            );
+        }
+        assert_eq!(settings("{}").to_document().yield_escalates_after, None);
     }
 
     #[test]

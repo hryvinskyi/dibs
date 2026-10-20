@@ -60,20 +60,40 @@ pub enum HeldReason {
         /// The pull requests the holder's claim recorded, in order.
         prs: Vec<PrRef>,
     },
-    /// The holder works in the area; message them or ask for a grant.
-    AskHolder,
+    /// The holder works in the area; message them or ask for a grant. When another member's claim
+    /// already waits for the holder to hand the area over, `waiting` names it.
+    AskHolder {
+        /// The claim that already waits for the area, when one does.
+        waiting: Option<Holder>,
+    },
     /// The member's live wide claim names the area and its holder has not acknowledged the
     /// announcement yet; their acknowledgement grants the edit.
     AwaitingAck,
+    /// The member's feature claim declared the area and waits for the holder's debt claim to hand
+    /// it over.
+    AwaitingHandover {
+        /// When the request goes to the arbiters if the area is not handed over by then; `None`
+        /// before the holder was asked and after it was escalated.
+        escalates_at: Option<OffsetDateTime>,
+    },
+    /// The holder's claim is debt work and the member's live feature claim did not declare the
+    /// area: declaring it on that claim asks the holder to hand it over.
+    AskHandover {
+        /// The item of the member's feature claim to declare it on.
+        claim: ItemId,
+    },
 }
 
 impl HeldReason {
-    /// The stable name: `in_review`, `ask_holder` or `awaiting_ack`.
+    /// The stable name: `in_review`, `ask_holder`, `awaiting_ack`, `awaiting_handover` or
+    /// `ask_handover`.
     pub const fn code(&self) -> &'static str {
         match self {
             Self::InReview { .. } => "in_review",
-            Self::AskHolder => "ask_holder",
+            Self::AskHolder { .. } => "ask_holder",
             Self::AwaitingAck => "awaiting_ack",
+            Self::AwaitingHandover { .. } => "awaiting_handover",
+            Self::AskHandover { .. } => "ask_handover",
         }
     }
 }
@@ -136,18 +156,22 @@ pub enum EditCheckRefused {
 ///    `Allowed`.
 /// 4. Another member's live claim holds the area, working or in review: `Granted` when that holder
 ///    granted me edits in it for one of my live claims — by a grant, or by acknowledging my wide
-///    claim's announcement — else `HeldBy`: free once its pull requests merge when the holder's claim
-///    is in review, waiting for that acknowledgement when my live wide claim names the area, else
-///    asking the holder.
+///    claim's announcement — else `HeldBy`, its reason the way on, the first that applies: free
+///    once its pull requests merge when the holder's claim is in review; waiting for that
+///    acknowledgement when my live wide claim names the area; waiting for the holder to hand it
+///    over when my live claim has it pending; asking the holder, naming the claim, when another
+///    member's claim already waits for it; declaring it on my live feature claim when the
+///    holder's claim is debt work; else asking the holder.
 /// 5. Nobody else holds it: `NeedsClaim` when I hold no live claim and the policy requires one,
 ///    else `Allowed`.
 ///
 /// Allowed edits in an area none of my claims holds and none of my live wide claims names add the
-/// area to my target claim: of my live claims I am working on, the one most recently claimed or
-/// renewed, the lowest item on a tie; with none, my claims in review by the same rule. An
-/// edit inside my wide scope adds nothing, since a wide claim holds nothing it names, and is
-/// attributed to that wide claim. Edits under a `warn-shared` rule record the path under the target
-/// claim. Nothing already recorded is planned again.
+/// area to my target claim for it: of my live claims I am working on that do not wait for the area,
+/// the one most recently claimed or renewed, the lowest item on a tie; with none, my claims in review
+/// by the same rule. An area another member's claim waits for is added to none of mine, since it is
+/// on its way to that claim. An edit inside my wide scope adds nothing, since a wide claim holds
+/// nothing it names, and is attributed to that wide claim. Edits under a `warn-shared` rule record
+/// the path under the target claim. Nothing already recorded is planned again.
 ///
 /// # Errors
 /// [`EditCheckRefused::UnknownRepo`] when a path's repository is not listed.
@@ -251,30 +275,70 @@ impl<'a> EditWorld<'a> {
                 .copied()
                 .filter(|claim| claim.names_wide(area)),
         );
+        let waited_for_elsewhere = input
+            .claims
+            .iter()
+            .any(|claim| claim.member != input.me && claim.waits_for(area));
         if let Some(claim) = holding.or(wide) {
             check.touch.insert(claim.item);
-        } else if let Some(target) = self.target() {
-            check.plan.add_area(AddArea {
-                claim: target.item,
-                area: area.clone(),
-            });
+        } else if let Some(target) = self.target_for(area) {
+            if !waited_for_elsewhere {
+                check.plan.add_area(AddArea {
+                    claim: target.item,
+                    area: area.clone(),
+                });
+            }
             check.touch.insert(target.item);
         }
         Verdict::Allowed
     }
 
     /// The way on from an area another member's claim holds: its pull requests' merge when that
-    /// claim is in review, their acknowledgement when one of my live wide claims names it, else
+    /// claim is in review, their acknowledgement when one of my live wide claims names it, their
+    /// handover when one of my live claims waits for it, asking them when another member's claim
+    /// already waits for it, declaring it on my feature claim when theirs is debt work, else
     /// asking them.
     fn held_reason(&self, holder: &Claim, area: &QualifiedArea) -> HeldReason {
         if let Some(review) = holder.state.review() {
-            HeldReason::InReview {
+            return HeldReason::InReview {
                 prs: review.prs().iter().cloned().collect(),
-            }
-        } else if self.mine.iter().any(|claim| claim.names_wide(area)) {
-            HeldReason::AwaitingAck
-        } else {
-            HeldReason::AskHolder
+            };
+        }
+        if self.mine.iter().any(|claim| claim.names_wide(area)) {
+            return HeldReason::AwaitingAck;
+        }
+        let settings = self.input.settings;
+        if let Some(pending) = self.mine.iter().find_map(|claim| claim.pending.get(area)) {
+            return HeldReason::AwaitingHandover {
+                escalates_at: pending
+                    .asked_at
+                    .filter(|_| pending.escalated_at.is_none())
+                    .map(|asked| asked + settings.yield_escalates_after()),
+            };
+        }
+        if let Some(waiting) = self
+            .input
+            .claims
+            .iter()
+            .filter(|claim| claim.member != self.input.me && claim.waits_for(area))
+            .min_by_key(|claim| claim.item)
+        {
+            return HeldReason::AskHolder {
+                waiting: Some(waiting.holder()),
+            };
+        }
+        let taking = |claim: &&&Claim| claim.kind.takes_from(holder.kind);
+        let feature = target_claim(
+            self.mine
+                .iter()
+                .filter(taking)
+                .copied()
+                .filter(|claim| claim.is_working()),
+        )
+        .or_else(|| target_claim(self.mine.iter().filter(taking).copied()));
+        match feature {
+            Some(claim) => HeldReason::AskHandover { claim: claim.item },
+            None => HeldReason::AskHolder { waiting: None },
         }
     }
 
@@ -301,6 +365,18 @@ impl<'a> EditWorld<'a> {
     fn target(&self) -> Option<&'a Claim> {
         target_claim(self.mine.iter().copied().filter(|claim| claim.is_working()))
             .or_else(|| target_claim(self.mine.iter().copied()))
+    }
+
+    /// The claim an area an edit meets goes to: [`EditWorld::target`] among my claims that do not
+    /// wait for it.
+    fn target_for(&self, area: &QualifiedArea) -> Option<&'a Claim> {
+        let free = || {
+            self.mine
+                .iter()
+                .copied()
+                .filter(|claim| !claim.waits_for(area))
+        };
+        target_claim(free().filter(|claim| claim.is_working())).or_else(|| target_claim(free()))
     }
 
     /// Other members' live claims that recorded this path as shared, each once, ordered.

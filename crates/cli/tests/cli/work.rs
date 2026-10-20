@@ -459,3 +459,125 @@ fn the_status_names_each_overlap_with_the_way_on() {
         "{shown}"
     );
 }
+
+#[test]
+fn a_feature_takes_an_area_from_debt_work_through_the_command_line() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    run(
+        &setup.alice,
+        &["new", "gh:acme/api#7", "--title", "Tidy billing"],
+    );
+    run(
+        &setup.bob,
+        &["new", "gh:acme/api#42", "--title", "Currency on invoices"],
+    );
+    let debt = run(
+        &setup.alice,
+        &["claim", "gh:acme/api#7", "--area", "billing", "--debt"],
+    );
+    assert_eq!(status(&debt), 0, "{}", text(&debt.stderr));
+    assert!(
+        text(&debt.stdout).contains("debt work, areas api:billing"),
+        "{}",
+        text(&debt.stdout)
+    );
+
+    let feature = run(
+        &setup.bob,
+        &["claim", "gh:acme/api#42", "--area", "billing"],
+    );
+    assert_eq!(status(&feature), 0, "{}", text(&feature.stderr));
+    let said = text(&feature.stdout);
+    for part in [
+        "waiting for api:billing",
+        "api:billing waits for alice's debt claim on gh:acme/api#7 to hand it over",
+        "dibs asked them to hand it over",
+    ] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+
+    let narrowed = run(
+        &setup.alice,
+        &["claim", "narrow", "gh:acme/api#7", "--area", "billing"],
+    );
+    assert_eq!(status(&narrowed), 0, "{}", text(&narrowed.stderr));
+    let said = text(&narrowed.stdout);
+    assert!(
+        said.starts_with("Gave up api:billing on gh:acme/api#7"),
+        "{said}"
+    );
+    assert!(
+        said.contains("api:billing is bob's now, for gh:acme/api#42"),
+        "{said}"
+    );
+    let again = run(
+        &setup.alice,
+        &[
+            "claim",
+            "narrow",
+            "gh:acme/api#7",
+            "--area",
+            "billing",
+            "--json",
+        ],
+    );
+    assert_eq!(status(&again), 0);
+    assert_eq!(json(&again)["areas"], serde_json::json!([]));
+
+    let bobs = run(
+        &setup.bob,
+        &["claim", "gh:acme/api#42", "--area", "billing", "--json"],
+    );
+    let answer = json(&bobs);
+    assert_eq!(answer["claim"]["areas"], serde_json::json!(["api:billing"]));
+    assert_eq!(answer["claim"]["pending"], serde_json::json!({}));
+    assert_eq!(answer["claim"]["kind"], "feature");
+
+    let not_theirs = run(
+        &setup.bob,
+        &["claim", "narrow", "gh:acme/api#7", "--area", "billing"],
+    );
+    assert_ne!(status(&not_theirs), 0);
+}
+
+#[test]
+fn a_takeover_names_the_kind_of_the_new_claim_and_a_renewal_cannot_change_it() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    run(
+        &setup.alice,
+        &["new", "gh:acme/api#3", "--title", "Clean-up"],
+    );
+    run(
+        &setup.alice,
+        &["claim", "gh:acme/api#3", "--area", "billing", "--debt"],
+    );
+    let renewed = run(&setup.alice, &["claim", "gh:acme/api#3", "--json"]);
+    assert_eq!(status(&renewed), 0, "a renewal without a kind keeps it");
+    assert_eq!(json(&renewed)["claim"]["kind"], "debt");
+    setup.server.advance(Duration::hours(2));
+    let taken = run(
+        &setup.bob,
+        &[
+            "takeover",
+            "gh:acme/api#3",
+            "--reason",
+            "a feature needs it",
+            "--feature",
+            "--json",
+        ],
+    );
+    assert_eq!(status(&taken), 0, "{}", text(&taken.stderr));
+    assert_eq!(json(&taken)["claim"]["kind"], "feature");
+    let changed = run(&setup.bob, &["claim", "gh:acme/api#3", "--debt"]);
+    assert_eq!(status(&changed), 1);
+    assert!(
+        text(&changed.stderr)
+            .contains("The claim was made as feature; release it and claim again to change it"),
+        "{}",
+        text(&changed.stderr)
+    );
+}

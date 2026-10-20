@@ -19,6 +19,7 @@ use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::MemberRecord;
 use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::{existing_item, present_member_by_handle};
+use crate::use_cases::handover::Handovers;
 use crate::use_cases::slots::Scene;
 use crate::use_cases::writing::{Posted, SystemPost, system_body};
 use crate::work::Work;
@@ -43,8 +44,10 @@ pub struct RemovedMember {
 /// session ended; each of their claims is released, its item open again (`force_released`); their
 /// holds on slots end and their places in queues and the offers to them go, the freed slots
 /// offered on (`slot_force_released`); they are marked removed (`member_removed`); and dibs tells
-/// the project, in one message, what was released. Their messages, and every record that names
-/// them, stay. A removed member is no recipient, takes nothing and signs in nowhere.
+/// the project, in one message, what was released. The areas other claims waited for their claims
+/// to hand over move to those claims, and their own claims' waits end with them. Their messages,
+/// and every record that names them, stay. A removed member is no recipient, takes nothing and
+/// signs in nowhere.
 pub struct RemoveMember {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -94,6 +97,13 @@ impl RemoveMember {
             }
         }
         let ui_sessions_ended = work.delete_ui_sessions_of(project, member.id).await?;
+        let settings = work.project_settings(&self.hot_rules).await?;
+        let handovers = Handovers {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        };
         let mut released = Vec::new();
         for claim in work.claims(project).await? {
             if claim.member != member.id {
@@ -108,7 +118,7 @@ impl RemoveMember {
                     by: admin,
                 }),
             };
-            end_claim(&mut work, &claim, ending, now).await?;
+            end_claim(&mut work, &claim, ending, &handovers).await?;
             released.push(ItemName::of(&item, &self.ref_schemes));
         }
         let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
@@ -306,6 +316,7 @@ mod tests {
                     session: who.session,
                     areas: vec!["billing".to_owned()],
                     wide: None,
+                    kind: None,
                 },
             )
             .await
@@ -423,6 +434,7 @@ mod tests {
                     session: erin_person.session,
                     areas: Vec::new(),
                     wide: None,
+                    kind: None,
                 },
             )
             .await
@@ -560,6 +572,7 @@ mod tests {
                         session: erin_person.session,
                         areas: Vec::new(),
                         wide: None,
+                        kind: None,
                     },
                 )
                 .await

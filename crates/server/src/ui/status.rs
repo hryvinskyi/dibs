@@ -20,7 +20,7 @@ use crate::ui::signed_page;
 /// The kinds of event after which the status page offers a reload.
 pub const STATUS_CHANGES: &str = "claimed renewed taken_over released completed force_released \
      reserved wide_claimed wide_granted_by_ack grant_revoked review_started pr_merged pr_closed \
-     review_ended completed_by_merge";
+     review_ended completed_by_merge area_handed_over wait_withdrawn claim_narrowed";
 
 #[derive(Template)]
 #[template(path = "status.html")]
@@ -49,9 +49,10 @@ pub async fn page(
     let view = state.app.status.execute(actor).await?;
     let signed = chrome::load(&state, &session, Section::Status).await?;
     let now = state.clock.now();
+    let shown: Vec<&dibs_app::use_cases::HeldItem> = view.live.iter().chain(&view.stale).collect();
     let rows = |held: &[dibs_app::use_cases::HeldItem]| {
         held.iter()
-            .map(|held| ClaimRow::of(held, actor.member, now))
+            .map(|held| ClaimRow::of(held, &shown, actor.member, now))
             .collect::<Vec<_>>()
     };
     let page = StatusPage {

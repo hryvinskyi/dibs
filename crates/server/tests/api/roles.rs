@@ -138,6 +138,11 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
         (Method::POST, format!("/v1/items/{item}/done"), None),
         (
             Method::POST,
+            format!("/v1/items/{item}/claim/narrow"),
+            Some(json!({"areas": ["billing"]})),
+        ),
+        (
+            Method::POST,
             format!("/v1/items/{item}/review"),
             Some(json!({"pr": "acme/widgets#7"})),
         ),

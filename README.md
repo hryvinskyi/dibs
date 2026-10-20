@@ -143,6 +143,14 @@ revokes their tokens and releases everything they held at once. With the Claude 
 - **Claim.** A member's hold on a work item and on the areas they will change. A claim is *live* while its session is
   seen (a heartbeat, an edit, a renewal) within the project's `stale_after`, 24 hours by default, and *stale* after that.
   Only one member holds an area at a time. A stale claim can be taken over, with a reason that is sent to its holder.
+- **Feature and debt work.** A claim is a feature (the default) or debt work (`--debt`: refactoring, clean-up), and
+  keeps that kind. A feature claim that declares an area other members hold only for debt work is not refused: the area
+  waits on it, the debt holder is asked, urgently and in one conversation per pair of claims, to hand it over once their
+  person agrees (`dibs claim narrow`), and it moves to the feature claim in the transaction that lets the last holder
+  go — a narrowing, the debt claim's end, or its going stale. A debt claim in review is asked once it is worked on
+  again; a request unanswered for the project's `yield_escalates_after` (30 minutes by default) goes to the arbiters.
+  Two features keep the plain refusal, and an area waits for one claim at a time. The board marks debt work and what
+  each claim waits for.
 - **Review.** Work reaches a protected branch through pull requests. A member records the pull request of their claim
   (`dibs claim review`); the claim is then *in review*: it keeps its areas, so nobody edits the files under review, and
   never goes stale while it waits. The merge of its last recorded pull request completes it, reported by an integration
@@ -173,7 +181,8 @@ revokes their tokens and releases everything they held at once. With the Claude 
   area is in one live wide claim at a time, and whoever claims an area inside one later is asked too.
 - **Thread.** A conversation between members, or with the whole project, optionally about a work item. Agents and people
   use the same threads.
-- **Messages from dibs.** What dibs writes itself — a wide claim's announcements, the notice that a claim or a slot hold
+- **Messages from dibs.** What dibs writes itself — a wide claim's announcements, a request to hand an area over to a
+  feature and the notice that it was handed over, the notice that a claim or a slot hold
   was taken over, ended, expired or that an offer lapsed, an escalation, a member leaving — is authored by the project,
   shown as *from dibs* everywhere and never counted toward anyone's limit on raised messages.
 - **Arbiters and escalation.** The members a project names (`arbiters` in its settings) to settle what agents do not
@@ -387,7 +396,9 @@ dibs claim gh:acme/widgets#42 --area billing --area search # claim, or renew you
 dibs claim gh:acme/widgets#50 --wide billing,search --reason "Upgrade the HTTP client"   # a wide claim
 dibs claim review gh:acme/widgets#42 --pr acme/widgets#7 [--more]   # your claim waits in review; the merge completes it
 dibs claim review gh:acme/widgets#42 --drop-pr acme/widgets#8       # remove a pull request recorded by mistake
-dibs takeover 12 --reason "alice is out; I am picking this up" --area billing
+dibs claim gh:acme/widgets#7 --area billing --debt    # debt work: a feature claim may take its areas
+dibs claim narrow gh:acme/widgets#7 --area billing    # give an area up; a feature claim waiting for it gets it
+dibs takeover 12 --reason "alice is out; I am picking this up" --area billing [--debt|--feature]
 dibs release 12                                   # give the item back
 dibs done 12                                      # the item is finished
 dibs check packages/billing/a.rs                  # may I edit these paths?

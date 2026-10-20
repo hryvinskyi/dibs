@@ -6,14 +6,16 @@ use std::fmt::Write as _;
 use time::OffsetDateTime;
 
 use dibs_client::api::{
-    ClaimOutcome, ClaimRequest, DropPrRequest, Ended, GrantRequest, HeldItem, ItemFilter, Items,
-    NewItem, ReviewRequest, TakeOverRequest, WideAreaState, WideClaim, WideRequest,
+    ClaimKind, ClaimOutcome, ClaimRequest, DropPrRequest, Ended, GrantRequest, HeldItem,
+    ItemFilter, Items, NarrowRequest, NewItem, ReviewRequest, TakeOverRequest, WideAreaState,
+    WideClaim, WideRequest,
 };
 use dibs_domain::message::Body;
 use dibs_domain::wide::WideReason;
 
 use crate::cli::{
-    ClaimAction, ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NewArgs, ReviewArgs, TakeoverArgs,
+    ClaimAction, ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NarrowArgs, NewArgs, ReviewArgs,
+    TakeoverArgs,
 };
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
@@ -154,8 +156,10 @@ pub async fn new(args: NewArgs, ctx: &Context) -> Result<(), Failure> {
 /// # Errors
 /// A refusal naming the member in the way; the [`Failure`] of the call.
 pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
-    if let Some(ClaimAction::Review(review)) = args.action {
-        return start_review(review, ctx).await;
+    match args.action {
+        Some(ClaimAction::Review(review)) => return start_review(review, ctx).await,
+        Some(ClaimAction::Narrow(narrow)) => return narrow_claim(narrow, ctx).await,
+        None => {}
     }
     let key = args.key.ok_or_else(|| {
         Failure::config(
@@ -189,6 +193,7 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
                 session_id: session,
                 areas: args.areas,
                 wide,
+                kind: args.debt.then_some(ClaimKind::Debt),
             },
         )
         .await
@@ -237,6 +242,20 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
                 areas.join(", ")
             );
         }
+        for pending in &claimed.pending {
+            let asked = if pending.asked {
+                "dibs asked them to hand it over"
+            } else {
+                "their claim is in review, so dibs asks them once it is worked on again"
+            };
+            let _ = write!(
+                text,
+                " {} waits for {}'s debt claim on {} to hand it over: {asked}, and tells you when it is yours; do not edit there until then.",
+                pending.area,
+                pending.holder,
+                pending.item.label()
+            );
+        }
         for inside in &claimed.inside_wide {
             let _ = write!(
                 text,
@@ -255,6 +274,47 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
                 }
                 None => text.push('.'),
             }
+        }
+        text
+    });
+    Ok(())
+}
+
+/// Gives areas of the caller's claim up; an area another claim waited for moves to it.
+///
+/// # Errors
+/// A refusal when another member holds the item or nobody does, or an area does not resolve; the
+/// [`Failure`] of the call.
+async fn narrow_claim(args: NarrowArgs, ctx: &Context) -> Result<(), Failure> {
+    let connection = ctx.connect().await?;
+    let item = connection.resolve(&args.key).await?;
+    let narrowed = connection
+        .client
+        .narrow(item, &NarrowRequest { areas: args.areas })
+        .await
+        .map_err(|error| connection.failed(error))?;
+    ctx.printer.show(&narrowed, || {
+        let label = item_label(Some(&narrowed.item), item);
+        if narrowed.areas.is_empty() {
+            return format!(
+                "Your claim on {label} neither held nor waited for those areas; nothing changed ({}).",
+                claim_text(&narrowed.claim)
+            );
+        }
+        let given: Vec<String> = narrowed.areas.iter().map(ToString::to_string).collect();
+        let mut text = format!(
+            "Gave up {} on {label} ({}).",
+            given.join(", "),
+            claim_text(&narrowed.claim)
+        );
+        for handed in &narrowed.handed_over {
+            let _ = write!(
+                text,
+                " {} is {}'s now, for {}: list the files you hand over in the conversation that asked for it.",
+                handed.area,
+                handed.holder,
+                handed.to.label()
+            );
         }
         text
     });
@@ -371,6 +431,11 @@ pub async fn take_over(args: TakeoverArgs, ctx: &Context) -> Result<(), Failure>
                 session_id: session,
                 reason,
                 areas: args.areas,
+                kind: match (args.debt, args.feature) {
+                    (true, _) => Some(ClaimKind::Debt),
+                    (_, true) => Some(ClaimKind::Feature),
+                    _ => None,
+                },
             },
         )
         .await
