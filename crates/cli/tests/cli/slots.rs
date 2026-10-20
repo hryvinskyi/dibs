@@ -449,12 +449,9 @@ fn an_admin_forces_a_release_through_the_command_line() {
 }
 
 /// The command line that runs `script` in the system's shell.
+/// The scripts are POSIX shell; on Windows the `sh` that ships with Git for Windows runs them.
 fn shell(script: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec!["cmd".to_owned(), "/C".to_owned(), script.to_owned()]
-    } else {
-        vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()]
-    }
+    vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()]
 }
 
 #[cfg(unix)]
