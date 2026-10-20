@@ -26,6 +26,7 @@ pub mod reservation;
 pub mod session;
 pub mod settings;
 mod text;
+pub mod wide;
 
 #[cfg(test)]
 mod testing;

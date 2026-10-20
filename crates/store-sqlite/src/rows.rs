@@ -13,6 +13,7 @@ mod settings;
 mod threads;
 mod tokens;
 mod ui_sessions;
+mod wide_asks;
 
 use sqlx::Sqlite;
 use sqlx::query::Query;

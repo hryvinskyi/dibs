@@ -227,3 +227,94 @@ fn a_stale_claim_is_taken_over_with_a_reason_and_a_grant_lets_another_edit() {
     assert_eq!(status(&check), 0);
     assert!(text(&check.stdout).contains("granted by alice"));
 }
+
+#[test]
+fn a_wide_claim_from_the_command_line_waits_for_the_holders_acknowledgement() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    run(
+        &setup.alice,
+        &["new", "gh:acme/api#1", "--title", "Invoices"],
+    );
+    run(&setup.bob, &["new", "gh:acme/api#2", "--title", "Upgrade"]);
+    assert_eq!(
+        status(&run(
+            &setup.alice,
+            &["claim", "gh:acme/api#1", "--area", "billing"]
+        )),
+        0
+    );
+    let no_reason = run(&setup.bob, &["claim", "gh:acme/api#2", "--wide", "billing"]);
+    assert_eq!(status(&no_reason), 2, "a wide claim needs its reason");
+
+    let wide = run(
+        &setup.bob,
+        &[
+            "claim",
+            "gh:acme/api#2",
+            "--wide",
+            "billing,search",
+            "--reason",
+            "Upgrade the HTTP client",
+        ],
+    );
+    assert_eq!(status(&wide), 0, "{}", text(&wide.stderr));
+    let said = text(&wide.stdout);
+    assert!(
+        said.contains("Wide over api:billing, api:search, holding none of them"),
+        "{said}"
+    );
+    assert!(
+        said.contains("Asked alice to acknowledge (message "),
+        "{said}"
+    );
+
+    let state = run(&setup.alice, &["status"]);
+    let shown = text(&state.stdout);
+    assert!(shown.contains("Wide claims ("), "{shown}");
+    assert!(
+        shown.contains(
+            "bob: Upgrade the HTTP client; api:billing (waiting for alice), api:search (free)"
+        ),
+        "{shown}"
+    );
+
+    std::fs::create_dir_all(api.join("src")).unwrap();
+    let held = run(&setup.bob, &["check", "src/billing/a.rs"]);
+    assert_eq!(status(&held), 1);
+    assert!(
+        text(&held.stdout)
+            .contains("your wide claim names it; waiting for alice's acknowledgement"),
+        "{}",
+        text(&held.stdout)
+    );
+
+    let again = run(
+        &setup.bob,
+        &[
+            "claim",
+            "gh:acme/api#2",
+            "--wide",
+            "billing",
+            "--reason",
+            "Upgrade the HTTP client",
+            "--json",
+        ],
+    );
+    assert_eq!(json(&again)["announced"], serde_json::json!([]));
+    let inbox = run(&setup.alice, &["inbox", "--unacked", "--json"]);
+    let message = json(&inbox)["unacked"][0]["message"]["id"]
+        .as_u64()
+        .unwrap()
+        .to_string();
+    let acked = run(&setup.alice, &["ack", &message]);
+    assert_eq!(status(&acked), 0);
+    assert!(
+        text(&acked.stdout).contains("That grants bob edits in api:billing for item"),
+        "{}",
+        text(&acked.stdout)
+    );
+    let granted = run(&setup.bob, &["check", "src/billing/a.rs"]);
+    assert_eq!(status(&granted), 0, "{}", text(&granted.stdout));
+}

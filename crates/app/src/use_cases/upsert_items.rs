@@ -544,6 +544,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    wide: None,
                     item: held,
                     session: env.bob.session,
                     areas: vec!["billing".to_owned()],

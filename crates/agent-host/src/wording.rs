@@ -13,7 +13,9 @@ use dibs_domain::item::ExternalRef;
 use dibs_domain::paths::RelPath;
 use dibs_domain::settings::EditPolicy;
 
-use crate::ports::{ClaimLine, InboxView, ReadyLine, StatusView, TouchedBy, UnackedLine};
+use crate::ports::{
+    ClaimLine, HeldWay, InboxView, ReadyLine, StatusView, TouchedBy, UnackedLine, WideLine,
+};
 
 /// How many unread subjects the brief names.
 const BRIEF_SUBJECTS: usize = 3;
@@ -31,19 +33,26 @@ pub fn item_name(item: ItemId, reference: Option<&ExternalRef>) -> String {
 }
 
 /// The reason an edit of `path` is refused: another member holds its area for `item`, named as
-/// [`item_name`] names it.
+/// [`item_name`] names it, and `way` says what the member can do about it.
 pub fn held_by(
     path: &RelPath,
     holder: Option<&Handle>,
     item: &str,
     area: &QualifiedArea,
+    way: HeldWay,
 ) -> String {
-    match holder {
-        Some(holder) => format!(
+    match (holder, way) {
+        (Some(holder), HeldWay::AskHolder) => format!(
             "{path} is in the area {area}, which {holder} holds for work item {item}. Do not edit it now: message {holder} (dibs_send, or dibs send --to {holder}) to agree on the change or ask for a grant, or pick other work."
         ),
-        None => format!(
+        (None, HeldWay::AskHolder) => format!(
             "{path} is in the area {area}, which another member holds for work item {item}. Do not edit it now: message the holder to agree on the change or ask for a grant, or pick other work."
+        ),
+        (Some(holder), HeldWay::AwaitingAck) => format!(
+            "{path} is in the area {area}, which {holder} holds for work item {item}. Your wide claim names it, and dibs asked {holder} to acknowledge it; their acknowledgement grants the edit. Do not edit it now: go on where the areas are free, or message {holder} (dibs_send, or dibs send --to {holder})."
+        ),
+        (None, HeldWay::AwaitingAck) => format!(
+            "{path} is in the area {area}, which another member holds for work item {item}. Your wide claim names it, and the edit waits for the holder to acknowledge it. Do not edit it now: go on where the areas are free, or message the holder."
         ),
     }
 }
@@ -173,6 +182,7 @@ impl Brief<'_> {
             .partition(|claim| claim.holder == *self.member);
         claim_lines("Your live claims", &mine, text);
         claim_lines("Other members' live claims", &others, text);
+        wide_lines(&status.wide, text);
         let stale: Vec<&ClaimLine> = status.stale.iter().collect();
         if !stale.is_empty() {
             claim_lines(
@@ -202,6 +212,35 @@ fn claim_lines(heading: &str, claims: &[&ClaimLine], text: &mut String) {
             let areas: Vec<String> = claim.areas.iter().map(ToString::to_string).collect();
             let _ = write!(text, ", areas {}", areas.join(", "));
         }
+    }
+}
+
+fn wide_lines(wide: &[WideLine], text: &mut String) {
+    if wide.is_empty() {
+        return;
+    }
+    text.push_str(
+        "\nWide claims (each holds none of its areas; a holder's acknowledgement of its announcement lets it edit theirs):",
+    );
+    for line in wide {
+        let areas: Vec<String> = line
+            .areas
+            .iter()
+            .map(|area| match &area.holder {
+                Some(holder) if area.granted => format!("{} (acknowledged by {holder})", area.area),
+                Some(holder) => format!("{} (waiting for {holder})", area.area),
+                None => format!("{} (free)", area.area),
+            })
+            .collect();
+        let _ = write!(
+            text,
+            "\n- item {} \"{}\", {}: {}; over {}",
+            item_name(line.item, line.reference.as_ref()),
+            line.title,
+            line.holder,
+            line.reason,
+            areas.join(", ")
+        );
     }
 }
 
@@ -296,7 +335,7 @@ fn unacked_lines(unacked: &[UnackedLine], text: &mut String) {
         );
     }
     text.push_str(
-        "\nRead each (dibs_thread), answer if a decision is needed, then acknowledge it (dibs_ack, or dibs ack <message>). An acknowledgement says you read it; it authorises nothing.",
+        "\nRead each (dibs_thread), answer if a decision is needed, then acknowledge it (dibs_ack, or dibs ack <message>). An acknowledgement says you read it; it authorises nothing, except that acknowledging a wide claim's announcement grants its member edits in your areas it names.",
     );
 }
 
@@ -344,18 +383,36 @@ mod tests {
         let area = QualifiedArea::parse("api:billing").unwrap();
         let reference = ExternalRef::parse("gh:acme/web#12").unwrap();
         let named = item_name(ItemId(1_739_000_000_123), Some(&reference));
-        let text = held_by(&path, Some(&handle("alice")), &named, &area);
+        let text = held_by(
+            &path,
+            Some(&handle("alice")),
+            &named,
+            &area,
+            HeldWay::AskHolder,
+        );
         assert!(
             text.contains("alice holds for work item gh:acme/web#12"),
             "{text}"
         );
         assert!(!text.contains("1739000000123"), "{text}");
         assert!(text.contains("dibs send --to alice"), "{text}");
-        let local = held_by(&path, None, &item_name(ItemId(4), None), &area);
+        let local = held_by(
+            &path,
+            None,
+            &item_name(ItemId(4), None),
+            &area,
+            HeldWay::AskHolder,
+        );
         assert!(
             local.contains("another member holds for work item 4"),
             "{local}"
         );
+        for holder in [Some(handle("alice")), None] {
+            let waiting = held_by(&path, holder.as_ref(), &named, &area, HeldWay::AwaitingAck);
+            assert!(waiting.contains("Your wide claim names it"), "{waiting}");
+            assert!(waiting.contains("Do not edit it now"), "{waiting}");
+            assert!(!waiting.contains("ask for a grant"), "{waiting}");
+        }
     }
 
     #[test]

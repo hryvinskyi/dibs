@@ -23,6 +23,7 @@ use dibs_domain::import::BatchRefused;
 use dibs_domain::item::CreateRefused;
 use dibs_domain::message::{AckRefused, RecipientsError};
 use dibs_domain::settings::AreaLookupError;
+use dibs_domain::wide::WideScopeError;
 
 /// A refusal or failure as the client receives it.
 #[derive(Debug, Clone, PartialEq)]
@@ -286,7 +287,10 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::ItemClosed { .. }
         | AppError::Claim(Refusal {
             reason:
-                ClaimRefused::HeldBy { .. } | ClaimRefused::Stale { .. } | ClaimRefused::AreaHeld { .. },
+                ClaimRefused::HeldBy { .. }
+                | ClaimRefused::Stale { .. }
+                | ClaimRefused::AreaHeld { .. }
+                | ClaimRefused::WideOverlap { .. },
             ..
         })
         | AppError::Takeover(Refusal {
@@ -294,7 +298,8 @@ fn status_of(error: &AppError) -> StatusCode {
                 TakeoverRefused::NothingToTake
                 | TakeoverRefused::OwnClaim
                 | TakeoverRefused::NotStale { .. }
-                | TakeoverRefused::AreaHeld { .. },
+                | TakeoverRefused::AreaHeld { .. }
+                | TakeoverRefused::WideOverlap { .. },
             ..
         })
         | AppError::HolderOnly(Refusal {
@@ -307,13 +312,14 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::Ack(AckRefused::NotRequired) => StatusCode::CONFLICT,
         AppError::NotARecipient(_)
         | AppError::Claim(Refusal {
-            reason: ClaimRefused::UnknownArea { .. },
+            reason: ClaimRefused::UnknownArea { .. } | ClaimRefused::WideAndHeld { .. },
             ..
         })
         | AppError::Takeover(Refusal {
-            reason: TakeoverRefused::UnknownArea { .. },
+            reason: TakeoverRefused::UnknownArea { .. } | TakeoverRefused::WideAndHeld { .. },
             ..
         })
+        | AppError::Wide(WideScopeError::NoAreas)
         | AppError::Grant(GrantRefused::SelfGrant | GrantRefused::UnknownArea { .. })
         | AppError::Create(CreateRefused::UnlistedRepository { .. })
         | AppError::Area(
@@ -363,12 +369,15 @@ fn details_of(error: &AppError) -> Map<String, Value> {
             details.time("last_seen", *last_seen);
         }
         AppError::Claim(Refusal {
-            reason: ClaimRefused::AreaHeld { area, item, .. },
+            reason:
+                ClaimRefused::AreaHeld { area, item, .. } | ClaimRefused::WideOverlap { area, item, .. },
             member,
             item_ref,
         })
         | AppError::Takeover(Refusal {
-            reason: TakeoverRefused::AreaHeld { area, item, .. },
+            reason:
+                TakeoverRefused::AreaHeld { area, item, .. }
+                | TakeoverRefused::WideOverlap { area, item, .. },
             member,
             item_ref,
         }) => {
@@ -387,11 +396,11 @@ fn details_of(error: &AppError) -> Map<String, Value> {
             ..
         }) => details.holder(member.as_ref()),
         AppError::Claim(Refusal {
-            reason: ClaimRefused::UnknownArea { area },
+            reason: ClaimRefused::UnknownArea { area } | ClaimRefused::WideAndHeld { area },
             ..
         })
         | AppError::Takeover(Refusal {
-            reason: TakeoverRefused::UnknownArea { area },
+            reason: TakeoverRefused::UnknownArea { area } | TakeoverRefused::WideAndHeld { area },
             ..
         })
         | AppError::Grant(GrantRefused::NotHolder { area } | GrantRefused::UnknownArea { area }) => {

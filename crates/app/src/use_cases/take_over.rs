@@ -17,8 +17,10 @@ use crate::error::AppError;
 use crate::named::{ItemName, Names, refuse};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::{MessageRecord, ThreadRecord};
+use crate::use_cases::claim_item::widened;
 use crate::use_cases::common::{existing_item, own_session, remove_claim, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
+use crate::use_cases::wide_asks::{Announced, Announcer};
 use crate::work::Work;
 
 const SUBJECT_PREFIX: &str = "Taken over: ";
@@ -50,12 +52,17 @@ pub struct TakenOverClaim {
     pub previous_holder: dibs_domain::handle::Handle,
     /// The item.
     pub item: ItemName,
+    /// The announcements the new claim's wide scope sent to the holders of its areas: a wide scope
+    /// carried on is announced again, in the new member's name.
+    pub announced: Vec<Announced>,
 }
 
 /// Takes over another member's stale claim on an item. In the same transaction the previous claim
 /// ends, with the paths recorded under it and the grants resting on it, and the previous holder is
 /// sent the reason in a thread about the item, as a `high` message that asks for no
-/// acknowledgement, so it reaches them while they work. A live claim is never taken over.
+/// acknowledgement, so it reaches them while they work. A live claim is never taken over. A wide
+/// scope the new claim carries on is announced to the holders of its areas in the new member's
+/// name, since what they acknowledged before granted the previous member, and those grants end.
 pub struct TakeOver {
     ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
@@ -109,6 +116,7 @@ impl TakeOver {
             session: session.id,
             host: session.host.clone(),
             areas: resolve_areas(&settings, &input.areas)?,
+            wide: None,
         };
         let current = work.claim(project, item.id).await?;
         let others = work.claims(project).await?;
@@ -168,7 +176,21 @@ impl TakeOver {
             }),
         )
         .await?;
+        if let Some(widened) = widened(None, &takeover.claim) {
+            work.record(now, widened).await?;
+        }
         end_orphaned_grants(&mut work, now).await?;
+        let announced = Announcer {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        }
+        .announce_due(&mut work)
+        .await?
+        .into_iter()
+        .filter(|announced| announced.ask.from == actor.member)
+        .collect();
         let names = Names::load(&mut work).await?;
         let holder = names.handle(actor.member)?;
         let previous_holder = names.handle(takeover.previous.member)?;
@@ -179,6 +201,7 @@ impl TakeOver {
             thread: thread.id,
             holder,
             previous_holder,
+            announced,
         })
     }
 }
@@ -220,6 +243,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: env.bob.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
@@ -374,6 +398,7 @@ mod tests {
             .execute(
                 &env.alice.actor,
                 ClaimItemInput {
+                    wide: None,
                     item: alices,
                     session: env.alice.session,
                     areas: Vec::new(),

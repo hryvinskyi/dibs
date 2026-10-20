@@ -95,11 +95,11 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/items/{id}/dependencies` | people | Record that the item is blocked by another. |
 | `DELETE /v1/items/{id}/dependencies` | people | Remove that the item is blocked by another. |
 | `GET /v1/ready` | any | The work the caller can pick up now, and why the other open items wait. |
-| `POST /v1/items/{id}/claim` | people | Claim an item, or renew your claim. |
+| `POST /v1/items/{id}/claim` | people | Claim an item, or renew your claim; with `wide`, a wide claim over many areas. |
 | `POST /v1/items/{id}/takeover` | people | Take over another member's stale claim. |
 | `POST /v1/items/{id}/release` | people | Release your claim. |
 | `POST /v1/items/{id}/done` | people | Complete your claim. |
-| `GET /v1/status` | people | Live claims, stale claims, the areas held and the caller's ready list. |
+| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims and the caller's ready list. |
 | `POST /v1/edit-check` | people | May I edit these paths? |
 | `POST /v1/grants` | people | Let another member edit in an area you hold. |
 | `DELETE /v1/grants/{id}` | people | Withdraw a grant you gave. |
@@ -131,7 +131,8 @@ item     { id, ref | null, title, status: "open" | "claimed" | "done" | "dropped
            repo | null, unlisted_remote | null, priority: 0..4, areas_hint: ["repo:area", …],
            source_status | null, closed, source | null, created_by, created_at }
 item ref { id, ref | null, title, link | null }
-claim    { item, holder, session_id, host, areas: ["repo:area", …], claimed_at, renewed_at, last_seen }
+claim    { item, holder, session_id, host, areas: ["repo:area", …], wide: { areas: ["repo:area", …], reason } | null,
+           claimed_at, renewed_at, last_seen }
 grant    { id, item, area, from, to, created_at }
 thread   { id, subject, item | null, author, to_project, to: [handle, …], created_at }
 message  { id, thread, author, label, body, importance: "normal" | "high" | "urgent", ack_required, created_at,
@@ -292,18 +293,50 @@ it: `repo:area`, or a bare name that exactly one repository declares. Answers
 
 `outcome` is `new` for a first claim and `renewed` when the caller already held the item (a stale claim of the caller's
 included); a renewal adds the requested areas to those held and lists in `dropped_areas` those it no longer holds
-because another member holds them now or the settings dropped them. Refusals: `held` (another member's live claim holds
-the item), `stale` (their claim is stale: only a takeover may take it), `area_held` (another member's live claim holds
-an area), `unknown_area`, `invalid_area`, `ambiguous_area`, `item_closed`. An area belongs to one member at a time. A
-claim on a blocked item is made all the same — dependent work is often started in parallel — and `blocked_by` lists, as
-item refs, the items it waits for that are neither done nor closed, for the client to warn about. `item` is the claimed
-item as an item ref, so a client names it by its reference.
+because another member holds them now, another live wide claim names them now, or the settings dropped them. Refusals:
+`held` (another member's live claim holds the item), `stale` (their claim is stale: only a takeover may take it),
+`area_held` (another member's live claim holds an area), `unknown_area`, `invalid_area`, `ambiguous_area`,
+`item_closed`. An area belongs to one member at a time. A claim on a blocked item is made all the same — dependent work
+is often started in parallel — and `blocked_by` lists, as item refs, the items it waits for that are neither done nor
+closed, for the client to warn about. `item` is the claimed item as an item ref, so a client names it by its reference.
+
+**Wide claims.** A change that cuts across many areas at once (a dependency upgrade, a rename across packages) is claimed
+wide: `{ "session_id": 7, "wide": { "areas": ["billing", "search"], "reason": "Upgrade the HTTP client" } }`, the
+reason 1 to 300 characters. A wide claim **holds none of the areas it names**, so it never refuses anyone's claim of
+them, and nobody's claim refuses it; it may still hold areas of its own under `areas` (an edit outside its scope adds the
+area there, as for any claim), but never one it also names. One area is named by one live wide claim at a time. In the
+same transaction every member whose live claim holds one of the named areas is sent an **announcement**: a conversation
+about the wide claim's item addressed to them alone, written in the wide claim's member's name under the label `dibs`,
+whose one message is `high` and asks to be acknowledged. Its text says dibs sent it for that member, why, and which of
+the recipient's areas it is about. `announced` in the answer lists them:
+
+```json
+{ "outcome": "new", "claim": { "item": 50, "holder": "bob", "areas": [],
+    "wide": { "areas": ["default:billing", "default:search"], "reason": "Upgrade the HTTP client" }, "…": "…" },
+  "announced": [{ "to": "alice", "areas": ["default:billing"], "message_id": 91, "thread_id": 90 }],
+  "inside_wide": [], "…": "…" }
+```
+
+**A holder's acknowledgement of the announcement is their grant**: for each area it asked about that they still hold
+through a live claim, the wide claim's member may edit there for the wide claim's item. The grant is like any other: in
+force while both claims are live, ended (`grant_revoked`) when either ends, revocable by the holder. Until a holder
+acknowledges, the wide claim's member's edits in their area answer `held_by` with `reason: "awaiting_ack"`; in a named
+area nobody holds they answer `allowed`, and nothing is added to the claim's `areas`. A member who comes to hold a named
+area later — by claiming it, by a takeover, or by an edit that adds it — is sent the same announcement in the same
+transaction, and the claim answer lists the area in `inside_wide`:
+`[{ "area": "default:billing", "holder": "bob", "item": item ref, "message_id": 93 }]` (`message_id` is the
+announcement waiting for them, or `null`). Nobody is asked twice about one area while an announcement to them waits.
+A renewal adds the requested areas to the scope and takes the new reason; without `wide` the claim keeps its scope. A
+takeover carries the scope on, minus areas another live wide claim names now, and announces it again in the new
+member's name. Refusals: `wide_overlap` (`409`: another live wide claim names an area; `details` name its member,
+item and the area), `wide_and_held` (`422`: the claim would both hold and name an area), `invalid_wide` (`422`: no area
+named), `invalid_request` for a missing or invalid `wide.reason` or a missing `wide.areas`, and the area refusals above.
 
 `POST /v1/items/{id}/takeover`, body `{ "session_id": 7, "reason": "…", "areas": [] }`, takes over another member's
 stale claim and tells them the reason in a conversation about the item, as a `high` message that asks for no
 acknowledgement. Answers
-`{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31, "item": item ref }`. Refusals: `not_stale` (the claim is
-live), `own_claim`, `nothing_to_take`, `area_held`.
+`{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31, "item": item ref, "announced": [] }`. Refusals: `not_stale` (the claim is
+live), `own_claim`, `nothing_to_take`, `area_held`, `wide_overlap`.
 
 `POST /v1/items/{id}/release` and `POST /v1/items/{id}/done` take no body and answer
 `{ "claim": claim, "item": item ref }`, the claim that ended and its item; the item is open again, or done. Refusals: `not_holder` (`403`), `no_claim` (`409`).
@@ -315,11 +348,17 @@ live), `own_claim`, `nothing_to_take`, `area_held`.
   "live":  [{ "item": item, "claim": claim }],
   "stale": [{ "item": item, "claim": claim }],
   "holds": [{ "area": "default:billing", "holder": "alice", "item": 12 }],
+  "wide":  [{ "item": item, "claim": claim,
+              "areas": [{ "area": "default:billing", "state": "waiting", "holder": "alice", "item": 12 },
+                        { "area": "default:search", "state": "free", "holder": null, "item": null }] }],
   "ready": { "ready": [], "excluded": [] }
 }
 ```
 
-`ready` is the caller's ready list, as `GET /v1/ready` answers it.
+`holds` never lists an area a wide claim names. `wide` lists the live wide claims by item, each area with where it
+stands for the wide claim's member: `free` (nobody else holds it), `granted` (its holder acknowledged the announcement,
+or granted the edits) or `waiting` (its holder has not). `ready` is the caller's ready list, as `GET /v1/ready` answers
+it.
 
 ### Edit check
 
@@ -342,8 +381,8 @@ check writes nothing. Answers a verdict per path, in the order asked:
 | `allowed` | The caller may edit. | |
 | `allowed_with_note` | The caller may edit; a hot-file rule has something to say. | `rule`, `note`, `touched_by: [{ holder, item, item_ref }]` |
 | `needs_claim` | The path is governed, the policy requires a claim, and the caller holds none that covers it. | |
-| `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason` (`ask_holder`: message them or ask for a grant) |
-| `granted` | The holder granted the caller edits in the area. | `by`, `area` |
+| `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason`: `ask_holder` (message them or ask for a grant), or `awaiting_ack` (the caller's live wide claim names the area and the holder has not acknowledged its announcement yet) |
+| `granted` | The holder granted the caller edits in the area, by a grant or by acknowledging the caller's wide claim's announcement. | `by`, `area` |
 
 A path that no area or rule governs is `allowed`. Refusals: `unknown_repo` (`422`), `invalid_request` for a missing
 field or a path that is not a relative path, `not_found` for a session that is not the caller's.
@@ -394,9 +433,11 @@ a thread addressed to the project, every person who was in the project when the 
 never a recipient. A message never changes; an acknowledgement is a record of its own, one per recipient.
 
 `POST /v1/messages/{id}/ack` takes no body and records the caller's acknowledgement. Answers
-`201 { "ack": { "message", "thread", "member", "at" }, "created": true }` and appends `acked`. Acknowledging again is
-harmless, so a client may retry after a lost answer: it answers `200` with the first acknowledgement (its original
-`at`) and `"created": false`, and records and appends nothing. Refusals: `not_a_recipient` (`403`: the message did not
+`201 { "ack": { "message", "thread", "member", "at" }, "created": true, "granted": [] }` and appends `acked`.
+Acknowledging a wide claim's announcement also grants its member edits, for the wide claim's item, in each area it asked
+about that the caller still holds through a live claim: `granted` lists those grants, and each appends
+`wide_granted_by_ack`. Acknowledging again is harmless, so a client may retry after a lost answer: it answers `200` with
+the first acknowledgement (its original `at`), `"created": false` and `"granted": []`, and records and appends nothing. Refusals: `not_a_recipient` (`403`: the message did not
 reach the caller, or the caller wrote it), `ack_not_required` (`409`: the message asks for none), `not_found` for a
 message in a conversation the caller may not read.
 
@@ -446,8 +487,12 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `item_updated` | `item`, `by` |
 | `dependency_added`, `dependency_removed` | `item`, `blocked_by`, `by` |
 | `acked` | `thread`, `message`, `by` |
+| `wide_claimed` | `item`, `member`, `areas` (every area the wide scope names now) |
+| `wide_granted_by_ack` | `grant`, `item`, `area`, `by` (the holder who acknowledged), `to` (the wide claim's member) |
 
 `item_updated` is appended when one of an item's reported facts actually changed; read the item for what it says now.
+`wide_claimed` is appended when a claim becomes wide or its scope grows; a renewal that names nothing new appends none.
+A grant an acknowledgement made ends like any grant, with `grant_revoked` naming its id.
 `acked` is about a conversation, like `thread_started` and `message_posted`: a caller who may not read the conversation
 does not see it.
 
@@ -522,7 +567,8 @@ token changes nothing.
 
 ## The web pages
 
-The pages under `/ui` are for people in a browser: `/ui/login` (sign in with a token), `/ui/` (status), `/ui/board`,
+The pages under `/ui` are for people in a browser: `/ui/login` (sign in with a token), `/ui/` (status, with the live wide
+claims and, for each of their areas, whether it is free, acknowledged by its holder or waiting for them), `/ui/board`,
 `/ui/threads` and `/ui/threads/{id}`, with `/ui/events/stream` feeding the open page. They are rendered on the server and
 are not part of the API. The board's *Ready* column is the viewer's ready list, each card with its priority, likely
 areas and a link to its tracker, and below it the open items that are not ready with their blockers or the held area;

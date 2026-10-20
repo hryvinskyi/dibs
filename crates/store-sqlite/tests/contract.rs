@@ -41,6 +41,7 @@ mod contract {
     use dibs_domain::reservation::SharedPath;
     use dibs_domain::session::{AgentLabel, HostName};
     use dibs_domain::settings::SettingsDocument;
+    use dibs_domain::wide::{WideAsk, WideReason, WideScope};
     use dibs_store_sqlite::SqliteStore;
 
     /// A store under test, with the directory its file lives in.
@@ -113,6 +114,8 @@ mod contract {
         messages_keep_their_importance_and_summaries_the_highest,
         acks_are_one_per_member_and_message_and_scoped,
         ack_requests_leave_out_my_own_and_the_acknowledged,
+        wide_claims_keep_their_scope_and_reason,
+        wide_asks_are_one_per_message_and_open_until_their_holder_acks,
         read_times_are_kept_per_member,
         events_only_increase_and_page_by_cursor,
         events_keep_every_field,
@@ -207,6 +210,7 @@ mod contract {
             session,
             host: HostName::parse("laptop").unwrap(),
             areas: areas(names),
+            wide: None,
             claimed_at: at(10),
             renewed_at: at(11),
             last_seen: at(12),
@@ -1460,6 +1464,101 @@ mod contract {
         );
         assert_eq!(ids(tx.ack_requests(A, ALICE).await.unwrap()), [94]);
         assert!(tx.ack_requests(B, BOB).await.unwrap().is_empty());
+    }
+
+    fn scope(names: &[&str], reason: &str) -> WideScope {
+        WideScope::new(areas(names), WideReason::parse(reason).unwrap()).unwrap()
+    }
+
+    fn wide_ask(
+        message: u64,
+        item: ItemId,
+        from: MemberId,
+        to: MemberId,
+        names: &[&str],
+    ) -> WideAsk {
+        WideAsk {
+            message: MessageId(message),
+            item,
+            from,
+            to,
+            areas: areas(names),
+        }
+    }
+
+    async fn wide_claims_keep_their_scope_and_reason(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let wide = Claim {
+            wide: Some(scope(
+                &["api:billing", "web:checkout"],
+                "Upgrade the HTTP client everywhere",
+            )),
+            ..claim(FIRST, ALICE, ALICE_LAPTOP, &["api:search"])
+        };
+        tx.save_claim(A, &wide).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.claim(A, FIRST).await.unwrap(), Some(wide.clone()));
+        assert_eq!(tx.claims(A).await.unwrap(), std::slice::from_ref(&wide));
+        let ordinary = Claim { wide: None, ..wide };
+        tx.save_claim(A, &ordinary).await.unwrap();
+        assert_eq!(
+            tx.claim(A, FIRST).await.unwrap(),
+            Some(ordinary),
+            "a claim replaced without a scope loses it"
+        );
+    }
+
+    async fn wide_asks_are_one_per_message_and_open_until_their_holder_acks(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, Some(FIRST), 60))
+            .await
+            .unwrap();
+        for id in [91, 92, 93] {
+            tx.insert_message(
+                A,
+                &asking(id, ThreadId(81), ALICE, 60 + i64::try_from(id).unwrap()),
+            )
+            .await
+            .unwrap();
+        }
+        let to_bob = wide_ask(91, FIRST, ALICE, BOB, &["api:billing", "api:search"]);
+        let again_to_bob = wide_ask(92, FIRST, ALICE, BOB, &["web:checkout"]);
+        let answered = wide_ask(93, FIRST, ALICE, BOB, &["web:billing"]);
+        for ask in [&to_bob, &again_to_bob, &answered] {
+            tx.insert_wide_ask(A, ask).await.unwrap();
+        }
+        tx.insert_ack(A, &ack(93, BOB, 70)).await.unwrap();
+        tx.insert_ack(A, &ack(92, ALICE, 70)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.wide_ask(A, MessageId(91)).await.unwrap(),
+            Some(to_bob.clone())
+        );
+        assert_eq!(tx.wide_ask(B, MessageId(91)).await.unwrap(), None);
+        assert_eq!(tx.wide_ask(A, MessageId(94)).await.unwrap(), None);
+        assert_eq!(
+            tx.open_wide_asks(A).await.unwrap(),
+            [to_bob.clone(), again_to_bob],
+            "in message order; only the holder's own acknowledgement answers one"
+        );
+        assert!(tx.open_wide_asks(B).await.unwrap().is_empty());
+        assert!(is_duplicate(tx.insert_wide_ask(A, &to_bob).await));
+        drop(tx);
+
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_wide_ask(A, &wide_ask(99, FIRST, ALICE, BOB, &["api:billing"]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(tx.commit().await, Err(StoreError::Backend(_))),
+            "an announcement no message carries"
+        );
     }
 
     async fn read_times_are_kept_per_member(store: Arc<dyn Store>) {

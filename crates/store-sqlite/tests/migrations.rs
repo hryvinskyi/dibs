@@ -11,9 +11,12 @@ mod migrations {
 
     use dibs_app::ports::Store;
     use dibs_app::records::ItemFilter;
+    use dibs_domain::area::QualifiedArea;
+    use dibs_domain::claim::Claim;
     use dibs_domain::ids::{ItemId, MemberId, MessageId, ProjectId, ThreadId};
     use dibs_domain::item::{ExternalRef, ItemStatus, Priority};
     use dibs_domain::message::{Ack, Importance};
+    use dibs_domain::wide::{WideAsk, WideReason, WideScope};
     use dibs_store_sqlite::{OpenError, SqliteStore};
 
     static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
@@ -229,6 +232,108 @@ mod migrations {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+    }
+
+    /// Two claims, a conversation with an acknowledged message and a grant, under the schema `0003`
+    /// left.
+    const CLAIMS_AT_ACKS: &str = "\
+        INSERT INTO projects (id, slug, created_at) VALUES (1, 'widgets', 0);
+        INSERT INTO members (project_id, id, handle, display_name, external_login, role, created_at)
+            VALUES (1, 11, 'alice', 'Alice', NULL, 'admin', 0),
+                   (1, 12, 'bob', 'Bob', NULL, 'member', 0);
+        INSERT INTO sessions (project_id, id, member_id, host, label, agent, push, last_seen)
+            VALUES (1, 31, 11, 'laptop', 'laptop/mcp', 'agent', 0, 5),
+                   (1, 32, 12, 'desktop', 'desktop/mcp', 'agent', 0, 5);
+        INSERT INTO items (project_id, id, external_ref, title, status, repo, remote, created_by,
+            created_at)
+            VALUES (1, 51, 'gh:acme/widgets#1', 'Work', 'claimed', NULL, NULL, 11, 1),
+                   (1, 52, NULL, 'More work', 'claimed', NULL, NULL, 12, 2);
+        INSERT INTO claims (project_id, item_id, member_id, session_id, host, areas, claimed_at,
+            renewed_at, last_seen)
+            VALUES (1, 51, 11, 31, 'laptop', '[\"default:billing\"]', 10, 11, 12),
+                   (1, 52, 12, 32, 'desktop', '[]', 10, 10, 10);
+        INSERT INTO grants (project_id, id, item_id, repo, area, from_member, to_member, created_at)
+            VALUES (1, 71, 52, 'default', 'billing', 11, 12, 13);
+        INSERT INTO threads (project_id, id, subject, item_id, author_id, to_project, created_at)
+            VALUES (1, 81, 'Invoice totals', 51, 11, 1, 20);
+        INSERT INTO messages (project_id, id, thread_id, author_id, label, body, importance,
+            ack_required, created_at)
+            VALUES (1, 91, 81, 11, 'web', 'Please read.', 'high', 1, 21);
+        INSERT INTO acks (project_id, message_id, member_id, at) VALUES (1, 91, 12, 22);
+    ";
+
+    #[tokio::test]
+    async fn wide_carries_every_claim_over_as_ordinary_and_keeps_the_rest() {
+        let (_dir, path) = database_at(3, CLAIMS_AT_ACKS).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let claims = tx.claims(ProjectId(1)).await.unwrap();
+        let carried: Vec<(u64, usize, bool)> = claims
+            .iter()
+            .map(|c| (c.item.get(), c.areas.len(), c.wide.is_none()))
+            .collect();
+        assert_eq!(carried, [(51, 1, true), (52, 0, true)]);
+        assert_eq!(tx.grants(ProjectId(1)).await.unwrap().len(), 1);
+        assert_eq!(tx.acks(ProjectId(1), MessageId(91)).await.unwrap().len(), 1);
+        assert!(tx.open_wide_asks(ProjectId(1)).await.unwrap().is_empty());
+        assert_eq!(
+            tx.wide_ask(ProjectId(1), MessageId(91)).await.unwrap(),
+            None
+        );
+
+        let reason = WideReason::parse("Rename the money type").unwrap();
+        let areas = [QualifiedArea::parse("default:search").unwrap()].into();
+        let widened = Claim {
+            wide: Some(WideScope::new(areas, reason).unwrap()),
+            ..claims[1].clone()
+        };
+        tx.save_claim(ProjectId(1), &widened).await.unwrap();
+        let ask = WideAsk {
+            message: MessageId(91),
+            item: ItemId(52),
+            from: MemberId(12),
+            to: MemberId(11),
+            areas: [QualifiedArea::parse("default:billing").unwrap()].into(),
+        };
+        tx.insert_wide_ask(ProjectId(1), &ask).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim(ProjectId(1), ItemId(52)).await.unwrap(),
+            Some(widened)
+        );
+        assert_eq!(tx.open_wide_asks(ProjectId(1)).await.unwrap(), [ask]);
+    }
+
+    #[tokio::test]
+    async fn wide_refuses_a_scope_without_its_reason_or_without_areas() {
+        let (_dir, path) = database_at(3, CLAIMS_AT_ACKS).await;
+        drop(open(&path).await.unwrap());
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for update in [
+            "UPDATE claims SET wide_areas = '[\"default:search\"]' WHERE item_id = 52",
+            "UPDATE claims SET wide_reason = 'Rename' WHERE item_id = 52",
+            "UPDATE claims SET wide_areas = '[]', wide_reason = 'Rename' WHERE item_id = 52",
+            "UPDATE claims SET wide_areas = 'billing', wide_reason = 'Rename' WHERE item_id = 52",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{update}"
+            );
+        }
+        let kept = sqlx::query(
+            "UPDATE claims SET wide_areas = '[\"default:search\"]', wide_reason = 'Rename' \
+             WHERE item_id = 52",
+        )
+        .execute(&pool)
+        .await;
+        assert!(kept.is_ok());
     }
 }

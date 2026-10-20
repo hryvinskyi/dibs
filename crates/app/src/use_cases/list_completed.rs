@@ -92,6 +92,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: who.session,
                     areas: Vec::new(),

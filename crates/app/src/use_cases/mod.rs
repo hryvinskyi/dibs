@@ -47,6 +47,7 @@ mod status;
 mod take_over;
 mod unacked;
 mod upsert_items;
+mod wide_asks;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -55,7 +56,7 @@ pub use ack::{AckMessage, Acknowledged};
 pub use add_dependency::{AddDependency, DependencyChange, DependencyInput};
 pub use apply_settings::{AppliedSettings, ApplySettings};
 pub use authenticate::Authenticate;
-pub use claim_item::{ClaimItem, ClaimItemInput, ClaimMade};
+pub use claim_item::{ClaimItem, ClaimItemInput, ClaimMade, WideInput, WideNote};
 pub use close_ui_session::CloseUiSession;
 pub use common::NewMember;
 pub use complete::Complete;
@@ -90,10 +91,11 @@ pub use revoke_token::RevokeToken;
 pub use rotate_token::{RotateToken, RotatedToken};
 pub use sent_status::{RecipientStatus, SentStatus, SentStatusView};
 pub use start_thread::{Addressees, StartThread, StartThreadInput, StartedThread};
-pub use status::{AreaHold, HeldItem, Status, StatusView};
+pub use status::{AreaHold, HeldItem, Status, StatusView, WideAreaStanding, WideClaimStatus};
 pub use take_over::{TakeOver, TakeOverInput, TakenOverClaim};
 pub use unacked::{Unacked, UnackedMessage};
 pub use upsert_items::{UpsertItems, UpsertReport};
+pub use wide_asks::Announced;
 
 use crate::dependencies::Dependencies;
 

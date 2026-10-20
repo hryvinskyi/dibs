@@ -130,6 +130,7 @@ mod concurrency {
             for n in 0..RACERS {
                 let race = self.clone();
                 let input = ClaimItemInput {
+                    wide: None,
                     item: items(n),
                     session: race.racers[n].session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
@@ -252,6 +253,7 @@ mod concurrency {
             .execute(
                 &race.racers[0].actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: race.racers[0].session,
                     areas: Vec::new(),

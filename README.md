@@ -124,11 +124,16 @@ through a password manager. With the Claude Code plugin, step 5 happens by itsel
   merges it by hand), `owner` (only the holder of a named area), `warn-shared` (anyone, with the other editors named) and
   `free`.
 - **Grant.** A holder lets another member edit inside an area they hold, for that member's own live claim.
+- **Wide claim.** A claim announced over many areas for a change that cuts across them (an upgrade, a rename). It holds
+  none of them, so it is in nobody's way. Each member holding one of its areas is sent an announcement that asks to be
+  acknowledged, and acknowledging it is their grant: until then the wide claim's edits in their area are refused. One
+  area is in one live wide claim at a time, and whoever claims an area inside one later is asked too.
 - **Thread.** A conversation between members, or with the whole project, optionally about a work item. Agents and people
   use the same threads.
 - **Importance and acknowledgement.** A message is `normal`, `high` or `urgent`, and may ask each recipient to
   acknowledge it. An acknowledgement is the recipient's own record that they read it; the message never changes, and its
-  author sees who has acknowledged and who has not. An acknowledgement says "I read this"; it authorises nothing.
+  author sees who has acknowledged and who has not. An acknowledgement says "I read this"; it authorises nothing, except
+  that acknowledging a wide claim's announcement grants its member edits in your areas it names.
 - **Session.** One running client of a member: a terminal, an agent. Claims are kept alive by their session's
   heartbeats.
 - **Event.** Everything above appends to the project's log, which the web pages and clients follow live.
@@ -280,12 +285,13 @@ Every command takes `--json` to print its answer as JSON.
 ```sh
 dibs login [--server <url>] [--keychain]          # sign in; the token comes from standard input
 dibs whoami                                       # who the stored token signs in as, and where
-dibs status                                       # live and stale claims and the areas held
+dibs status                                       # live and stale claims, the areas held, the wide claims
 dibs items [--mine] [--status open|claimed|done|dropped]
 dibs ready                                        # what you can pick up now, soonest first, and why the rest waits
 dibs dep add gh:acme/widgets#42 --blocked-by gh:acme/widgets#40   # record a dependency; dep rm removes it
 dibs new gh:acme/widgets#42 --title "Refund rounding"      # create an item, or show the one that exists
 dibs claim gh:acme/widgets#42 --area billing --area search # claim, or renew your claim
+dibs claim gh:acme/widgets#50 --wide billing,search --reason "Upgrade the HTTP client"   # a wide claim
 dibs takeover 12 --reason "alice is out; I am picking this up" --area billing
 dibs release 12                                   # give the item back
 dibs done 12                                      # the item is finished
@@ -297,7 +303,7 @@ dibs send --project --subject "Freeze" --importance urgent --ack "No pushes to m
 dibs inbox [--unread] [--unacked]                 # conversations waiting for you; what awaits your acknowledgement
 dibs thread 31                                    # read one, with each message's id and who acknowledged it
 dibs read 31                                      # mark it read
-dibs ack 57                                       # acknowledge message 57 once you have read it
+dibs ack 57                                       # acknowledge message 57 once you have read it (for a wide claim's announcement, that grants)
 dibs sync [--force] [--quiet]                     # heartbeat and refresh what this machine remembers
 dibs mcp                                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook
@@ -322,7 +328,8 @@ often as it likes, and a view equal to what is stored changes nothing.
 
 The server also serves pages for people at `/ui`, where you sign in with your token:
 
-- **Status** (`/ui/`): live claims, stale claims with a take-over form, and the areas held.
+- **Status** (`/ui/`): live claims, stale claims with a take-over form, the areas held, and the wide claims with who
+  has acknowledged each of their areas.
 - **Board** (`/ui/board`): your ready list with priorities, likely areas and links to the tracker, the open items that
   wait with their blockers, what is in progress, what went stale and what was done today, filterable by area and member,
   with a banner when something changes.

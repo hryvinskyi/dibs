@@ -86,6 +86,7 @@ fn an_item_is_created_once_found_by_its_reference_and_claimed() {
             .claim(
                 created.item.id,
                 &ClaimRequest {
+                    wide: None,
                     session_id: laptop.session_id,
                     areas: vec!["billing".to_owned()],
                 },
@@ -148,6 +149,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
             .claim(
                 first,
                 &ClaimRequest {
+                    wide: None,
                     session_id: alice_session,
                     areas: vec!["api:billing".to_owned()],
                 },
@@ -159,6 +161,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
             .claim(
                 first,
                 &ClaimRequest {
+                    wide: None,
                     session_id: bob_session,
                     areas: Vec::new(),
                 },
@@ -176,6 +179,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
             .claim(
                 second,
                 &ClaimRequest {
+                    wide: None,
                     session_id: bob_session,
                     areas: vec!["billing".to_owned()],
                 },
@@ -191,6 +195,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
             .claim(
                 second,
                 &ClaimRequest {
+                    wide: None,
                     session_id: bob_session,
                     areas: vec!["nowhere".to_owned()],
                 },
@@ -224,6 +229,7 @@ fn edit_checks_answer_per_path_and_ungoverned_paths_need_no_server() {
             .claim(
                 item,
                 &ClaimRequest {
+                    wide: None,
                     session_id: alice_session,
                     areas: vec!["billing".to_owned()],
                 },
@@ -295,6 +301,7 @@ fn a_holder_grants_another_member_edits_for_their_item() {
             who.claim(
                 item,
                 &ClaimRequest {
+                    wide: None,
                     session_id: session,
                     areas: vec![area.to_owned()],
                 },
@@ -356,6 +363,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
             .claim(
                 item,
                 &ClaimRequest {
+                    wide: None,
                     session_id: alice_session,
                     areas: vec!["checkout".to_owned()],
                 },
@@ -406,6 +414,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
         bob.claim(
             item,
             &ClaimRequest {
+                wide: None,
                 session_id: bob_session,
                 areas: Vec::new(),
             },
@@ -454,6 +463,7 @@ fn the_ready_list_and_the_dependencies_are_read_and_written() {
             .claim(
                 waiting,
                 &ClaimRequest {
+                    wide: None,
                     session_id: session,
                     areas: Vec::new(),
                 },
@@ -471,5 +481,91 @@ fn the_ready_list_and_the_dependencies_are_read_and_written() {
                 .unwrap()
                 .changed
         );
+    });
+}
+
+#[test]
+fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
+    use dibs_client::api::{HeldReason, WideAreaState, WideRequest};
+
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    run(async {
+        let alices = alice
+            .create_item(&new_item("gh:acme/api#1", "Invoices"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let bobs = bob
+            .create_item(&new_item("gh:acme/api#2", "Upgrade the client"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let alice_session = session(&alice, "laptop/cli").await.session_id;
+        let bob_session = session(&bob, "desk/cli").await.session_id;
+        alice
+            .claim(
+                alices,
+                &ClaimRequest {
+                    session_id: alice_session,
+                    areas: vec!["billing".to_owned()],
+                    wide: None,
+                },
+            )
+            .await
+            .unwrap();
+        let wide = bob
+            .claim(
+                bobs,
+                &ClaimRequest {
+                    session_id: bob_session,
+                    areas: Vec::new(),
+                    wide: Some(WideRequest {
+                        areas: vec!["billing".to_owned(), "search".to_owned()],
+                        reason: "Upgrade the HTTP client".to_owned(),
+                    }),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(wide.claim.areas.is_empty());
+        let scope = wide.claim.wide.clone().unwrap();
+        assert_eq!(scope.reason, "Upgrade the HTTP client");
+        assert_eq!(scope.areas.len(), 2);
+        assert_eq!(wide.announced.len(), 1);
+        assert_eq!(wide.announced[0].to.as_str(), "alice");
+        let request = EditCheckRequest {
+            session_id: bob_session,
+            repo: RepoId::parse("api").unwrap(),
+            paths: paths(&["src/billing/a.rs"]),
+            reserve: true,
+        };
+        let held = bob.edit_check(&request).await.unwrap().verdicts;
+        assert!(
+            matches!(
+                held[0].verdict,
+                Verdict::HeldBy {
+                    reason: HeldReason::AwaitingAck,
+                    ..
+                }
+            ),
+            "{held:?}"
+        );
+        let status = bob.status().await.unwrap();
+        let states: Vec<WideAreaState> = status.wide[0].areas.iter().map(|a| a.state).collect();
+        assert_eq!(states, [WideAreaState::Waiting, WideAreaState::Free]);
+        let acked = alice.ack(wide.announced[0].message_id).await.unwrap();
+        assert_eq!(acked.granted.len(), 1);
+        assert_eq!(acked.granted[0].to.as_str(), "bob");
+        let granted = bob.edit_check(&request).await.unwrap().verdicts;
+        assert!(
+            matches!(granted[0].verdict, Verdict::Granted { .. }),
+            "{granted:?}"
+        );
+        let status = bob.status().await.unwrap();
+        assert_eq!(status.wide[0].areas[0].state, WideAreaState::Granted);
     });
 }

@@ -80,6 +80,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: env.bob.session,
                     areas: Vec::new(),

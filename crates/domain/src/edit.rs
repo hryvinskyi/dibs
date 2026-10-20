@@ -56,6 +56,19 @@ pub enum Verdict {
 pub enum HeldReason {
     /// The holder works in the area; message them or ask for a grant.
     AskHolder,
+    /// The member's live wide claim names the area and its holder has not acknowledged the
+    /// announcement yet; their acknowledgement grants the edit.
+    AwaitingAck,
+}
+
+impl HeldReason {
+    /// The stable name: `ask_holder` or `awaiting_ack`.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::AskHolder => "ask_holder",
+            Self::AwaitingAck => "awaiting_ack",
+        }
+    }
 }
 
 /// The verdict for one path.
@@ -115,13 +128,16 @@ pub enum EditCheckRefused {
 /// 3. The first area of that repository, in declaration order, containing the path. None:
 ///    `Allowed`.
 /// 4. Another member's live claim holds the area: `Granted` when that holder granted me edits in it
-///    for one of my live claims, else `HeldBy`.
+///    for one of my live claims — by a grant, or by acknowledging my wide claim's announcement —
+///    else `HeldBy`, waiting for that acknowledgement when my live wide claim names the area.
 /// 5. Nobody else holds it: `NeedsClaim` when I hold no live claim and the policy requires one,
 ///    else `Allowed`.
 ///
-/// Allowed edits in an area none of my claims holds add the area to my target claim (the one most
-/// recently claimed or renewed, the lowest item on a tie). Edits under a `warn-shared` rule record
-/// the path under that claim. Nothing already recorded is planned again.
+/// Allowed edits in an area none of my claims holds and none of my live wide claims names add the
+/// area to my target claim (the one most recently claimed or renewed, the lowest item on a tie); an
+/// edit inside my wide scope adds nothing, since a wide claim holds nothing it names, and is
+/// attributed to that wide claim. Edits under a `warn-shared` rule record the path under the target
+/// claim. Nothing already recorded is planned again.
 ///
 /// # Errors
 /// [`EditCheckRefused::UnknownRepo`] when a path's repository is not listed.
@@ -208,7 +224,7 @@ impl<'a> EditWorld<'a> {
                     member: holder.member,
                     item: holder.item,
                     area: area.clone(),
-                    reason: HeldReason::AskHolder,
+                    reason: self.held_reason(area),
                 },
             };
         }
@@ -219,7 +235,13 @@ impl<'a> EditWorld<'a> {
             };
         }
         let holding = target_claim(self.mine.iter().copied().filter(|claim| claim.holds(area)));
-        if let Some(claim) = holding {
+        let wide = target_claim(
+            self.mine
+                .iter()
+                .copied()
+                .filter(|claim| claim.names_wide(area)),
+        );
+        if let Some(claim) = holding.or(wide) {
             check.touch.insert(claim.item);
         } else if let Some(target) = self.target() {
             check.plan.add_area(AddArea {
@@ -229,6 +251,16 @@ impl<'a> EditWorld<'a> {
             check.touch.insert(target.item);
         }
         Verdict::Allowed
+    }
+
+    /// The way on from an area another member holds: their acknowledgement when one of my live
+    /// wide claims names it, else asking them.
+    fn held_reason(&self, area: &QualifiedArea) -> HeldReason {
+        if self.mine.iter().any(|claim| claim.names_wide(area)) {
+            HeldReason::AwaitingAck
+        } else {
+            HeldReason::AskHolder
+        }
     }
 
     fn share(&self, path: &RepoPath, check: &mut EditCheck) {

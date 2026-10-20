@@ -69,6 +69,14 @@ fn held(member: MemberId, item: u64, text: &str) -> Verdict {
     }
 }
 
+fn scope(named: &[&str]) -> crate::wide::WideScope {
+    crate::wide::WideScope::new(
+        crate::testing::areas(named),
+        crate::wide::WideReason::parse("Rename the money type").unwrap(),
+    )
+    .unwrap()
+}
+
 fn run(case: &Case, now: OffsetDateTime) -> EditCheck {
     let settings = settings(&two_repo_json(case.policy));
     let input = EditCheckInput {
@@ -89,6 +97,10 @@ fn verdict_table() {
     let bob_search = || claim(2, BOB, &["api:search"], 0);
     let alice_billing = || claim(1, ALICE, &["api:billing"], 0);
     let alice_plain = || claim(1, ALICE, &[], 0);
+    let alice_wide = || Claim {
+        wide: Some(scope(&["api:billing", "api:search"])),
+        ..claim(1, ALICE, &[], 0)
+    };
     let lock_note = || Verdict::AllowedWithNote {
         rule: kind("regenerate"),
         note: note("regenerate it; never merge by hand"),
@@ -326,6 +338,85 @@ fn verdict_table() {
             name: "owner rule, no claim of mine",
             path: "api:deploy/billing.yaml",
             verdict: Verdict::NeedsClaim,
+            ..Case::default()
+        },
+        Case {
+            name: "wide: an area my wide claim names and nobody holds",
+            claims: vec![alice_wide()],
+            path: "api:packages/billing/src/Invoice.php",
+            touch: vec![1],
+            ..Case::default()
+        },
+        Case {
+            name: "wide: held by a member who acknowledged the announcement",
+            claims: vec![alice_wide(), bob_billing()],
+            grants: vec![Grant {
+                item: ItemId(1),
+                area: area("api:billing"),
+                from: BOB,
+                to: ALICE,
+            }],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::Granted {
+                by: BOB,
+                area: area("api:billing"),
+            },
+            touch: vec![1],
+            ..Case::default()
+        },
+        Case {
+            name: "wide: held by a member who has not acknowledged yet",
+            claims: vec![alice_wide(), bob_billing()],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: Verdict::HeldBy {
+                member: BOB,
+                item: ItemId(2),
+                area: area("api:billing"),
+                reason: HeldReason::AwaitingAck,
+            },
+            ..Case::default()
+        },
+        Case {
+            name: "wide: my stale wide claim waits for nobody's acknowledgement",
+            claims: vec![
+                Claim {
+                    wide: Some(scope(&["api:billing"])),
+                    ..claim(3, ALICE, &[], stale)
+                },
+                alice_plain(),
+                bob_billing(),
+            ],
+            path: "api:packages/billing/src/Invoice.php",
+            verdict: held(BOB, 2, "api:billing"),
+            ..Case::default()
+        },
+        Case {
+            name: "wide: an area outside the scope joins the wide claim as held",
+            claims: vec![alice_wide()],
+            path: "web:src/checkout/Cart.ts",
+            add_areas: vec![add(1, "web:checkout")],
+            touch: vec![1],
+            ..Case::default()
+        },
+        Case {
+            name: "wide: inside the scope nothing is added to a newer ordinary claim",
+            claims: vec![alice_wide(), claim(3, ALICE, &[], 5)],
+            path: "api:packages/search/src/Index.php",
+            touch: vec![1],
+            ..Case::default()
+        },
+        Case {
+            name: "wide: another member's wide claim holds what it names for nobody",
+            claims: vec![
+                alice_plain(),
+                Claim {
+                    wide: Some(scope(&["api:search"])),
+                    ..claim(2, BOB, &[], 0)
+                },
+            ],
+            path: "api:packages/search/src/Index.php",
+            add_areas: vec![add(1, "api:search")],
+            touch: vec![1],
             ..Case::default()
         },
         Case {

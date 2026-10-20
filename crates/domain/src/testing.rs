@@ -36,6 +36,7 @@ pub(crate) fn claim(item: u64, member: MemberId, declared: &[&str], minutes: i64
         session: SessionId(member.get() * 100),
         host: HostName::parse("laptop").unwrap(),
         areas: areas(declared),
+        wide: None,
         claimed_at: at(minutes),
         renewed_at: at(minutes),
         last_seen: at(minutes),
@@ -49,6 +50,7 @@ pub(crate) fn request(item: u64, by: MemberId, declared: &[&str]) -> ClaimReques
         session: SessionId(by.get() * 100 + 1),
         host: HostName::parse("desktop").unwrap(),
         areas: areas(declared),
+        wide: None,
     }
 }
 

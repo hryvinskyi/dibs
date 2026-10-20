@@ -69,6 +69,12 @@ pub enum EventKind {
     DependencyRemoved(DependencyRemoved),
     /// A recipient acknowledged a message.
     Acked(Acked),
+    /// A claim became wide, or its wide scope grew: its member announces a change over these
+    /// areas, holding none of them.
+    WideClaimed(WideClaimed),
+    /// A holder acknowledged a wide claim's announcement, and that granted the wide claim's member
+    /// edits in one of their areas.
+    WideGrantedByAck(WideGrantedByAck),
 }
 
 impl EventKind {
@@ -92,6 +98,8 @@ impl EventKind {
             Self::DependencyAdded(_) => "dependency_added",
             Self::DependencyRemoved(_) => "dependency_removed",
             Self::Acked(_) => "acked",
+            Self::WideClaimed(_) => "wide_claimed",
+            Self::WideGrantedByAck(_) => "wide_granted_by_ack",
         }
     }
 
@@ -115,6 +123,8 @@ impl EventKind {
             Self::DependencyAdded(e) => &[e.by],
             Self::DependencyRemoved(e) => &[e.by],
             Self::Acked(e) => &[e.by],
+            Self::WideClaimed(e) => &[e.member],
+            Self::WideGrantedByAck(e) => &[e.by, e.to],
         };
         named.iter().copied().collect()
     }
@@ -138,7 +148,9 @@ impl EventKind {
             | Self::ItemUpdated(_)
             | Self::DependencyAdded(_)
             | Self::DependencyRemoved(_)
-            | Self::Acked(_) => None,
+            | Self::Acked(_)
+            | Self::WideClaimed(_)
+            | Self::WideGrantedByAck(_) => None,
         }
     }
 
@@ -161,7 +173,9 @@ impl EventKind {
             | Self::SettingsChanged(_)
             | Self::ItemUpdated(_)
             | Self::DependencyAdded(_)
-            | Self::DependencyRemoved(_) => None,
+            | Self::DependencyRemoved(_)
+            | Self::WideClaimed(_)
+            | Self::WideGrantedByAck(_) => None,
         }
     }
 }
@@ -372,6 +386,32 @@ pub struct DependencyRemoved {
     pub by: MemberId,
 }
 
+/// A claim became wide, or its wide scope grew. Carries no reason; the claim is read for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WideClaimed {
+    /// The item of the claim.
+    pub item: ItemId,
+    /// Its member.
+    pub member: MemberId,
+    /// Every area the wide scope names now.
+    pub areas: BTreeSet<QualifiedArea>,
+}
+
+/// A holder's acknowledgement of a wide claim's announcement granted edits in one area.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WideGrantedByAck {
+    /// The stored grant; it ends like any grant, with a `grant_revoked` naming it.
+    pub grant: GrantId,
+    /// The wide claim's item.
+    pub item: ItemId,
+    /// The area.
+    pub area: QualifiedArea,
+    /// The holder who acknowledged.
+    pub by: MemberId,
+    /// The wide claim's member, who may edit.
+    pub to: MemberId,
+}
+
 /// A recipient acknowledged a message. Carries the ids and the member only, like the message
 /// events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,6 +517,18 @@ mod tests {
                 message: MessageId(6),
                 by: BOB,
             }),
+            EventKind::WideClaimed(WideClaimed {
+                item,
+                member: ALICE,
+                areas: BTreeSet::from([area("api:billing"), area("web:checkout")]),
+            }),
+            EventKind::WideGrantedByAck(WideGrantedByAck {
+                grant: GrantId(2),
+                item,
+                area: area("api:billing"),
+                by: BOB,
+                to: ALICE,
+            }),
         ]
     }
 
@@ -561,6 +613,36 @@ mod tests {
         }
     }
 
+    fn both_again() -> BTreeSet<MemberId> {
+        BTreeSet::from([ALICE, BOB])
+    }
+
+    #[test]
+    fn wide_claim_events_carry_ids_areas_and_members_only() {
+        for kind in every_kind() {
+            let allowed: &[&str] = match kind {
+                EventKind::WideClaimed(_) => &["item", "member", "areas"],
+                EventKind::WideGrantedByAck(_) => &["grant", "item", "area", "by", "to"],
+                _ => continue,
+            };
+            let value = serde_json::to_value(&kind).unwrap();
+            let fields: Vec<String> = value["payload"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(fields.len(), allowed.len(), "{}", kind.name());
+            for field in &fields {
+                assert!(
+                    allowed.contains(&field.as_str()),
+                    "{} carries {field}",
+                    kind.name()
+                );
+            }
+        }
+    }
+
     #[test]
     fn each_kind_names_its_members_and_its_thread() {
         let named: Vec<(BTreeSet<MemberId>, Option<ThreadId>)> = every_kind()
@@ -569,7 +651,7 @@ mod tests {
             .collect();
         let messages: Vec<Option<MessageId>> =
             every_kind().iter().map(EventKind::message).collect();
-        let mut expected = vec![None; 17];
+        let mut expected = vec![None; 19];
         expected[11] = Some(MessageId(6));
         assert_eq!(messages, expected);
         let alice = BTreeSet::from([ALICE]);
@@ -593,8 +675,10 @@ mod tests {
                 (alice.clone(), None),
                 (BTreeSet::from([BOB]), None),
                 (BTreeSet::from([BOB]), None),
-                (alice, None),
+                (alice.clone(), None),
                 (BTreeSet::from([BOB]), Some(ThreadId(5))),
+                (alice, None),
+                (both_again(), None),
             ]
         );
     }

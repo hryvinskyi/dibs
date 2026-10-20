@@ -15,17 +15,21 @@ use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::fields::message_in_path;
 use crate::http::AppState;
-use crate::views::{AckView, MessageView, RecipientStatusView, ThreadView, reply};
+use crate::views::{AckView, GrantView, MessageView, RecipientStatusView, ThreadView, reply};
 
 #[derive(Serialize)]
 struct AckedAnswer {
     ack: AckView,
     created: bool,
+    /// The grants the acknowledgement made: for a wide claim's announcement, one per area it asked
+    /// about that the caller still holds; empty otherwise and for a repeat.
+    granted: Vec<GrantView>,
 }
 
 /// Records that the caller acknowledged the message. Answers `201` with the acknowledgement and
 /// `created: true`; a caller who acknowledged it before is answered `200` with their first
-/// acknowledgement and `created: false`, and nothing is recorded again.
+/// acknowledgement and `created: false`, and nothing is recorded again. Acknowledging a wide
+/// claim's announcement grants its member edits in the areas it asked about, listed in `granted`.
 ///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for a message the caller may not read;
@@ -48,6 +52,12 @@ pub async fn ack(
         status,
         &AckedAnswer {
             created: acknowledged.created,
+            granted: acknowledged
+                .granted
+                .iter()
+                .cloned()
+                .map(GrantView::of)
+                .collect(),
             ack: AckView::of(acknowledged),
         },
     ))

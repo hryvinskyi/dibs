@@ -100,9 +100,11 @@ impl Link {
     pub async fn claim(&self, input: ClaimInput) -> Result<Claimed, Failure> {
         let key = input.key.key("key")?;
         let item = self.resolve(&key).await?;
+        let wide = input.wide()?;
         let request = ClaimRequest {
             session_id: self.session,
             areas: input.areas,
+            wide,
         };
         self.call(self.connection.client.claim(item, &request))
             .await

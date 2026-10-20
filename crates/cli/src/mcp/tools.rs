@@ -103,7 +103,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Claim a work item, with the areas of the code you will change, before you edit its files. Claiming an item you already hold renews the claim and replaces its areas. If another member holds the item or an area, the answer is a refusal that names the holder: pick other work, or message the holder with dibs_send. Do not edit the files anyway. A claim on an item that waits for unfinished work is made all the same, and blocked_by in the answer names what it waits for: tell your person, and check with whoever works on those items."
+        description = "Claim a work item, with the areas of the code you will change, before you edit its files. Claiming an item you already hold renews the claim and replaces its areas. If another member holds the item or an area, the answer is a refusal that names the holder: pick other work, or message the holder with dibs_send. Do not edit the files anyway. A claim on an item that waits for unfinished work is made all the same, and blocked_by in the answer names what it waits for: tell your person, and check with whoever works on those items. For a change across many areas (an upgrade, a rename), give wide with the areas and a reason: a wide claim holds none of them, each member holding one is asked to acknowledge (announced lists them), and your edits in their area wait for that acknowledgement. inside_wide in an answer names areas you hold that someone's wide claim names: read their announcement and acknowledge it if the change may go ahead there."
     )]
     async fn dibs_claim(&self, Parameters(input): Parameters<ClaimInput>) -> CallToolResult {
         self.perform(|link| async move { link.claim(input).await })
@@ -186,7 +186,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Acknowledge a message that asks for it (ack_required), once you have read it: it tells its author you saw it, and nothing more. Give the message id from dibs_thread or dibs_inbox with unacked. Acknowledging again is harmless: it answers your first acknowledgement with created false. An acknowledgement is not agreement and authorises nothing; reply with dibs_send when an answer is needed."
+        description = "Acknowledge a message that asks for it (ack_required), once you have read it: it tells its author you saw it. Give the message id from dibs_thread or dibs_inbox with unacked. Acknowledging again is harmless: it answers your first acknowledgement with created false. An acknowledgement is not agreement and authorises nothing, with one exception: acknowledging a wide claim's announcement (dibs sends it for the member who took the wide claim) grants that member edits in the areas of yours it names, and granted in the answer lists them. Reply with dibs_send when an answer is needed, or when the wide change should not go ahead in your area."
     )]
     async fn dibs_ack(&self, Parameters(input): Parameters<AckInput>) -> CallToolResult {
         self.perform(|link| async move { link.ack(input).await })

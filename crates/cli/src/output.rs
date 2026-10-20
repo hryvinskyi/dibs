@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use dibs_client::api::{
-    Claim, Item, ItemName, Message, PathVerdict, ThreadSummary, Unacked, Verdict,
+    Claim, HeldReason, Item, ItemName, Message, PathVerdict, ThreadSummary, Unacked, Verdict,
 };
 use dibs_domain::ids::ItemId;
 
@@ -132,7 +132,7 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
             item,
             item_ref,
             area,
-            ..
+            reason,
         } => {
             let who = holder
                 .as_ref()
@@ -140,7 +140,15 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
             let item = item_ref
                 .as_ref()
                 .map_or_else(|| item.to_string(), ToString::to_string);
-            format!("held by {who} (item {item}, area {area}); message them or ask for a grant")
+            let way = match reason {
+                HeldReason::AwaitingAck => format!(
+                    "your wide claim names it; waiting for {who}'s acknowledgement, which grants the edit"
+                ),
+                HeldReason::AskHolder | HeldReason::Other => {
+                    "message them or ask for a grant".to_owned()
+                }
+            };
+            format!("held by {who} (item {item}, area {area}); {way}")
         }
         Verdict::Granted { by, area } => {
             let who = by

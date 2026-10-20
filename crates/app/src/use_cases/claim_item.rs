@@ -3,22 +3,27 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use dibs_domain::claim::{ClaimOutcome, ClaimRequest, decide_claim};
+use dibs_domain::area::QualifiedArea;
+use dibs_domain::claim::{Claim, ClaimOutcome, ClaimRequest, decide_claim};
 use dibs_domain::dependency::blockers;
-use dibs_domain::event::{Claimed, EventKind, Renewed};
+use dibs_domain::event::{Claimed, EventKind, Renewed, WideClaimed};
+use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::{ItemId, SessionId};
+use dibs_domain::ids::{ItemId, MessageId, SessionId};
 use dibs_domain::item::ItemStatus;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
+use dibs_domain::settings::ProjectSettings;
+use dibs_domain::wide::{WideReason, WideScope, inside_wide};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{ItemName, Names, refuse};
-use crate::ports::{Clock, EventNotifier, Store};
+use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::ItemRecord;
 use crate::use_cases::common::{existing_item, own_session, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
+use crate::use_cases::wide_asks::{Announced, Announcer};
 use crate::work::Work;
 
 /// The claim to make.
@@ -31,6 +36,30 @@ pub struct ClaimItemInput {
     /// The areas to declare, as a person names them: `repo:area`, or a bare name exactly one
     /// repository declares.
     pub areas: Vec<String>,
+    /// The scope to announce, for a wide claim.
+    pub wide: Option<WideInput>,
+}
+
+/// The scope of a wide claim, as a person names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideInput {
+    /// The areas the wide claim names, written like [`ClaimItemInput::areas`].
+    pub areas: Vec<String>,
+    /// Why, as the holders it asks read it.
+    pub reason: WideReason,
+}
+
+/// An area the new claim holds that another member's live wide claim names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideNote {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The handle of the wide claim's member.
+    pub holder: Handle,
+    /// The wide claim's item.
+    pub item: ItemName,
+    /// The announcement that asks the caller about the area, when one waits for them.
+    pub message: Option<MessageId>,
 }
 
 /// What a claim did, with the claiming member's handle.
@@ -46,6 +75,11 @@ pub struct ClaimMade {
     pub blocked_by: Vec<ItemName>,
     /// The item claimed.
     pub item: ItemName,
+    /// The announcements this claim's wide scope sent to the holders of its areas.
+    pub announced: Vec<Announced>,
+    /// The areas the claim holds that other members' live wide claims name. The claim is made; the
+    /// caller is told that those members will ask for the edits there.
+    pub inside_wide: Vec<WideNote>,
 }
 
 /// Claims a work item for the caller, or renews the caller's own claim on it.
@@ -55,9 +89,15 @@ pub struct ClaimMade {
 /// other learns who holds it. A closed item cannot be claimed. A renewal that loses areas to another
 /// member ends the grants the caller gave in them. A blocked item is claimed, and the answer names
 /// what blocks it.
+///
+/// A wide claim is announced in the same transaction: every holder of an area its scope names is
+/// sent the announcement that asks for their acknowledgement. A claim that comes to hold an area
+/// another member's live wide claim names is not refused; its member is sent that wide claim's
+/// announcement in the same transaction, and the answer says so.
 pub struct ClaimItem {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
     ref_schemes: Arc<RefSchemeRegistry>,
@@ -69,6 +109,7 @@ impl ClaimItem {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
             ref_schemes: deps.ref_schemes.clone(),
@@ -80,8 +121,10 @@ impl ClaimItem {
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for an unknown item or a
     /// session not the caller's; [`AppError::ItemClosed`] for a done or dropped item;
-    /// [`AppError::Area`] for an area that does not resolve; [`AppError::Claim`] when another
-    /// member holds the item or a declared area, naming that member; [`AppError::Store`] when the store fails.
+    /// [`AppError::Area`] for an area that does not resolve; [`AppError::Wide`] for a wide scope
+    /// naming no area; [`AppError::Claim`] when another member holds the item or a declared area,
+    /// or another wide claim names an area of the scope, naming that member; [`AppError::Store`]
+    /// when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
@@ -105,6 +148,7 @@ impl ClaimItem {
             session: session.id,
             host: session.host,
             areas: resolve_areas(&settings, &input.areas)?,
+            wide: wide_scope(&settings, input.wide)?,
         };
         let current = work.claim(project, item.id).await?;
         let others = work.claims(project).await?;
@@ -135,16 +179,76 @@ impl ClaimItem {
             }),
         };
         work.record(now, event).await?;
+        if let Some(widened) = widened(current.as_ref(), claim) {
+            work.record(now, widened).await?;
+        }
         end_orphaned_grants(&mut work, now).await?;
-        let holder = Names::load(&mut work).await?.handle(actor.member)?;
+        let sent = Announcer {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        }
+        .announce_due(&mut work)
+        .await?;
+        let names = Names::load(&mut work).await?;
+        let holder = names.handle(actor.member)?;
+        let inside_wide = self
+            .wide_notes(&mut work, &names, claim, &sent, &settings, now)
+            .await?;
         let blocked_by = self.blockers_of(&mut work, item.id).await?;
         work.commit(&*self.notifier).await?;
+        let announced = sent
+            .into_iter()
+            .filter(|announced| announced.ask.from == actor.member)
+            .collect();
         Ok(ClaimMade {
             outcome,
             holder,
             blocked_by,
             item: ItemName::of(&item, &self.ref_schemes),
+            announced,
+            inside_wide,
         })
+    }
+
+    /// The areas `claim` holds that other members' live wide claims name, each with the
+    /// announcement waiting for the caller about it.
+    async fn wide_notes(
+        &self,
+        work: &mut Work,
+        names: &Names,
+        claim: &Claim,
+        sent: &[Announced],
+        settings: &ProjectSettings,
+        now: time::OffsetDateTime,
+    ) -> Result<Vec<WideNote>, AppError> {
+        let project = work.project_id();
+        let claims = work.claims(project).await?;
+        let open = work.open_wide_asks(project).await?;
+        let mut notes = Vec::new();
+        for inside in inside_wide(claim, &claims, now, settings.stale_after()) {
+            let message = sent
+                .iter()
+                .map(|announced| &announced.ask)
+                .chain(&open)
+                .find(|ask| {
+                    ask.item == inside.wide.item
+                        && ask.to == claim.member
+                        && ask.areas.contains(&inside.area)
+                })
+                .map(|ask| ask.message);
+            notes.push(WideNote {
+                area: inside.area,
+                holder: names.handle(inside.wide.member)?,
+                item: ItemName::of(
+                    &existing_item(work, inside.wide.item).await?,
+                    &self.ref_schemes,
+                ),
+                message,
+            });
+        }
+        Ok(notes)
     }
 
     /// The items `item` waits for that still block it, named.
@@ -168,6 +272,35 @@ impl ClaimItem {
             .map(|record| ItemName::of(record, &self.ref_schemes))
             .collect())
     }
+}
+
+/// The wide scope a person asked for, its areas resolved.
+pub(crate) fn wide_scope(
+    settings: &ProjectSettings,
+    input: Option<WideInput>,
+) -> Result<Option<WideScope>, AppError> {
+    input
+        .map(|wide| {
+            let areas = resolve_areas(settings, &wide.areas)?;
+            WideScope::new(areas, wide.reason).map_err(AppError::from)
+        })
+        .transpose()
+}
+
+/// The event that records a claim becoming wide or its scope growing, when it did.
+pub(crate) fn widened(before: Option<&Claim>, after: &Claim) -> Option<EventKind> {
+    let scope = after.wide.as_ref()?;
+    let had = before
+        .filter(|claim| claim.member == after.member)
+        .and_then(|claim| claim.wide.as_ref());
+    let grew = had.is_none_or(|old| !old.areas().is_superset(scope.areas()));
+    grew.then(|| {
+        EventKind::WideClaimed(WideClaimed {
+            item: after.item,
+            member: after.member,
+            areas: scope.areas().clone(),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -195,6 +328,7 @@ mod tests {
             item,
             session,
             areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+            wide: None,
         }
     }
 

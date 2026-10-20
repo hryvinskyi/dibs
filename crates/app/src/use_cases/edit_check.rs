@@ -10,14 +10,16 @@ use dibs_domain::grant::Grant;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::paths::RepoPath;
+use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::reservation::ReservationPlan;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{NamedVerdict, Names, item_ref};
-use crate::ports::{Clock, EventNotifier, Store};
+use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::common::own_session;
+use crate::use_cases::wide_asks::Announcer;
 use crate::work::Work;
 
 /// The paths to check.
@@ -77,12 +79,16 @@ impl EditVerdicts {
 /// Answers a verdict per path. When the edits are being made, it records what the domain planned —
 /// areas added to the caller's claims, paths recorded as shared — and refreshes the claims the edits
 /// were attributed to, wherever those claims were taken. A `Reserved` event is appended per claim
-/// that actually gained something, so a repeated check appends nothing.
+/// that actually gained something, so a repeated check appends nothing. An area an edit adds to the
+/// caller's claim that another member's live wide claim names makes the caller one of that wide
+/// claim's holders, so its announcement is sent to them in the same transaction.
 pub struct EditCheck {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
+    ref_schemes: Arc<RefSchemeRegistry>,
 }
 
 /// What one claim gains from a check.
@@ -98,8 +104,10 @@ impl EditCheck {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
+            ref_schemes: deps.ref_schemes.clone(),
         }
     }
 
@@ -171,6 +179,7 @@ impl EditCheck {
             }
             work.save_claim(project, &claim).await?;
         }
+        let held_more = gains.values().any(|gain| !gain.areas.is_empty());
         for (item, gain) in gains {
             work.record(
                 now,
@@ -181,6 +190,16 @@ impl EditCheck {
                     paths: gain.paths,
                 }),
             )
+            .await?;
+        }
+        if held_more {
+            Announcer {
+                ids: &*self.ids,
+                schemes: &self.ref_schemes,
+                settings: &settings,
+                now,
+            }
+            .announce_due(&mut work)
             .await?;
         }
         let verdicts = EditVerdicts::named(check, &names, &mut work).await?;
@@ -213,6 +232,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: who.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
@@ -316,6 +336,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: laptop,
                     areas: vec!["billing".to_owned()],

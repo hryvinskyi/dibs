@@ -25,6 +25,7 @@ use dibs_domain::item::{ExternalRef, ItemStatus};
 use dibs_domain::message::{Ack, SessionLabel};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
+use dibs_domain::wide::WideAsk;
 
 use crate::records::{
     CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
@@ -79,6 +80,7 @@ pub trait Tx:
     + GrantRows
     + ThreadRows
     + AckRows
+    + WideAskRows
     + EventRows
     + SettingsRows
     + UiSessionRows
@@ -336,6 +338,22 @@ pub trait AckRows: Send {
         project: ProjectId,
         message: MessageId,
     ) -> StoreResult<Vec<ReadMark>>;
+}
+
+/// The announcements wide claims sent to the holders of their areas.
+#[async_trait]
+pub trait WideAskRows: Send {
+    /// Stores an announcement. A second one for the same message fails with
+    /// [`StoreError::Duplicate`].
+    async fn insert_wide_ask(&mut self, project: ProjectId, ask: &WideAsk) -> StoreResult<()>;
+    /// The announcement the message carries, if it carries one.
+    async fn wide_ask(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<Option<WideAsk>>;
+    /// Every announcement its holder has not acknowledged yet, ordered by message.
+    async fn open_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>>;
 }
 
 /// The project's append-only event log.

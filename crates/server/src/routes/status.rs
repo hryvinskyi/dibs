@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::Serialize;
 
+use dibs_app::use_cases::WideClaimStatus;
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
@@ -19,7 +20,53 @@ struct StatusAnswer {
     live: Vec<HeldItemView>,
     stale: Vec<HeldItemView>,
     holds: Vec<HoldView>,
+    wide: Vec<WideClaimView>,
     ready: ReadyView,
+}
+
+/// A live wide claim and where each area it names stands.
+#[derive(Serialize)]
+struct WideClaimView {
+    #[serde(flatten)]
+    held: HeldItemView,
+    areas: Vec<WideAreaView>,
+}
+
+/// One area of a wide claim: `free` when nobody else holds it, `granted` when its holder
+/// acknowledged the announcement or granted the edits, `waiting` while they have not.
+#[derive(Serialize)]
+struct WideAreaView {
+    area: QualifiedArea,
+    state: &'static str,
+    holder: Option<Handle>,
+    item: Option<ItemId>,
+}
+
+impl WideClaimView {
+    fn of(wide: WideClaimStatus) -> Self {
+        Self {
+            held: HeldItemView::of(wide.held),
+            areas: wide
+                .areas
+                .into_iter()
+                .map(|row| {
+                    let state = match (&row.holder, row.granted) {
+                        (None, _) => "free",
+                        (Some(_), true) => "granted",
+                        (Some(_), false) => "waiting",
+                    };
+                    let (holder, item) =
+                        row.holder.map_or((None, None), |(h, i)| (Some(h), Some(i)));
+                    WideAreaView {
+                        area: row.area,
+                        state,
+                        holder,
+                        item,
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -29,8 +76,9 @@ struct HoldView {
     item: ItemId,
 }
 
-/// The project's live claims, its stale claims, the areas the live ones hold, and the caller's ready
-/// list, each ordered as the use case orders it.
+/// The project's live claims, its stale claims, the areas the live ones hold, the live wide claims
+/// with where each of their areas stands, and the caller's ready list, each ordered as the use case
+/// orders it.
 ///
 /// # Errors
 /// `forbidden` for an integration; the answer for the use case's failure.
@@ -52,6 +100,7 @@ pub async fn status(
                 item: hold.item,
             })
             .collect(),
+        wide: view.wide.into_iter().map(WideClaimView::of).collect(),
         ready: ReadyView::of(view.ready),
     };
     Ok(reply(StatusCode::OK, &answer))

@@ -441,6 +441,7 @@ mod tests {
             live: Vec::new(),
             stale: Vec::new(),
             holds: Vec::new(),
+            wide: Vec::new(),
             ready: crate::api::ReadyList::default(),
         };
         let earlier: Status =

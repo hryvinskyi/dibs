@@ -22,11 +22,12 @@ use dibs_domain::item::{ExternalRef, ItemStatus};
 use dibs_domain::message::{Ack, Recipients, SessionLabel};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
+use dibs_domain::wide::WideAsk;
 
 use crate::ports::{
     AckRows, ClaimRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows,
     SessionRows, SettingsRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
-    UiSessionRows,
+    UiSessionRows, WideAskRows,
 };
 use crate::records::{
     CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
@@ -52,6 +53,7 @@ struct State {
     messages: BTreeMap<(ProjectId, MessageId), MessageRecord>,
     reads: BTreeMap<(ProjectId, MemberId, MessageId), OffsetDateTime>,
     acks: BTreeMap<(ProjectId, MessageId, MemberId), Ack>,
+    wide_asks: BTreeMap<(ProjectId, MessageId), WideAsk>,
     events: Vec<Event>,
     last_event: u64,
     settings: BTreeMap<ProjectId, SettingsDocument>,
@@ -116,7 +118,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 16] = [
+        let checks: [(&'static str, bool); 17] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -187,6 +189,15 @@ impl State {
                 "an acknowledgement",
                 self.acks.keys().all(|(p, message, m)| {
                     member(*p, *m) && self.messages.contains_key(&(*p, *message))
+                }),
+            ),
+            (
+                "a wide claim's announcement",
+                self.wide_asks.iter().all(|((p, message), ask)| {
+                    self.messages.contains_key(&(*p, *message))
+                        && item(*p, ask.item)
+                        && member(*p, ask.from)
+                        && member(*p, ask.to)
                 }),
             ),
             ("an event", self.events.iter().all(|e| project(&e.project))),
@@ -841,6 +852,38 @@ impl AckRows for MemoryTx {
                 member: *member,
                 at: *at,
             })
+            .collect())
+    }
+}
+
+#[async_trait]
+impl WideAskRows for MemoryTx {
+    async fn insert_wide_ask(&mut self, project: ProjectId, ask: &WideAsk) -> StoreResult<()> {
+        let key = (project, ask.message);
+        if self.work.wide_asks.contains_key(&key) {
+            return Err(StoreError::Duplicate);
+        }
+        self.work.wide_asks.insert(key, ask.clone());
+        Ok(())
+    }
+
+    async fn wide_ask(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<Option<WideAsk>> {
+        Ok(self.work.wide_asks.get(&(project, message)).cloned())
+    }
+
+    async fn open_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>> {
+        Ok(self
+            .work
+            .wide_asks
+            .iter()
+            .filter(|((p, message), ask)| {
+                *p == project && !self.work.acks.contains_key(&(project, *message, ask.to))
+            })
+            .map(|(_, ask)| ask.clone())
             .collect())
     }
 }

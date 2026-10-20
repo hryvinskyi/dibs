@@ -7,9 +7,10 @@ use time::OffsetDateTime;
 
 use dibs_client::api::{
     ClaimOutcome, ClaimRequest, Ended, GrantRequest, HeldItem, ItemFilter, Items, NewItem,
-    TakeOverRequest,
+    TakeOverRequest, WideAreaState, WideClaim, WideRequest,
 };
 use dibs_domain::message::Body;
+use dibs_domain::wide::WideReason;
 
 use crate::cli::{ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NewArgs, TakeoverArgs};
 use crate::context::Context;
@@ -51,6 +52,15 @@ pub async fn status(ctx: &Context) -> Result<(), Failure> {
         };
         section(&mut text, "Live claims", &status.live);
         section(&mut text, "Stale claims", &status.stale);
+        if !status.wide.is_empty() {
+            let _ = writeln!(
+                text,
+                "Wide claims (they hold none of their areas; a holder's acknowledgement grants the edit):"
+            );
+            for wide in &status.wide {
+                let _ = writeln!(text, "  {}", wide_line(wide));
+            }
+        }
         if text.is_empty() {
             text.push_str("Nobody holds anything.");
         }
@@ -120,6 +130,21 @@ pub async fn new(args: NewArgs, ctx: &Context) -> Result<(), Failure> {
 /// # Errors
 /// A refusal naming the member in the way; the [`Failure`] of the call.
 pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
+    let wide = match args.reason {
+        Some(reason) => {
+            WideReason::parse(&reason).map_err(|error| {
+                Failure::config(
+                    "invalid_reason",
+                    sentence(&format!("the reason is not valid: {error}")),
+                )
+            })?;
+            Some(WideRequest {
+                areas: args.wide,
+                reason,
+            })
+        }
+        None => None,
+    };
     let connection = ctx.connect().await?;
     let item = connection.resolve(&args.key).await?;
     let session = connection.session().await?;
@@ -130,6 +155,7 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
             &ClaimRequest {
                 session_id: session,
                 areas: args.areas,
+                wide,
             },
         )
         .await
@@ -160,9 +186,75 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
                 .collect();
             let _ = write!(text, " No longer held: {}.", dropped.join(", "));
         }
+        if let Some(scope) = &claimed.claim.wide {
+            let areas: Vec<String> = scope.areas.iter().map(ToString::to_string).collect();
+            let _ = write!(
+                text,
+                " Wide over {}, holding none of them: you may edit where nobody holds the area.",
+                areas.join(", ")
+            );
+        }
+        for asked in &claimed.announced {
+            let areas: Vec<String> = asked.areas.iter().map(ToString::to_string).collect();
+            let _ = write!(
+                text,
+                " Asked {} to acknowledge (message {}) for {}; your edits there wait for it.",
+                asked.to,
+                asked.message_id,
+                areas.join(", ")
+            );
+        }
+        for inside in &claimed.inside_wide {
+            let _ = write!(
+                text,
+                " {} is in {}'s wide claim on {}",
+                inside.area,
+                inside.holder,
+                inside.item.label()
+            );
+            match inside.message_id {
+                Some(message) => {
+                    let _ = write!(
+                        text,
+                        "; read message {message} and acknowledge it (dibs ack {message}) to let {} edit there.",
+                        inside.holder
+                    );
+                }
+                None => text.push('.'),
+            }
+        }
         text
     });
     Ok(())
+}
+
+/// One line for a live wide claim: its item, member, reason and where each area stands.
+fn wide_line(wide: &WideClaim) -> String {
+    let reason = wide
+        .claim
+        .wide
+        .as_ref()
+        .map(|scope| scope.reason.as_str())
+        .unwrap_or_default();
+    let areas: Vec<String> = wide
+        .areas
+        .iter()
+        .map(|area| match (area.state, &area.holder) {
+            (WideAreaState::Granted, Some(holder)) => {
+                format!("{} (acknowledged by {holder})", area.area)
+            }
+            (WideAreaState::Waiting, Some(holder)) => {
+                format!("{} (waiting for {holder})", area.area)
+            }
+            _ => format!("{} (free)", area.area),
+        })
+        .collect();
+    format!(
+        "{} — {}: {reason}; {}",
+        item_line(&wide.item),
+        wide.claim.holder,
+        areas.join(", ")
+    )
 }
 
 /// Takes over another member's stale claim, telling them why.

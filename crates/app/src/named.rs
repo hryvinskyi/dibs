@@ -204,15 +204,19 @@ impl NamesMember for ClaimRefused {
         match self {
             Self::HeldBy { member, .. }
             | Self::Stale { member, .. }
-            | Self::AreaHeld { member, .. } => Some(*member),
-            Self::UnknownArea { .. } => None,
+            | Self::AreaHeld { member, .. }
+            | Self::WideOverlap { member, .. } => Some(*member),
+            Self::UnknownArea { .. } | Self::WideAndHeld { .. } => None,
         }
     }
 
     fn item(&self) -> Option<ItemId> {
         match self {
-            Self::AreaHeld { item, .. } => Some(*item),
-            Self::HeldBy { .. } | Self::Stale { .. } | Self::UnknownArea { .. } => None,
+            Self::AreaHeld { item, .. } | Self::WideOverlap { item, .. } => Some(*item),
+            Self::HeldBy { .. }
+            | Self::Stale { .. }
+            | Self::UnknownArea { .. }
+            | Self::WideAndHeld { .. } => None,
         }
     }
 }
@@ -220,18 +224,24 @@ impl NamesMember for ClaimRefused {
 impl NamesMember for TakeoverRefused {
     fn member(&self) -> Option<MemberId> {
         match self {
-            Self::NotStale { member, .. } | Self::AreaHeld { member, .. } => Some(*member),
-            Self::NothingToTake | Self::OwnClaim | Self::UnknownArea { .. } => None,
+            Self::NotStale { member, .. }
+            | Self::AreaHeld { member, .. }
+            | Self::WideOverlap { member, .. } => Some(*member),
+            Self::NothingToTake
+            | Self::OwnClaim
+            | Self::UnknownArea { .. }
+            | Self::WideAndHeld { .. } => None,
         }
     }
 
     fn item(&self) -> Option<ItemId> {
         match self {
-            Self::AreaHeld { item, .. } => Some(*item),
+            Self::AreaHeld { item, .. } | Self::WideOverlap { item, .. } => Some(*item),
             Self::NotStale { .. }
             | Self::NothingToTake
             | Self::OwnClaim
-            | Self::UnknownArea { .. } => None,
+            | Self::UnknownArea { .. }
+            | Self::WideAndHeld { .. } => None,
         }
     }
 }

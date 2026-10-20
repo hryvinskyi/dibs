@@ -96,6 +96,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: who.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),

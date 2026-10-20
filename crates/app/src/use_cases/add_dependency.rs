@@ -304,6 +304,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    wide: None,
                     item: a,
                     session: env.bob.session,
                     areas: Vec::new(),
@@ -321,6 +322,7 @@ mod tests {
             .execute(
                 &env.alice.actor,
                 ClaimItemInput {
+                    wide: None,
                     item: b,
                     session: env.alice.session,
                     areas: Vec::new(),

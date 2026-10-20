@@ -1,5 +1,6 @@
-//! `GET /ui/`: the status page — live claims, stale claims with a take-over form, and the areas
-//! held — with a reload banner when the claims change.
+//! `GET /ui/`: the status page — live claims, stale claims with a take-over form, the areas held,
+//! and the live wide claims with who has acknowledged each — with a reload banner when the claims
+//! change.
 
 use askama::Template;
 use axum::extract::State;
@@ -12,13 +13,13 @@ use crate::ui::chrome::{self, Chrome, Section};
 use crate::ui::live::latest_event;
 use crate::ui::moments::{Ago, Moment, Span, moment, span};
 use crate::ui::render::html;
-use crate::ui::rows::{ClaimRow, HoldRow};
+use crate::ui::rows::{ClaimRow, HoldRow, WideRow};
 use crate::ui::session::PageSession;
 use crate::ui::signed_page;
 
 /// The kinds of event after which the status page offers a reload.
-pub const STATUS_CHANGES: &str =
-    "claimed renewed taken_over released completed force_released reserved";
+pub const STATUS_CHANGES: &str = "claimed renewed taken_over released completed force_released \
+     reserved wide_claimed wide_granted_by_ack grant_revoked";
 
 #[derive(Template)]
 #[template(path = "status.html")]
@@ -27,6 +28,7 @@ struct StatusPage {
     live: Vec<ClaimRow>,
     stale: Vec<ClaimRow>,
     holds: Vec<HoldRow>,
+    wide: Vec<WideRow>,
     stale_after: Span,
     updated: Moment,
     after: u64,
@@ -60,6 +62,7 @@ pub async fn page(
             .iter()
             .map(|hold| HoldRow::of(hold, &view.live))
             .collect(),
+        wide: view.wide.iter().map(WideRow::of).collect(),
         stale_after: span(signed.settings.stale_after()),
         updated: moment(now, now),
         after,

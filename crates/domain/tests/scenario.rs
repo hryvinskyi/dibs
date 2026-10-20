@@ -91,6 +91,7 @@ mod support {
                 session: SessionId(by.get() * 10),
                 host: HostName::parse("laptop").unwrap(),
                 areas: areas.iter().map(|a| self.area(a)).collect(),
+                wide: None,
             }
         }
 

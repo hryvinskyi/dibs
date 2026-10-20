@@ -272,15 +272,21 @@ impl Run<'_> {
                     .to_owned(),
             ));
         }
-        Ok(self.verdicts(settings, &repo, &ask, &answers))
+        let wide = self.wide_named_by_me(&known.value);
+        Ok(self.verdicts(settings, &repo, &ask, &answers, &wide))
     }
 
+    /// Answers the server gave for `paths`. An area an allowed edit lies in is remembered as held
+    /// by the member, so the next edit there needs no call — unless one of the member's wide claims
+    /// names it: a wide claim holds nothing it names, so whoever claims that area next must be
+    /// asked about again.
     fn verdicts(
         &self,
         settings: &ProjectSettings,
         repo: &RepoId,
         paths: &[RelPath],
         answers: &[PathAnswer],
+        wide: &BTreeSet<QualifiedArea>,
     ) -> GuardOutcome {
         let mut refusals = Vec::new();
         let mut notes = Vec::new();
@@ -288,7 +294,9 @@ impl Run<'_> {
         for (path, answer) in paths.iter().zip(answers) {
             let area = area_of(settings, repo, path);
             match answer {
-                PathAnswer::Allowed => now_held.extend(area),
+                PathAnswer::Allowed => {
+                    now_held.extend(area.filter(|area| !wide.contains(area)));
+                }
                 PathAnswer::Granted { .. } => {}
                 PathAnswer::Noted {
                     rule,
@@ -301,12 +309,14 @@ impl Run<'_> {
                     item,
                     item_ref,
                     area,
+                    way,
                 } => {
                     refusals.push(wording::held_by(
                         path,
                         holder.as_ref(),
                         &wording::item_name(*item, item_ref.as_ref()),
                         area,
+                        *way,
                     ));
                 }
             }
@@ -348,6 +358,23 @@ impl Run<'_> {
             );
         }
         held
+    }
+
+    /// The areas the member's live wide claims name, as the last status this machine read says.
+    fn wide_named_by_me(&self, known: &KnownSettings) -> BTreeSet<QualifiedArea> {
+        self.workspace
+            .cache()
+            .status()
+            .map(|status| {
+                status
+                    .value
+                    .wide
+                    .into_iter()
+                    .filter(|line| line.holder == known.member)
+                    .flat_map(|line| line.areas.into_iter().map(|area| area.area))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The settings as cached, or fetched when this machine has none yet.

@@ -89,7 +89,11 @@ impl From<ClientError> for Failure {
         if let Some(holder) = details.and_then(|details| details.holder.as_ref())
             && !message.contains(holder.as_str())
         {
-            message.push_str(&format!(" It is held by {holder}"));
+            if code == "wide_overlap" {
+                message.push_str(&format!(" It is in the wide claim of {holder}"));
+            } else {
+                message.push_str(&format!(" It is held by {holder}"));
+            }
             if let Some(details) = details {
                 match (&details.item_ref, details.item) {
                     (Some(reference), _) => message.push_str(&format!(" on item {reference}")),
@@ -212,6 +216,23 @@ mod tests {
                 .and_then(|d| d.holder.as_ref())
                 .map(|h| h.as_str()),
             Some("alice")
+        );
+    }
+
+    #[test]
+    fn an_overlapping_wide_claim_names_whose_wide_claim_is_in_the_way() {
+        let failure = Failure::from(ClientError::Conflict {
+            code: "wide_overlap".to_owned(),
+            message: "The area api:billing is already in another member's wide claim.".to_owned(),
+            details: Box::new(ErrorDetails {
+                holder: Some("bob".parse().unwrap()),
+                item: Some(dibs_domain::ids::ItemId(9)),
+                ..ErrorDetails::default()
+            }),
+        });
+        assert_eq!(
+            failure.message,
+            "The area api:billing is already in another member's wide claim. It is in the wide claim of bob on item 9."
         );
     }
 

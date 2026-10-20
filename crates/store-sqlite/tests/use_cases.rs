@@ -193,6 +193,7 @@ mod use_cases {
             for (n, item) in items.iter().copied().enumerate() {
                 let race = self.clone();
                 let input = ClaimItemInput {
+                    wide: None,
                     item,
                     session: race.racers[n].session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
@@ -303,6 +304,7 @@ mod use_cases {
             .execute(
                 &race.racers[0].actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: race.racers[0].session,
                     areas: Vec::new(),
@@ -361,6 +363,7 @@ mod use_cases {
             .execute(
                 &alice,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: alices_session,
                     areas: Vec::new(),
@@ -400,6 +403,7 @@ mod use_cases {
                 .execute(
                     &dave,
                     ClaimItemInput {
+                        wide: None,
                         item,
                         session: daves_session,
                         areas: Vec::new(),

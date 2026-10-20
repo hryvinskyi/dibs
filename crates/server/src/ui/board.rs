@@ -285,6 +285,7 @@ mod tests {
                     .iter()
                     .map(|area| QualifiedArea::parse(area).unwrap())
                     .collect::<BTreeSet<_>>(),
+                wide: None,
                 claimed_at: at,
                 renewed_at: at,
                 last_seen: at,

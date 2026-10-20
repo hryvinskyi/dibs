@@ -163,6 +163,7 @@ mod repositories {
                 .execute(
                     actor,
                     ClaimItemInput {
+                        wide: None,
                         item,
                         session,
                         areas: areas.iter().map(|a| (*a).to_owned()).collect(),

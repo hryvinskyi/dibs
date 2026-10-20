@@ -117,6 +117,7 @@ fn an_admin_force_releases_any_claim() {
         bob.claim(
             item,
             &ClaimRequest {
+                wide: None,
                 session_id: bob_session,
                 areas: Vec::new(),
             },

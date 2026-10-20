@@ -19,7 +19,7 @@ use dibs_app::use_cases::{
     ReadyView as ReadyList, RecipientAck, RecipientStatus, UnackedMessage,
 };
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::edit::{HeldReason, Verdict};
+use dibs_domain::edit::Verdict;
 use dibs_domain::event::EventKind;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::{HotRuleKind, Note};
@@ -308,6 +308,8 @@ pub struct ClaimView {
     pub host: HostName,
     /// The areas it declared.
     pub areas: BTreeSet<QualifiedArea>,
+    /// For a wide claim, the areas it names and holds none of, and why; `null` otherwise.
+    pub wide: Option<WideScopeView>,
     /// When it was first claimed.
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
     pub claimed_at: OffsetDateTime,
@@ -329,11 +331,24 @@ impl ClaimView {
             session_id: claim.session,
             host: claim.host,
             areas: claim.areas,
+            wide: claim.wide.map(|scope| WideScopeView {
+                areas: scope.areas().clone(),
+                reason: scope.reason().as_str().to_owned(),
+            }),
             claimed_at: claim.claimed_at,
             renewed_at: claim.renewed_at,
             last_seen: claim.last_seen,
         }
     }
+}
+
+/// The scope of a wide claim.
+#[derive(Debug, Serialize)]
+pub struct WideScopeView {
+    /// The areas it names.
+    pub areas: BTreeSet<QualifiedArea>,
+    /// Why.
+    pub reason: String,
 }
 
 /// An item with its claim.
@@ -437,7 +452,9 @@ pub enum VerdictView {
         item_ref: Option<ExternalRef>,
         /// The area.
         area: QualifiedArea,
-        /// The way on: `ask_holder`, message the holder or ask for a grant.
+        /// The way on: `ask_holder`, message the holder or ask for a grant; `awaiting_ack`, the
+        /// caller's wide claim names the area and the holder has not acknowledged its
+        /// announcement.
         reason: &'static str,
     },
     /// The holder granted the member edits in the area.
@@ -486,7 +503,7 @@ impl PathVerdictView {
                 item,
                 item_ref: named.item_ref,
                 area,
-                reason: reason_code(reason),
+                reason: reason.code(),
             },
             Verdict::Granted { area, .. } => VerdictView::Granted {
                 by: named.member,
@@ -778,19 +795,13 @@ impl TokenView {
     }
 }
 
-fn reason_code(reason: HeldReason) -> &'static str {
-    match reason {
-        HeldReason::AskHolder => "ask_holder",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
     use time::macros::datetime;
 
     use dibs_domain::claim::{Claim, Holder};
-    use dibs_domain::edit::PathVerdict;
+    use dibs_domain::edit::{HeldReason, PathVerdict};
     use dibs_domain::hot_rule::HotRuleRegistry;
     use dibs_domain::ids::MemberId;
     use dibs_domain::paths::RepoPath;
@@ -809,6 +820,7 @@ mod tests {
             session: SessionId(9),
             host: HostName::parse("laptop").unwrap(),
             areas: BTreeSet::from([QualifiedArea::parse("api:billing").unwrap()]),
+            wide: None,
             claimed_at: datetime!(2026-01-02 03:04:05 UTC),
             renewed_at: datetime!(2026-01-02 03:04:05 UTC),
             last_seen: datetime!(2026-01-02 03:05:00 UTC),
@@ -823,6 +835,7 @@ mod tests {
             json!({
                 "item": 5, "holder": "alice", "session_id": 9, "host": "laptop",
                 "areas": ["api:billing"],
+                "wide": null,
                 "claimed_at": "2026-01-02T03:04:05Z",
                 "renewed_at": "2026-01-02T03:04:05Z",
                 "last_seen": "2026-01-02T03:05:00Z"

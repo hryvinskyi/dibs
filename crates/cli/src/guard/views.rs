@@ -1,11 +1,13 @@
 //! The client's answers as the guard reads them.
 
 use dibs_agent_host::ports::{
-    ClaimLine, HoldLine, InboxView, PathAnswer, PortError, ReadyLine, StatusView, TouchedBy,
-    UnackedLine,
+    ClaimLine, HeldWay, HoldLine, InboxView, PathAnswer, PortError, ReadyLine, StatusView,
+    TouchedBy, UnackedLine, WideAreaLine, WideLine,
 };
 use dibs_client::ClientError;
-use dibs_client::api::{HeldItem, Inbox, InboxRequest, NotReady, Status, Verdict};
+use dibs_client::api::{
+    HeldItem, HeldReason, Inbox, InboxRequest, NotReady, Status, Verdict, WideAreaState,
+};
 
 use crate::failure::sentence;
 
@@ -28,6 +30,31 @@ pub fn status(status: &Status) -> StatusView {
                 area: hold.area.clone(),
                 holder: hold.holder.clone(),
                 item: hold.item,
+            })
+            .collect(),
+        wide: status
+            .wide
+            .iter()
+            .map(|wide| WideLine {
+                item: wide.item.id,
+                reference: wide.item.external_ref.clone(),
+                title: wide.item.title.clone(),
+                holder: wide.claim.holder.clone(),
+                reason: wide
+                    .claim
+                    .wide
+                    .as_ref()
+                    .map(|scope| scope.reason.clone())
+                    .unwrap_or_default(),
+                areas: wide
+                    .areas
+                    .iter()
+                    .map(|area| WideAreaLine {
+                        area: area.area.clone(),
+                        holder: area.holder.clone(),
+                        granted: area.state == WideAreaState::Granted,
+                    })
+                    .collect(),
             })
             .collect(),
         ready: status
@@ -126,12 +153,16 @@ pub fn answer(verdict: &Verdict) -> PathAnswer {
             item,
             item_ref,
             area,
-            ..
+            reason,
         } => PathAnswer::HeldBy {
             holder: holder.clone(),
             item: *item,
             item_ref: item_ref.clone(),
             area: area.clone(),
+            way: match reason {
+                HeldReason::AwaitingAck => HeldWay::AwaitingAck,
+                HeldReason::AskHolder | HeldReason::Other => HeldWay::AskHolder,
+            },
         },
         Verdict::Granted { by, area } => PathAnswer::Granted {
             by: by.clone(),

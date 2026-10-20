@@ -310,6 +310,9 @@ pub struct Claim {
     pub host: HostName,
     /// The areas it declared.
     pub areas: BTreeSet<QualifiedArea>,
+    /// For a wide claim, the areas it names and holds none of, and why.
+    #[serde(default)]
+    pub wide: Option<WideScope>,
     /// When it was first claimed.
     #[serde(with = "time::serde::rfc3339")]
     pub claimed_at: OffsetDateTime,
@@ -319,6 +322,15 @@ pub struct Claim {
     /// The last sign of life.
     #[serde(with = "time::serde::rfc3339")]
     pub last_seen: OffsetDateTime,
+}
+
+/// The scope of a wide claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WideScope {
+    /// The areas it names.
+    pub areas: BTreeSet<QualifiedArea>,
+    /// Why.
+    pub reason: String,
 }
 
 /// `GET /v1/items/{id}`: an item and its claim, live or stale.
@@ -337,6 +349,45 @@ pub struct ClaimRequest {
     pub session_id: SessionId,
     /// The areas, as a person names them: `repo:area`, or a name one repository declares.
     pub areas: Vec<String>,
+    /// For a wide claim, the areas it names and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wide: Option<WideRequest>,
+}
+
+/// The `wide` part of a claim: the areas to announce a change over, holding none of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WideRequest {
+    /// The areas, named like [`ClaimRequest::areas`].
+    pub areas: Vec<String>,
+    /// Why, as the holders read it: 1 to 300 characters.
+    pub reason: String,
+}
+
+/// An announcement a wide claim sent to a holder of its areas.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Announcement {
+    /// The holder asked.
+    pub to: Handle,
+    /// The areas of theirs it asks about.
+    pub areas: BTreeSet<QualifiedArea>,
+    /// Its message, which the holder acknowledges.
+    pub message_id: MessageId,
+    /// Its thread.
+    pub thread_id: ThreadId,
+}
+
+/// An area a claim holds that another member's live wide claim names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsideWide {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The wide claim's member.
+    pub holder: Handle,
+    /// The wide claim's item.
+    pub item: ItemName,
+    /// The announcement asking the caller about the area, when one waits for them.
+    #[serde(default)]
+    pub message_id: Option<MessageId>,
 }
 
 /// Whether a claim was new or renewed the caller's own.
@@ -364,6 +415,12 @@ pub struct Claimed {
     /// The item claimed.
     #[serde(default)]
     pub item: Option<ItemName>,
+    /// For a wide claim, the announcements it sent.
+    #[serde(default)]
+    pub announced: Vec<Announcement>,
+    /// The areas the claim holds that other members' live wide claims name.
+    #[serde(default)]
+    pub inside_wide: Vec<InsideWide>,
 }
 
 /// `POST /v1/items/{id}/takeover`.
@@ -391,6 +448,9 @@ pub struct TakenOver {
     /// The item taken over.
     #[serde(default)]
     pub item: Option<ItemName>,
+    /// The announcements the carried-on wide scope sent, in the caller's name.
+    #[serde(default)]
+    pub announced: Vec<Announcement>,
 }
 
 /// The answer of a release, a completion or a forced release: the claim that ended.
@@ -432,9 +492,53 @@ pub struct Status {
     pub stale: Vec<HeldItem>,
     /// Areas the live claims hold.
     pub holds: Vec<Hold>,
+    /// The live wide claims, with where each of their areas stands.
+    #[serde(default)]
+    pub wide: Vec<WideClaim>,
     /// The caller's ready list.
     #[serde(default)]
     pub ready: ReadyList,
+}
+
+/// A live wide claim, its item, and where each area it names stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WideClaim {
+    /// The item.
+    pub item: Item,
+    /// The claim.
+    pub claim: Claim,
+    /// Its areas, in area order.
+    pub areas: Vec<WideArea>,
+}
+
+/// Where one area of a wide claim stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WideArea {
+    /// The area.
+    pub area: QualifiedArea,
+    /// `free`, `granted` or `waiting`.
+    pub state: WideAreaState,
+    /// The other member holding it, when one does.
+    #[serde(default)]
+    pub holder: Option<Handle>,
+    /// That member's item.
+    #[serde(default)]
+    pub item: Option<ItemId>,
+}
+
+/// Where an area of a wide claim stands for its member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WideAreaState {
+    /// Nobody else holds it; the wide claim's member may edit there.
+    Free,
+    /// Its holder acknowledged the announcement or granted the edits.
+    Granted,
+    /// Its holder has not acknowledged yet.
+    Waiting,
+    /// A state this client does not know yet.
+    #[serde(other)]
+    Other,
 }
 
 /// `POST /v1/edit-check`.
@@ -501,6 +605,9 @@ impl Toucher {
 pub enum HeldReason {
     /// Message the holder or ask for a grant.
     AskHolder,
+    /// The caller's wide claim names the area: wait for the holder to acknowledge its
+    /// announcement.
+    AwaitingAck,
     /// A way this client does not know yet.
     #[serde(other)]
     Other,
@@ -832,6 +939,10 @@ pub struct Acked {
     pub ack: AckRecord,
     /// `false` when the caller had acknowledged the message before.
     pub created: bool,
+    /// The grants it made: for a wide claim's announcement, one per area it asked about that the
+    /// caller still holds.
+    #[serde(default)]
+    pub granted: Vec<Grant>,
 }
 
 /// One recipient of a message the caller sent.

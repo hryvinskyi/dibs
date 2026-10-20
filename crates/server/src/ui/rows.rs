@@ -4,7 +4,9 @@
 use time::OffsetDateTime;
 
 use dibs_app::named::ItemName;
-use dibs_app::use_cases::{AreaHold, ExcludedEntry, HeldItem, NamedNotReady, ReadyEntry};
+use dibs_app::use_cases::{
+    AreaHold, ExcludedEntry, HeldItem, NamedNotReady, ReadyEntry, WideClaimStatus,
+};
 use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::item::ExternalRef;
 
@@ -82,6 +84,59 @@ impl HoldRow {
             area: hold.area.to_string(),
             holder: hold.holder.to_string(),
             reference: reference(hold.item, external),
+        }
+    }
+}
+
+/// A live wide claim and where each of its areas stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideRow {
+    /// How the item is named.
+    pub reference: String,
+    /// The item's title.
+    pub title: String,
+    /// The wide claim's member.
+    pub holder: String,
+    /// Why the change is made.
+    pub reason: String,
+    /// Its areas, in area order.
+    pub areas: Vec<WideAreaRow>,
+}
+
+/// One area of a wide claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideAreaRow {
+    /// The area, as `repo:area`.
+    pub area: String,
+    /// The handle of the other member holding it, when one does.
+    pub holder: Option<String>,
+    /// Whether that holder granted the edits there.
+    pub granted: bool,
+}
+
+impl WideRow {
+    /// The row of a live wide claim.
+    pub fn of(wide: &WideClaimStatus) -> Self {
+        let claim = &wide.held.claim.claim;
+        let item = &wide.held.item.item;
+        Self {
+            reference: reference(item.id, item.external_ref.as_ref()),
+            title: item.title.to_string(),
+            holder: wide.held.claim.holder.to_string(),
+            reason: claim
+                .wide
+                .as_ref()
+                .map(|scope| scope.reason().to_string())
+                .unwrap_or_default(),
+            areas: wide
+                .areas
+                .iter()
+                .map(|row| WideAreaRow {
+                    area: row.area.to_string(),
+                    holder: row.holder.as_ref().map(|(handle, _)| handle.to_string()),
+                    granted: row.granted,
+                })
+                .collect(),
         }
     }
 }

@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::grant::Grant;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
+use dibs_domain::wide::standing;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -38,6 +40,28 @@ pub struct AreaHold {
     pub item: ItemId,
 }
 
+/// Where one area of a live wide claim stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideAreaStanding {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The other member whose live claim holds it, with their handle and item; `None` when nobody
+    /// else holds it and the wide claim's member may edit there.
+    pub holder: Option<(Handle, ItemId)>,
+    /// Whether that holder granted the edits there, by acknowledging the announcement or by a
+    /// grant.
+    pub granted: bool,
+}
+
+/// A live wide claim and where each area it names stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideClaimStatus {
+    /// The claim and its item.
+    pub held: HeldItem,
+    /// Its areas, in area order.
+    pub areas: Vec<WideAreaStanding>,
+}
+
 /// The project's claims and holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusView {
@@ -45,13 +69,17 @@ pub struct StatusView {
     pub live: Vec<HeldItem>,
     /// Stale claims, ordered by item: they hold nothing and wait for their holder or a takeover.
     pub stale: Vec<HeldItem>,
-    /// The areas live claims hold, ordered by area.
+    /// The areas live claims hold, ordered by area. The areas a wide claim names are not among
+    /// them.
     pub holds: Vec<AreaHold>,
+    /// The live wide claims, ordered by item.
+    pub wide: Vec<WideClaimStatus>,
     /// The work the caller can pick up now, and the open items that are not ready.
     pub ready: ReadyView,
 }
 
-/// Shows the project's live and stale claims, the areas held, and the caller's ready list.
+/// Shows the project's live and stale claims, the areas held, the live wide claims with where each
+/// of their areas stands, and the caller's ready list.
 pub struct Status {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -93,9 +121,17 @@ impl Status {
             live: Vec::new(),
             stale: Vec::new(),
             holds: Vec::new(),
+            wide: Vec::new(),
             ready,
         };
-        for claim in work.claims(actor.project).await? {
+        let claims = work.claims(actor.project).await?;
+        let grants: Vec<Grant> = work
+            .grants(actor.project)
+            .await?
+            .into_iter()
+            .map(|record| record.grant)
+            .collect();
+        for claim in claims.iter().cloned() {
             let item =
                 work.item(actor.project, claim.item)
                     .await?
@@ -115,6 +151,27 @@ impl Status {
                         holder: claim.holder.clone(),
                         item: claim.claim.item,
                     }));
+                if claim.claim.wide.is_some() {
+                    let areas = standing(&claim.claim, &claims, &grants, now, stale_after)
+                        .into_iter()
+                        .map(|row| {
+                            Ok(WideAreaStanding {
+                                holder: row
+                                    .holder
+                                    .map(|holder| {
+                                        names.handle(holder.member).map(|h| (h, holder.item))
+                                    })
+                                    .transpose()?,
+                                area: row.area,
+                                granted: row.granted,
+                            })
+                        })
+                        .collect::<Result<_, AppError>>()?;
+                    view.wide.push(WideClaimStatus {
+                        held: held.clone(),
+                        areas,
+                    });
+                }
                 view.live.push(held);
             } else {
                 view.stale.push(held);
@@ -139,6 +196,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    wide: None,
                     item,
                     session: who.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),

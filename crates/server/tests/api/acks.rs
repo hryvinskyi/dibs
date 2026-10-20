@@ -130,7 +130,7 @@ async fn a_recipient_acks_once_and_the_thread_shows_who_has() {
     assert_eq!(
         acked.body,
         json!({"ack": {"message": message, "thread": thread, "member": "bob",
-                       "at": "2026-03-02T09:03:00Z"}, "created": true})
+                       "at": "2026-03-02T09:03:00Z"}, "created": true, "granted": []})
     );
     let after = world
         .get(&team.alice, &format!("/v1/threads/{thread}"))
@@ -152,7 +152,7 @@ async fn a_recipient_acks_once_and_the_thread_shows_who_has() {
     assert_eq!(
         again.body,
         json!({"ack": {"message": message, "thread": thread, "member": "bob",
-                       "at": "2026-03-02T09:03:00Z"}, "created": false}),
+                       "at": "2026-03-02T09:03:00Z"}, "created": false, "granted": []}),
         "the first acknowledgement, with its time"
     );
     let events = world.get(&team.alice, "/v1/events").await;

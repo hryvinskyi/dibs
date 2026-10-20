@@ -210,10 +210,18 @@ pub async fn ack(args: AckArgs, ctx: &Context) -> Result<(), Failure> {
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&acked, || {
         if acked.created {
-            format!(
+            let mut text = format!(
                 "Acknowledged message {} in conversation #{}; its author can see it.",
                 acked.ack.message, acked.ack.thread
-            )
+            );
+            for grant in &acked.granted {
+                let _ = write!(
+                    text,
+                    " That grants {} edits in {} for item {}.",
+                    grant.to, grant.area, grant.item
+                );
+            }
+            text
         } else {
             format!(
                 "You acknowledged message {} in conversation #{} already, at {}; nothing changed.",

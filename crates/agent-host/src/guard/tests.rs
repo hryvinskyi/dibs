@@ -19,8 +19,8 @@ use super::*;
 use crate::adapter::{HostAdapter, HostId, ParseError};
 use crate::neutral::Neutral;
 use crate::ports::{
-    CoordinationGateway, HoldLine, InboxView, LocalCache, StatusView, TouchedBy, UnackedLine,
-    Upkeep,
+    CoordinationGateway, HeldWay, HoldLine, InboxView, LocalCache, StatusView, TouchedBy,
+    UnackedLine, Upkeep,
 };
 
 const START: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -378,6 +378,7 @@ fn held_by_alice() -> PathAnswer {
         item: ItemId(4),
         item_ref: None,
         area: area("api:billing"),
+        way: HeldWay::AskHolder,
     }
 }
 
@@ -573,6 +574,103 @@ fn an_allowed_area_is_remembered_and_answers_the_next_edit_without_the_server() 
         &edit(&["src/billing/b.rs"]),
     );
     assert_eq!(world.calls().len(), 2, "a remembered hold stands 30 s");
+}
+
+fn my_wide_claim_over_billing() -> StatusView {
+    StatusView {
+        wide: vec![crate::ports::WideLine {
+            item: ItemId(8),
+            reference: None,
+            title: "Upgrade the client".parse().unwrap(),
+            holder: handle("bob"),
+            reason: "Upgrade the HTTP client".to_owned(),
+            areas: vec![crate::ports::WideAreaLine {
+                area: area("api:billing"),
+                holder: None,
+                granted: false,
+            }],
+        }],
+        ..StatusView::default()
+    }
+}
+
+#[test]
+fn an_allowed_edit_in_an_area_my_wide_claim_names_is_asked_again_next_time() {
+    let world = World::new().with(|state| {
+        state.answers = Ok(vec![PathAnswer::Allowed]);
+        state.status = Some(Cached {
+            value: my_wide_claim_over_billing(),
+            at: at(-5),
+        });
+    });
+    run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    world.set(|state| state.now = at(10));
+    run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/b.rs"]),
+    );
+    assert_eq!(
+        world.calls().len(),
+        2,
+        "a wide claim holds nothing it names, so the next edit asks the server"
+    );
+}
+
+#[test]
+fn an_edit_waiting_for_a_holders_acknowledgement_is_denied_saying_so() {
+    let world = World::new().with(|state| {
+        state.answers = Ok(vec![PathAnswer::HeldBy {
+            holder: Some(handle("alice")),
+            item: ItemId(4),
+            item_ref: None,
+            area: area("api:billing"),
+            way: HeldWay::AwaitingAck,
+        }]);
+    });
+    let answer = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    let value = reply(&answer);
+    assert_eq!(value["decision"], "deny");
+    let reason = value["reason"].as_str().unwrap();
+    assert!(reason.contains("Your wide claim names it"), "{reason}");
+    assert!(reason.contains("alice to acknowledge"), "{reason}");
+    assert!(!reason.contains("ask for a grant"), "{reason}");
+}
+
+#[test]
+fn the_brief_shows_the_live_wide_claims_and_who_has_acknowledged() {
+    let world = World::new().with(|state| {
+        let mut status = my_wide_claim_over_billing();
+        status.wide[0].areas.push(crate::ports::WideAreaLine {
+            area: area("api:search"),
+            holder: Some(handle("alice")),
+            granted: true,
+        });
+        state.status = Some(Cached {
+            value: status,
+            at: at(-5),
+        });
+    });
+    let answer = run(&world, "neutral", "session-started", &input(None));
+    let context = no_objection(&answer)["context"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        context.contains("- item 8 \"Upgrade the client\", bob: Upgrade the HTTP client; over api:billing (free), api:search (acknowledged by alice)"),
+        "{context}"
+    );
 }
 
 #[test]
@@ -900,6 +998,7 @@ fn a_refusal_names_the_holders_item_by_its_reference() {
             item: ItemId(1_739_000_000_004),
             item_ref: Some(dibs_domain::item::ExternalRef::parse("gh:acme/api#4").unwrap()),
             area: area("api:billing"),
+            way: HeldWay::AskHolder,
         }]);
     });
     let answer = run(

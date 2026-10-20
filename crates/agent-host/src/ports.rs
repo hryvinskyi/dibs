@@ -94,6 +94,34 @@ pub struct ReadyLine {
     pub stale_holder: Option<Handle>,
 }
 
+/// A live wide claim as the brief shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideLine {
+    /// The item.
+    pub item: ItemId,
+    /// Its reference in an outside tracker, when it has one.
+    pub reference: Option<ExternalRef>,
+    /// Its title.
+    pub title: Title,
+    /// The member whose wide claim it is.
+    pub holder: Handle,
+    /// Why the change is made.
+    pub reason: String,
+    /// Its areas, in area order.
+    pub areas: Vec<WideAreaLine>,
+}
+
+/// One area of a wide claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideAreaLine {
+    /// The area.
+    pub area: QualifiedArea,
+    /// The other member holding it, when one does.
+    pub holder: Option<Handle>,
+    /// Whether that member acknowledged the announcement or granted the edits.
+    pub granted: bool,
+}
+
 /// The project's claims and holds, and the member's ready list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatusView {
@@ -101,8 +129,10 @@ pub struct StatusView {
     pub live: Vec<ClaimLine>,
     /// Stale claims.
     pub stale: Vec<ClaimLine>,
-    /// Areas held by live claims.
+    /// Areas held by live claims. A wide claim holds none of the areas it names.
     pub holds: Vec<HoldLine>,
+    /// The live wide claims.
+    pub wide: Vec<WideLine>,
     /// The items the member can pick up now, soonest first.
     pub ready: Vec<ReadyLine>,
     /// How many open items nobody holds wait for items that are neither done nor closed.
@@ -173,6 +203,8 @@ pub enum PathAnswer {
         item_ref: Option<ExternalRef>,
         /// The area.
         area: QualifiedArea,
+        /// The way on.
+        way: HeldWay,
     },
     /// The holder granted the member edits in the area.
     Granted {
@@ -181,6 +213,16 @@ pub enum PathAnswer {
         /// The area.
         area: QualifiedArea,
     },
+}
+
+/// What a member can do about a path another member holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldWay {
+    /// Message the holder or ask for a grant.
+    AskHolder,
+    /// The member's wide claim names the area: its holder's acknowledgement of the announcement
+    /// grants the edit.
+    AwaitingAck,
 }
 
 /// One session of one host, as the guard names it to its ports.

@@ -1078,3 +1078,65 @@ async fn done_today_counts_from_the_viewers_midnight_or_else_from_utcs() {
         assert!(fallback.column("c-done").contains("Done item"));
     }
 }
+
+#[tokio::test]
+async fn the_status_page_shows_a_wide_claim_and_who_has_acknowledged_it() {
+    let (world, alice, bob) = team().await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let alices = world.item(&alice, None, "Invoices").await;
+    let bobs = world.item(&bob, Some("gh:acme/api#9"), "Upgrade").await;
+    claim(
+        &world,
+        &alice,
+        alice_session,
+        alices,
+        json!(["api:billing"]),
+    )
+    .await;
+    let browser = sign_in(&world, &alice).await;
+    let empty = browser.get(&world, "/ui/").await;
+    assert!(
+        empty.column("wide").contains("No wide claims"),
+        "{}",
+        empty.text
+    );
+    let made = world
+        .post(
+            &bob,
+            &format!("/v1/items/{bobs}/claim"),
+            json!({"session_id": bob_session,
+                   "wide": {"areas": ["api:billing", "api:search"],
+                            "reason": "Swap <b>the</b> HTTP client"}}),
+        )
+        .await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.body);
+    let page = browser.get(&world, "/ui/").await;
+    assert_eq!(page.status, StatusCode::OK);
+    let wide = page.column("wide");
+    assert!(wide.contains("gh:acme/api#9"), "{wide}");
+    assert!(
+        wide.contains("Swap &#60;b&#62;the&#60;/b&#62; HTTP client"),
+        "{wide}"
+    );
+    assert!(!wide.contains("<b>the</b>"), "{wide}");
+    assert!(wide.contains("waiting for alice"), "{wide}");
+    assert!(
+        wide.contains("api:search</span> <span class=\"muted\">free"),
+        "{wide}"
+    );
+    assert!(
+        page.text.contains("wide_claimed wide_granted_by_ack"),
+        "the page reloads on a wide claim's events"
+    );
+    let message = made.body["announced"][0]["message_id"].as_u64().unwrap();
+    world
+        .post(&alice, &format!("/v1/messages/{message}/ack"), json!({}))
+        .await;
+    let after = browser.get(&world, "/ui/").await;
+    assert!(
+        after.column("wide").contains("acknowledged by alice"),
+        "{}",
+        after.text
+    );
+}

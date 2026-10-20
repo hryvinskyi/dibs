@@ -12,6 +12,7 @@ use dibs_domain::import::BatchRefused;
 use dibs_domain::item::{CreateRefused, ItemStatus};
 use dibs_domain::message::{AckRefused, RecipientsError};
 use dibs_domain::settings::{AreaLookupError, SettingsError};
+use dibs_domain::wide::WideScopeError;
 
 use crate::named::Refusal;
 use crate::ports::StoreError;
@@ -121,6 +122,9 @@ pub enum AppError {
     /// An area named in the request does not resolve.
     #[error(transparent)]
     Area(#[from] AreaLookupError),
+    /// The wide scope asked for cannot be made.
+    #[error(transparent)]
+    Wide(#[from] WideScopeError),
     /// The settings document is invalid.
     #[error(transparent)]
     Settings(#[from] SettingsError),
@@ -159,6 +163,8 @@ impl AppError {
                 ClaimRefused::Stale { .. } => "stale",
                 ClaimRefused::AreaHeld { .. } => "area_held",
                 ClaimRefused::UnknownArea { .. } => "unknown_area",
+                ClaimRefused::WideOverlap { .. } => "wide_overlap",
+                ClaimRefused::WideAndHeld { .. } => "wide_and_held",
             },
             Self::Takeover(refused) => match refused.reason {
                 TakeoverRefused::NothingToTake => "nothing_to_take",
@@ -166,6 +172,8 @@ impl AppError {
                 TakeoverRefused::NotStale { .. } => "not_stale",
                 TakeoverRefused::AreaHeld { .. } => "area_held",
                 TakeoverRefused::UnknownArea { .. } => "unknown_area",
+                TakeoverRefused::WideOverlap { .. } => "wide_overlap",
+                TakeoverRefused::WideAndHeld { .. } => "wide_and_held",
             },
             Self::HolderOnly(refused) => match refused.reason {
                 HolderOnly::NoClaim => "no_claim",
@@ -192,6 +200,7 @@ impl AppError {
                 BatchRefused::CompleteWithoutSource => "invalid_batch",
                 BatchRefused::Duplicate { .. } => "duplicate_ref",
             },
+            Self::Wide(WideScopeError::NoAreas) => "invalid_wide",
             Self::Area(refused) => match refused {
                 AreaLookupError::Malformed { .. } => "invalid_area",
                 AreaLookupError::NotFound { .. } => "unknown_area",

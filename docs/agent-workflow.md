@@ -8,8 +8,8 @@ areas without asking you. Everything below is done with the `dibs_*` tools of th
 ## At the start of a session
 
 Read the brief dibs gives you: your live claims and their areas, other members' live claims, stale claims, unread
-conversations, the messages that ask for your acknowledgement (most pressing first), the project's edit policy, and the
-top of your ready list. If you were already working on something,
+conversations, the messages that ask for your acknowledgement (most pressing first), the live wide claims and who has
+acknowledged each of their areas, the project's edit policy, and the top of your ready list. If you were already working on something,
 your claim is still there; carry on under it.
 
 ## Choosing what to do next
@@ -42,6 +42,25 @@ When dibs refuses an edit, the area belongs to another member's live claim. Do n
 
 A claim that is refused because the item or an area is held names the holder and the item they hold it for. Ask them;
 do not claim around them.
+
+## Changes across many areas: wide claims
+
+A change that touches many areas at once — a dependency upgrade, a rename across packages, one fix applied everywhere —
+is claimed wide: `dibs_claim` with `wide: {areas, reason}`, or `dibs claim <item> --wide <area>,<area> --reason "..."`.
+Give a reason the holders will understand in one reading.
+
+- A wide claim holds none of the areas it names, so it is in nobody's way. Where nobody holds a named area, edit it.
+- dibs sends every member who holds one of the areas an announcement for you, asking them to acknowledge it; `announced`
+  in the answer lists them. Their acknowledgement lets you edit in their area. Until then your edits there are refused
+  with "your wide claim names it": go on with the free areas, and message the holder if you need an answer.
+- Only one live wide claim names an area at a time; a second one over it is refused, naming whose wide claim it is.
+  Agree with that member on who goes first.
+
+When an announcement reaches you, someone asks to change files in an area you hold. Acknowledging it grants them the
+edits there, for their wide claim, until either claim ends. Tell your person what it asks and acknowledge it only when
+they agree, or when the change cannot collide with what you are doing; otherwise reply in its conversation and leave it
+unacknowledged. A claim of yours that holds an area inside someone's wide claim says so (`inside_wide`), and its
+announcement is already waiting in your inbox.
 
 ## Release and done
 
@@ -78,7 +97,8 @@ A message is `normal`, `high` or `urgent`, and may ask each recipient to acknowl
 
 - read it (`dibs_thread`), tell your person what it says if it bears on your work, and reply if it needs a decision;
 - then acknowledge it (`dibs_ack` with the message id, or `dibs ack <message>`). An acknowledgement says you read it;
-  it is not agreement, and it authorises nothing. Acknowledging again is harmless: it answers your first one.
+  it is not agreement, and it authorises nothing — except a wide claim's announcement, whose acknowledgement is your
+  grant (see above). Acknowledging again is harmless: it answers your first one.
 
 `dibs_inbox` with `unacked` lists every message still waiting for your acknowledgement. When you send, keep `normal`
 unless the message must be read soon (`high`) or now (`urgent`), and ask for an acknowledgement (`ack_required`, or

@@ -220,6 +220,7 @@ mod scenario {
 
         // Alice takes billing; Bob takes search and cannot take billing as well.
         let claim = |item, session, areas: &[&str]| ClaimItemInput {
+            wide: None,
             item,
             session,
             areas: areas.iter().map(|a| (*a).to_owned()).collect(),

@@ -11,16 +11,17 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
 use dibs_app::named::{EndedClaim, NamedClaim};
-use dibs_app::use_cases::{ClaimItemInput, TakeOverInput};
+use dibs_app::use_cases::{Announced, ClaimItemInput, TakeOverInput, WideInput, WideNote};
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::ClaimOutcome;
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{ItemId, ThreadId};
+use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::message::Body;
+use dibs_domain::wide::WideReason;
 
 use crate::auth::Authed;
 use crate::error::ApiError;
-use crate::fields::{item_in_path, parse_required, session_in_body};
+use crate::fields::{item_in_path, parse_required, required, session_in_body};
 use crate::http::AppState;
 use crate::views::{ClaimView, ItemNameView, reply};
 
@@ -29,6 +30,71 @@ use crate::views::{ClaimView, ItemNameView, reply};
 pub struct ClaimBody {
     session_id: Option<u64>,
     areas: Option<Vec<String>>,
+    wide: Option<WideBody>,
+}
+
+/// The `wide` object of a claim's body.
+#[derive(Deserialize)]
+pub struct WideBody {
+    areas: Option<Vec<String>>,
+    reason: Option<String>,
+}
+
+impl WideBody {
+    /// The scope as the use case takes it.
+    fn input(self) -> Result<WideInput, ApiError> {
+        Ok(WideInput {
+            areas: required("wide.areas", self.areas)?,
+            reason: parse_required("wide.reason", self.reason.as_deref(), WideReason::parse)?,
+        })
+    }
+}
+
+/// An announcement a wide claim sent.
+#[derive(Serialize)]
+struct AnnouncedView {
+    /// The holder asked.
+    to: Handle,
+    /// The areas of theirs it asks about.
+    areas: BTreeSet<QualifiedArea>,
+    /// Its message, which the holder acknowledges.
+    message_id: MessageId,
+    /// Its thread.
+    thread_id: ThreadId,
+}
+
+impl AnnouncedView {
+    fn of(announced: Announced) -> Self {
+        Self {
+            to: announced.to,
+            areas: announced.ask.areas,
+            message_id: announced.ask.message,
+            thread_id: announced.thread,
+        }
+    }
+}
+
+/// An area the claim holds that another member's live wide claim names.
+#[derive(Serialize)]
+struct InsideWideView {
+    area: QualifiedArea,
+    /// The wide claim's member.
+    holder: Handle,
+    /// The wide claim's item.
+    item: ItemNameView,
+    /// The announcement that asks the caller about the area, when one waits for them.
+    message_id: Option<MessageId>,
+}
+
+impl InsideWideView {
+    fn of(note: WideNote) -> Self {
+        Self {
+            area: note.area,
+            holder: note.holder,
+            item: ItemNameView::of(note.item),
+            message_id: note.message,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -44,16 +110,23 @@ struct ClaimAnswer {
     blocked_by: Vec<ItemNameView>,
     /// The item claimed.
     item: ItemNameView,
+    /// For a wide claim, the announcements it sent to the holders of its areas.
+    announced: Vec<AnnouncedView>,
+    /// The areas the claim holds that other members' live wide claims name.
+    inside_wide: Vec<InsideWideView>,
 }
 
 /// Claims the item for the caller, or renews the caller's own claim. `areas` are named as a person
 /// names them: `repo:area`, or a bare name exactly one repository declares. A blocked item is
-/// claimed all the same; `blocked_by` names what it waits for.
+/// claimed all the same; `blocked_by` names what it waits for. With `wide: {areas, reason}` the
+/// claim is wide: it holds none of those areas, and each holder of one is sent an announcement to
+/// acknowledge, which `announced` lists; a renewal adds to the scope it had.
 ///
 /// # Errors
-/// `held`, `stale` or `area_held` (`409`, naming the holder) when another member is in the way;
-/// `item_closed`, `unknown_area`, `invalid_area`, `ambiguous_area`, `not_found`, `forbidden` for an
-/// integration; `invalid_request` for a malformed body.
+/// `held`, `stale`, `area_held` or `wide_overlap` (`409`, naming the member in the way);
+/// `wide_and_held`, `invalid_wide`, `item_closed`, `unknown_area`, `invalid_area`,
+/// `ambiguous_area`, `not_found`, `forbidden` for an integration; `invalid_request` for a malformed
+/// body.
 pub async fn claim(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -68,6 +141,7 @@ pub async fn claim(
         item,
         session: session_in_body("session_id", body.session_id)?,
         areas: body.areas.unwrap_or_default(),
+        wide: body.wide.map(WideBody::input).transpose()?,
     };
     let made = state.app.claim_item.execute(&actor, input).await?;
     let (name, claim, dropped_areas) = match made.outcome {
@@ -86,6 +160,12 @@ pub async fn claim(
         dropped_areas,
         blocked_by: made.blocked_by.into_iter().map(ItemNameView::of).collect(),
         item: ItemNameView::of(made.item),
+        announced: made.announced.into_iter().map(AnnouncedView::of).collect(),
+        inside_wide: made
+            .inside_wide
+            .into_iter()
+            .map(InsideWideView::of)
+            .collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }
@@ -107,6 +187,8 @@ struct TakeOverAnswer {
     thread_id: ThreadId,
     /// The item taken over.
     item: ItemNameView,
+    /// The announcements the carried-on wide scope sent, in the caller's name.
+    announced: Vec<AnnouncedView>,
 }
 
 /// Takes over another member's stale claim; the previous holder is sent `reason` in a thread about
@@ -142,6 +224,7 @@ pub async fn take_over(
         dropped_areas: taken.takeover.dropped_areas,
         thread_id: taken.thread,
         item: ItemNameView::of(taken.item),
+        announced: taken.announced.into_iter().map(AnnouncedView::of).collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

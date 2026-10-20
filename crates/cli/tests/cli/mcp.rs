@@ -656,3 +656,63 @@ fn a_server_that_goes_away_mid_session_is_met_the_same_way_and_a_session_ends_wi
     assert_eq!(reply.structured["error"]["code"], "unreachable");
     assert_eq!(mcp.finish(), Some(0));
 }
+
+#[test]
+fn a_wide_claim_through_the_tools_is_announced_and_its_acknowledgement_grants() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#1", "title": "Invoices"}),
+    );
+    bob.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#2", "title": "Upgrade"}),
+    );
+    alice
+        .tool(
+            "dibs_claim",
+            json!({"key": "gh:acme/api#1", "areas": ["billing"]}),
+        )
+        .ok();
+    let wide = bob.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#2",
+               "wide": {"areas": ["billing", "search"], "reason": "Upgrade the HTTP client"}}),
+    );
+    let made = wide.ok();
+    assert_eq!(made["claim"]["areas"], json!([]));
+    assert_eq!(made["claim"]["wide"]["reason"], "Upgrade the HTTP client");
+    assert_eq!(made["announced"][0]["to"], "alice");
+    let message = made["announced"][0]["message_id"].as_u64().unwrap();
+
+    let held = bob.tool("dibs_check", json!({"paths": ["src/billing/a.rs"]}));
+    assert_eq!(held.ok()["verdicts"][0]["reason"], "awaiting_ack");
+
+    let acked = alice.tool("dibs_ack", json!({"message": message}));
+    assert_eq!(acked.ok()["granted"][0]["to"], "bob");
+    assert_eq!(acked.ok()["granted"][0]["area"], "api:billing");
+    let granted = bob.tool("dibs_check", json!({"paths": ["src/billing/a.rs"]}));
+    assert_eq!(granted.ok()["verdicts"][0]["verdict"], "granted");
+
+    let overlap = alice.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#1", "wide": {"areas": ["search"], "reason": "Rename"}}),
+    );
+    assert!(
+        overlap.error().contains("wide claim of bob"),
+        "{}",
+        overlap.text
+    );
+    let blank = alice.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#1", "wide": {"areas": ["web:checkout"], "reason": " "}}),
+    );
+    assert!(
+        blank.error().starts_with("`wide.reason`: "),
+        "{}",
+        blank.error()
+    );
+}

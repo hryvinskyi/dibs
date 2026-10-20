@@ -35,3 +35,5 @@ mod threads;
 mod transport;
 #[cfg(test)]
 mod ui;
+#[cfg(test)]
+mod wide;

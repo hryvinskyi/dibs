@@ -188,6 +188,14 @@ pub struct ClaimArgs {
     /// several.
     #[arg(long = "area")]
     pub areas: Vec<String>,
+    /// Make the claim wide over these areas, comma-separated, for a change that cuts across them:
+    /// it holds none of them, and each member holding one is asked to acknowledge, which lets you
+    /// edit there. Needs `--reason`.
+    #[arg(long = "wide", value_delimiter = ',', requires = "reason")]
+    pub wide: Vec<String>,
+    /// Why the wide change is made, as the members it asks read it.
+    #[arg(long, requires = "wide")]
+    pub reason: Option<String>,
 }
 
 /// `dibs dep`.

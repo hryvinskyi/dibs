@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
-use dibs_client::api::{GrantRequest, ItemFilter, NewItem, Recipients};
+use dibs_client::api::{GrantRequest, ItemFilter, NewItem, Recipients, WideRequest};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::message::{Body, Importance, Subject};
+use dibs_domain::wide::WideReason;
 
 use crate::failure::{Failure, sentence};
 
@@ -134,6 +135,41 @@ pub struct ClaimInput {
     /// claim the item without areas.
     #[serde(default)]
     pub areas: Vec<String>,
+    /// Make the claim wide, for a change that cuts across many areas: it holds none of them, and
+    /// each member holding one is asked to acknowledge, which lets you edit there.
+    #[serde(default)]
+    pub wide: Option<WideClaimInput>,
+}
+
+/// The `wide` part of `dibs_claim`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WideClaimInput {
+    /// The areas the change touches, named like `areas`.
+    pub areas: Vec<String>,
+    /// Why the change is made, in one or two sentences the holders read: up to 300 characters.
+    pub reason: String,
+}
+
+impl ClaimInput {
+    /// The wide part of the claim as the client sends it.
+    ///
+    /// # Errors
+    /// A [`Failure`] when the reason is empty, too long or has control characters.
+    pub fn wide(&self) -> Result<Option<WideRequest>, Failure> {
+        self.wide
+            .as_ref()
+            .map(|wide| {
+                WideReason::parse(&wide.reason).map_err(|error| {
+                    invalid("wide.reason", &format!("the reason is not valid ({error})"))
+                })?;
+                Ok(WideRequest {
+                    areas: wide.areas.clone(),
+                    reason: wide.reason.clone(),
+                })
+            })
+            .transpose()
+    }
 }
 
 /// `dibs_takeover`.
@@ -471,6 +507,28 @@ mod tests {
         let misspelt = serde_json::from_value::<ClaimInput>(json!({"key": 1, "area": ["billing"]}));
         assert!(misspelt.is_err());
         assert!(serde_json::from_value::<ClaimInput>(json!({"areas": []})).is_err());
+    }
+
+    #[test]
+    fn a_wide_claim_needs_a_reason_the_holders_can_read() {
+        let wide = parse::<ClaimInput>(
+            json!({"key": 4, "wide": {"areas": ["billing", "search"], "reason": "Rename money"}}),
+        );
+        let request = wide.wide().unwrap().unwrap();
+        assert_eq!(request.areas, ["billing", "search"]);
+        assert_eq!(request.reason, "Rename money");
+        let blank =
+            parse::<ClaimInput>(json!({"key": 4, "wide": {"areas": ["billing"], "reason": " "}}));
+        assert!(blank.wide().is_err());
+        assert!(
+            parse::<ClaimInput>(json!({"key": 4}))
+                .wide()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            serde_json::from_value::<ClaimInput>(json!({"key": 4, "wide": {"areas": []}})).is_err()
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ mod store;
 pub use store::{
     AckRows, ClaimRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows,
     SessionRows, SettingsRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
-    UiSessionRows,
+    UiSessionRows, WideAskRows,
 };
 
 use time::OffsetDateTime;

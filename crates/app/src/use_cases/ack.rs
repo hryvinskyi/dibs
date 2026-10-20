@@ -4,17 +4,19 @@ use std::sync::Arc;
 
 use dibs_domain::event::{Acked, EventKind};
 use dibs_domain::handle::Handle;
+use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{MessageId, ThreadId};
 use dibs_domain::message::{Ack, AckOutcome, AckState, decide_ack};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::{AppError, Missing};
-use crate::named::Names;
-use crate::ports::{Clock, EventNotifier, Store};
+use crate::named::{NamedGrant, Names};
+use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::{MessageRecord, ThreadRecord};
 use crate::use_cases::acks::{people, reached};
 use crate::use_cases::readable::may_read_thread;
+use crate::use_cases::wide_asks::grant_by_ack;
 use crate::work::Work;
 
 /// The caller's acknowledgement of a message, with the thread of the message and the handle of the
@@ -29,16 +31,25 @@ pub struct Acknowledged {
     pub thread: ThreadId,
     /// The handle of `ack.member`, the caller.
     pub member: Handle,
+    /// The grants this acknowledgement made: for the announcement of a wide claim, one per area it
+    /// asked about that the caller still holds. Empty for any other message and for a repeat.
+    pub granted: Vec<NamedGrant>,
 }
 
 /// Records that the caller acknowledged a message. Only a message that asks for it, and only by one
 /// of its recipients — never its author. A recipient acknowledges once: asking again answers their
 /// first acknowledgement and records nothing, so a retry after a lost answer is harmless. The
 /// message itself stays as it was written.
+///
+/// Acknowledging a wide claim's announcement is the holder's grant: in the same transaction, the
+/// wide claim's member is granted edits, for the wide claim's item, in each area it asked about
+/// that the holder still holds through a live claim, while the wide claim is live.
 pub struct AckMessage {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
+    hot_rules: Arc<HotRuleRegistry>,
 }
 
 impl AckMessage {
@@ -47,7 +58,9 @@ impl AckMessage {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
+            hot_rules: deps.hot_rules.clone(),
         }
     }
 
@@ -72,6 +85,7 @@ impl AckMessage {
         let state = AckState::derive(&reached(&thread, &message, &people), &acks);
         let outcome = decide_ack(message.id, message.ack_required, &state, actor.member, now)?;
         let member = Names::load(&mut work).await?.handle(actor.member)?;
+        let mut granted = Vec::new();
         let created = match outcome {
             AckOutcome::Already(_) => false,
             AckOutcome::New(ack) => {
@@ -85,6 +99,8 @@ impl AckMessage {
                     }),
                 )
                 .await?;
+                let settings = work.project_settings(&self.hot_rules).await?;
+                granted = grant_by_ack(&mut work, &*self.ids, message.id, &settings, now).await?;
                 work.commit(&*self.notifier).await?;
                 true
             }
@@ -94,6 +110,7 @@ impl AckMessage {
             created,
             thread: thread.id,
             member,
+            granted,
         })
     }
 }

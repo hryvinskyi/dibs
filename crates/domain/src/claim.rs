@@ -11,6 +11,7 @@ use crate::ids::{ItemId, MemberId, SessionId};
 use crate::member::Role;
 use crate::session::HostName;
 use crate::settings::ProjectSettings;
+use crate::wide::{WideScope, live_wide_naming};
 
 /// A member holding a work item. The claim is the member's: `session` and `host` record where it
 /// was taken and which machine's heartbeat keeps it alive, and any session of the member acts on it.
@@ -24,8 +25,11 @@ pub struct Claim {
     pub session: SessionId,
     /// The host of that session.
     pub host: HostName,
-    /// The areas the claim declared.
+    /// The areas the claim declared, and holds while it is live.
     pub areas: BTreeSet<QualifiedArea>,
+    /// The areas a wide claim names and why; `None` for an ordinary claim. A wide claim holds none
+    /// of them: they are disjoint from `areas`.
+    pub wide: Option<WideScope>,
     /// When the member first claimed the item.
     pub claimed_at: OffsetDateTime,
     /// When the member last claimed it again; equal to `claimed_at` until then.
@@ -41,9 +45,15 @@ impl Claim {
         now - self.last_seen <= stale_after
     }
 
-    /// Whether the claim holds the area — that is, declared it.
+    /// Whether the claim holds the area — that is, declared it. The areas a wide claim names are
+    /// not held.
     pub fn holds(&self, area: &QualifiedArea) -> bool {
         self.areas.contains(area)
+    }
+
+    /// Whether the claim is wide and its scope names the area.
+    pub fn names_wide(&self, area: &QualifiedArea) -> bool {
+        self.wide.as_ref().is_some_and(|scope| scope.names(area))
     }
 
     /// The claim's member and item.
@@ -77,6 +87,9 @@ pub struct ClaimRequest {
     pub host: HostName,
     /// The areas to declare.
     pub areas: BTreeSet<QualifiedArea>,
+    /// The scope to announce the claim over, for a wide claim. A renewal adds these areas to the
+    /// scope the claim had and takes this reason; without one, the claim keeps the scope it had.
+    pub wide: Option<WideScope>,
 }
 
 /// What a successful claim did.
@@ -93,7 +106,7 @@ pub enum ClaimOutcome {
         /// The claim to store.
         claim: Claim,
         /// Areas the old claim had that it no longer gets: another member's live claim holds them
-        /// now, or the settings no longer declare them.
+        /// now, another live wide claim names them now, or the settings no longer declare them.
         dropped_areas: BTreeSet<QualifiedArea>,
     },
 }
@@ -144,13 +157,32 @@ pub enum ClaimRefused {
         /// The area.
         area: QualifiedArea,
     },
+    /// An area of the wide scope is named by another live wide claim.
+    #[error("the area {area} is already in another member's wide claim")]
+    WideOverlap {
+        /// The area.
+        area: QualifiedArea,
+        /// The member of the other wide claim.
+        member: MemberId,
+        /// Its item.
+        item: ItemId,
+    },
+    /// An area would be both held by the claim and named by its wide scope.
+    #[error("the claim cannot both hold {area} and name it in its wide scope")]
+    WideAndHeld {
+        /// The area.
+        area: QualifiedArea,
+    },
 }
 
 /// Decides a claim on an item.
 ///
 /// `current` is the item's stored claim, `others` the project's other claims (stale ones are
 /// ignored). An area belongs to one member at a time: a requested area another member's live claim
-/// holds refuses the whole claim. The same member may hold an area under several claims.
+/// holds refuses the whole claim. The same member may hold an area under several claims. A wide
+/// claim holds none of the areas its scope names, so another member's wide claim never refuses an
+/// area; but one area is named by one live wide claim at a time, and a claim never both holds and
+/// names one area.
 ///
 /// # Errors
 /// [`ClaimRefused`] naming the first conflict: the item first, then the areas in order.
@@ -165,14 +197,24 @@ pub fn decide_claim(
     match current {
         Some(existing) if existing.member == request.by => {
             check_areas(&request.areas, others, request, now, settings)?;
-            let (kept, dropped_areas) =
+            let (kept, mut dropped_areas) =
                 keep_free_areas(&existing.areas, others, request, now, settings);
             let mut areas = kept;
             areas.extend(request.areas.iter().cloned());
+            let (wide, dropped_wide) = settle_wide(
+                existing.wide.as_ref(),
+                others,
+                request,
+                &areas,
+                now,
+                settings,
+            )?;
+            dropped_areas.extend(dropped_wide);
             let claim = Claim {
                 session: request.session,
                 host: request.host.clone(),
                 areas,
+                wide,
                 renewed_at: now,
                 last_seen: now,
                 ..existing.clone()
@@ -193,8 +235,9 @@ pub fn decide_claim(
         }),
         None => {
             check_areas(&request.areas, others, request, now, settings)?;
+            let (wide, _) = settle_wide(None, others, request, &request.areas, now, settings)?;
             Ok(ClaimOutcome::New {
-                claim: new_claim(request, request.areas.clone(), now),
+                claim: new_claim(request, request.areas.clone(), wide, now),
             })
         }
     }
@@ -206,10 +249,11 @@ pub struct Takeover {
     /// The stale claim that ends.
     pub previous: Claim,
     /// The claim to store. It declares the requested areas and those of the previous claim that
-    /// nobody else holds now.
+    /// nobody else holds now, and carries on the previous claim's wide scope as far as no other
+    /// live wide claim names it now.
     pub claim: Claim,
-    /// Areas of the previous claim it does not get: another member's live claim holds them, or the
-    /// settings no longer declare them.
+    /// Areas of the previous claim it does not get: another member's live claim holds them,
+    /// another live wide claim names them, or the settings no longer declare them.
     pub dropped_areas: BTreeSet<QualifiedArea>,
 }
 
@@ -246,6 +290,22 @@ pub enum TakeoverRefused {
         /// The area.
         area: QualifiedArea,
     },
+    /// An area of the requested wide scope is named by another live wide claim.
+    #[error("the area {area} is already in another member's wide claim")]
+    WideOverlap {
+        /// The area.
+        area: QualifiedArea,
+        /// The member of the other wide claim.
+        member: MemberId,
+        /// Its item.
+        item: ItemId,
+    },
+    /// An area would be both held by the claim and named by its wide scope.
+    #[error("the claim cannot both hold {area} and name it in its wide scope")]
+    WideAndHeld {
+        /// The area.
+        area: QualifiedArea,
+    },
 }
 
 /// Decides an explicit takeover of the item's claim. Only another member's stale claim can be taken.
@@ -270,12 +330,21 @@ pub fn decide_takeover(
         });
     }
     check_areas(&request.areas, others, request, now, settings)?;
-    let (mut areas, dropped_areas) =
+    let (mut areas, mut dropped_areas) =
         keep_free_areas(&previous.areas, others, request, now, settings);
     areas.extend(request.areas.iter().cloned());
+    let (wide, dropped_wide) = settle_wide(
+        previous.wide.as_ref(),
+        others,
+        request,
+        &areas,
+        now,
+        settings,
+    )?;
+    dropped_areas.extend(dropped_wide);
     Ok(Takeover {
         previous: previous.clone(),
-        claim: new_claim(request, areas, now),
+        claim: new_claim(request, areas, wide, now),
         dropped_areas,
     })
 }
@@ -403,13 +472,19 @@ where
         .max_by_key(|claim| (claim.renewed_at, Reverse(claim.item)))
 }
 
-fn new_claim(request: &ClaimRequest, areas: BTreeSet<QualifiedArea>, now: OffsetDateTime) -> Claim {
+fn new_claim(
+    request: &ClaimRequest,
+    areas: BTreeSet<QualifiedArea>,
+    wide: Option<WideScope>,
+    now: OffsetDateTime,
+) -> Claim {
     Claim {
         item: request.item,
         member: request.by,
         session: request.session,
         host: request.host.clone(),
         areas,
+        wide,
         claimed_at: now,
         renewed_at: now,
         last_seen: now,
@@ -451,6 +526,14 @@ enum AreaConflict {
     Unknown {
         area: QualifiedArea,
     },
+    WideOverlap {
+        area: QualifiedArea,
+        member: MemberId,
+        item: ItemId,
+    },
+    WideAndHeld {
+        area: QualifiedArea,
+    },
 }
 
 impl From<AreaConflict> for ClaimRefused {
@@ -458,6 +541,10 @@ impl From<AreaConflict> for ClaimRefused {
         match conflict {
             AreaConflict::Held { area, member, item } => Self::AreaHeld { area, member, item },
             AreaConflict::Unknown { area } => Self::UnknownArea { area },
+            AreaConflict::WideOverlap { area, member, item } => {
+                Self::WideOverlap { area, member, item }
+            }
+            AreaConflict::WideAndHeld { area } => Self::WideAndHeld { area },
         }
     }
 }
@@ -467,8 +554,71 @@ impl From<AreaConflict> for TakeoverRefused {
         match conflict {
             AreaConflict::Held { area, member, item } => Self::AreaHeld { area, member, item },
             AreaConflict::Unknown { area } => Self::UnknownArea { area },
+            AreaConflict::WideOverlap { area, member, item } => {
+                Self::WideOverlap { area, member, item }
+            }
+            AreaConflict::WideAndHeld { area } => Self::WideAndHeld { area },
         }
     }
+}
+
+/// The wide scope a claim ends up with, and the inherited areas it loses.
+///
+/// The requested scope must name declared areas no other live wide claim names; an inherited
+/// scope keeps the areas that still pass and drops the rest. The two are merged, the requested
+/// reason winning. The result names no area of `held`.
+fn settle_wide(
+    inherited: Option<&WideScope>,
+    others: &[Claim],
+    request: &ClaimRequest,
+    held: &BTreeSet<QualifiedArea>,
+    now: OffsetDateTime,
+    settings: &ProjectSettings,
+) -> Result<(Option<WideScope>, BTreeSet<QualifiedArea>), AreaConflict> {
+    let stale_after = settings.stale_after();
+    let named_elsewhere = |area: &QualifiedArea| {
+        live_wide_naming(
+            area,
+            others.iter().filter(|claim| claim.item != request.item),
+            now,
+            stale_after,
+        )
+    };
+    if let Some(requested) = &request.wide {
+        for area in requested.areas() {
+            if settings.area(area).is_none() {
+                return Err(AreaConflict::Unknown { area: area.clone() });
+            }
+            if let Some(other) = named_elsewhere(area) {
+                return Err(AreaConflict::WideOverlap {
+                    area: area.clone(),
+                    member: other.member,
+                    item: other.item,
+                });
+            }
+        }
+    }
+    let (kept, dropped): (BTreeSet<QualifiedArea>, BTreeSet<QualifiedArea>) =
+        inherited
+            .map(|scope| {
+                scope.areas().iter().cloned().partition(|area| {
+                    settings.area(area).is_some() && named_elsewhere(area).is_none()
+                })
+            })
+            .unwrap_or_default();
+    let mut names = kept;
+    let reason = match (&request.wide, inherited) {
+        (Some(requested), _) => {
+            names.extend(requested.areas().iter().cloned());
+            requested.reason().clone()
+        }
+        (None, Some(scope)) => scope.reason().clone(),
+        (None, None) => return Ok((None, dropped)),
+    };
+    if let Some(area) = names.intersection(held).next() {
+        return Err(AreaConflict::WideAndHeld { area: area.clone() });
+    }
+    Ok((WideScope::new(names, reason).ok(), dropped))
 }
 
 /// Splits inherited areas into those the request may keep and those it may not.
@@ -864,6 +1014,242 @@ mod tests {
             decide_force_release(None, Role::Admin),
             Err(ForceReleaseRefused::NoClaim)
         );
+    }
+
+    fn scope(named: &[&str], why: &str) -> WideScope {
+        WideScope::new(areas(named), crate::wide::WideReason::parse(why).unwrap()).unwrap()
+    }
+
+    fn wide_request(item: u64, by: MemberId, held: &[&str], named: &[&str]) -> ClaimRequest {
+        ClaimRequest {
+            wide: Some(scope(named, "Upgrade the HTTP client")),
+            ..request(item, by, held)
+        }
+    }
+
+    fn wide_claim(item: u64, member: MemberId, named: &[&str], minutes: i64) -> Claim {
+        Claim {
+            wide: Some(scope(named, "Upgrade the HTTP client")),
+            ..claim(item, member, &[], minutes)
+        }
+    }
+
+    #[test]
+    fn a_wide_claim_over_held_areas_holds_none_of_them() {
+        let settings = two_repo_settings();
+        let others = [claim(2, BOB, &["api:billing"], 0)];
+        let outcome = decide_claim(
+            None,
+            &others,
+            &wide_request(1, ALICE, &[], &["api:billing", "api:search"]),
+            at(1),
+            &settings,
+        )
+        .unwrap();
+        let made = outcome.claim();
+        assert!(made.areas.is_empty());
+        assert!(made.names_wide(&area("api:billing")));
+        assert!(!made.holds(&area("api:billing")));
+        assert!(!made.holds(&area("api:search")));
+    }
+
+    #[test]
+    fn nobody_is_refused_an_area_a_wide_claim_names() {
+        let settings = two_repo_settings();
+        let others = [wide_claim(1, ALICE, &["api:search"], 0)];
+        let outcome = decide_claim(
+            None,
+            &others,
+            &request(2, BOB, &["api:search"]),
+            at(1),
+            &settings,
+        );
+        assert!(
+            matches!(outcome, Ok(ClaimOutcome::New { .. })),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn two_live_wide_claims_never_name_one_area() {
+        let settings = two_repo_settings();
+        let others = [wide_claim(1, ALICE, &["api:billing"], 0)];
+        assert_eq!(
+            decide_claim(
+                None,
+                &others,
+                &wide_request(2, BOB, &[], &["api:search", "api:billing"]),
+                at(1),
+                &settings,
+            ),
+            Err(ClaimRefused::WideOverlap {
+                area: area("api:billing"),
+                member: ALICE,
+                item: ItemId(1),
+            })
+        );
+        let mine = [wide_claim(1, BOB, &["api:billing"], 0)];
+        assert!(
+            matches!(
+                decide_claim(
+                    None,
+                    &mine,
+                    &wide_request(2, BOB, &[], &["api:billing"]),
+                    at(1),
+                    &settings,
+                ),
+                Err(ClaimRefused::WideOverlap { .. })
+            ),
+            "not even two of one member's"
+        );
+        let late = at(0) + settings.stale_after() + Duration::minutes(1);
+        assert!(
+            decide_claim(
+                None,
+                &others,
+                &wide_request(2, BOB, &[], &["api:billing"]),
+                late,
+                &settings,
+            )
+            .is_ok(),
+            "a stale wide claim names nothing"
+        );
+    }
+
+    #[test]
+    fn a_wide_scope_names_declared_areas_the_claim_does_not_hold() {
+        let settings = two_repo_settings();
+        assert_eq!(
+            decide_claim(
+                None,
+                &[],
+                &wide_request(1, ALICE, &[], &["web:search"]),
+                at(1),
+                &settings,
+            ),
+            Err(ClaimRefused::UnknownArea {
+                area: area("web:search")
+            })
+        );
+        assert_eq!(
+            decide_claim(
+                None,
+                &[],
+                &wide_request(1, ALICE, &["api:billing"], &["api:billing", "api:search"]),
+                at(1),
+                &settings,
+            ),
+            Err(ClaimRefused::WideAndHeld {
+                area: area("api:billing")
+            })
+        );
+        let current = claim(1, ALICE, &["api:billing"], 0);
+        assert_eq!(
+            decide_claim(
+                Some(&current),
+                &[],
+                &wide_request(1, ALICE, &[], &["api:billing"]),
+                at(1),
+                &settings,
+            ),
+            Err(ClaimRefused::WideAndHeld {
+                area: area("api:billing")
+            }),
+            "a renewal cannot name an area the claim already holds"
+        );
+    }
+
+    #[test]
+    fn a_renewal_widens_the_scope_takes_the_new_reason_and_keeps_it_when_asked_nothing() {
+        let settings = two_repo_settings();
+        let current = wide_claim(1, ALICE, &["api:billing"], 0);
+        let widened = decide_claim(
+            Some(&current),
+            &[],
+            &ClaimRequest {
+                wide: Some(scope(&["api:search"], "Rename the money type")),
+                ..request(1, ALICE, &[])
+            },
+            at(1),
+            &settings,
+        )
+        .unwrap();
+        let scope_now = widened.claim().wide.clone().unwrap();
+        assert_eq!(scope_now.areas(), &areas(&["api:billing", "api:search"]));
+        assert_eq!(scope_now.reason().as_str(), "Rename the money type");
+        let kept = decide_claim(
+            Some(widened.claim()),
+            &[],
+            &request(1, ALICE, &["web:checkout"]),
+            at(2),
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(kept.claim().wide, Some(scope_now));
+        assert_eq!(kept.claim().areas, areas(&["web:checkout"]));
+    }
+
+    #[test]
+    fn a_renewal_drops_a_scope_area_another_wide_claim_took_while_it_was_stale() {
+        let settings = two_repo_settings();
+        let current = wide_claim(1, ALICE, &["api:billing", "api:search"], 0);
+        let late = at(0) + settings.stale_after() + Duration::hours(1);
+        let others = [wide_claim(2, BOB, &["api:billing"], 60 * 25)];
+        let outcome = decide_claim(
+            Some(&current),
+            &others,
+            &request(1, ALICE, &[]),
+            late,
+            &settings,
+        )
+        .unwrap();
+        let ClaimOutcome::Renewed {
+            claim,
+            dropped_areas,
+        } = outcome
+        else {
+            panic!("expected a renewal");
+        };
+        assert_eq!(
+            claim.wide.map(|scope| scope.areas().clone()),
+            Some(areas(&["api:search"]))
+        );
+        assert_eq!(dropped_areas, areas(&["api:billing"]));
+    }
+
+    #[test]
+    fn a_takeover_carries_the_wide_scope_on() {
+        let settings = two_repo_settings();
+        let late = at(0) + settings.stale_after() + Duration::minutes(1);
+        let stale = wide_claim(1, BOB, &["api:billing", "web:checkout"], 0);
+        let taken =
+            decide_takeover(Some(&stale), &[], &request(1, ALICE, &[]), late, &settings).unwrap();
+        assert_eq!(taken.claim.member, ALICE);
+        assert_eq!(taken.claim.wide, stale.wide);
+        let others = [wide_claim(2, CAROL, &["web:checkout"], 60 * 24)];
+        let partly = decide_takeover(
+            Some(&stale),
+            &others,
+            &request(1, ALICE, &[]),
+            late,
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(
+            partly.claim.wide.map(|scope| scope.areas().clone()),
+            Some(areas(&["api:billing"]))
+        );
+        assert_eq!(partly.dropped_areas, areas(&["web:checkout"]));
+        assert!(matches!(
+            decide_takeover(
+                Some(&stale),
+                &others,
+                &wide_request(1, ALICE, &[], &["web:checkout"]),
+                late,
+                &settings
+            ),
+            Err(TakeoverRefused::WideOverlap { .. })
+        ));
     }
 
     #[test]
