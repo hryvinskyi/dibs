@@ -7,6 +7,7 @@ use time::{Duration, OffsetDateTime};
 
 use dibs_domain::delivery::DeliverySubject;
 use dibs_domain::ids::MessageId;
+use dibs_domain::message::speaks_for;
 use dibs_domain::wide::ask_stands;
 
 use dibs_domain::hot_rule::HotRuleRegistry;
@@ -16,7 +17,7 @@ use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{NamedMessage, NamedSummary, NamedThread, Names};
-use crate::ports::{Clock, EventNotifier, Store};
+use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::{MessageRecord, ThreadRecord, ThreadSummary};
 use crate::use_cases::acks::{awaiting, awaiting_per_thread, people, reached};
 use crate::use_cases::readable::readable_summaries;
@@ -85,6 +86,7 @@ pub struct PendingOffer {
 pub struct Inbox {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
 }
@@ -95,6 +97,7 @@ impl Inbox {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
         }
@@ -107,9 +110,9 @@ impl Inbox {
     pub async fn execute(&self, actor: &Actor, query: InboxQuery) -> Result<InboxView, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
-        scene.save(&mut work, now).await?;
+        scene.save(&mut work, &*self.ids, now).await?;
         let offers = scene
             .board
             .offers
@@ -182,7 +185,7 @@ async fn deliverable(
     {
         for message in work.messages(project, summary.thread.id).await? {
             let pressing = message.importance.is_raised()
-                && message.author != actor.member
+                && speaks_for(summary.thread.author, message.author) != Some(actor.member)
                 && recent(&message)
                 && !found.contains_key(&message.id)
                 && reached(&summary.thread, &message, &people).contains(&actor.member);

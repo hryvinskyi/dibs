@@ -16,6 +16,7 @@ pub mod hold;
 pub mod http;
 pub mod rate_limit;
 pub mod restore;
+pub mod retention;
 pub mod routes;
 pub mod serve;
 pub mod snapshot;

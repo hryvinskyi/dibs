@@ -5,7 +5,7 @@ use std::sync::Arc;
 use dibs_domain::event::{EventKind, MessagePosted};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{MessageId, ThreadId};
-use dibs_domain::message::{Body, Importance, SessionLabel};
+use dibs_domain::message::{Author, Body, Importance, SessionLabel};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -14,7 +14,7 @@ use crate::named::{NamedMessage, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::MessageRecord;
 use crate::use_cases::readable::readable_thread;
-use crate::use_cases::writing::{Authorship, write_message};
+use crate::use_cases::writing::write_message;
 use crate::work::Work;
 
 /// The message to post.
@@ -67,12 +67,12 @@ impl PostMessage {
     ) -> Result<NamedMessage, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let thread = readable_thread(&mut work, actor, input.thread).await?;
         let message = MessageRecord {
             id: MessageId(self.ids.next()),
             thread: thread.id,
-            author: actor.member,
+            author: Author::Member(actor.member),
             label: input.label,
             body: input.body,
             importance: input.importance,
@@ -83,13 +83,13 @@ impl PostMessage {
             .project_settings(&self.hot_rules)
             .await?
             .raised_per_hour();
-        write_message(&mut work, &message, Authorship::Member { limit }, now).await?;
+        write_message(&mut work, &message, limit, now).await?;
         work.record(
             now,
             EventKind::MessagePosted(MessagePosted {
                 thread: thread.id,
                 message: message.id,
-                author: actor.member,
+                author: Some(actor.member),
             }),
         )
         .await?;
@@ -166,7 +166,7 @@ mod tests {
             [EventKind::MessagePosted(MessagePosted {
                 thread: started.thread.record.id,
                 message: reply.record.id,
-                author: env.bob.actor.member,
+                author: Some(env.bob.actor.member),
             })]
         );
         assert_eq!(reply.author.as_str(), "bob");

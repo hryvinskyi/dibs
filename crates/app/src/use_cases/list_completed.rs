@@ -57,7 +57,7 @@ impl ListCompleted {
         since: OffsetDateTime,
     ) -> Result<Vec<CompletedItem>, AppError> {
         let project = actor.project;
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let completions = work
             .completions_since(project, since, MAX_COMPLETED)
             .await?;

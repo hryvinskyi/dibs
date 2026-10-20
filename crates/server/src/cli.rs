@@ -51,6 +51,9 @@ pub enum AdminCommand {
     /// Manage members' tokens.
     #[command(subcommand)]
     Token(TokenCommand),
+    /// Delete a conversation at once.
+    #[command(subcommand)]
+    Thread(ThreadCommand),
     /// Write one snapshot into DIBS_SNAPSHOT_DIR now and delete those past DIBS_SNAPSHOT_KEEP.
     Snapshot,
 }
@@ -77,6 +80,38 @@ pub struct InitArgs {
 pub enum MemberCommand {
     /// Add a member to a project and print their first token, once.
     Add(MemberAddArgs),
+    /// Remove a member from a project: revoke their tokens, end their browser sessions, release
+    /// their claims and slots and take them out of slot queues. Their messages stay.
+    Remove(MemberRemoveArgs),
+}
+
+/// `dibs-server admin member remove`.
+#[derive(Debug, Args)]
+pub struct MemberRemoveArgs {
+    /// The project's slug.
+    #[arg(long, value_parser = ProjectSlug::parse)]
+    pub project: ProjectSlug,
+    /// Their handle.
+    #[arg(value_parser = Handle::parse)]
+    pub handle: Handle,
+}
+
+/// `dibs-server admin thread`.
+#[derive(Debug, Subcommand)]
+pub enum ThreadCommand {
+    /// Delete a conversation and every message in it; the log keeps only that it was deleted.
+    Delete(ThreadDeleteArgs),
+}
+
+/// `dibs-server admin thread delete`.
+#[derive(Debug, Args)]
+pub struct ThreadDeleteArgs {
+    /// The project's slug.
+    #[arg(long, value_parser = ProjectSlug::parse)]
+    pub project: ProjectSlug,
+    /// The conversation's id.
+    #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+    pub thread: u64,
 }
 
 /// `dibs-server admin member add`.
@@ -91,8 +126,8 @@ pub struct MemberAddArgs {
     /// The name shown for them.
     #[arg(long, value_parser = DisplayName::parse)]
     pub name: DisplayName,
-    /// Their login in the outside tracker.
-    #[arg(long, value_parser = ExternalLogin::parse)]
+    /// Their login in the outside tracker, such as their GitHub login.
+    #[arg(long, visible_alias = "github", value_parser = ExternalLogin::parse)]
     pub login: Option<ExternalLogin>,
     /// Their role.
     #[arg(long, value_enum, default_value = "member")]
@@ -242,6 +277,82 @@ mod tests {
         assert_eq!(role(&["--role", "admin"]), Role::Admin);
         assert!(add(&["--role", "owner"]).is_err());
         assert!(add(&["--admin"]).is_err());
+    }
+
+    #[test]
+    fn a_member_is_removed_and_a_thread_deleted_by_name_and_id() {
+        let cli = Cli::try_parse_from([
+            "dibs-server",
+            "admin",
+            "member",
+            "remove",
+            "bob",
+            "--project",
+            "widgets",
+        ])
+        .unwrap();
+        let Some(Command::Admin(AdminCommand::Member(MemberCommand::Remove(args)))) = cli.command
+        else {
+            panic!("not a member remove");
+        };
+        assert_eq!(args.handle.as_str(), "bob");
+        assert!(
+            Cli::try_parse_from(["dibs-server", "admin", "member", "remove", "bob"]).is_err(),
+            "the project is named"
+        );
+        let cli = Cli::try_parse_from([
+            "dibs-server",
+            "admin",
+            "thread",
+            "delete",
+            "31",
+            "--project",
+            "widgets",
+        ])
+        .unwrap();
+        let Some(Command::Admin(AdminCommand::Thread(ThreadCommand::Delete(args)))) = cli.command
+        else {
+            panic!("not a thread delete");
+        };
+        assert_eq!(args.thread, 31);
+        assert!(
+            Cli::try_parse_from([
+                "dibs-server",
+                "admin",
+                "thread",
+                "delete",
+                "0",
+                "--project",
+                "widgets"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_members_github_login_is_their_outside_login() {
+        let cli = Cli::try_parse_from([
+            "dibs-server",
+            "admin",
+            "member",
+            "add",
+            "bob",
+            "--project",
+            "widgets",
+            "--name",
+            "Bob",
+            "--github",
+            "bob-gh",
+        ])
+        .unwrap();
+        let Some(Command::Admin(AdminCommand::Member(MemberCommand::Add(args)))) = cli.command
+        else {
+            panic!("not a member add");
+        };
+        assert_eq!(
+            args.login.map(|login| login.to_string()).as_deref(),
+            Some("bob-gh")
+        );
     }
 
     #[test]

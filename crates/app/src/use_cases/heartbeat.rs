@@ -51,7 +51,7 @@ impl Heartbeat {
     ) -> Result<HeartbeatOutcome, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let mut session = own_session(&mut work, actor, session).await?;
         let stale_after = work.project_settings(&self.hot_rules).await?.stale_after();
         session.last_seen = now;

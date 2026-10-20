@@ -9,6 +9,7 @@
 
 mod command;
 mod decide;
+mod notice;
 mod spec;
 mod state;
 mod verdict;
@@ -18,10 +19,11 @@ mod tests;
 
 pub use command::{MAX_COMMAND_BYTES, SimpleCommand, split_commands};
 pub use decide::{
-    BeatRefused, SlotRefused, TakeAnswer, TakeRequest, Transition, decide_force_release,
-    decide_leave, decide_release, decide_run_beat, decide_run_finished, decide_slots_removed,
-    decide_stall_takeover, decide_take, decide_tick,
+    BeatRefused, RemovedFromSlots, SlotRefused, TakeAnswer, TakeRequest, Transition,
+    decide_force_release, decide_leave, decide_member_removed, decide_release, decide_run_beat,
+    decide_run_finished, decide_slots_removed, decide_stall_takeover, decide_take, decide_tick,
 };
+pub use notice::{SlotNotice, SlotNoticeKind, notices_owed};
 pub use spec::{
     CommandPattern, DEFAULT_MAX_WAIT, DEFAULT_OFFER_FOR, GroupKey, MAX_HOLD_RANGE,
     MAX_PATTERN_CHARS, MAX_PATTERNS, PATTERN_SIZE_LIMIT, PatternError, Purpose, PurposeError,

@@ -213,6 +213,11 @@ export function mount(root) {
         end();
       }
     },
+    onResync: () => {
+      if (!ended) {
+        refreshes.request();
+      }
+    },
   });
 
   return () => {

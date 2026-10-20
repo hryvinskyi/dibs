@@ -15,12 +15,13 @@ use tracing::level_filters::LevelFilter;
 use dibs_app::token::SecretToken;
 use dibs_app::use_cases::{CreateMemberInput, InitProjectInput, NewMember, UseCases};
 use dibs_app::{AppError, Operator};
+use dibs_domain::ids::ThreadId;
 use dibs_domain::member::Role;
 use dibs_domain::project::ProjectSlug;
 use dibs_store_sqlite::SqliteStore;
 
 use crate::adapters::{BroadcastNotifier, SystemClock};
-use crate::cli::{AdminCommand, Cli, Command, MemberCommand, TokenCommand};
+use crate::cli::{AdminCommand, Cli, Command, MemberCommand, ThreadCommand, TokenCommand};
 use crate::config::Config;
 use crate::hold::{DatabaseHold, HoldError};
 use crate::restore::restore;
@@ -179,6 +180,37 @@ async fn admin_on(
                     created.member.handle, args.project
                 ),
                 &created.token,
+            );
+        }
+        AdminCommand::Member(MemberCommand::Remove(args)) => {
+            let operator = operator(&app, &args.project).await?;
+            let removed = app
+                .remove_member
+                .execute(&operator, &args.handle)
+                .await
+                .map_err(refused)?;
+            println!(
+                "Removed '{}' from the project '{}': {} token(s) revoked, {} browser session(s) ended, {} claim(s) released, {} slot hold(s) ended, {} queue place(s) and {} offer(s) given up. Their messages stay.",
+                removed.member.handle,
+                args.project,
+                removed.tokens_revoked,
+                removed.ui_sessions_ended,
+                removed.released.len(),
+                removed.slots.held.len(),
+                removed.slots.waited.len(),
+                removed.slots.offered.len()
+            );
+        }
+        AdminCommand::Thread(ThreadCommand::Delete(args)) => {
+            let operator = operator(&app, &args.project).await?;
+            let deleted = app
+                .delete_thread
+                .execute(&operator, ThreadId(args.thread))
+                .await
+                .map_err(refused)?;
+            println!(
+                "Deleted conversation {} of the project '{}' with its {} message(s).",
+                deleted.thread, args.project, deleted.messages
             );
         }
         AdminCommand::Token(TokenCommand::Rotate(args)) => {

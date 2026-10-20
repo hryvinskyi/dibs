@@ -1,6 +1,6 @@
 //! Who may administer a project: an admin a token authenticated, or the operator of the service.
 
-use dibs_domain::ids::ProjectId;
+use dibs_domain::ids::{MemberId, ProjectId};
 
 use crate::actor::Actor;
 use crate::error::AppError;
@@ -12,6 +12,10 @@ pub trait AdminAuthority: Send + Sync {
     /// # Errors
     /// [`AppError::Forbidden`] when the holder may not administer it.
     fn administered_project(&self) -> Result<ProjectId, AppError>;
+
+    /// The admin acting, as the records name them; `None` for the operator of the service, who is
+    /// no member.
+    fn acting_member(&self) -> Option<MemberId>;
 }
 
 impl AdminAuthority for Actor {
@@ -19,6 +23,10 @@ impl AdminAuthority for Actor {
     fn administered_project(&self) -> Result<ProjectId, AppError> {
         self.require_admin()?;
         Ok(self.project)
+    }
+
+    fn acting_member(&self) -> Option<MemberId> {
+        Some(self.member)
     }
 }
 
@@ -47,11 +55,14 @@ impl AdminAuthority for Operator {
     fn administered_project(&self) -> Result<ProjectId, AppError> {
         Ok(self.project)
     }
+
+    fn acting_member(&self) -> Option<MemberId> {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use dibs_domain::ids::MemberId;
     use dibs_domain::member::Role;
 
     use super::*;
@@ -87,5 +98,7 @@ mod tests {
         let operator = Operator::of(ProjectId(9));
         assert_eq!(operator.project(), ProjectId(9));
         assert_eq!(operator.administered_project().unwrap(), ProjectId(9));
+        assert_eq!(operator.acting_member(), None, "the operator is no member");
+        assert_eq!(actor(Role::Admin).acting_member(), Some(MemberId(2)));
     }
 }

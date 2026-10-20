@@ -56,7 +56,7 @@ impl RegisterSession {
     ) -> Result<SessionRecord, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let known = work
             .session_by_label(actor.project, actor.member, &input.label)
             .await?;

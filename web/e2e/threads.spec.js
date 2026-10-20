@@ -2,10 +2,18 @@
 /**
  * The conversations pages in a real browser: sign in with a token, open a conversation, reply
  * through the form, see a message posted through the API appear without a reload, acknowledge a
- * message that asks for it, and see a recipient's acknowledgement arrive without a reload.
+ * message that asks for it, see a recipient's acknowledgement arrive without a reload, and read what
+ * dibs wrote as from dibs.
  */
 
-import { ackMessage, postMessage, startThread } from './dibs-api.js';
+import {
+  ackMessage,
+  applySettings,
+  escalateItem,
+  importItems,
+  postMessage,
+  startThread,
+} from './dibs-api.js';
 import { watchPolicy } from './csp-watch.js';
 import { expect, test } from './fixtures.js';
 import { signIn } from './sign-in.js';
@@ -111,6 +119,43 @@ test("the author sees a recipient's acknowledgement arrive in the list without a
   await expect(acks.locator('.ack__wait')).toHaveCount(0);
   await expect(acks.locator('.ack__done time')).toHaveAttribute('datetime', /^\d{4}-\d{2}-\d{2}T/);
   await expect(page.locator('body')).toHaveAttribute('data-e2e-marker', 'same-document');
+});
+
+test('an escalation reads from dibs on its page and leaves the board once the arbiter acknowledges it', async ({
+  page,
+  dibs,
+}) => {
+  await applySettings(dibs.url, dibs.adminToken, { arbiters: ['bob'] });
+  const reference = `gh:acme/widgets#${Date.now() % 100000}`;
+  const [itemId] = await importItems(dibs.url, dibs.adminToken, [{ ref: reference, title: 'Shared rates' }]);
+  if (itemId === undefined) {
+    throw new Error('the import created no item');
+  }
+  const { threadId, messageId } = await escalateItem(
+    dibs.url,
+    dibs.adminToken,
+    itemId,
+    'Two agents keep undoing each other in the rate table.',
+  );
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/board`);
+  const banner = page.locator('[data-escalation]');
+  await expect(banner).toContainText(`Escalated by alice: work item ${reference}`);
+  await banner.getByRole('link', { name: 'Open the conversation' }).click();
+  await expect(page).toHaveURL(`${dibs.url}/ui/threads/${threadId}`);
+
+  const notice = page.locator(`#m-${messageId}`);
+  await expect(notice).toHaveClass(/msg--system/);
+  await expect(notice.locator('.msg__author')).toHaveText('from dibs');
+  await expect(notice.locator('.msg__session')).toHaveCount(0);
+  await expect(notice.locator('.msg__body')).toContainText('alice asks the arbiters of this project (bob)');
+  await expect(notice.getByText('Urgent')).toBeVisible();
+  await notice.getByRole('button', { name: 'Acknowledge' }).click();
+  await expect(page.locator(`#m-${messageId}`).locator('.ack__done')).toContainText('bob (you)');
+
+  await page.goto(`${dibs.url}/ui/board`);
+  await expect(page.locator('[data-escalation]')).toHaveCount(0);
 });
 
 test('a token the server does not know is refused on the login page', async ({ page, dibs }) => {

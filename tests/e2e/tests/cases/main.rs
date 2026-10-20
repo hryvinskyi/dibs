@@ -2,7 +2,8 @@
 //! guard's hooks, the checkouts of a project over several repositories, an integration's import
 //! feeding the ready list, a message acknowledged by its recipient, a wide claim whose edits wait
 //! for the acknowledgement of the area's holder, slots taken by racing members and handed to the
-//! one waiting, and a shell command refused while another member holds the slot it needs.
+//! one waiting, a shell command refused while another member holds the slot it needs, and a member
+//! removed while they held a claim and a slot.
 
 #[cfg(test)]
 mod harness;
@@ -11,6 +12,8 @@ mod harness;
 mod acks;
 #[cfg(test)]
 mod hooks;
+#[cfg(test)]
+mod people;
 #[cfg(test)]
 mod race;
 #[cfg(test)]

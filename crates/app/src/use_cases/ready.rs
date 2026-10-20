@@ -103,7 +103,7 @@ impl Ready {
     /// [`AppError::Store`] when the store fails.
     pub async fn execute(&self, actor: &Actor) -> Result<ReadyView, AppError> {
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let settings = work.project_settings(&self.hot_rules).await?;
         let names = Names::load(&mut work).await?;
         let view = ReadyScope {

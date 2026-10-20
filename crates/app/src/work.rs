@@ -7,9 +7,11 @@ use time::OffsetDateTime;
 
 use dibs_domain::event::EventKind;
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::{EventId, ProjectId};
+use dibs_domain::ids::{EventId, MemberId, ProjectId};
 use dibs_domain::settings::ProjectSettings;
 
+use crate::actor::Actor;
+use crate::authority::AdminAuthority;
 use crate::error::AppError;
 use crate::ports::{EventNotifier, Store, Tx};
 
@@ -21,13 +23,65 @@ pub(crate) struct Work {
 }
 
 impl Work {
-    /// Opens a transaction for the project.
-    pub(crate) async fn begin(store: &dyn Store, project: ProjectId) -> Result<Self, AppError> {
-        Ok(Self {
+    /// Opens a transaction for a member's request, in their project. A member removed since their
+    /// request was signed in is refused as signed out: whatever they ask is decided in the same
+    /// order as their removal, before it or not at all, so nothing is ever done in a removed
+    /// member's name.
+    ///
+    /// # Errors
+    /// [`AppError::Unauthorized`] when the member is no longer in the project;
+    /// [`AppError::Store`] when the store fails.
+    pub(crate) async fn begin_for(store: &dyn Store, actor: &Actor) -> Result<Self, AppError> {
+        Self::begin_present(store, actor.project, Some(actor.member)).await
+    }
+
+    /// Opens a transaction for whoever administers a project: an admin, who must still be in it
+    /// as [`Work::begin_for`] requires, or the operator of the service.
+    ///
+    /// # Errors
+    /// [`AppError::Forbidden`] unless `by` may administer a project; [`AppError::Unauthorized`]
+    /// when the admin is no longer in it; [`AppError::Store`] when the store fails.
+    pub(crate) async fn begin_administering(
+        store: &dyn Store,
+        by: &impl AdminAuthority,
+    ) -> Result<Self, AppError> {
+        let project = by.administered_project()?;
+        Self::begin_present(store, project, by.acting_member()).await
+    }
+
+    /// Opens a transaction the service starts for nobody: creating a project, a sweep, the
+    /// retention.
+    ///
+    /// # Errors
+    /// [`AppError::Store`] when the store fails.
+    pub(crate) async fn begin_unattended(
+        store: &dyn Store,
+        project: ProjectId,
+    ) -> Result<Self, AppError> {
+        Self::begin_present(store, project, None).await
+    }
+
+    async fn begin_present(
+        store: &dyn Store,
+        project: ProjectId,
+        member: Option<MemberId>,
+    ) -> Result<Self, AppError> {
+        let mut work = Self {
             tx: store.begin().await?,
             project,
             last_event: None,
-        })
+        };
+        if let Some(member) = member {
+            let present = work
+                .tx
+                .member(project, member)
+                .await?
+                .is_some_and(|record| record.is_present());
+            if !present {
+                return Err(AppError::Unauthorized);
+            }
+        }
+        Ok(work)
     }
 
     /// Scopes a transaction opened before its project was known (while authenticating) to that

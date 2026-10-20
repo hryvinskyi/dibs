@@ -100,6 +100,116 @@ fn members_are_added_and_tokens_rotated_while_the_server_runs() {
 }
 
 #[test]
+fn the_operator_removes_a_member_and_deletes_a_thread_while_the_server_runs() {
+    let place = Place::new();
+    let alice = init(&place.database());
+    let server = Server::spawn(&place.database(), &[]);
+    let added = run(
+        &place.database(),
+        &[
+            "admin",
+            "member",
+            "add",
+            "--project",
+            "widgets",
+            "carol",
+            "--name",
+            "Carol",
+            "--github",
+            "carol-gh",
+        ],
+        &[],
+    );
+    assert_eq!(added.code, Some(0), "{added:?}");
+    let carol = token_of(&added);
+    let (status, answer) = request(server.address, "GET", "/v1/me", &carol, None);
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        body_of(&answer)["member"]["external_login"],
+        "carol-gh",
+        "{answer}"
+    );
+    let (status, answer) = request(
+        server.address,
+        "POST",
+        "/v1/threads",
+        &carol,
+        Some(
+            r#"{"subject": "Rates", "to": ["alice"], "label": "web", "body": "Where is the table?"}"#,
+        ),
+    );
+    assert_eq!(status, 201, "{answer}");
+    let thread = body_of(&answer)["thread"]["id"].as_u64().unwrap();
+
+    let removed = run(
+        &place.database(),
+        &["admin", "member", "remove", "--project", "widgets", "carol"],
+        &[],
+    );
+    assert_eq!(removed.code, Some(0), "{removed:?}");
+    assert!(
+        removed
+            .stdout
+            .starts_with("Removed 'carol' from the project 'widgets': 1 token(s) revoked"),
+        "{removed:?}"
+    );
+    let (status, _) = request(server.address, "GET", "/v1/me", &carol, None);
+    assert_eq!(status, 401, "her token no longer works");
+    let (status, answer) = request(server.address, "GET", "/v1/members", &alice, None);
+    assert_eq!(status, 200, "{answer}");
+    assert!(!answer.contains("\"carol\""), "{answer}");
+    let (status, answer) = request(
+        server.address,
+        "GET",
+        &format!("/v1/threads/{thread}"),
+        &alice,
+        None,
+    );
+    assert_eq!(status, 200, "{answer}");
+    assert_eq!(
+        body_of(&answer)["messages"][0]["author"],
+        "carol",
+        "her messages stay: {answer}"
+    );
+    let again = run(
+        &place.database(),
+        &["admin", "member", "remove", "--project", "widgets", "carol"],
+        &[],
+    );
+    assert_eq!(again.code, Some(1), "{again:?}");
+    assert!(
+        again.stderr.contains("there is no member 'carol'"),
+        "{again:?}"
+    );
+
+    let deleted = run(
+        &place.database(),
+        &[
+            "admin",
+            "thread",
+            "delete",
+            "--project",
+            "widgets",
+            &thread.to_string(),
+        ],
+        &[],
+    );
+    assert_eq!(deleted.code, Some(0), "{deleted:?}");
+    assert!(
+        deleted.stdout.contains("with its 1 message(s)"),
+        "{deleted:?}"
+    );
+    let (status, _) = request(
+        server.address,
+        "GET",
+        &format!("/v1/threads/{thread}"),
+        &alice,
+        None,
+    );
+    assert_eq!(status, 404);
+}
+
+#[test]
 fn an_unknown_project_or_member_or_a_taken_handle_is_refused() {
     let place = Place::new();
     init(&place.database());

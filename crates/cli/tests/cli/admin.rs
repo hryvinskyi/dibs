@@ -105,3 +105,143 @@ fn an_admin_force_releases_a_claim() {
     assert_eq!(status(&out), 0);
     assert!(text(&out.stdout).contains("Force-released"));
 }
+
+#[test]
+fn an_admin_removes_a_member_and_deletes_a_conversation_from_the_command_line() {
+    let setup = Setup::new();
+    let dir = setup.elsewhere();
+    let added = setup
+        .dibs(&setup.alice, &dir)
+        .args([
+            "admin", "member", "add", "carol", "--name", "Carol", "--github", "carol-gh", "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&added), 0, "{}", text(&added.stderr));
+    assert_eq!(json(&added)["member"]["external_login"], "carol-gh");
+    let token = json(&added)["token"].as_str().unwrap().to_owned();
+    assert_eq!(status(&setup.login_as("carol", &token)), 0);
+    let sent = setup
+        .dibs_as("carol", &dir)
+        .args([
+            "send",
+            "--to",
+            "alice",
+            "--subject",
+            "Rates",
+            "Where is the table?",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&sent), 0, "{}", text(&sent.stderr));
+    let thread = json(&sent)["thread"]["id"].as_u64().unwrap().to_string();
+
+    let removed = setup
+        .dibs(&setup.alice, &dir)
+        .args(["admin", "member", "remove", "carol"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&removed), 0, "{}", text(&removed.stderr));
+    assert!(
+        text(&removed.stdout).starts_with("Removed carol from the project: 1 token(s) revoked"),
+        "{}",
+        text(&removed.stdout)
+    );
+    let gone = setup.dibs_as("carol", &dir).arg("whoami").output().unwrap();
+    assert_eq!(status(&gone), 2, "her token no longer signs in");
+    let refused = setup
+        .dibs(&setup.bob, &dir)
+        .args(["admin", "member", "remove", "alice"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&refused), 1);
+
+    let read = setup
+        .dibs(&setup.alice, &dir)
+        .args(["thread", &thread])
+        .output()
+        .unwrap();
+    assert!(text(&read.stdout).contains("carol ("), "her messages stay");
+    let deleted = setup
+        .dibs(&setup.alice, &dir)
+        .args(["admin", "thread", "delete", &thread])
+        .output()
+        .unwrap();
+    assert_eq!(status(&deleted), 0, "{}", text(&deleted.stderr));
+    assert!(text(&deleted.stdout).contains("with its 1 message(s)"));
+    let missing = setup
+        .dibs(&setup.alice, &dir)
+        .args(["thread", &thread])
+        .output()
+        .unwrap();
+    assert_eq!(status(&missing), 1);
+}
+
+#[test]
+fn a_member_escalates_from_the_command_line_and_the_arbiter_reads_it_from_dibs() {
+    let setup = Setup::new();
+    let dir = setup.elsewhere();
+    let mut settings = dibs_test_server::two_repositories();
+    settings["arbiters"] = serde_json::json!(["alice"]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    let created = setup
+        .dibs(&setup.bob, &dir)
+        .args(["new", "gh:acme/api#77", "--title", "Rates", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&created), 0, "{}", text(&created.stderr));
+
+    let none = setup
+        .dibs(&setup.bob, &dir)
+        .args(["escalate", "--reason", "who goes first?"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&none), 2, "a subject is required");
+    let sent = setup
+        .dibs(&setup.bob, &dir)
+        .args([
+            "escalate",
+            "gh:acme/api#77",
+            "--reason",
+            "alice's agent and mine both need the rate table",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(status(&sent), 0, "{}", text(&sent.stderr));
+    let said = text(&sent.stdout);
+    assert!(said.starts_with("Escalated in conversation #"), "{said}");
+    assert!(said.contains("(arbiters: alice)"), "{said}");
+
+    let board = setup
+        .dibs(&setup.alice, &dir)
+        .arg("status")
+        .output()
+        .unwrap();
+    let shown = text(&board.stdout);
+    assert!(
+        shown.contains("Escalated by bob: work item gh:acme/api#77 \"Rates\" — waiting for alice"),
+        "{shown}"
+    );
+    let inbox = setup
+        .dibs(&setup.alice, &dir)
+        .args(["inbox", "--unacked"])
+        .output()
+        .unwrap();
+    assert!(
+        text(&inbox.stdout).contains("from dibs in #"),
+        "{}",
+        text(&inbox.stdout)
+    );
+    let slot = setup
+        .dibs(&setup.bob, &dir)
+        .args(["escalate", "--slot", "ghost", "--reason", "?"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&slot), 1);
+    assert!(
+        text(&slot.stderr).contains("ghost"),
+        "{}",
+        text(&slot.stderr)
+    );
+}

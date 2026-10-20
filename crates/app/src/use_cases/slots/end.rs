@@ -27,6 +27,7 @@ use crate::work::Work;
 struct Ports {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
 }
@@ -36,6 +37,7 @@ impl Ports {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
         }
@@ -88,7 +90,7 @@ impl ReleaseSlot {
     ) -> Result<EndedHold, AppError> {
         actor.require_person()?;
         let now = self.ports.clock.now();
-        let mut work = Work::begin(&*self.ports.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.ports.store, actor).await?;
         let mut scene = Scene::load(&mut work, &self.ports.hot_rules, now).await?;
         declared(&mut work, &scene, &input.slot).await?;
         let decided = decide_release(
@@ -105,7 +107,7 @@ impl ReleaseSlot {
             Err(reason) => return Err(refuse(&mut work, reason).await),
         };
         let hold = scene.apply(transition);
-        scene.save(&mut work, now).await?;
+        scene.save(&mut work, &*self.ports.ids, now).await?;
         let ended = ended(&mut work, &scene, hold, &input.slot).await?;
         work.commit(&*self.ports.notifier).await?;
         Ok(ended)
@@ -133,7 +135,7 @@ impl LeaveSlotQueue {
     pub async fn execute(&self, actor: &Actor, slot: &SlotName) -> Result<SlotLine, AppError> {
         actor.require_person()?;
         let now = self.ports.clock.now();
-        let mut work = Work::begin(&*self.ports.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.ports.store, actor).await?;
         let mut scene = Scene::load(&mut work, &self.ports.hot_rules, now).await?;
         let transition = match decide_leave(&scene.board, scene.catalog(), slot, actor.member, now)
         {
@@ -141,7 +143,7 @@ impl LeaveSlotQueue {
             Err(reason) => return Err(refuse(&mut work, reason).await),
         };
         scene.apply(transition);
-        scene.save(&mut work, now).await?;
+        scene.save(&mut work, &*self.ports.ids, now).await?;
         let line = line_of(&mut work, &scene, slot).await?;
         work.commit(&*self.ports.notifier).await?;
         Ok(line)
@@ -197,8 +199,8 @@ impl ForceReleaseSlot {
     ) -> Result<ForcedHold, AppError> {
         actor.require_admin()?;
         let now = self.ports.clock.now();
-        let mut work = Work::begin(&*self.ports.store, actor.project).await?;
-        let session = own_session(&mut work, actor, input.session).await?;
+        let mut work = Work::begin_for(&*self.ports.store, actor).await?;
+        own_session(&mut work, actor, input.session).await?;
         let mut scene = Scene::load(&mut work, &self.ports.hot_rules, now).await?;
         declared(&mut work, &scene, &input.slot).await?;
         let decided = decide_force_release(
@@ -213,17 +215,21 @@ impl ForceReleaseSlot {
             Err(reason) => return Err(refuse(&mut work, reason).await),
         };
         let hold = scene.apply(transition);
-        scene.save(&mut work, now).await?;
+        scene.save(&mut work, &*self.ports.ids, now).await?;
         let thread = if hold.member == actor.member {
             None
         } else {
+            let admin = Names::load(&mut work).await?.handle(actor.member)?;
             let notice = Notice {
                 ids: &*self.ids,
                 from: actor.member,
-                label: session.label,
                 to: hold.member,
                 subject: format!("Your hold on {} was ended by an admin", input.slot),
-                body: input.reason,
+                lead: format!(
+                    "{admin}, an admin of this project, ended your hold on {}. The slot is free again, or offered to the next member waiting.",
+                    input.slot
+                ),
+                reason: input.reason,
             };
             Some(notice.send(&mut work, now).await?)
         };
@@ -269,7 +275,7 @@ impl SlotRunFinished {
     pub async fn execute(&self, actor: &Actor, input: RunFinishedInput) -> Result<bool, AppError> {
         actor.require_import()?;
         let now = self.ports.clock.now();
-        let mut work = Work::begin(&*self.ports.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.ports.store, actor).await?;
         let mut scene = Scene::load(&mut work, &self.ports.hot_rules, now).await?;
         let transition = decide_run_finished(
             &scene.board,
@@ -281,7 +287,7 @@ impl SlotRunFinished {
             now,
         );
         let matched = scene.apply(transition).is_some();
-        scene.save(&mut work, now).await?;
+        scene.save(&mut work, &*self.ports.ids, now).await?;
         work.commit(&*self.ports.notifier).await?;
         Ok(matched)
     }

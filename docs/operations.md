@@ -2,7 +2,8 @@
 
 The server is one process on one SQLite file. It speaks plain HTTP on port 8080 and expects a proxy in front of it to
 terminate TLS. This page covers the image, the compose example behind Caddy in both TLS modes, running behind a CDN,
-configuration, snapshots and restore, upgrades, the lock file and the GHCR package.
+configuration, members joining and leaving, how long records are kept, snapshots and restore, upgrades, the lock file
+and the GHCR package.
 
 ## The image
 
@@ -181,12 +182,16 @@ the release workflow refuses to publish a release whose signature does not verif
 ```text
 dibs-server [serve]                                  serve until SIGTERM or Ctrl-C (the default)
 dibs-server admin init --project <slug> --admin <handle> --name <name> [--login <login>]
-dibs-server admin member add <handle> --project <slug> --name <name> [--login <login>] [--role admin|member|importer]
+dibs-server admin member add <handle> --project <slug> --name <name> [--github <login>] [--role admin|member|importer]
+dibs-server admin member remove <handle> --project <slug>
 dibs-server admin token rotate <project> <handle>
+dibs-server admin thread delete <id> --project <slug>
 dibs-server admin snapshot
 dibs-server restore <snapshot> --to <database>
 dibs-server migrate
 ```
+
+`--github` is another name of `--login`: the member's login in the outside tracker, which an integration maps to them.
 
 The commands that issue a token (`admin init`, `admin member add`, `admin token rotate`) print the token alone on
 standard output and a sentence about it on standard error, so `token=$(… 2>/dev/null)` captures exactly the token. The
@@ -196,6 +201,34 @@ Members can also be added, and their tokens rotated, with `dibs admin member add
 client signed in as an admin. `--role` is `member` by default; `importer` makes the token of an integration worker that
 feeds the project's items from an outside tracker (`PUT /v1/items`): it may read members, items, the event log and the
 ready list, and nothing else — no claim, no conversation.
+
+## Members joining and leaving
+
+**Joining.** `dibs admin member add <handle> --name <name> [--github <login>] [--role member|admin]` (from a client
+signed in as an admin) or `dibs-server admin member add` (on the server) prints the new member's token once. Hand it
+over through a password manager, never chat or email. The member stores it with `dibs login`, in the credentials file
+readable by them alone (`0600` on macOS and Linux, an access list granting only them on Windows), or with
+`dibs login --keychain` in the operating system's credential store. The handle `dibs` is taken: it is the name what
+dibs writes itself goes by.
+
+**Leaving.** `dibs admin member remove <handle>` (or `dibs-server admin member remove <handle> --project <slug>`) does
+all of this in one transaction, so it happens whole or not at all:
+
+- every token of the member is revoked and every browser session of theirs ends; their machines answer
+  `dibs login` from then on, and their hooks fall silent with one warning;
+- each of their claims is released and its item is open again (`force_released`, naming the admin, or `null` for the
+  operator);
+- each hold of theirs on a slot ends, their places in slot queues and the offers to them go, and a freed slot is offered
+  to the next member waiting (`slot_force_released`, cause `member_removed`);
+- they are marked removed (`member_removed`) and leave `GET /v1/members`;
+- dibs tells the project, in one message from dibs addressed to everyone, what was released (the first 20 of each
+  kind by name, then how many more, however much they held).
+
+A request of theirs that was signed in before the removal is decided before it or refused after it: every request
+checks, in its own transaction, that its member is still in the project.
+
+Their messages, and every record that names them, stay; their handle stays taken. An admin cannot remove themself;
+another admin or the operator can. A member removed by mistake is added again under another handle.
 
 ### Rotating a token
 
@@ -208,15 +241,35 @@ docker compose exec dibs /dibs-server admin token rotate widgets bob
 This revokes every token of the member, ends the browser sessions those tokens opened, and prints one new token. The
 member signs in again with `dibs login`.
 
+## How long records are kept
+
+A background task removes what is past its date once when the server starts and then once a day, each project in a
+transaction of its own; it stops with the server, finishing a pass it is running, before the write-ahead log is
+checkpointed.
+
+| Record | Kept |
+|---|---|
+| A conversation and its messages | 180 days after its last message; while it is about a work item that is still open (not done, not dropped), as long as the item is; while it carries an escalation no arbiter has settled, until one does |
+| An event of the log | 90 days |
+| A browser session | 12 hours after it was last used |
+| A snapshot | the newest `DIBS_SNAPSHOT_KEEP`, and of those none older than 30 days, but the newest always |
+
+Each pass that removed anything appends one `pruned` event with the counts (`threads`, `messages`, `events`) to the
+project's log. A reader whose cursor is behind the events removed — an integration that was off for longer than the log
+keeps — is answered `410 cursor_expired` (`details.pruned_through`): it reads the state again, then follows the log from
+the start (`after=0`). An admin deletes a conversation at once with `dibs admin thread delete <id>` (a secret pasted by
+mistake): its messages go, and the log keeps a `thread_deleted` event with its id alone.
+
 ## Snapshots
 
 With `DIBS_SNAPSHOT_DIR` set, a background task writes a consistent copy of the database (`VACUUM INTO`) every
-`DIBS_SNAPSHOT_EVERY`, starting as the server starts, and keeps the newest `DIBS_SNAPSHOT_KEEP`. The newest snapshot is
-never deleted.
+`DIBS_SNAPSHOT_EVERY`, starting as the server starts, and keeps the newest `DIBS_SNAPSHOT_KEEP`, of which it deletes
+those older than 30 days too. The newest snapshot is never deleted, however old it is.
 
 - A snapshot is named `dibs-<UTC timestamp>.db`, such as `dibs-20261019T215526.072Z.db`, so the names sort by age. It
   is written under a hidden temporary name, flushed to disk and renamed, so a file with a final name is whole. A crash
-  in the middle can leave a hidden `.partial` file, which is safe to delete.
+  in the middle can leave a hidden `.dibs-<UTC timestamp>.db.partial` file; the next snapshot removes such a file once
+  it is more than an hour old.
 - Only files of that name form are counted or deleted; the directory may hold other files.
 - `dibs-server admin snapshot` writes one now (and applies the retention). The server logs each snapshot's size and
   duration.
@@ -354,4 +407,5 @@ the repository.
 | *another server, a restore or a migration holds the database* | Another process has the database; stop it. |
 | A client reports a `429` with `too_many_attempts` | Ten failed sign-ins from one address within a minute. If every client shares one address, the proxy's, `DIBS_TRUST_PROXY` and `DIBS_TRUSTED_PROXIES` are not set as above. |
 | A client reports `503` with `too_many_streams` | A member holds 8 event streams open, or the server 128. |
+| An integration reports `410` with `cursor_expired` | It was off for longer than the log keeps events (90 days); it reads the state again and follows the log from `after=0`. |
 | The web pages cannot sign in | The session cookie is `Secure`: use the pages over HTTPS (or `localhost`). |

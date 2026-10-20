@@ -530,8 +530,10 @@ pub struct ThreadView {
     pub subject: Subject,
     /// The work item it is about.
     pub item: Option<ItemId>,
-    /// Who started it.
-    pub author: Handle,
+    /// Who started it: a member's handle, or `dibs`.
+    pub author: String,
+    /// Whether dibs started it, in the project's name.
+    pub system: bool,
     /// Whether it is addressed to every person in the project.
     pub to_project: bool,
     /// The members it is addressed to; empty when it is addressed to the project.
@@ -549,7 +551,8 @@ impl ThreadView {
             id: thread.id,
             subject: thread.subject,
             item: thread.item,
-            author: named.author,
+            system: named.author.is_dibs(),
+            author: named.author.to_string(),
             to_project: matches!(thread.recipients, Recipients::Project),
             to: named.recipients,
             created_at: thread.created_at,
@@ -564,8 +567,11 @@ pub struct MessageView {
     pub id: MessageId,
     /// Its thread.
     pub thread: ThreadId,
-    /// Who wrote it.
-    pub author: Handle,
+    /// Who wrote it: a member's handle, or `dibs`.
+    pub author: String,
+    /// Whether dibs wrote it, in the project's name: it counts toward no limit and is shown as
+    /// from dibs.
+    pub system: bool,
     /// The label of the session it was written from.
     pub label: SessionLabel,
     /// Its text.
@@ -590,7 +596,8 @@ impl MessageView {
         Self {
             id: message.id,
             thread: message.thread,
-            author: named.author,
+            system: named.author.is_dibs(),
+            author: named.author.to_string(),
             label: message.label,
             body: message.body,
             importance: message.importance,
@@ -904,7 +911,7 @@ mod tests {
             kind: EventKind::MessagePosted(MessagePosted {
                 thread: ThreadId(4),
                 message: MessageId(5),
-                author: MemberId(7),
+                author: Some(MemberId(7)),
             }),
         };
         let named = NamedEvent {
@@ -924,29 +931,44 @@ mod tests {
             record: MessageRecord {
                 id: MessageId(5),
                 thread: ThreadId(4),
-                author: MemberId(7),
+                author: dibs_domain::message::Author::Member(MemberId(7)),
                 label: SessionLabel::parse("web").unwrap(),
                 body: Body::parse("line one\nline two").unwrap(),
                 importance: Importance::High,
                 ack_required: true,
                 created_at: datetime!(2026-01-02 03:04:05 UTC),
             },
-            author: handle("alice"),
+            author: dibs_app::named::AuthorName::Member(handle("alice")),
         };
         let followed = serde_json::to_value(EventView::followed(FollowedEvent {
             event: named,
-            message: Some(message),
+            message: Some(message.clone()),
         }))
         .unwrap();
         assert_eq!(
             followed["message"],
             json!({
-                "id": 5, "thread": 4, "author": "alice", "label": "web",
+                "id": 5, "thread": 4, "author": "alice", "system": false, "label": "web",
                 "body": "line one\nline two", "importance": "high", "ack_required": true,
                 "created_at": "2026-01-02T03:04:05Z"
             })
         );
         assert!(!serde_json::to_string(&followed).unwrap().contains('\n'));
+
+        let from_dibs = NamedMessage {
+            record: MessageRecord {
+                author: dibs_domain::message::Author::System,
+                label: SessionLabel::parse("dibs").unwrap(),
+                ..message.record
+            },
+            author: dibs_app::named::AuthorName::Dibs,
+        };
+        let shown = serde_json::to_value(MessageView::of(from_dibs)).unwrap();
+        assert_eq!(
+            (&shown["author"], &shown["system"], &shown["label"]),
+            (&json!("dibs"), &json!(true), &json!("dibs")),
+            "what dibs wrote is from dibs and from no member"
+        );
     }
 
     #[test]

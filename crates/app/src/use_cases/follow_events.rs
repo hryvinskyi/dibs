@@ -57,7 +57,8 @@ impl FollowEvents {
     ///
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::Unauthorized`] when the caller's
-    /// token was revoked or its member is gone; [`AppError::Store`] when the store fails.
+    /// token was revoked or its member is gone; [`AppError::CursorExpired`] for a cursor behind
+    /// events the retention removed; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
@@ -65,7 +66,7 @@ impl FollowEvents {
         limit: usize,
     ) -> Result<FollowPage, AppError> {
         actor.require_person()?;
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         still_signed_in(&mut work, actor).await?;
         let page = visible_page(&mut work, actor, from, limit).await?;
         let names = Names::load(&mut work).await?;

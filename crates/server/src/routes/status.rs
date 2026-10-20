@@ -5,10 +5,12 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::Serialize;
 
-use dibs_app::use_cases::WideClaimStatus;
+use dibs_app::use_cases::{OpenEscalation, WideClaimStatus};
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::ItemId;
+use dibs_domain::ids::{ItemId, MessageId, ThreadId};
+use time::OffsetDateTime;
 
 use crate::auth::Authed;
 use crate::error::ApiError;
@@ -24,6 +26,34 @@ struct StatusAnswer {
     wide: Vec<WideClaimView>,
     ready: ReadyView,
     slots: Vec<SlotView>,
+    escalations: Vec<EscalationView>,
+}
+
+/// An escalation the caller may read that no arbiter has acknowledged yet.
+#[derive(Serialize)]
+struct EscalationView {
+    subject: EscalationSubject,
+    about: String,
+    by: Handle,
+    arbiters: Vec<Handle>,
+    thread_id: ThreadId,
+    message_id: MessageId,
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    at: OffsetDateTime,
+}
+
+impl EscalationView {
+    fn of(open: OpenEscalation) -> Self {
+        Self {
+            subject: open.subject,
+            about: open.about,
+            by: open.by,
+            arbiters: open.arbiters,
+            thread_id: open.thread,
+            message_id: open.message,
+            at: open.at,
+        }
+    }
 }
 
 /// A live wide claim and where each area it names stands.
@@ -79,8 +109,8 @@ struct HoldView {
 }
 
 /// The project's live claims, its stale claims, the areas the live ones hold, the live wide claims
-/// with where each of their areas stands, and the caller's ready list, each ordered as the use case
-/// orders it.
+/// with where each of their areas stands, the caller's ready list, the slots and the escalations
+/// still waiting for an arbiter, each ordered as the use case orders it.
 ///
 /// # Errors
 /// `forbidden` for an integration; the answer for the use case's failure.
@@ -105,6 +135,11 @@ pub async fn status(
         wide: view.wide.into_iter().map(WideClaimView::of).collect(),
         ready: ReadyView::of(view.ready),
         slots: view.slots.into_iter().map(SlotView::of).collect(),
+        escalations: view
+            .escalations
+            .into_iter()
+            .map(EscalationView::of)
+            .collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

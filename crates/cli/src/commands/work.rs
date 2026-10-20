@@ -15,7 +15,7 @@ use dibs_domain::wide::WideReason;
 use crate::cli::{ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NewArgs, TakeoverArgs};
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
-use crate::output::{claim_text, item_label, item_line};
+use crate::output::{claim_text, escalation_line, item_label, item_line};
 
 /// Shows the live and stale claims and the areas they hold.
 ///
@@ -59,6 +59,12 @@ pub async fn status(ctx: &Context) -> Result<(), Failure> {
             );
             for wide in &status.wide {
                 let _ = writeln!(text, "  {}", wide_line(wide));
+            }
+        }
+        if !status.escalations.is_empty() {
+            let _ = writeln!(text, "Escalations waiting for an arbiter:");
+            for escalation in &status.escalations {
+                let _ = writeln!(text, "  {}", escalation_line(escalation));
             }
         }
         if text.is_empty() {

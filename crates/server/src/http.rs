@@ -177,10 +177,19 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         )
         .route("/v1/events", get(routes::events::list))
         .route("/v1/events/stream", get(routes::events::stream))
+        .route("/v1/escalations", post(routes::escalations::escalate))
         .route("/v1/admin/members", post(routes::admin::add_member))
+        .route(
+            "/v1/admin/members/{handle}",
+            delete(routes::admin::remove_member),
+        )
         .route(
             "/v1/admin/members/{handle}/tokens",
             post(routes::admin::rotate_token),
+        )
+        .route(
+            "/v1/admin/threads/{id}",
+            delete(routes::admin::delete_thread),
         )
         .route(
             "/v1/admin/tokens/{prefix}",

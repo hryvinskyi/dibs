@@ -415,7 +415,7 @@ pub fn decide_force_release(
     let event = EventKind::SlotForceReleased(SlotForceReleased {
         slot: slot.clone(),
         member: hold.member,
-        by,
+        by: Some(by),
         cause: ForceCause::Admin,
     });
     Ok(end_hold(board, catalog, hold, event, now))
@@ -555,7 +555,7 @@ pub fn decide_slots_removed(
             events.push(EventKind::SlotForceReleased(SlotForceReleased {
                 slot: slot.clone(),
                 member,
-                by,
+                by: Some(by),
                 cause: ForceCause::SlotRemoved,
             }));
         }
@@ -571,6 +571,74 @@ pub fn decide_slots_removed(
         board: next,
         events,
         answer: (),
+    }
+}
+
+/// What removing a member from a project took from them among the slots.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemovedFromSlots {
+    /// The slots they held.
+    pub held: Vec<SlotName>,
+    /// The slots they waited for.
+    pub waited: Vec<SlotName>,
+    /// The slots on offer to them.
+    pub offered: Vec<SlotName>,
+}
+
+impl RemovedFromSlots {
+    /// Whether they had nothing among the slots.
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty() && self.waited.is_empty() && self.offered.is_empty()
+    }
+}
+
+/// Ends every hold, place and offer of `member`, each with an event naming `by` and the member's
+/// removal as the cause, then offers every freed group to its first waiter.
+pub fn decide_member_removed(
+    board: &SlotBoard,
+    catalog: &SlotCatalog,
+    member: MemberId,
+    by: Option<MemberId>,
+    now: OffsetDateTime,
+) -> Transition<RemovedFromSlots> {
+    let mut next = board.clone();
+    let mut events = Vec::new();
+    let mut removed = RemovedFromSlots::default();
+    let mut end = |slot: &SlotName, list: &mut Vec<SlotName>| {
+        events.push(EventKind::SlotForceReleased(SlotForceReleased {
+            slot: slot.clone(),
+            member,
+            by,
+            cause: ForceCause::MemberRemoved,
+        }));
+        list.push(slot.clone());
+    };
+    next.holds.retain(|hold| {
+        let theirs = hold.member == member;
+        if theirs {
+            end(&hold.slot, &mut removed.held);
+        }
+        !theirs
+    });
+    next.offers.retain(|offer| {
+        let theirs = offer.member == member;
+        if theirs {
+            end(&offer.slot, &mut removed.offered);
+        }
+        !theirs
+    });
+    next.waiters.retain(|waiter| {
+        let theirs = waiter.member == member;
+        if theirs {
+            end(&waiter.slot, &mut removed.waited);
+        }
+        !theirs
+    });
+    settle(&mut next, catalog, now, &mut events);
+    Transition {
+        board: next,
+        events,
+        answer: removed,
     }
 }
 

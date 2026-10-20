@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::escalation::{EscalationReason, EscalationSubject};
 use dibs_domain::event::EventKind;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::{HotRuleRegistry, Note};
@@ -20,6 +21,7 @@ use dibs_domain::project::ProjectSlug;
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::session::{AgentLabel, HostName};
 use dibs_domain::settings::{ProjectSettings, SettingsDocument, SettingsError};
+use dibs_domain::slot::SlotName;
 
 use crate::token::Token;
 
@@ -523,6 +525,121 @@ pub struct Status {
     /// Every declared slot with its group's hold, queue and offer.
     #[serde(default)]
     pub slots: Vec<Slot>,
+    /// The escalations the caller may read that no arbiter has acknowledged yet, newest first.
+    #[serde(default)]
+    pub escalations: Vec<OpenEscalation>,
+}
+
+/// An escalation that waits for an arbiter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenEscalation {
+    /// What it is about.
+    pub subject: EscalationSubject,
+    /// How the subject reads.
+    pub about: String,
+    /// Who escalated.
+    pub by: Handle,
+    /// The arbiters it waits for.
+    pub arbiters: Vec<Handle>,
+    /// Its conversation.
+    pub thread_id: ThreadId,
+    /// Its message, which an arbiter acknowledges.
+    pub message_id: MessageId,
+    /// When.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+}
+
+/// `POST /v1/escalations`'s body: one subject and the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EscalationRequest {
+    /// A work item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item: Option<ItemId>,
+    /// A slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<SlotName>,
+    /// A conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<ThreadId>,
+    /// Why.
+    pub reason: EscalationReason,
+}
+
+impl EscalationRequest {
+    /// The request about `subject`.
+    pub fn about(subject: EscalationSubject, reason: EscalationReason) -> Self {
+        let mut request = Self {
+            item: None,
+            slot: None,
+            thread: None,
+            reason,
+        };
+        match subject {
+            EscalationSubject::Item(item) => request.item = Some(item),
+            EscalationSubject::Slot(slot) => request.slot = Some(slot),
+            EscalationSubject::Thread(thread) => request.thread = Some(thread),
+        }
+        request
+    }
+}
+
+/// An escalation sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EscalationSent {
+    /// Its conversation.
+    pub thread_id: ThreadId,
+    /// Its message.
+    pub message_id: MessageId,
+    /// The arbiters it reached.
+    pub arbiters: Vec<Handle>,
+    /// Everyone it reached.
+    pub reached: Vec<Handle>,
+}
+
+/// `POST /v1/escalations`'s answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Escalated {
+    /// The escalation.
+    pub escalation: EscalationSent,
+}
+
+/// What removing a member took from them among the slots.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftSlots {
+    /// The slots they held.
+    pub held: Vec<SlotName>,
+    /// The slots they waited for.
+    pub waited: Vec<SlotName>,
+    /// The slots on offer to them.
+    pub offered: Vec<SlotName>,
+}
+
+/// `DELETE /v1/admin/members/{handle}`'s answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberRemoved {
+    /// The member.
+    pub member: Member,
+    /// When they were removed.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub removed_at: Option<OffsetDateTime>,
+    /// The items whose claims were released.
+    pub released: Vec<ItemName>,
+    /// What they had among the slots.
+    pub slots: LeftSlots,
+    /// How many tokens were revoked.
+    pub tokens_revoked: u64,
+    /// How many browser sessions ended.
+    pub ui_sessions_ended: u64,
+}
+
+/// `DELETE /v1/admin/threads/{id}`'s answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadDeleted {
+    /// The conversation.
+    pub thread_id: ThreadId,
+    /// How many messages went with it.
+    pub messages: u64,
 }
 
 /// A live wide claim, its item, and where each area it names stands.
@@ -745,8 +862,11 @@ pub struct Thread {
     pub subject: Subject,
     /// The work item it is about.
     pub item: Option<ItemId>,
-    /// Who started it.
+    /// Who started it: a member's handle, or `dibs`.
     pub author: Handle,
+    /// Whether dibs started it, in the project's name.
+    #[serde(default)]
+    pub system: bool,
     /// Whether it is addressed to every person in the project.
     pub to_project: bool,
     /// The members it is addressed to.
@@ -763,8 +883,11 @@ pub struct Message {
     pub id: MessageId,
     /// Its thread.
     pub thread: ThreadId,
-    /// Who wrote it.
+    /// Who wrote it: a member's handle, or `dibs`.
     pub author: Handle,
+    /// Whether dibs wrote it, in the project's name.
+    #[serde(default)]
+    pub system: bool,
     /// The label of the session it was written from.
     pub label: SessionLabel,
     /// Its text.

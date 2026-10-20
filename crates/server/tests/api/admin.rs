@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use dibs_domain::member::Role;
 
-use crate::support::{Person, World, assert_error, two_repositories};
+use crate::support::{Person, World, assert_error, request, two_repositories};
 
 #[tokio::test]
 async fn an_admin_adds_a_member_whose_token_works() {
@@ -244,6 +244,10 @@ fn admin_routes() -> Vec<(Method, &'static str, Option<Value>)> {
         (Method::PUT, "/v1/admin/settings", Some(json!({"areas": 7}))),
         (Method::POST, "/v1/admin/items/999/force-release", None),
         (Method::POST, "/v1/admin/items/abc/force-release", None),
+        (Method::DELETE, "/v1/admin/members/alice", None),
+        (Method::DELETE, "/v1/admin/members/nobody", None),
+        (Method::DELETE, "/v1/admin/threads/999", None),
+        (Method::DELETE, "/v1/admin/threads/abc", None),
     ]
 }
 
@@ -262,8 +266,14 @@ async fn only_an_admin_reaches_an_admin_route() {
             assert_error(&answer, StatusCode::FORBIDDEN, "forbidden");
         }
     }
-    for (method, path, body) in admin_routes() {
-        let answer = world.call(method, path, None, body).await;
+    for (n, (method, path, body)) in admin_routes().into_iter().enumerate() {
+        let peer = format!("198.51.100.{}:50000", n + 1);
+        let answer = world
+            .send(
+                request(method, path, None, body.map(|b| b.to_string())),
+                &peer,
+            )
+            .await;
         assert_error(&answer, StatusCode::UNAUTHORIZED, "unauthorized");
     }
     let members = world.get(&alice, "/v1/members").await;

@@ -106,7 +106,7 @@ impl TakeSlot {
     pub async fn execute(&self, actor: &Actor, input: TakeSlotInput) -> Result<TookSlot, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let session = own_session(&mut work, actor, input.session).await?;
         if let Some(item) = input.item {
             existing_item(&mut work, item).await?;
@@ -138,7 +138,7 @@ impl TakeSlot {
             TakeAnswer::Renewed { hold } => (TookKind::Renewed, run_of(&hold.liveness)),
             TakeAnswer::Queued { position, .. } => (TookKind::Queued { position }, None),
         };
-        scene.save(&mut work, now).await?;
+        scene.save(&mut work, &*self.ids, now).await?;
         let line = line_of(&mut work, &scene, &input.slot).await?;
         work.commit(&*self.notifier).await?;
         Ok(TookSlot { kind, line, run })

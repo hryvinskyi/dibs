@@ -145,13 +145,54 @@ impl Recipients {
     }
 }
 
+/// Who wrote a message or started a thread: a member, or dibs itself, writing in the project's
+/// name when something happens. dibs is no member: it holds nothing, reads nothing and is never a
+/// recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Author {
+    /// A member, through what they or their agent did.
+    Member(MemberId),
+    /// dibs itself.
+    System,
+}
+
+impl Author {
+    /// The member, for a member's text; `None` for what dibs wrote.
+    pub const fn member(self) -> Option<MemberId> {
+        match self {
+            Self::Member(member) => Some(member),
+            Self::System => None,
+        }
+    }
+
+    /// Whether `member` wrote it.
+    pub fn is(self, member: MemberId) -> bool {
+        self.member() == Some(member)
+    }
+
+    /// Whether dibs wrote it.
+    pub const fn is_system(self) -> bool {
+        matches!(self, Self::System)
+    }
+}
+
+/// The member a message speaks for: its author, or, for a message dibs wrote, the member who
+/// started its thread, on whose behalf dibs wrote it. `None` for what dibs wrote in a thread of its
+/// own. A message never reaches, and never awaits an acknowledgement from, the member it speaks for.
+pub const fn speaks_for(thread_author: Author, message_author: Author) -> Option<MemberId> {
+    match message_author {
+        Author::Member(member) => Some(member),
+        Author::System => thread_author.member(),
+    }
+}
+
 /// Whether `reader` may read a thread `author` started with these recipients: its author, its
 /// recipients, and for a project-addressed thread every person. An integration bot reads no thread.
-pub fn may_read(author: MemberId, recipients: &Recipients, reader: MemberId, role: Role) -> bool {
+pub fn may_read(author: Author, recipients: &Recipients, reader: MemberId, role: Role) -> bool {
     if !role.is_person() {
         return false;
     }
-    if reader == author {
+    if author.is(reader) {
         return true;
     }
     match recipients {
@@ -226,25 +267,15 @@ pub const fn interrupts(importance: Importance, ack_required: bool) -> bool {
     importance.is_raised() || ack_required
 }
 
-/// Who wrote a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Writer {
-    /// A member, through the message routes: what they or their agent typed, at the importance
-    /// they chose.
-    Member,
-    /// dibs itself: an announcement, a notice or a yield request it sends when something happens,
-    /// in the project's name or in the name of the member whose action caused it.
-    Dibs,
-}
-
 /// How far back the limit on raised messages looks.
 pub const RAISED_WINDOW: Duration = Duration::hours(1);
 
 /// Whether a message counts toward its writer's limit on raised messages: one a member wrote at a
 /// raised importance. A message dibs writes never counts, so the announcements a wide claim over
-/// many held areas sends never refuse the claim. This is the one place that says so.
-pub const fn counts_toward_limit(writer: Writer, importance: Importance) -> bool {
-    matches!(writer, Writer::Member) && importance.is_raised()
+/// many held areas sends, or an escalation, never refuse what caused them. This is the one place
+/// that says so.
+pub const fn counts_toward_limit(author: Author, importance: Importance) -> bool {
+    matches!(author, Author::Member(_)) && importance.is_raised()
 }
 
 /// That a member wrote as many raised messages within [`RAISED_WINDOW`] as the project allows.
@@ -259,8 +290,8 @@ pub struct ImportanceLimited {
     pub frees_at: OffsetDateTime,
 }
 
-/// Decides whether a message of `importance` by `writer` may be written at `now`, given when the
-/// writer's counted messages were written (in any order; those older than [`RAISED_WINDOW`] are
+/// Decides whether a message of `importance` by `author` may be written at `now`, given when the
+/// author's counted messages were written (in any order; those older than [`RAISED_WINDOW`] are
 /// ignored) and the project's `limit`. Answers whether the message counts, so it is recorded with
 /// the others.
 ///
@@ -268,13 +299,13 @@ pub struct ImportanceLimited {
 /// [`ImportanceLimited`] when the writer already wrote `limit` counted messages within the window,
 /// with when the next one is allowed.
 pub fn decide_raised(
-    writer: Writer,
+    author: Author,
     importance: Importance,
     written: &[OffsetDateTime],
     limit: u32,
     now: OffsetDateTime,
 ) -> Result<bool, ImportanceLimited> {
-    if !counts_toward_limit(writer, importance) {
+    if !counts_toward_limit(author, importance) {
         return Ok(false);
     }
     let mut recent: Vec<OffsetDateTime> = written
@@ -306,14 +337,15 @@ pub struct Person {
     pub joined_at: OffsetDateTime,
 }
 
-/// The members a message reaches: everyone who may read its thread but its own author — the
-/// thread's author and the members it names, or for a thread addressed to the project every person
-/// who was in the project when the message was written. Of the members named, only the people
-/// among `members` count, so a member who is gone or an integration is never a recipient.
+/// The members a message reaches: everyone who may read its thread but the member it speaks for
+/// ([`speaks_for`]) — the thread's author and the members it names, or for a thread addressed to
+/// the project every person who was in the project when the message was written. Of the members
+/// named, only the people among `members` count, so a member who is gone or an integration is
+/// never a recipient.
 pub fn message_recipients(
-    thread_author: MemberId,
+    thread_author: Author,
     recipients: &Recipients,
-    message_author: MemberId,
+    message_author: Author,
     written_at: OffsetDateTime,
     members: &[Person],
 ) -> BTreeSet<MemberId> {
@@ -325,12 +357,13 @@ pub fn message_recipients(
             .collect(),
         Recipients::Members(named) => people
             .map(|person| person.member)
-            .filter(|member| *member == thread_author || named.contains(member))
+            .filter(|member| thread_author.is(*member) || named.contains(member))
             .collect(),
     };
+    let sender = speaks_for(thread_author, message_author);
     reached
         .into_iter()
-        .filter(|member| *member != message_author)
+        .filter(|member| Some(*member) != sender)
         .collect()
 }
 
@@ -529,22 +562,38 @@ mod tests {
     #[test]
     fn who_may_read_a_thread() {
         let to_bob = Recipients::members(BTreeSet::from([BOB])).unwrap();
-        assert!(may_read(ALICE, &to_bob, ALICE, Role::Member), "the author");
-        assert!(may_read(ALICE, &to_bob, BOB, Role::Member), "a recipient");
         assert!(
-            !may_read(ALICE, &to_bob, CAROL, Role::Member),
+            may_read(Author::Member(ALICE), &to_bob, ALICE, Role::Member),
+            "the author"
+        );
+        assert!(
+            may_read(Author::Member(ALICE), &to_bob, BOB, Role::Member),
+            "a recipient"
+        );
+        assert!(
+            !may_read(Author::Member(ALICE), &to_bob, CAROL, Role::Member),
             "anyone else"
         );
         assert!(
-            !may_read(ALICE, &to_bob, CAROL, Role::Admin),
+            !may_read(Author::Member(ALICE), &to_bob, CAROL, Role::Admin),
             "an admin is not a recipient"
         );
         assert!(
-            may_read(ALICE, &Recipients::Project, CAROL, Role::Member),
+            may_read(
+                Author::Member(ALICE),
+                &Recipients::Project,
+                CAROL,
+                Role::Member
+            ),
             "the project"
         );
         assert!(
-            !may_read(ALICE, &Recipients::Project, CAROL, Role::Importer),
+            !may_read(
+                Author::Member(ALICE),
+                &Recipients::Project,
+                CAROL,
+                Role::Importer
+            ),
             "an integration reads no thread"
         );
     }
@@ -577,28 +626,59 @@ mod tests {
     fn a_message_reaches_its_thread_s_readers_but_its_author() {
         let to_bob = Recipients::members(BTreeSet::from([BOB, BOT])).unwrap();
         assert_eq!(
-            message_recipients(ALICE, &to_bob, ALICE, at(30), &people()),
+            message_recipients(
+                Author::Member(ALICE),
+                &to_bob,
+                Author::Member(ALICE),
+                at(30),
+                &people()
+            ),
             BTreeSet::from([BOB]),
             "the members named, never an integration or the author"
         );
         assert_eq!(
-            message_recipients(ALICE, &to_bob, BOB, at(30), &people()),
+            message_recipients(
+                Author::Member(ALICE),
+                &to_bob,
+                Author::Member(BOB),
+                at(30),
+                &people()
+            ),
             BTreeSet::from([ALICE]),
             "a reply reaches the thread's author"
         );
         assert_eq!(
-            message_recipients(ALICE, &Recipients::Project, BOB, at(10), &people()),
+            message_recipients(
+                Author::Member(ALICE),
+                &Recipients::Project,
+                Author::Member(BOB),
+                at(10),
+                &people()
+            ),
             BTreeSet::from([ALICE, CAROL]),
             "the people in the project when it was written"
         );
         assert_eq!(
-            message_recipients(ALICE, &Recipients::Project, BOB, at(20), &people()),
+            message_recipients(
+                Author::Member(ALICE),
+                &Recipients::Project,
+                Author::Member(BOB),
+                at(20),
+                &people()
+            ),
             BTreeSet::from([ALICE, CAROL, DAVE]),
             "a member who joined at that moment is reached"
         );
         let gone = Recipients::members(BTreeSet::from([MemberId(77)])).unwrap();
         assert!(
-            message_recipients(ALICE, &gone, ALICE, at(30), &people()).is_empty(),
+            message_recipients(
+                Author::Member(ALICE),
+                &gone,
+                Author::Member(ALICE),
+                at(30),
+                &people()
+            )
+            .is_empty(),
             "a member who is gone is no recipient"
         );
     }
@@ -662,11 +742,17 @@ mod tests {
             (0..10).map(|n| start + Duration::minutes(n * 5)).collect();
         let now = start + Duration::minutes(50);
         assert_eq!(
-            decide_raised(Writer::Member, Importance::Urgent, &written[..9], 10, now),
+            decide_raised(
+                Author::Member(ALICE),
+                Importance::Urgent,
+                &written[..9],
+                10,
+                now
+            ),
             Ok(true)
         );
         assert_eq!(
-            decide_raised(Writer::Member, Importance::High, &written, 10, now),
+            decide_raised(Author::Member(ALICE), Importance::High, &written, 10, now),
             Err(ImportanceLimited {
                 limit: 10,
                 frees_at: start + Duration::hours(1)
@@ -674,7 +760,7 @@ mod tests {
         );
         assert_eq!(
             decide_raised(
-                Writer::Member,
+                Author::Member(ALICE),
                 Importance::High,
                 &written,
                 10,
@@ -684,7 +770,7 @@ mod tests {
             "the oldest left the window"
         );
         assert_eq!(
-            decide_raised(Writer::Member, Importance::Normal, &written, 10, now),
+            decide_raised(Author::Member(ALICE), Importance::Normal, &written, 10, now),
             Ok(false),
             "an ordinary message is never limited"
         );
@@ -694,10 +780,81 @@ mod tests {
     fn what_dibs_writes_never_counts_or_is_refused() {
         let now = OffsetDateTime::UNIX_EPOCH + Duration::days(1);
         let written = vec![now; 50];
-        assert!(!counts_toward_limit(Writer::Dibs, Importance::Urgent));
+        assert!(!counts_toward_limit(Author::System, Importance::Urgent));
         assert_eq!(
-            decide_raised(Writer::Dibs, Importance::Urgent, &written, 10, now),
+            decide_raised(Author::System, Importance::Urgent, &written, 10, now),
             Ok(false)
         );
+    }
+
+    #[test]
+    fn what_dibs_writes_in_a_members_thread_reaches_its_readers_but_that_member() {
+        let to_bob = Recipients::members(BTreeSet::from([BOB])).unwrap();
+        let on_behalf = message_recipients(
+            Author::Member(ALICE),
+            &to_bob,
+            Author::System,
+            at(30),
+            &people(),
+        );
+        assert_eq!(
+            on_behalf,
+            BTreeSet::from([BOB]),
+            "dibs writes for the thread's author, who is not asked"
+        );
+        assert_eq!(
+            speaks_for(Author::Member(ALICE), Author::System),
+            Some(ALICE)
+        );
+        assert_eq!(
+            speaks_for(Author::Member(ALICE), Author::Member(BOB)),
+            Some(BOB)
+        );
+    }
+
+    #[test]
+    fn what_dibs_writes_in_a_thread_of_its_own_reaches_every_reader() {
+        let to_bob_and_carol = Recipients::members(BTreeSet::from([BOB, CAROL])).unwrap();
+        assert_eq!(
+            message_recipients(
+                Author::System,
+                &to_bob_and_carol,
+                Author::System,
+                at(30),
+                &people()
+            ),
+            BTreeSet::from([BOB, CAROL])
+        );
+        assert_eq!(
+            message_recipients(
+                Author::System,
+                &Recipients::Project,
+                Author::System,
+                at(30),
+                &people()
+            ),
+            BTreeSet::from([ALICE, BOB, CAROL, DAVE]),
+            "every person, never an integration"
+        );
+        assert_eq!(speaks_for(Author::System, Author::System), None);
+        assert!(
+            !may_read(Author::System, &to_bob_and_carol, ALICE, Role::Admin),
+            "dibs's thread is read by its recipients only"
+        );
+        assert!(may_read(
+            Author::System,
+            &to_bob_and_carol,
+            BOB,
+            Role::Member
+        ));
+    }
+
+    #[test]
+    fn the_system_author_is_no_member() {
+        assert_eq!(Author::System.member(), None);
+        assert!(Author::System.is_system());
+        assert!(!Author::System.is(ALICE));
+        assert!(Author::Member(ALICE).is(ALICE));
+        assert!(!Author::Member(ALICE).is_system());
     }
 }

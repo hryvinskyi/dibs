@@ -13,9 +13,9 @@ mod contract {
     use dibs_app::fakes::MemoryStore;
     use dibs_app::ports::{Store, StoreError};
     use dibs_app::records::{
-        CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord,
-        MessageRecord, ProjectRecord, ReadMark, SessionRecord, ThreadRecord, TokenRecord,
-        UiSessionRecord,
+        CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
+        MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
+        ThreadActivity, ThreadRecord, TokenRecord, UiSessionRecord,
     };
     use dibs_app::token::{TokenHash, TokenPrefix};
     use dibs_domain::area::QualifiedArea;
@@ -35,7 +35,7 @@ mod contract {
         ExternalRef, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
     };
     use dibs_domain::member::{DisplayName, ExternalLogin, Role};
-    use dibs_domain::message::{Ack, Body, Importance, Recipients, SessionLabel, Subject};
+    use dibs_domain::message::{Ack, Author, Body, Importance, Recipients, SessionLabel, Subject};
     use dibs_domain::paths::RepoPath;
     use dibs_domain::project::ProjectSlug;
     use dibs_domain::repo::{RemoteUrl, RepoId};
@@ -131,6 +131,14 @@ mod contract {
         a_delivery_is_one_per_member_and_subject_and_scoped,
         a_delivery_naming_a_missing_session_fails_the_commit,
         raised_messages_are_counted_per_member_from_a_time,
+        what_dibs_writes_has_no_member_author_and_speaks_for_the_threads_starter,
+        a_removed_member_is_kept_with_the_first_time_they_were_removed,
+        a_deleted_thread_takes_everything_that_refers_to_its_messages,
+        quiet_threads_are_found_by_their_last_activity,
+        open_escalations_are_one_per_message_newest_first_until_an_arbiter_acks,
+        old_events_go_and_the_newest_gone_is_remembered,
+        a_members_browser_sessions_are_removed_together,
+        every_project_is_listed,
     );
 
     const A: ProjectId = ProjectId(1);
@@ -167,6 +175,7 @@ mod contract {
             external_login: None,
             role: Role::Member,
             created_at: at(1),
+            removed_at: None,
         }
     }
 
@@ -236,7 +245,7 @@ mod contract {
             id,
             subject: Subject::parse("Invoice totals").unwrap(),
             item,
-            author,
+            author: Author::Member(author),
             recipients: Recipients::Project,
             created_at: at(created),
         }
@@ -246,7 +255,7 @@ mod contract {
         MessageRecord {
             id: MessageId(id),
             thread,
-            author,
+            author: Author::Member(author),
             label: SessionLabel::parse("laptop/mcp").unwrap(),
             body: Body::parse("Can I take billing for an hour?\nThanks.").unwrap(),
             importance: Importance::Normal,
@@ -1214,7 +1223,7 @@ mod contract {
             EventKind::MessagePosted(MessagePosted {
                 thread: ThreadId(81),
                 message: MessageId(91),
-                author: BOB,
+                author: Some(BOB),
             }),
         ];
         let mut tx = store.begin().await.unwrap();
@@ -2048,5 +2057,354 @@ mod contract {
             let mut tx = store.begin().await.unwrap();
             assert!(tx.slot_board(A).await.unwrap().is_empty(), "{what}");
         }
+    }
+
+    fn system_message(id: u64, thread: ThreadId, created: i64) -> MessageRecord {
+        MessageRecord {
+            author: Author::System,
+            label: SessionLabel::parse("dibs").unwrap(),
+            ..asking(id, thread, ALICE, created)
+        }
+    }
+
+    async fn what_dibs_writes_has_no_member_author_and_speaks_for_the_threads_starter(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, None, 60))
+            .await
+            .unwrap();
+        let of_dibs = ThreadRecord {
+            author: Author::System,
+            ..thread(ThreadId(82), ALICE, None, 61)
+        };
+        tx.insert_thread(A, &of_dibs).await.unwrap();
+        tx.insert_message(A, &system_message(91, ThreadId(81), 62))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(92, ThreadId(82), 63))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.thread(A, ThreadId(82)).await.unwrap(), Some(of_dibs));
+        assert_eq!(
+            tx.message(A, MessageId(91)).await.unwrap(),
+            Some(system_message(91, ThreadId(81), 62))
+        );
+        let ids =
+            |records: Vec<MessageRecord>| records.iter().map(|m| m.id.get()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(tx.ack_requests(A, ALICE).await.unwrap()),
+            [92],
+            "what dibs wrote for alice asks her nothing"
+        );
+        assert_eq!(ids(tx.ack_requests(A, BOB).await.unwrap()), [92, 91]);
+        let unread = |summaries: Vec<dibs_app::records::ThreadSummary>| {
+            summaries
+                .iter()
+                .map(|s| (s.thread.id.get(), s.unread))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            unread(tx.thread_summaries(A, ALICE, None).await.unwrap()),
+            [(82, 1), (81, 0)]
+        );
+        assert_eq!(
+            unread(tx.thread_summaries(A, BOB, None).await.unwrap()),
+            [(82, 1), (81, 1)]
+        );
+        assert_eq!(
+            tx.mark_read(A, ALICE, ThreadId(81), at(70)).await.unwrap(),
+            0,
+            "nothing in alice's thread is unread to her"
+        );
+        assert_eq!(tx.mark_read(A, BOB, ThreadId(81), at(70)).await.unwrap(), 1);
+        assert_eq!(
+            tx.mark_read(A, ALICE, ThreadId(82), at(70)).await.unwrap(),
+            1
+        );
+    }
+
+    async fn a_removed_member_is_kept_with_the_first_time_they_were_removed(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.remove_member(A, BOB, at(50)).await.unwrap();
+        tx.remove_member(A, BOB, at(90)).await.unwrap();
+        tx.remove_member(B, ALICE, at(90)).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let bob = tx.member(A, BOB).await.unwrap().unwrap();
+        assert_eq!(bob.removed_at, Some(at(50)));
+        assert!(!bob.is_present());
+        assert_eq!(
+            tx.member_by_handle(A, &Handle::parse("bob").unwrap())
+                .await
+                .unwrap(),
+            Some(bob)
+        );
+        assert_eq!(tx.members(A).await.unwrap().len(), 2, "still listed");
+        assert_eq!(
+            tx.member(A, ALICE).await.unwrap().unwrap().removed_at,
+            None,
+            "another project's removal touches nothing here"
+        );
+    }
+
+    async fn a_deleted_thread_takes_everything_that_refers_to_its_messages(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let to_bob = ThreadRecord {
+            recipients: Recipients::members([BOB].into()).unwrap(),
+            ..thread(ThreadId(81), ALICE, Some(FIRST), 60)
+        };
+        tx.insert_thread(A, &to_bob).await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(82), ALICE, None, 60))
+            .await
+            .unwrap();
+        tx.insert_message(A, &asking(91, ThreadId(81), ALICE, 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(92, ThreadId(81), 62))
+            .await
+            .unwrap();
+        tx.insert_message(A, &asking(93, ThreadId(82), ALICE, 63))
+            .await
+            .unwrap();
+        tx.mark_read(A, BOB, ThreadId(81), at(64)).await.unwrap();
+        tx.insert_ack(A, &ack(91, BOB, 65)).await.unwrap();
+        tx.insert_ack(A, &ack(93, BOB, 65)).await.unwrap();
+        tx.insert_wide_ask(A, &wide_ask(91, FIRST, ALICE, BOB, &["default:billing"]))
+            .await
+            .unwrap();
+        tx.insert_raised(A, ALICE, MessageId(91), at(61))
+            .await
+            .unwrap();
+        let delivered = DeliverySubject::Message(MessageId(91));
+        let kept = DeliverySubject::Message(MessageId(93));
+        tx.insert_delivery(A, &delivery(BOB, &delivered, BOB_LAPTOP, 66))
+            .await
+            .unwrap();
+        tx.insert_delivery(A, &delivery(BOB, &kept, BOB_LAPTOP, 66))
+            .await
+            .unwrap();
+        tx.insert_escalation(A, &escalation(92, ThreadId(81), 62))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.delete_thread(A, ThreadId(81)).await.unwrap(), 2);
+        assert_eq!(tx.delete_thread(A, ThreadId(81)).await.unwrap(), 0);
+        assert_eq!(
+            tx.delete_thread(B, ThreadId(82)).await.unwrap(),
+            0,
+            "another project's thread is not reached"
+        );
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.thread(A, ThreadId(81)).await.unwrap(), None);
+        assert!(tx.messages(A, ThreadId(81)).await.unwrap().is_empty());
+        assert!(tx.acks(A, MessageId(91)).await.unwrap().is_empty());
+        assert!(tx.reads_of(A, MessageId(91)).await.unwrap().is_empty());
+        assert_eq!(tx.wide_ask(A, MessageId(91)).await.unwrap(), None);
+        assert!(tx.raised_since(A, ALICE, at(0)).await.unwrap().is_empty());
+        assert_eq!(tx.delivery(A, BOB, &delivered).await.unwrap(), None);
+        assert!(tx.open_escalations(A).await.unwrap().is_empty());
+        assert_eq!(tx.messages(A, ThreadId(82)).await.unwrap().len(), 1);
+        assert_eq!(tx.acks(A, MessageId(93)).await.unwrap().len(), 1);
+        assert!(tx.delivery(A, BOB, &kept).await.unwrap().is_some());
+    }
+
+    async fn quiet_threads_are_found_by_their_last_activity(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, Some(FIRST), 10))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(82), ALICE, None, 10))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(83), ALICE, None, 20))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(91, ThreadId(81), ALICE, 30))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(92, ThreadId(82), ALICE, 100))
+            .await
+            .unwrap();
+        tx.insert_thread(B, &thread(ThreadId(84), DAVE, None, 10))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.quiet_threads(A, at(50)).await.unwrap(),
+            [
+                ThreadActivity {
+                    thread: ThreadId(81),
+                    item: Some(FIRST),
+                    last_activity: at(30),
+                },
+                ThreadActivity {
+                    thread: ThreadId(83),
+                    item: None,
+                    last_activity: at(20),
+                },
+            ],
+            "a thread without messages counts from its start; a recent message keeps one"
+        );
+        assert!(
+            tx.quiet_threads(A, at(20)).await.unwrap().is_empty(),
+            "before is strict"
+        );
+    }
+
+    fn escalation(message: u64, thread: ThreadId, seconds: i64) -> EscalationRecord {
+        EscalationRecord {
+            message: MessageId(message),
+            thread,
+            subject: dibs_domain::escalation::EscalationSubject::Slot(slot_name("deploy:prod")),
+            by: BOB,
+            arbiters: [ALICE].into(),
+            created_at: at(seconds),
+        }
+    }
+
+    async fn open_escalations_are_one_per_message_newest_first_until_an_arbiter_acks(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), BOB, None, 60))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(91, ThreadId(81), 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(92, ThreadId(81), 62))
+            .await
+            .unwrap();
+        tx.insert_escalation(A, &escalation(91, ThreadId(81), 61))
+            .await
+            .unwrap();
+        let item_subject = EscalationRecord {
+            subject: dibs_domain::escalation::EscalationSubject::Item(FIRST),
+            arbiters: [ALICE, BOB].into(),
+            ..escalation(92, ThreadId(81), 62)
+        };
+        tx.insert_escalation(A, &item_subject).await.unwrap();
+        assert!(is_duplicate(
+            tx.insert_escalation(A, &escalation(91, ThreadId(81), 70))
+                .await
+        ));
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.open_escalations(A).await.unwrap(),
+            [item_subject, escalation(91, ThreadId(81), 61)]
+        );
+        assert!(tx.open_escalations(B).await.unwrap().is_empty());
+        tx.insert_ack(A, &ack(91, BOB, 70)).await.unwrap();
+        tx.insert_ack(A, &ack(92, BOB, 70)).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.open_escalations(A).await.unwrap(),
+            [escalation(91, ThreadId(81), 61)],
+            "an arbiter's acknowledgement settles one; anyone else's settles nothing"
+        );
+    }
+
+    async fn old_events_go_and_the_newest_gone_is_remembered(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let mut ids = Vec::new();
+        for (project, seconds) in [(A, 10), (B, 15), (A, 20), (A, 30)] {
+            ids.push(
+                tx.append_event(
+                    project,
+                    at(seconds),
+                    &EventKind::SettingsChanged(SettingsChanged { by: ALICE }),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.events_pruned_through(A).await.unwrap(), None);
+        assert_eq!(
+            tx.delete_events_before(A, at(25)).await.unwrap(),
+            PrunedEvents {
+                count: 2,
+                through: Some(ids[2]),
+            }
+        );
+        assert_eq!(
+            tx.delete_events_before(A, at(25)).await.unwrap(),
+            PrunedEvents::default(),
+            "nothing left before then"
+        );
+        assert_eq!(tx.events_pruned_through(A).await.unwrap(), Some(ids[2]));
+        assert_eq!(tx.events_pruned_through(B).await.unwrap(), None);
+        let left: Vec<EventId> = tx
+            .events_after(A, None, 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(left, [ids[3]]);
+        assert_eq!(tx.events_after(B, None, 10).await.unwrap().len(), 1);
+        assert_eq!(tx.delete_events_before(A, at(40)).await.unwrap().count, 1);
+        assert_eq!(tx.events_pruned_through(A).await.unwrap(), Some(ids[3]));
+        tx.commit().await.unwrap();
+    }
+
+    async fn a_members_browser_sessions_are_removed_together(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let browser = |hash: &str, member: MemberId, token: &str| UiSessionRecord {
+            hash: TokenHash::new(hash.to_owned()),
+            member,
+            token: TokenHash::new(token.to_owned()),
+            expires_at: at(500),
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_token(A, &token("hash:alice", "AAAAAAAA", ALICE, 1))
+            .await
+            .unwrap();
+        tx.insert_token(A, &token("hash:bob", "BBBBBBBB", BOB, 1))
+            .await
+            .unwrap();
+        for (hash, member, token) in [
+            ("ui:a1", ALICE, "hash:alice"),
+            ("ui:a2", ALICE, "hash:alice"),
+            ("ui:b1", BOB, "hash:bob"),
+        ] {
+            tx.insert_ui_session(A, &browser(hash, member, token))
+                .await
+                .unwrap();
+        }
+        assert_eq!(tx.delete_ui_sessions_of(B, ALICE).await.unwrap(), 0);
+        assert_eq!(tx.delete_ui_sessions_of(A, ALICE).await.unwrap(), 2);
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let hash = |text: &str| TokenHash::new(text.to_owned());
+        assert_eq!(tx.ui_session(&hash("ui:a1")).await.unwrap(), None);
+        assert!(tx.ui_session(&hash("ui:b1")).await.unwrap().is_some());
+    }
+
+    async fn every_project_is_listed(store: Arc<dyn Store>) {
+        let mut tx = store.begin().await.unwrap();
+        assert!(tx.project_ids().await.unwrap().is_empty());
+        drop(tx);
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.project_ids().await.unwrap(), [A, B]);
     }
 }

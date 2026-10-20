@@ -17,6 +17,7 @@ pub use duration::{DurationError, format_duration, parse_duration};
 pub use slots::SlotError;
 
 use crate::area::{Area, AreaName, AreaNameError, QualifiedArea};
+use crate::handle::Handle;
 use crate::hot_rule::{
     HotRuleConfig, HotRuleRefused, HotRuleRegistry, HotRuleSpec, Note, NoteError,
 };
@@ -89,6 +90,7 @@ pub struct ProjectSettings {
     lists_repositories: bool,
     repos: Vec<RepoSpec>,
     slots: SlotCatalog,
+    arbiters: BTreeSet<Handle>,
 }
 
 /// Why a settings document is refused. Each message names the setting at fault.
@@ -242,6 +244,12 @@ pub enum SettingsError {
         #[source]
         error: SlotError,
     },
+    /// An arbiter is not a handle.
+    #[error("arbiters: '{text}' is not a member's handle")]
+    Arbiter {
+        /// The text as written.
+        text: String,
+    },
 }
 
 /// Why an area named by a person does not resolve.
@@ -313,7 +321,8 @@ impl ProjectSettings {
     /// names unique, each slot with `max_hold` between 1 minute and 24 hours, `offer_for` between
     /// 1 minute and 1 hour (default 5 minutes), `max_wait` between 1 minute and 24 hours (default
     /// 2 hours), at most 20 command patterns that compile within their limits, and frozen refs of
-    /// declared repositories.
+    /// declared repositories; arbiters named by handle, each once. Whether an arbiter is a member is
+    /// for the project to say, not the document.
     ///
     /// # Errors
     /// The first [`SettingsError`] found, in document order.
@@ -381,6 +390,13 @@ impl ProjectSettings {
         }
         let slots = slots::parse_slots(&document.slots, &repos, lists_repositories)
             .map_err(|(slot, error)| SettingsError::Slot { slot, error })?;
+        let arbiters = document
+            .arbiters
+            .iter()
+            .map(|text| {
+                Handle::parse(text).map_err(|_| SettingsError::Arbiter { text: text.clone() })
+            })
+            .collect::<Result<BTreeSet<Handle>, _>>()?;
         Ok(Self {
             stale_after,
             heartbeat_every,
@@ -389,7 +405,13 @@ impl ProjectSettings {
             lists_repositories,
             repos,
             slots,
+            arbiters,
         })
+    }
+
+    /// The members who settle what agents do not agree on, by handle.
+    pub fn arbiters(&self) -> &BTreeSet<Handle> {
+        &self.arbiters
     }
 
     /// How long a claim stays live without a heartbeat.
@@ -528,6 +550,7 @@ impl ProjectSettings {
             raised_per_hour: (self.raised_per_hour != DEFAULT_RAISED_PER_HOUR)
                 .then_some(self.raised_per_hour),
             slots: slots::slot_documents(&self.slots),
+            arbiters: self.arbiters.iter().map(ToString::to_string).collect(),
             ..SettingsDocument::default()
         };
         if self.lists_repositories {
@@ -784,6 +807,25 @@ mod tests {
         let set = settings(r#"{"raised_per_hour":25}"#);
         assert_eq!(set.raised_per_hour(), 25);
         assert_eq!(set.to_document().raised_per_hour, Some(25));
+    }
+
+    #[test]
+    fn arbiters_are_handles_kept_once_in_order() {
+        assert!(settings("{}").arbiters().is_empty());
+        assert!(settings("{}").to_document().arbiters.is_empty());
+        let set = settings(r#"{"arbiters":["bob","alice","bob"]}"#);
+        let names: Vec<&str> = set.arbiters().iter().map(Handle::as_str).collect();
+        assert_eq!(names, ["alice", "bob"]);
+        assert_eq!(set.to_document().arbiters, ["alice", "bob"]);
+        assert_eq!(
+            ProjectSettings::parse(
+                &document(r#"{"arbiters":["Not A Handle"]}"#),
+                &HotRuleRegistry::standard()
+            ),
+            Err(SettingsError::Arbiter {
+                text: "Not A Handle".to_owned()
+            })
+        );
     }
 
     #[test]

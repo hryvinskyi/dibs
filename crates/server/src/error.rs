@@ -18,6 +18,7 @@ use dibs_domain::claim::{ClaimRefused, ForceReleaseRefused, HolderOnly, Takeover
 use dibs_domain::delivery::DeliveryRefused;
 use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
+use dibs_domain::escalation::EscalationRefused;
 use dibs_domain::grant::{GrantRefused, RevokeRefused};
 use dibs_domain::handle::Handle;
 use dibs_domain::import::BatchRefused;
@@ -333,7 +334,11 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::Beat(Refusal {
             reason: BeatRefused::TakenOver { .. } | BeatRefused::Ended,
             ..
-        }) => StatusCode::CONFLICT,
+        })
+        | AppError::Escalation(EscalationRefused::NoArbiters)
+        | AppError::AlreadyEscalated { .. }
+        | AppError::SelfRemoval => StatusCode::CONFLICT,
+        AppError::CursorExpired { .. } => StatusCode::GONE,
         AppError::NotARecipient(_)
         | AppError::Claim(Refusal {
             reason: ClaimRefused::UnknownArea { .. } | ClaimRefused::WideAndHeld { .. },
@@ -477,6 +482,8 @@ fn details_of(error: &AppError) -> Map<String, Value> {
             reason: SlotRefused::UnknownSlot { slot },
             ..
         }) => details.put("slot", slot),
+        AppError::CursorExpired { through } => details.put("pruned_through", through),
+        AppError::AlreadyEscalated { thread } => details.put("thread_id", thread),
         _ => {}
     }
     details.0
@@ -640,6 +647,26 @@ mod tests {
                 AppError::Batch(BatchRefused::TooMany { max: 500 }),
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "batch_too_large",
+            ),
+            (
+                AppError::Escalation(EscalationRefused::NoArbiters),
+                StatusCode::CONFLICT,
+                "no_arbiters",
+            ),
+            (AppError::SelfRemoval, StatusCode::CONFLICT, "self_removal"),
+            (
+                AppError::AlreadyEscalated {
+                    thread: dibs_domain::ids::ThreadId(31),
+                },
+                StatusCode::CONFLICT,
+                "already_escalated",
+            ),
+            (
+                AppError::CursorExpired {
+                    through: dibs_domain::ids::EventId(40),
+                },
+                StatusCode::GONE,
+                "cursor_expired",
             ),
         ];
         for (error, status, code) in cases {

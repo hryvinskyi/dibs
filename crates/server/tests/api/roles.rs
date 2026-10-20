@@ -92,6 +92,11 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             format!("/v1/items/{item}/takeover"),
             claim_body(),
         ),
+        (
+            Method::POST,
+            "/v1/escalations".into(),
+            Some(json!({"item": item, "reason": "who goes first?"})),
+        ),
         (Method::POST, format!("/v1/items/{item}/release"), None),
         (Method::POST, format!("/v1/items/{item}/done"), None),
         (

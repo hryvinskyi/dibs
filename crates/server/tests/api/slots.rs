@@ -400,9 +400,19 @@ async fn a_run_beats_releases_with_its_exit_and_a_stalled_hold_is_taken_over_wit
     let told = world
         .get(&team.alice, &format!("/v1/threads/{thread}"))
         .await;
+    assert_eq!(told.body["messages"][0]["author"], "dibs");
+    assert_eq!(told.body["messages"][0]["system"], true);
     assert_eq!(
-        told.body["messages"][0]["body"],
-        "the deploy log stopped; nothing runs"
+        told.body["thread"]["author"], "bob",
+        "dibs writes it for bob"
+    );
+    assert!(
+        told.body["messages"][0]["body"]
+            .as_str()
+            .unwrap()
+            .ends_with("Their reason: the deploy log stopped; nothing runs"),
+        "{}",
+        told.body
     );
     let gone = world
         .post(
@@ -511,7 +521,15 @@ async fn an_admin_forces_a_release_and_the_holder_reads_why() {
         .world
         .get(&team.bob, &format!("/v1/threads/{thread}"))
         .await;
-    assert_eq!(told.body["messages"][0]["body"], "the release is cancelled");
+    assert!(
+        told.body["messages"][0]["body"]
+            .as_str()
+            .unwrap()
+            .ends_with("Their reason: the release is cancelled"),
+        "{}",
+        told.body
+    );
+    assert_eq!(told.body["messages"][0]["system"], true);
     assert_eq!(told.body["messages"][0]["importance"], "high");
 }
 
@@ -547,8 +565,13 @@ async fn the_sweep_offers_a_freed_slot_with_nobody_touching_it_and_stops_on_its_
         tokio::time::sleep(StdDuration::from_millis(10)).await;
     }
     assert!(
-        kinds.ends_with(&["slot_expired", "slot_offered"]),
-        "{kinds:?}"
+        kinds.ends_with(&[
+            "slot_expired",
+            "slot_offered",
+            "thread_started",
+            "message_posted"
+        ]),
+        "the sweep tells the holder whose hold expired: {kinds:?}"
     );
     shutdown.stop();
     tokio::time::timeout(StdDuration::from_secs(5), sweeper)

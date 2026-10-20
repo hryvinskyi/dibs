@@ -5,27 +5,24 @@ use std::sync::Arc;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use dibs_domain::claim::{ClaimRequest, Takeover, decide_takeover};
-use dibs_domain::event::{EventKind, MessagePosted, TakenOver, ThreadStarted};
+use dibs_domain::event::{EventKind, TakenOver};
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
-use dibs_domain::item::Title;
-use dibs_domain::message::{Body, Importance, Recipients, Subject};
+use dibs_domain::ids::{ItemId, SessionId, ThreadId};
+use dibs_domain::message::{Author, Body, Importance, Recipients};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{ItemName, Names, refuse};
-use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
-use crate::records::{MessageRecord, ThreadRecord};
+use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::claim_item::widened;
 use crate::use_cases::common::{existing_item, own_session, remove_claim, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::use_cases::wide_asks::{Announced, Announcer};
-use crate::use_cases::writing::{Authorship, write_message};
+use crate::use_cases::writing::{Posted, SystemPost, system_body};
 use crate::work::Work;
 
 const SUBJECT_PREFIX: &str = "Taken over: ";
-const SUBJECT_MAX_CHARS: usize = 200;
 
 /// The takeover to make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +99,7 @@ impl TakeOver {
         actor.require_person()?;
         let now = self.clock.now();
         let project = actor.project;
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let session = own_session(&mut work, actor, input.session).await?;
         let item = existing_item(&mut work, input.item).await?;
         if item.is_closed() {
@@ -139,44 +136,32 @@ impl TakeOver {
             }),
         )
         .await?;
-        let thread = ThreadRecord {
-            id: ThreadId(self.ids.next()),
-            subject: subject_for(&item.title)?,
+        let names = Names::load(&mut work).await?;
+        let holder = names.handle(actor.member)?;
+        let named = ItemName::of(&item, &self.ref_schemes);
+        let thread = SystemPost {
+            ids: Posted::next(&*self.ids),
+            subject: format!("{SUBJECT_PREFIX}{}", item.title),
             item: Some(item.id),
-            author: actor.member,
-            recipients: Recipients::Members([takeover.previous.member].into()),
-            created_at: now,
-        };
-        let message = MessageRecord {
-            id: MessageId(self.ids.next()),
-            thread: thread.id,
-            author: actor.member,
-            label: session.label,
-            body: input.reason,
+            on_behalf_of: Author::Member(actor.member),
+            to: Recipients::Members([takeover.previous.member].into()),
+            body: system_body(
+                &format!(
+                    "{holder} took over your stale claim on work item {} \"{}\". Your claim has ended; the item is theirs now.",
+                    named
+                        .external_ref
+                        .as_ref()
+                        .map_or_else(|| format!("#{}", item.id), ToString::to_string),
+                    item.title
+                ),
+                Some(("Their reason", input.reason.as_str())),
+            )?,
             importance: Importance::High,
             ack_required: false,
-            created_at: now,
-        };
-        work.insert_thread(project, &thread).await?;
-        write_message(&mut work, &message, Authorship::Dibs, now).await?;
-        work.record(
-            now,
-            EventKind::ThreadStarted(ThreadStarted {
-                thread: thread.id,
-                author: actor.member,
-                item: Some(item.id),
-            }),
-        )
-        .await?;
-        work.record(
-            now,
-            EventKind::MessagePosted(MessagePosted {
-                thread: thread.id,
-                message: message.id,
-                author: actor.member,
-            }),
-        )
-        .await?;
+        }
+        .send(&mut work, now)
+        .await?
+        .thread;
         if let Some(widened) = widened(None, &takeover.claim) {
             work.record(now, widened).await?;
         }
@@ -192,32 +177,17 @@ impl TakeOver {
         .into_iter()
         .filter(|announced| announced.ask.from == actor.member)
         .collect();
-        let names = Names::load(&mut work).await?;
-        let holder = names.handle(actor.member)?;
         let previous_holder = names.handle(takeover.previous.member)?;
         work.commit(&*self.notifier).await?;
         Ok(TakenOverClaim {
-            item: ItemName::of(&item, &self.ref_schemes),
+            item: named,
             takeover,
-            thread: thread.id,
+            thread,
             holder,
             previous_holder,
             announced,
         })
     }
-}
-
-/// The subject of the message to the previous holder: the item's title behind a short prefix,
-/// shortened to fit.
-fn subject_for(title: &Title) -> Result<Subject, AppError> {
-    let room = SUBJECT_MAX_CHARS - SUBJECT_PREFIX.chars().count();
-    let shortened: String = title.as_str().chars().take(room).collect();
-    let text = format!("{SUBJECT_PREFIX}{}", shortened.trim_end());
-    Subject::parse(&text).map_err(|_| {
-        AppError::Store(StoreError::Corrupt {
-            what: "a stored item title that cannot head a message".to_owned(),
-        })
-    })
 }
 
 #[cfg(test)]
@@ -226,7 +196,7 @@ mod tests {
 
     use dibs_domain::area::QualifiedArea;
     use dibs_domain::claim::TakeoverRefused;
-    use dibs_domain::event::{GrantEnd, GrantRevoked};
+    use dibs_domain::event::{GrantEnd, GrantRevoked, ThreadStarted};
     use dibs_domain::handle::Handle;
     use dibs_domain::message::may_read;
 
@@ -294,7 +264,7 @@ mod tests {
             kinds[1],
             EventKind::ThreadStarted(ThreadStarted {
                 thread: taken.thread,
-                author: env.alice.actor.member,
+                author: Some(env.alice.actor.member),
                 item: Some(item),
             })
         );
@@ -312,8 +282,21 @@ mod tests {
             env.bob.actor.role
         ));
         let messages = tx.messages(env.project, taken.thread).await.unwrap();
-        assert_eq!(messages[0].body, reason());
-        assert_eq!(messages[0].label.as_str(), "laptop/4f2a91c0");
+        assert_eq!(
+            messages[0].author,
+            Author::System,
+            "dibs tells them, for alice"
+        );
+        assert_eq!(messages[0].label.as_str(), "dibs");
+        let text = messages[0].body.as_str();
+        assert!(
+            text.starts_with("alice took over your stale claim on work item gh:acme/widgets#1"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(&format!("Their reason: {}", reason().as_str())),
+            "{text}"
+        );
         assert_eq!(
             (messages[0].importance, messages[0].ack_required),
             (Importance::High, false),
@@ -437,13 +420,5 @@ mod tests {
                 cause: GrantEnd::GrantorLeft,
             }))
         );
-    }
-
-    #[test]
-    fn a_long_title_is_shortened_to_fit_the_subject() {
-        let title = Title::parse(&"t".repeat(200)).unwrap();
-        let subject = subject_for(&title).unwrap();
-        assert_eq!(subject.as_str().chars().count(), 200);
-        assert!(subject.as_str().starts_with(SUBJECT_PREFIX));
     }
 }

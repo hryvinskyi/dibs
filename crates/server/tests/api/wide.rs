@@ -108,7 +108,12 @@ async fn a_wide_claim_holds_nothing_and_announces_itself_to_each_holder() {
     let unacked = inbox.body["unacked"].as_array().unwrap();
     assert_eq!(unacked.len(), 1, "{}", inbox.body);
     assert_eq!(unacked[0]["message"]["id"], message);
-    assert_eq!(unacked[0]["message"]["author"], "bob");
+    assert_eq!(unacked[0]["message"]["author"], "dibs");
+    assert_eq!(unacked[0]["message"]["system"], true);
+    assert_eq!(
+        unacked[0]["thread"]["author"], "bob",
+        "dibs writes it for bob"
+    );
     assert_eq!(unacked[0]["message"]["importance"], "high");
     assert_eq!(unacked[0]["message"]["ack_required"], true);
 

@@ -6,7 +6,7 @@ use time::Duration;
 use dibs_domain::event::{EventKind, ForceCause, SlotForceReleased, SlotMember, SlotReleased};
 use dibs_domain::ids::{RunId, SessionId};
 use dibs_domain::member::Role;
-use dibs_domain::message::Body;
+use dibs_domain::message::{Author, Body};
 use dibs_domain::slot::{CommitSha, EndWord, Purpose, RunExit, SlotName, WorkflowName};
 
 use super::*;
@@ -429,9 +429,15 @@ async fn a_run_beats_releases_with_its_exit_and_learns_of_a_takeover() {
         .execute(&env.alice.actor, taken.thread)
         .await
         .unwrap();
+    let notice = &thread.messages[0];
+    assert_eq!(notice.record.author, Author::System);
     assert_eq!(
-        thread.messages[0].record.body.as_str(),
-        "checked the environment: the deploy had stopped"
+        thread.thread.record.author,
+        Author::Member(env.bob.actor.member)
+    );
+    assert_eq!(
+        notice.record.body.as_str(),
+        "bob took over your hold on deploy:prod: the run that held it sent no heartbeat for too long. The slot is theirs now.\nTheir reason: checked the environment: the deploy had stopped"
     );
     let ended = ReleaseSlot::new(&env.deps)
         .execute(
@@ -507,7 +513,7 @@ async fn an_admin_forces_a_release_and_the_holder_is_told_why() {
         EventKind::SlotForceReleased(SlotForceReleased {
             slot: slot("deploy:prod"),
             member: env.bob.actor.member,
-            by: env.alice.actor.member,
+            by: Some(env.alice.actor.member),
             cause: ForceCause::Admin,
         })
     );
@@ -515,9 +521,10 @@ async fn an_admin_forces_a_release_and_the_holder_is_told_why() {
         .execute(&env.bob.actor, forced.thread.unwrap())
         .await
         .unwrap();
+    assert_eq!(thread.messages[0].record.author, Author::System);
     assert_eq!(
         thread.messages[0].record.body.as_str(),
-        "the release is cancelled"
+        "alice, an admin of this project, ended your hold on deploy:prod. The slot is free again, or offered to the next member waiting.\nTheir reason: the release is cancelled"
     );
     assert_eq!(
         force
@@ -549,12 +556,101 @@ async fn the_sweep_offers_a_freed_slot_with_nobody_touching_it() {
         .iter()
         .map(EventKind::name)
         .collect();
-    assert_eq!(kinds, ["slot_expired", "slot_offered"]);
+    assert_eq!(
+        kinds,
+        [
+            "slot_expired",
+            "slot_offered",
+            "thread_started",
+            "message_posted"
+        ],
+        "alice is told her hold expired"
+    );
     assert_eq!(env.fakes.notifier.calls().len(), calls + 1);
     env.advance(Duration::minutes(6));
     let lapsed = sweep.execute().await.unwrap();
     assert_eq!(lapsed.events, 1, "bob's offer lapses");
     assert_eq!(sweep.execute().await.unwrap().projects, 0, "nothing left");
+}
+
+/// The notices dibs wrote to one member about slots, each with its importance, oldest first.
+async fn slot_notices(env: &Env, who: &Person) -> Vec<(String, String)> {
+    let inbox = Inbox::new(&env.deps)
+        .execute(&who.actor, InboxQuery::default())
+        .await
+        .unwrap();
+    let mut notices = Vec::new();
+    for summary in inbox.threads.iter().rev() {
+        let thread = ReadThread::new(&env.deps)
+            .execute(&who.actor, summary.thread.record.id)
+            .await
+            .unwrap();
+        for message in thread.messages {
+            if message.author.is_dibs() {
+                notices.push((
+                    thread.thread.record.subject.to_string(),
+                    message.record.body.to_string(),
+                ));
+            }
+        }
+    }
+    notices
+}
+
+#[tokio::test]
+async fn the_expiry_and_the_lapse_reach_their_member_once_whoever_finds_them() {
+    let (env, carol) = env().await;
+    take(&env, &env.alice, "deploy:prod", HoldMode::Session).await;
+    take(&env, &env.bob, "deploy:prod", HoldMode::Session).await;
+    env.advance(Duration::minutes(31));
+    line(&env, "deploy:prod").await;
+    TickSlots::new(&env.deps).execute().await.unwrap();
+    line(&env, "deploy:prod").await;
+    let alices = slot_notices(&env, &env.alice).await;
+    assert_eq!(
+        alices.len(),
+        1,
+        "one notice, though three reads found the change"
+    );
+    assert_eq!(alices[0].0, "Your hold on deploy:prod expired");
+    assert!(
+        alices[0]
+            .1
+            .starts_with("Your hold on deploy:prod reached its expiry and ended.")
+    );
+    assert!(
+        slot_notices(&env, &env.bob).await.is_empty(),
+        "bob is offered it"
+    );
+    assert!(slot_notices(&env, &carol).await.is_empty());
+
+    env.advance(Duration::minutes(6));
+    TickSlots::new(&env.deps).execute().await.unwrap();
+    TickSlots::new(&env.deps).execute().await.unwrap();
+    let bobs = slot_notices(&env, &env.bob).await;
+    assert_eq!(bobs.len(), 1);
+    assert_eq!(bobs[0].0, "The offer of deploy:prod to you lapsed");
+    assert!(bobs[0].1.contains("you are out of its queue"));
+    assert_eq!(slot_notices(&env, &env.alice).await.len(), 1);
+    assert!(slot_notices(&env, &carol).await.is_empty());
+
+    let inbox = Inbox::new(&env.deps)
+        .execute(
+            &env.bob.actor,
+            InboxQuery {
+                deliverable: true,
+                ..InboxQuery::default()
+            },
+        )
+        .await
+        .unwrap();
+    let pending = inbox.deliverable.unwrap();
+    assert_eq!(pending.len(), 1, "the notice reaches bob's agent");
+    assert!(pending[0].message.author.is_dibs());
+    assert_eq!(
+        pending[0].message.record.importance,
+        dibs_domain::message::Importance::High
+    );
 }
 
 #[tokio::test]

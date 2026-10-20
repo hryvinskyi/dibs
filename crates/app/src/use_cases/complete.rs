@@ -45,7 +45,7 @@ impl Complete {
     pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<EndedClaim, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let item = existing_item(&mut work, item).await?;
         let current = work.claim(actor.project, item.id).await?;
         let completed = match decide_complete(current.as_ref(), actor.member) {

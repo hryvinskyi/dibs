@@ -1,13 +1,15 @@
 //! One conversation with its messages.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use time::OffsetDateTime;
 
+use dibs_domain::claim::Claim;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{MemberId, MessageId, ThreadId};
 use dibs_domain::message::{Ack, AckState};
+use dibs_domain::wide::ask_stands;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -39,6 +41,9 @@ pub struct ThreadView {
     /// For each message that asks to be acknowledged, its recipients ordered by handle, with when
     /// each acknowledged it.
     pub acks: BTreeMap<MessageId, Vec<RecipientAck>>,
+    /// The messages of `acks` that still ask for an acknowledgement: all of them but a wide claim's
+    /// announcement whose wide claim has ended, which asks for nothing any more.
+    pub asking: BTreeSet<MessageId>,
 }
 
 /// Shows a thread the caller may read. Reading does not mark it read; that is its own step.
@@ -61,14 +66,16 @@ impl ReadThread {
     /// exist or that the caller may not read; [`AppError::Store`] when the store fails.
     pub async fn execute(&self, actor: &Actor, thread: ThreadId) -> Result<ThreadView, AppError> {
         actor.require_person()?;
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let thread = readable_thread(&mut work, actor, thread).await?;
         let messages = work.messages(actor.project, thread.id).await?;
         let names = Names::load(&mut work).await?;
         let mut acks = BTreeMap::new();
+        let mut asking = BTreeSet::new();
         if messages.iter().any(|message| message.ack_required) {
             let people = people(&mut work).await?;
             let recorded = work.thread_acks(actor.project, thread.id).await?;
+            let mut claims = None;
             for message in messages.iter().filter(|message| message.ack_required) {
                 let of_message: Vec<Ack> = recorded
                     .iter()
@@ -88,6 +95,9 @@ impl ReadThread {
                     .collect::<Result<Vec<_>, AppError>>()?;
                 entries.sort_by(|a, b| a.handle.cmp(&b.handle));
                 acks.insert(message.id, entries);
+                if still_asks(&mut work, &mut claims, message.id).await? {
+                    asking.insert(message.id);
+                }
             }
         }
         Ok(ThreadView {
@@ -97,8 +107,29 @@ impl ReadThread {
                 .map(|message| names.message(message))
                 .collect::<Result<_, _>>()?,
             acks,
+            asking,
         })
     }
+}
+
+/// Whether a message that asks to be acknowledged still does: a wide claim's announcement asks
+/// only while its wide claim stands. The project's claims are read once, the first time one is
+/// needed.
+async fn still_asks(
+    work: &mut Work,
+    claims: &mut Option<Vec<Claim>>,
+    message: MessageId,
+) -> Result<bool, AppError> {
+    let project = work.project_id();
+    let Some(ask) = work.wide_ask(project, message).await? else {
+        return Ok(true);
+    };
+    if claims.is_none() {
+        *claims = Some(work.claims(project).await?);
+    }
+    Ok(claims
+        .as_deref()
+        .is_some_and(|claims| ask_stands(&ask, claims)))
 }
 
 #[cfg(test)]

@@ -7,10 +7,13 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
-use dibs_app::Actor;
+use serde::Deserialize;
+
 use dibs_app::use_cases::EventCursor;
+use dibs_app::{Actor, AppError};
 
 use crate::error::ApiError;
+use crate::fields::event_cursor;
 use crate::http::AppState;
 use crate::routes::events::{StreamQuery, stream_from};
 use crate::ui::session::ScriptSession;
@@ -41,9 +44,40 @@ pub async fn stream(
         .await
 }
 
-/// `GET /ui/session`: `204` while the browser's session lives, `401` once it ended.
-pub async fn session(ScriptSession(_): ScriptSession) -> Response {
-    StatusCode::NO_CONTENT.into_response()
+/// The query of `GET /ui/session`.
+#[derive(Deserialize)]
+pub struct SessionQuery {
+    after: Option<String>,
+}
+
+/// `GET /ui/session`: `204` while the browser's session lives, `401` once it ended. With
+/// `?after=<cursor>`, the cursor the page follows the stream from, a cursor behind the events the
+/// retention removed is answered `410 cursor_expired` with `details.latest`, the newest event now,
+/// so the page reads its state again and follows the stream from there instead of asking for what
+/// no longer exists, again and again.
+///
+/// # Errors
+/// `unauthorized` without a live session; `invalid_query` for a cursor that is none;
+/// `cursor_expired` as above.
+pub async fn session(
+    State(state): State<AppState>,
+    ScriptSession(session): ScriptSession,
+    query: Result<Query<SessionQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    if let Some(text) = query.after.as_deref() {
+        let cursor = event_cursor(text).map_err(|rule| ApiError::invalid_field("after", &rule))?;
+        let actor = session.actor();
+        match state.app.list_events.execute(actor, cursor, 1).await {
+            Ok(_) => {}
+            Err(error @ AppError::CursorExpired { .. }) => {
+                let latest = latest_event(&state, actor).await?;
+                return Err(ApiError::from(error).with_detail("latest", latest));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// The id of the newest event of the actor's log, or 0 while it is empty: what a page read the log

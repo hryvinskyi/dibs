@@ -16,7 +16,7 @@ use dibs_domain::event::Event;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::item::{ExternalRef, Title};
-use dibs_domain::message::{Importance, Recipients};
+use dibs_domain::message::{Author, Importance, Recipients};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::slot::{BeatRefused, SlotRefused};
 
@@ -112,25 +112,66 @@ pub struct NamedVerdict {
     pub touched_refs: Vec<Option<ExternalRef>>,
 }
 
+/// Who wrote a message or started a thread, as a result names them: a member by handle, or dibs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorName {
+    /// A member.
+    Member(Handle),
+    /// dibs itself, writing in the project's name.
+    Dibs,
+}
+
+impl AuthorName {
+    /// The name dibs goes by where an author is named.
+    pub const DIBS: &'static str = "dibs";
+
+    /// The member's handle; `None` for dibs.
+    pub fn handle(&self) -> Option<&Handle> {
+        match self {
+            Self::Member(handle) => Some(handle),
+            Self::Dibs => None,
+        }
+    }
+
+    /// Whether dibs wrote it.
+    pub fn is_dibs(&self) -> bool {
+        matches!(self, Self::Dibs)
+    }
+
+    /// The name as text: the member's handle, or `dibs`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Member(handle) => handle.as_str(),
+            Self::Dibs => Self::DIBS,
+        }
+    }
+}
+
+impl fmt::Display for AuthorName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A conversation with the handles of its author and recipients.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedThread {
     /// The thread.
     pub record: ThreadRecord,
-    /// The handle of `record.author`.
-    pub author: Handle,
+    /// Who started it.
+    pub author: AuthorName,
     /// The handles of the members `record.recipients` lists, in its order; empty for a thread
     /// addressed to the whole project.
     pub recipients: Vec<Handle>,
 }
 
-/// A message with its author's handle.
+/// A message with its author named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedMessage {
     /// The message.
     pub record: MessageRecord,
-    /// The handle of `record.author`.
-    pub author: Handle,
+    /// Who wrote it.
+    pub author: AuthorName,
 }
 
 /// A thread with its counts as one reader sees them, its members named.
@@ -321,6 +362,17 @@ impl Names {
         })
     }
 
+    /// How an author is named: a member by their handle, or dibs.
+    ///
+    /// # Errors
+    /// [`AppError::Store`] when the author is a member the project does not have.
+    pub(crate) fn author(&self, author: Author) -> Result<AuthorName, AppError> {
+        match author {
+            Author::Member(member) => self.handle(member).map(AuthorName::Member),
+            Author::System => Ok(AuthorName::Dibs),
+        }
+    }
+
     /// The member of a handle, if the project has one.
     pub(crate) fn member(&self, handle: &Handle) -> Option<MemberId> {
         self.handles
@@ -364,7 +416,7 @@ impl Names {
                 .collect::<Result<_, _>>()?,
         };
         Ok(NamedThread {
-            author: self.handle(record.author)?,
+            author: self.author(record.author)?,
             recipients,
             record,
         })
@@ -373,7 +425,7 @@ impl Names {
     /// The message with its author's handle.
     pub(crate) fn message(&self, record: MessageRecord) -> Result<NamedMessage, AppError> {
         Ok(NamedMessage {
-            author: self.handle(record.author)?,
+            author: self.author(record.author)?,
             record,
         })
     }

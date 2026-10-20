@@ -14,7 +14,7 @@ use dibs_domain::slot::SlotName;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::ports::{Clock, EventNotifier, Store};
+use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::ack::readable_message;
 use crate::use_cases::acks::{people, reached};
 use crate::use_cases::common::own_session;
@@ -42,6 +42,7 @@ pub enum DeliveryAsk {
 pub struct ClaimDelivery {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
 }
@@ -52,6 +53,7 @@ impl ClaimDelivery {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
         }
@@ -73,7 +75,7 @@ impl ClaimDelivery {
         actor.require_person()?;
         let now = self.clock.now();
         let project = actor.project;
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         own_session(&mut work, actor, session).await?;
         let subject = match ask {
             DeliveryAsk::Message(id) => {
@@ -86,7 +88,7 @@ impl ClaimDelivery {
             }
             DeliveryAsk::Offer { slot, until } => {
                 let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
-                scene.save(&mut work, now).await?;
+                scene.save(&mut work, &*self.ids, now).await?;
                 let stands = scene.board.offers.iter().any(|offer| {
                     offer.member == actor.member && offer.slot == slot && offer.until == until
                 });

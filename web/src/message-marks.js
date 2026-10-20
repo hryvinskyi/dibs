@@ -15,14 +15,26 @@ export function showsImportance(importance) {
 }
 
 /**
+ * The handle of the member a message speaks for: its author, or, for what dibs wrote, the member
+ * who started the thread, on whose behalf dibs wrote it — `''` when dibs started the thread too.
+ * @param {Pick<import('./events.js').StreamMessage, 'author' | 'system'>} message
+ * @param {string} sender the handle of the member who started the thread, `''` for dibs
+ * @returns {string}
+ */
+export function speaksFor(message, sender) {
+  return message.system ? sender : message.author;
+}
+
+/**
  * Whether the person reading the page is offered the acknowledge button for a message: it asks
- * for an acknowledgement and somebody else wrote it.
- * @param {Pick<import('./events.js').StreamMessage, 'ackRequired' | 'author'>} message
+ * for an acknowledgement and does not speak for them.
+ * @param {Pick<import('./events.js').StreamMessage, 'ackRequired' | 'author' | 'system'>} message
  * @param {string} me the handle of the person reading the page
+ * @param {string} sender the handle of the member who started the thread, `''` for dibs
  * @returns {boolean}
  */
-export function offersAck(message, me) {
-  return message.ackRequired && message.author !== me;
+export function offersAck(message, me, sender) {
+  return message.ackRequired && speaksFor(message, sender) !== me;
 }
 
 /**

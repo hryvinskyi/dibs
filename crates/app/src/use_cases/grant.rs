@@ -76,7 +76,7 @@ impl Grant {
         actor.require_person()?;
         let now = self.clock.now();
         let project = actor.project;
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let item = existing_item(&mut work, input.item).await?;
         let grantee = member_by_handle(&mut work, &input.to).await?;
         let settings = work.project_settings(&self.hot_rules).await?;

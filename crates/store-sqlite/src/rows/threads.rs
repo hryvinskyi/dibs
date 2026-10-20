@@ -7,9 +7,9 @@ use sqlx::sqlite::SqliteRow;
 use time::OffsetDateTime;
 
 use dibs_app::ports::{AckRows, StoreResult, ThreadRows};
-use dibs_app::records::{MessageRecord, ReadMark, ThreadRecord, ThreadSummary};
+use dibs_app::records::{MessageRecord, ReadMark, ThreadActivity, ThreadRecord, ThreadSummary};
 use dibs_domain::ids::{ItemId, MemberId, MessageId, ProjectId, ThreadId};
-use dibs_domain::message::{Ack, Body, Importance, Recipients, SessionLabel, Subject};
+use dibs_domain::message::{Ack, Author, Body, Importance, Recipients, SessionLabel, Subject};
 
 use crate::SqliteTx;
 use crate::codec::{Fields, int, name, nanos};
@@ -19,6 +19,19 @@ macro_rules! message_columns {
     () => {
         "m.id, m.thread_id, m.author_id, m.label, m.body, m.importance, m.ack_required, \
          m.created_at"
+    };
+}
+
+/// The statement that removes the rows of `$table` that refer to a message of the thread `?2` of
+/// the project `?1`.
+macro_rules! of_thread_messages {
+    ($table:literal) => {
+        concat!(
+            "DELETE FROM ",
+            $table,
+            " WHERE project_id = ?1 AND message_id IN \
+             (SELECT id FROM messages WHERE project_id = ?1 AND thread_id = ?2)"
+        )
     };
 }
 
@@ -47,13 +60,24 @@ fn recipients(f: &Fields<'_>) -> StoreResult<Recipients> {
     Recipients::members(members).map_err(|error| f.bad("recipients", error))
 }
 
+/// The author an `author_id` column holds: a member, or NULL for dibs.
+fn author(f: &Fields<'_>) -> StoreResult<Author> {
+    Ok(f.opt_number("author_id")?
+        .map_or(Author::System, |id| Author::Member(MemberId(id))))
+}
+
+/// The author as an `author_id` column holds it.
+fn author_id(author: Author) -> StoreResult<Option<i64>> {
+    author.member().map(|member| int(member.get())).transpose()
+}
+
 fn thread(row: &SqliteRow) -> StoreResult<ThreadRecord> {
     let f = Fields::of(row, "threads");
     Ok(ThreadRecord {
         id: ThreadId(f.number("id")?),
         subject: f.parse("subject", Subject::parse)?,
         item: f.opt_number("item_id")?.map(ItemId),
-        author: MemberId(f.number("author_id")?),
+        author: author(&f)?,
         recipients: recipients(&f)?,
         created_at: f.time("created_at")?,
     })
@@ -64,7 +88,7 @@ fn message(row: &SqliteRow) -> StoreResult<MessageRecord> {
     Ok(MessageRecord {
         id: MessageId(f.number("id")?),
         thread: ThreadId(f.number("thread_id")?),
-        author: MemberId(f.number("author_id")?),
+        author: author(&f)?,
         label: f.parse("label", SessionLabel::parse)?,
         body: f.parse("body", Body::parse)?,
         importance: f.named("importance")?,
@@ -113,7 +137,7 @@ impl ThreadRows for SqliteTx {
         .bind(int(record.id.get())?)
         .bind(record.subject.as_str().to_owned())
         .bind(record.item.map(|item| int(item.get())).transpose()?)
-        .bind(int(record.author.get())?)
+        .bind(author_id(record.author)?)
         .bind(to_project)
         .bind(nanos(record.created_at)?);
         self.run(statement).await?;
@@ -162,7 +186,7 @@ impl ThreadRows for SqliteTx {
         .bind(int(project.get())?)
         .bind(int(record.id.get())?)
         .bind(int(record.thread.get())?)
-        .bind(int(record.author.get())?)
+        .bind(author_id(record.author)?)
         .bind(record.label.as_str().to_owned())
         .bind(record.body.as_str().to_owned())
         .bind(name(&record.importance)?)
@@ -220,7 +244,8 @@ impl ThreadRows for SqliteTx {
              (SELECT COUNT(*) FROM messages m \
               WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS messages, \
              (SELECT COUNT(*) FROM messages m \
-              WHERE m.project_id = t.project_id AND m.thread_id = t.id AND m.author_id <> ?2 \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id \
+              AND COALESCE(m.author_id, t.author_id) IS NOT ?2 \
               AND NOT EXISTS (SELECT 1 FROM reads d WHERE d.project_id = m.project_id \
                   AND d.member_id = ?2 AND d.message_id = m.id)) AS unread, \
              (SELECT MAX(m.created_at) FROM messages m \
@@ -236,6 +261,79 @@ impl ThreadRows for SqliteTx {
         self.all(statement).await?.iter().map(summary).collect()
     }
 
+    async fn quiet_threads(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<Vec<ThreadActivity>> {
+        let statement = sqlx::query(
+            "SELECT id, item_id, last_activity FROM (\
+               SELECT t.id, t.item_id, COALESCE((SELECT MAX(m.created_at) FROM messages m \
+                 WHERE m.project_id = t.project_id AND m.thread_id = t.id), t.created_at) \
+                 AS last_activity \
+               FROM threads t WHERE t.project_id = ?1) \
+             WHERE last_activity < ?2 ORDER BY id",
+        )
+        .bind(int(project.get())?)
+        .bind(nanos(before)?);
+        self.all(statement)
+            .await?
+            .iter()
+            .map(|row| {
+                let f = Fields::of(row, "threads");
+                Ok(ThreadActivity {
+                    thread: ThreadId(f.number("id")?),
+                    item: f.opt_number("item_id")?.map(ItemId),
+                    last_activity: f.time("last_activity")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn delete_thread(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<u64> {
+        let project = int(project.get())?;
+        let thread = int(thread.get())?;
+        for statement in [
+            of_thread_messages!("reads"),
+            of_thread_messages!("acks"),
+            of_thread_messages!("wide_asks"),
+            of_thread_messages!("raised_messages"),
+            of_thread_messages!("escalations"),
+        ] {
+            self.run(sqlx::query(statement).bind(project).bind(thread))
+                .await?;
+        }
+        self.run(
+            sqlx::query(
+                "DELETE FROM message_deliveries WHERE project_id = ?1 AND subject IN \
+                 (SELECT CAST(id AS TEXT) FROM messages WHERE project_id = ?1 AND thread_id = ?2)",
+            )
+            .bind(project)
+            .bind(thread),
+        )
+        .await?;
+        let messages = self
+            .run(
+                sqlx::query("DELETE FROM messages WHERE project_id = ?1 AND thread_id = ?2")
+                    .bind(project)
+                    .bind(thread),
+            )
+            .await?;
+        self.run(
+            sqlx::query("DELETE FROM thread_recipients WHERE project_id = ?1 AND thread_id = ?2")
+                .bind(project)
+                .bind(thread),
+        )
+        .await?;
+        self.run(
+            sqlx::query("DELETE FROM threads WHERE project_id = ?1 AND id = ?2")
+                .bind(project)
+                .bind(thread),
+        )
+        .await?;
+        Ok(messages)
+    }
+
     async fn mark_read(
         &mut self,
         project: ProjectId,
@@ -246,7 +344,9 @@ impl ThreadRows for SqliteTx {
         let statement = sqlx::query(
             "INSERT INTO reads (project_id, member_id, message_id, read_at) \
              SELECT m.project_id, ?2, m.id, ?4 FROM messages m \
-             WHERE m.project_id = ?1 AND m.thread_id = ?3 AND m.author_id <> ?2 \
+             JOIN threads t ON t.project_id = m.project_id AND t.id = m.thread_id \
+             WHERE m.project_id = ?1 AND m.thread_id = ?3 \
+             AND COALESCE(m.author_id, t.author_id) IS NOT ?2 \
              ON CONFLICT (project_id, member_id, message_id) DO NOTHING",
         )
         .bind(int(project.get())?)
@@ -302,7 +402,9 @@ impl AckRows for SqliteTx {
             "SELECT ",
             message_columns!(),
             " FROM messages m \
-             WHERE m.project_id = ?1 AND m.ack_required = 1 AND m.author_id <> ?2 \
+             JOIN threads t ON t.project_id = m.project_id AND t.id = m.thread_id \
+             WHERE m.project_id = ?1 AND m.ack_required = 1 \
+             AND COALESCE(m.author_id, t.author_id) IS NOT ?2 \
              AND NOT EXISTS (SELECT 1 FROM acks a WHERE a.project_id = m.project_id \
                  AND a.message_id = m.id AND a.member_id = ?2) \
              ORDER BY m.created_at DESC, m.id DESC"

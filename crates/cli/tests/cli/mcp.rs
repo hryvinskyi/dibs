@@ -15,11 +15,12 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 19] = [
+const TOOLS: [&str; 20] = [
     "dibs_ack",
     "dibs_check",
     "dibs_claim",
     "dibs_done",
+    "dibs_escalate",
     "dibs_grant",
     "dibs_inbox",
     "dibs_items",
@@ -487,6 +488,76 @@ fn messages_are_sent_read_and_answered_under_the_sessions_label() {
     assert_eq!(everyone.ok()["thread"]["to_project"], true);
     assert_eq!(everyone.ok()["message"]["importance"], "normal");
     assert_eq!(everyone.ok()["message"]["ack_required"], false);
+}
+
+#[test]
+fn an_escalation_through_the_tools_reaches_the_arbiter_from_dibs_and_counts_toward_no_limit() {
+    let setup = Setup::new();
+    let mut settings = dibs_test_server::two_repositories();
+    settings["arbiters"] = json!(["alice"]);
+    settings["raised_per_hour"] = json!(1);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    let urgent = bob.tool(
+        "dibs_send",
+        json!({"to": ["alice"], "subject": "Rates", "body": "Now?", "importance": "urgent"}),
+    );
+    assert!(!urgent.is_error, "{}", urgent.text);
+    let item = bob
+        .tool(
+            "dibs_new",
+            json!({"ref": "gh:acme/api#78", "title": "Rates"}),
+        )
+        .ok()["item"]["id"]
+        .as_u64()
+        .unwrap();
+    let other = bob
+        .tool(
+            "dibs_new",
+            json!({"ref": "gh:acme/api#79", "title": "Search"}),
+        )
+        .ok()["item"]["id"]
+        .as_u64()
+        .unwrap();
+    for subject in [item, other] {
+        let sent = bob.tool(
+            "dibs_escalate",
+            json!({"item": subject, "reason": "our agents keep undoing each other"}),
+        );
+        assert_eq!(
+            sent.ok()["escalation"]["arbiters"],
+            json!(["alice"]),
+            "{}",
+            sent.text
+        );
+    }
+    let again = bob.tool(
+        "dibs_escalate",
+        json!({"item": item, "reason": "still undoing each other"}),
+    );
+    assert!(
+        again
+            .error()
+            .starts_with("This is escalated already, in conversation"),
+        "{}",
+        again.error()
+    );
+    let both = bob.tool(
+        "dibs_escalate",
+        json!({"item": item, "slot": "deploy:prod", "reason": "?"}),
+    );
+    assert!(both.error().starts_with("`item`: "), "{}", both.error());
+
+    let inbox = alice.tool("dibs_inbox", json!({"unacked": true}));
+    let unacked = inbox.ok()["unacked"].as_array().unwrap().clone();
+    assert_eq!(unacked.len(), 2);
+    assert_eq!(unacked[0]["message"]["author"], "dibs");
+    assert_eq!(unacked[0]["message"]["system"], true);
+    assert_eq!(unacked[0]["message"]["importance"], "urgent");
+    let status = alice.tool("dibs_status", json!({}));
+    assert_eq!(status.ok()["escalations"].as_array().unwrap().len(), 2);
 }
 
 #[test]

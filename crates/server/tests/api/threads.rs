@@ -59,13 +59,15 @@ async fn a_thread_starts_and_its_people_read_and_answer() {
         started.body["thread"],
         json!({
             "id": thread, "subject": "Invoice totals", "item": item, "author": "alice",
-            "to_project": false, "to": ["bob"], "created_at": "2026-03-02T09:00:00Z",
+            "system": false, "to_project": false, "to": ["bob"],
+            "created_at": "2026-03-02T09:00:00Z",
         })
     );
     assert_eq!(
         started.body["message"],
         json!({
-            "id": first, "thread": thread, "author": "alice", "label": "laptop/mcp",
+            "id": first, "thread": thread, "author": "alice", "system": false,
+            "label": "laptop/mcp",
             "body": "Can you look?\nThe totals are off.", "importance": "normal",
             "ack_required": false, "created_at": "2026-03-02T09:00:00Z",
         })

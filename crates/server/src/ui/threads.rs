@@ -70,7 +70,7 @@ fn people(thread: &NamedThread) -> (Vec<String>, bool) {
         thread
             .recipients
             .iter()
-            .filter(|handle| **handle != thread.author)
+            .filter(|handle| thread.author.handle() != Some(*handle))
             .map(ToString::to_string),
     );
     let to_project = matches!(thread.record.recipients, Recipients::Project);
@@ -148,7 +148,9 @@ struct AckBlock {
 }
 
 impl AckBlock {
-    fn of(acks: &[RecipientAck], viewer: MemberId, now: OffsetDateTime) -> Self {
+    /// The block of a message; `asking` says whether it still asks for an acknowledgement, which a
+    /// wide claim's announcement does only while its wide claim stands.
+    fn of(acks: &[RecipientAck], viewer: MemberId, asking: bool, now: OffsetDateTime) -> Self {
         Self {
             entries: acks
                 .iter()
@@ -158,9 +160,10 @@ impl AckBlock {
                     acked: ack.acked_at.map(|at| moment(at, now)),
                 })
                 .collect(),
-            may_ack: acks
-                .iter()
-                .any(|ack| ack.member == viewer && ack.acked_at.is_none()),
+            may_ack: asking
+                && acks
+                    .iter()
+                    .any(|ack| ack.member == viewer && ack.acked_at.is_none()),
         }
     }
 }
@@ -174,6 +177,8 @@ struct MessageRow {
     body: String,
     at: Moment,
     mine: bool,
+    /// Whether dibs wrote it, in the project's name.
+    system: bool,
     importance: Importance,
     ack: Option<AckBlock>,
 }
@@ -182,6 +187,7 @@ impl MessageRow {
     fn of(
         named: &NamedMessage,
         acks: Option<&Vec<RecipientAck>>,
+        asking: bool,
         viewer: MemberId,
         now: OffsetDateTime,
     ) -> Self {
@@ -192,9 +198,10 @@ impl MessageRow {
             label: message.label.to_string(),
             body: message.body.to_string(),
             at: moment(message.created_at, now),
-            mine: message.author == viewer,
+            mine: message.author.is(viewer),
+            system: named.author.is_dibs(),
             importance: message.importance,
-            ack: acks.map(|acks| AckBlock::of(acks, viewer, now)),
+            ack: acks.map(|acks| AckBlock::of(acks, viewer, asking, now)),
         }
     }
 }
@@ -232,6 +239,9 @@ struct ThreadPage {
     /// The highest importance among the messages.
     importance: Importance,
     messages: Vec<MessageRow>,
+    /// The handle of the member the thread's author is, on whose behalf what dibs writes in it
+    /// speaks; empty for a thread dibs started.
+    sender: String,
     after: u64,
     rendered: Moment,
     problem: Option<ReplyProblem>,
@@ -295,9 +305,16 @@ async fn thread_page(
             .iter()
             .map(|message| {
                 let acks = view.acks.get(&message.record.id);
-                MessageRow::of(message, acks, actor.member, now)
+                let asking = view.asking.contains(&message.record.id);
+                MessageRow::of(message, acks, asking, actor.member, now)
             })
             .collect(),
+        sender: view
+            .thread
+            .author
+            .handle()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
         after,
         rendered: moment(now, now),
         problem,

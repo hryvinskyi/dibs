@@ -66,7 +66,7 @@ impl InitProject {
     pub async fn execute(&self, input: InitProjectInput) -> Result<InitializedProject, AppError> {
         let now = self.clock.now();
         let id = ProjectId(self.ids.next());
-        let mut work = Work::begin(&*self.store, id).await?;
+        let mut work = Work::begin_unattended(&*self.store, id).await?;
         if work.project_by_slug(&input.slug).await?.is_some() {
             return Err(AppError::Duplicate(Duplicate::Project(input.slug)));
         }

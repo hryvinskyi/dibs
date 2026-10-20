@@ -1,5 +1,6 @@
-//! `POST /v1/admin/members`, `POST /v1/admin/members/{handle}/tokens`,
-//! `DELETE /v1/admin/tokens/{prefix}`, `PUT /v1/admin/settings` and
+//! `POST /v1/admin/members`, `DELETE /v1/admin/members/{handle}`,
+//! `POST /v1/admin/members/{handle}/tokens`, `DELETE /v1/admin/tokens/{prefix}`,
+//! `DELETE /v1/admin/threads/{id}`, `PUT /v1/admin/settings` and
 //! `POST /v1/admin/items/{id}/force-release`: managing a project. Every route refuses a caller who
 //! is no admin before it reads the request, so the refusal is the same whatever was sent.
 
@@ -18,9 +19,12 @@ use dibs_domain::settings::SettingsDocument;
 
 use crate::auth::Authed;
 use crate::error::ApiError;
-use crate::fields::{item_in_path, parse, parse_required};
+use crate::fields::{item_in_path, parse, parse_required, thread_in_path};
 use crate::http::AppState;
 use crate::views::{ClaimView, ItemNameView, MemberView, TokenView, reply};
+use dibs_domain::ids::ThreadId;
+use dibs_domain::slot::SlotName;
+use time::OffsetDateTime;
 
 /// The body of `POST /v1/admin/members`.
 #[derive(Deserialize)]
@@ -117,6 +121,87 @@ pub async fn rotate_token(
     Ok(reply(
         StatusCode::CREATED,
         &EnrolledAnswer::of(MemberView::of(&rotated.member), &rotated.token),
+    ))
+}
+
+#[derive(Serialize)]
+struct LeftSlots {
+    held: Vec<SlotName>,
+    waited: Vec<SlotName>,
+    offered: Vec<SlotName>,
+}
+
+#[derive(Serialize)]
+struct RemovedAnswer {
+    member: MemberView,
+    #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
+    removed_at: Option<OffsetDateTime>,
+    released: Vec<ItemNameView>,
+    slots: LeftSlots,
+    tokens_revoked: u64,
+    ui_sessions_ended: u64,
+}
+
+/// Removes the member with this handle from the project, in one transaction: their tokens are
+/// revoked and their browser sessions end, their claims are released, their holds, places in
+/// queues and offers among the slots end, and dibs tells the project what was released. Their
+/// messages stay. Answers what went with them.
+///
+/// # Errors
+/// `forbidden` unless the caller is an admin; `not_found` for a handle the project has no member
+/// of, or one removed before; `self_removal` (`409`) for the caller's own handle.
+pub async fn remove_member(
+    State(state): State<AppState>,
+    Authed(actor): Authed,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Response, ApiError> {
+    actor.require_admin()?;
+    let Path(text) = path?;
+    let handle = Handle::parse(&text).map_err(|_| no_member(&text))?;
+    let removed = state.app.remove_member.execute(&actor, &handle).await?;
+    Ok(reply(
+        StatusCode::OK,
+        &RemovedAnswer {
+            member: MemberView::of(&removed.member),
+            removed_at: removed.member.removed_at,
+            released: removed.released.into_iter().map(ItemNameView::of).collect(),
+            slots: LeftSlots {
+                held: removed.slots.held,
+                waited: removed.slots.waited,
+                offered: removed.slots.offered,
+            },
+            tokens_revoked: removed.tokens_revoked,
+            ui_sessions_ended: removed.ui_sessions_ended,
+        },
+    ))
+}
+
+#[derive(Serialize)]
+struct DeletedAnswer {
+    thread_id: ThreadId,
+    messages: u64,
+}
+
+/// Deletes a conversation of the project at once, with every message in it, whether or not the
+/// admin may read it; the log keeps a `thread_deleted` event with its id alone.
+///
+/// # Errors
+/// `forbidden` unless the caller is an admin; `not_found` for an id the project has no thread of.
+pub async fn delete_thread(
+    State(state): State<AppState>,
+    Authed(actor): Authed,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Response, ApiError> {
+    actor.require_admin()?;
+    let Path(text) = path?;
+    let thread = thread_in_path(&text)?;
+    let deleted = state.app.delete_thread.execute(&actor, thread).await?;
+    Ok(reply(
+        StatusCode::OK,
+        &DeletedAnswer {
+            thread_id: deleted.thread,
+            messages: deleted.messages,
+        },
     ))
 }
 

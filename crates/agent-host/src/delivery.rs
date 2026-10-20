@@ -158,6 +158,7 @@ mod tests {
             message: MessageId(id),
             thread: ThreadId(id + 100),
             sender: handle(sender),
+            from_dibs: false,
             subject: "Staging".parse().unwrap(),
             importance,
             awaiting_ack,

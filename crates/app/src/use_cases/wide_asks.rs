@@ -2,9 +2,9 @@
 //! areas, and turning a holder's acknowledgement of one into their grants.
 //!
 //! An announcement is a thread about the wide claim's item, addressed to the one holder it asks,
-//! whose single message is `high` and asks to be acknowledged. It is written in the name of the wide
-//! claim's member, under the session label `dibs`, and its text says that dibs sent it for them:
-//! the member did not type it, and the holder's answer is to them.
+//! whose single message is `high` and asks to be acknowledged. dibs writes it, under the session
+//! label `dibs`, in a thread the wide claim's member starts: the member did not type it, its text
+//! says dibs sent it for them, and the holder's answer is to them.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -12,11 +12,11 @@ use std::fmt::Write as _;
 use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::event::{EventKind, MessagePosted, ThreadStarted, WideGrantedByAck};
+use dibs_domain::event::{EventKind, WideGrantedByAck};
 use dibs_domain::grant::Grant;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{GrantId, MessageId, ThreadId};
-use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
+use dibs_domain::message::{Author, Body, Importance, Recipients};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::wide::{AskDue, WideAsk, asks_due, grants_by_ack};
@@ -24,19 +24,13 @@ use dibs_domain::wide::{AskDue, WideAsk, asks_due, grants_by_ack};
 use crate::error::AppError;
 use crate::named::{ItemName, NamedGrant, Names};
 use crate::ports::{IdGen, StoreError};
-use crate::records::{GrantRecord, MessageRecord, ThreadRecord};
+use crate::records::GrantRecord;
 use crate::use_cases::common::existing_item;
-use crate::use_cases::writing::{Authorship, write_message};
+use crate::use_cases::writing::{Posted, SystemPost};
 use crate::work::Work;
-
-/// The session label announcements are written under.
-const LABEL: &str = "dibs";
 
 /// How many areas the text of an announcement lists by name before it counts the rest.
 const LISTED_AREAS: usize = 20;
-
-/// The most characters a subject holds.
-const SUBJECT_MAX_CHARS: usize = 200;
 
 /// An announcement sent, with the handle of the holder it asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,56 +100,30 @@ impl Announcer<'_> {
         let item = ItemName::of(&existing_item(work, due.item).await?, self.schemes);
         let from = names.handle(due.from)?;
         let to = names.handle(due.to)?;
-        let thread = ThreadRecord {
-            id: ThreadId(self.ids.next()),
-            subject: subject(&from, &due.areas, &item)?,
+        let posted = Posted::next(self.ids);
+        let posted = SystemPost {
+            ids: posted,
+            subject: subject(&from, &due.areas, &item),
             item: Some(due.item),
-            author: due.from,
-            recipients: Recipients::Members([due.to].into()),
-            created_at: self.now,
-        };
-        let message_id = MessageId(self.ids.next());
-        let message = MessageRecord {
-            id: message_id,
-            thread: thread.id,
-            author: due.from,
-            label: label()?,
-            body: body(&from, &due.areas, &item, reason, message_id)?,
+            on_behalf_of: Author::Member(due.from),
+            to: Recipients::Members([due.to].into()),
+            body: body(&from, &due.areas, &item, reason, posted.message)?,
             importance: Importance::High,
             ack_required: true,
-            created_at: self.now,
-        };
-        work.insert_thread(project, &thread).await?;
-        write_message(work, &message, Authorship::Dibs, self.now).await?;
+        }
+        .send(work, self.now)
+        .await?;
         let ask = WideAsk {
-            message: message_id,
+            message: posted.message,
             item: due.item,
             from: due.from,
             to: due.to,
             areas: due.areas,
         };
         work.insert_wide_ask(project, &ask).await?;
-        work.record(
-            self.now,
-            EventKind::ThreadStarted(ThreadStarted {
-                thread: thread.id,
-                author: due.from,
-                item: Some(due.item),
-            }),
-        )
-        .await?;
-        work.record(
-            self.now,
-            EventKind::MessagePosted(MessagePosted {
-                thread: thread.id,
-                message: message_id,
-                author: due.from,
-            }),
-        )
-        .await?;
         Ok(Announced {
             ask,
-            thread: thread.id,
+            thread: posted.thread,
             to,
         })
     }
@@ -211,23 +179,13 @@ pub(crate) async fn grant_by_ack(
     Ok(named)
 }
 
-fn label() -> Result<SessionLabel, AppError> {
-    SessionLabel::parse(LABEL).map_err(|_| unwritable("the label of an announcement"))
-}
-
-/// The subject: who asks, for which areas, about which item — shortened to fit.
-fn subject(
-    from: &Handle,
-    areas: &BTreeSet<QualifiedArea>,
-    item: &ItemName,
-) -> Result<Subject, AppError> {
-    let text = format!(
+/// The subject: who asks, for which areas, about which item.
+fn subject(from: &Handle, areas: &BTreeSet<QualifiedArea>, item: &ItemName) -> String {
+    format!(
         "Wide change by {from} on {}: may they edit {}?",
         item_label(item),
         area_list(areas)
-    );
-    let shortened: String = text.chars().take(SUBJECT_MAX_CHARS).collect();
-    Subject::parse(shortened.trim_end()).map_err(|_| unwritable("the subject of an announcement"))
+    )
 }
 
 /// The message: that dibs sends it for the wide claim's member, why, which of the holder's areas
@@ -300,6 +258,7 @@ mod tests {
     use super::*;
     use crate::actor::Actor;
     use crate::named::Refusal;
+    use crate::records::MessageRecord;
     use crate::use_cases::testing::{Env, Person, new_member, session};
     use crate::use_cases::{
         AckMessage, Authenticate, ClaimItem, ClaimItemInput, ClaimMade, CreateMember,
@@ -365,12 +324,20 @@ mod tests {
     }
 
     async fn unacked(env: &Env, who: &Actor) -> Vec<MessageRecord> {
+        unacked_with_threads(env, who)
+            .await
+            .into_iter()
+            .map(|(message, _)| message)
+            .collect()
+    }
+
+    async fn unacked_with_threads(env: &Env, who: &Actor) -> Vec<(MessageRecord, Author)> {
         Unacked::new(&env.deps)
             .execute(who)
             .await
             .unwrap()
             .into_iter()
-            .map(|unacked| unacked.message.record)
+            .map(|unacked| (unacked.message.record, unacked.thread.record.author))
             .collect()
     }
 
@@ -421,11 +388,18 @@ mod tests {
             ]
         );
         for who in [&env.alice.actor, &carol.actor] {
-            let messages = unacked(&env, who).await;
-            assert_eq!(messages.len(), 1, "one announcement each");
+            let found = unacked_with_threads(&env, who).await;
+            assert_eq!(found.len(), 1, "one announcement each");
+            let (message, thread_author) = &found[0];
+            assert_eq!(*thread_author, Author::Member(env.bob.actor.member));
+            let messages = [message.clone()];
             assert_eq!(messages[0].importance, Importance::High);
             assert!(messages[0].ack_required);
-            assert_eq!(messages[0].author, env.bob.actor.member);
+            assert_eq!(
+                messages[0].author,
+                Author::System,
+                "dibs writes it, for bob"
+            );
             assert_eq!(messages[0].label.as_str(), "dibs");
             assert!(messages[0].body.as_str().contains("dibs sent this for bob"));
         }
@@ -663,8 +637,9 @@ mod tests {
             .unwrap();
         assert!(taken.takeover.claim.names_wide(&area("default:billing")));
         assert_eq!(taken.announced.len(), 1);
-        let asked = unacked(&env, &carol.actor).await;
+        let asked = unacked_with_threads(&env, &carol.actor).await;
         assert_eq!(asked.len(), 1);
-        assert_eq!(asked[0].author, env.alice.actor.member);
+        assert_eq!(asked[0].1, Author::Member(env.alice.actor.member));
+        assert_eq!(asked[0].0.author, Author::System);
     }
 }

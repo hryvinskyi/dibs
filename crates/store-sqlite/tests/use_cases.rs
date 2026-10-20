@@ -879,4 +879,249 @@ mod use_cases {
         one_delivery_wins_a_race_of_sessions(Arc::new(dibs_app::fakes::MemoryStore::default()))
             .await;
     }
+
+    #[tokio::test]
+    async fn retention_on_the_file_removes_by_date_and_keeps_an_open_items_thread() {
+        let world = World::new().await;
+        let app = &world.app;
+        let alice = project(app, "widgets", "alice").await;
+        let session = register(app, &alice, 1).await;
+        let open = create_item(app, &alice, 1).await;
+        app.claim_item
+            .execute(
+                &alice,
+                ClaimItemInput {
+                    item: open,
+                    session,
+                    areas: Vec::new(),
+                    wide: None,
+                },
+            )
+            .await
+            .unwrap();
+        let start = |subject: &str, item: Option<ItemId>| StartThreadInput {
+            subject: Subject::parse(subject).unwrap(),
+            to: Addressees::Project,
+            item,
+            label: SessionLabel::parse("web").unwrap(),
+            body: Body::parse("notes").unwrap(),
+            importance: dibs_domain::message::Importance::Normal,
+            ack_required: false,
+        };
+        app.start_thread
+            .execute(&alice, start("Old notes", None))
+            .await
+            .unwrap();
+        app.start_thread
+            .execute(&alice, start("About the open item", Some(open)))
+            .await
+            .unwrap();
+        world.fakes.clock.advance(Duration::days(200));
+
+        let report = app.prune.execute().await.unwrap();
+        assert!(report.failed.is_empty());
+        let (_, counts) = report.pruned[0];
+        assert_eq!((counts.threads, counts.messages), (1, 1));
+        let left: Vec<String> = app
+            .list_threads
+            .execute(&alice, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|summary| summary.thread.record.subject.to_string())
+            .collect();
+        assert_eq!(left, ["About the open item"]);
+        assert_eq!(world.event_names(alice.project).await, ["pruned"]);
+        let behind = app
+            .list_events
+            .execute(&alice, EventCursor::After(dibs_domain::ids::EventId(1)), 10)
+            .await
+            .unwrap_err();
+        assert_eq!(behind.code(), "cursor_expired");
+    }
+
+    #[tokio::test]
+    async fn a_removal_on_the_file_and_the_members_own_claim_meet_one_after_the_other() {
+        let world = World::new().await;
+        let app = &world.app;
+        let admin = project(app, "widgets", "admin").await;
+        let token = app
+            .create_member
+            .execute(
+                &admin,
+                CreateMemberInput {
+                    member: member("bob"),
+                    role: Role::Member,
+                },
+            )
+            .await
+            .unwrap()
+            .token;
+        let bob = app.authenticate.execute(token.expose()).await.unwrap();
+        let session = register(app, &bob, 2).await;
+        let items: Vec<ItemId> = {
+            let mut items = Vec::new();
+            for n in 0..8 {
+                items.push(create_item(app, &admin, 10 + n).await);
+            }
+            items
+        };
+        let world = Arc::new(world);
+        let mut tasks = Vec::new();
+        for item in items.iter().copied() {
+            let (world, bob) = (world.clone(), bob.clone());
+            tasks.push(tokio::spawn(async move {
+                world
+                    .app
+                    .claim_item
+                    .execute(
+                        &bob,
+                        ClaimItemInput {
+                            item,
+                            session,
+                            areas: Vec::new(),
+                            wide: None,
+                        },
+                    )
+                    .await
+                    .is_ok()
+            }));
+        }
+        let remover = {
+            let (world, admin) = (world.clone(), admin.clone());
+            tokio::spawn(async move {
+                world
+                    .app
+                    .remove_member
+                    .execute(&admin, &Handle::parse("bob").unwrap())
+                    .await
+                    .unwrap()
+            })
+        };
+        let mut claimed = 0;
+        for task in tasks {
+            if task.await.unwrap() {
+                claimed += 1;
+            }
+        }
+        let removed = remover.await.unwrap();
+        assert_eq!(
+            removed.released.len(),
+            claimed,
+            "every claim made before the removal was released by it, and none was made after"
+        );
+        let mut tx = world.store.begin().await.unwrap();
+        let held: Vec<_> = tx
+            .claims(admin.project)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|claim| claim.member == bob.member)
+            .collect();
+        assert!(
+            held.is_empty(),
+            "nothing is left in a removed member's name"
+        );
+    }
+
+    #[tokio::test]
+    async fn messages_racing_a_removal_on_the_file_land_before_it_or_not_at_all() {
+        use dibs_app::use_cases::PostMessageInput;
+        use dibs_domain::event::EventKind;
+
+        let world = World::new().await;
+        let app = &world.app;
+        let admin = project(app, "widgets", "admin").await;
+        let token = app
+            .create_member
+            .execute(
+                &admin,
+                CreateMemberInput {
+                    member: member("bob"),
+                    role: Role::Member,
+                },
+            )
+            .await
+            .unwrap()
+            .token;
+        let bob = app.authenticate.execute(token.expose()).await.unwrap();
+        let thread = app
+            .start_thread
+            .execute(
+                &admin,
+                StartThreadInput {
+                    subject: Subject::parse("Rates").unwrap(),
+                    to: Addressees::Project,
+                    item: None,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("Where is the table?").unwrap(),
+                    importance: dibs_domain::message::Importance::Normal,
+                    ack_required: false,
+                },
+            )
+            .await
+            .unwrap()
+            .thread
+            .record
+            .id;
+        let world = Arc::new(world);
+        let mut tasks = Vec::new();
+        for n in 0..RACERS {
+            let (world, bob) = (world.clone(), bob.clone());
+            tasks.push(tokio::spawn(async move {
+                world
+                    .app
+                    .post_message
+                    .execute(
+                        &bob,
+                        PostMessageInput {
+                            thread,
+                            label: SessionLabel::parse("web").unwrap(),
+                            body: Body::parse(&format!("note {n}")).unwrap(),
+                            importance: dibs_domain::message::Importance::Normal,
+                            ack_required: false,
+                        },
+                    )
+                    .await
+            }));
+        }
+        let remover = {
+            let (world, admin) = (world.clone(), admin.clone());
+            tokio::spawn(async move {
+                world
+                    .app
+                    .remove_member
+                    .execute(&admin, &Handle::parse("bob").unwrap())
+                    .await
+                    .unwrap()
+            })
+        };
+        let mut posted = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(_) => posted += 1,
+                Err(error) => assert_eq!(error.code(), "unauthorized"),
+            }
+        }
+        remover.await.unwrap();
+        let mut tx = world.store.begin().await.unwrap();
+        let events = tx.events_after(admin.project, None, 10_000).await.unwrap();
+        let removed_at = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::MemberRemoved(_)))
+            .unwrap();
+        let by_bob: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                matches!(&event.kind, EventKind::MessagePosted(posted) if posted.author == Some(bob.member))
+            })
+            .map(|(place, _)| place)
+            .collect();
+        assert_eq!(by_bob.len(), posted);
+        assert!(
+            by_bob.iter().all(|place| *place < removed_at),
+            "no message lands after the removal"
+        );
+    }
 }

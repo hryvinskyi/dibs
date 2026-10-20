@@ -79,6 +79,18 @@ impl UiSessionRows for SqliteTx {
         Ok(())
     }
 
+    async fn delete_ui_sessions_of(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<u64> {
+        let statement =
+            sqlx::query("DELETE FROM ui_sessions WHERE project_id = ?1 AND member_id = ?2")
+                .bind(int(project.get())?)
+                .bind(int(member.get())?);
+        self.run(statement).await
+    }
+
     async fn delete_expired_ui_sessions(&mut self, now: OffsetDateTime) -> StoreResult<u64> {
         let statement =
             sqlx::query("DELETE FROM ui_sessions WHERE expires_at < ?1").bind(nanos(now)?);

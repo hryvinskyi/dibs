@@ -74,7 +74,8 @@ cause of an internal failure and answers `internal`.
 | `403` | `forbidden`, `not_holder` (details: `holder`; for a slot too), `not_grantor`, `not_a_recipient` (an acknowledgement or a delivery for somebody a message did not reach), `not_author` |
 | `404` | `not_found` (also: a record of another project, and a conversation the caller may not read), `unknown_slot` (`slot`) |
 | `405` | `method_not_allowed` |
-| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `offer_gone` |
+| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal` |
+| `410` | `cursor_expired` (details: `pruned_through`) |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
 | `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`) |
@@ -117,6 +118,7 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/threads/{id}/read` | people | Mark a conversation read. |
 | `GET /v1/inbox` | people | Conversations waiting for you, the messages awaiting your acknowledgement or still to be delivered to you, and the slots offered to you. |
 | `POST /v1/messages/{id}/ack` | people | Acknowledge a message you were sent. |
+| `POST /v1/escalations` | people | Ask the project's arbiters to settle a dispute about an item, a slot or a conversation. |
 | `POST /v1/messages/{id}/deliver` | people | Claim the delivery of a message to one of your sessions; the first claim wins. |
 | `GET /v1/messages/{id}/status` | people | Who read and acknowledged a message you wrote. |
 | `GET /v1/slots` | any | Every declared slot: its group's hold, queue and offer. |
@@ -131,7 +133,9 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/events` | any | A page of the project's event log. |
 | `GET /v1/events/stream` | people | The event log as server-sent events. |
 | `POST /v1/admin/members` | admin | Add a member. |
+| `DELETE /v1/admin/members/{handle}` | admin | Remove a member, releasing everything they held. |
 | `POST /v1/admin/members/{handle}/tokens` | admin | Rotate a member's token. |
+| `DELETE /v1/admin/threads/{id}` | admin | Delete a conversation at once. |
 | `DELETE /v1/admin/tokens/{prefix}` | admin | Revoke one token. |
 | `PUT /v1/admin/settings` | admin | Replace the project's settings. |
 | `POST /v1/admin/items/{id}/force-release` | admin | End any member's claim. |
@@ -152,9 +156,9 @@ item ref { id, ref | null, title, link | null }
 claim    { item, holder, session_id, host, areas: ["repo:area", …], wide: { areas: ["repo:area", …], reason } | null,
            claimed_at, renewed_at, last_seen }
 grant    { id, item, area, from, to, created_at }
-thread   { id, subject, item | null, author, to_project, to: [handle, …], created_at }
-message  { id, thread, author, label, body, importance: "normal" | "high" | "urgent", ack_required, created_at,
-           acks?: [{ member, acked_at | null }, …] }
+thread   { id, subject, item | null, author, system, to_project, to: [handle, …], created_at }
+message  { id, thread, author, system, label, body, importance: "normal" | "high" | "urgent", ack_required,
+           created_at, acks?: [{ member, acked_at | null }, …] }
 summary  { thread, messages, unread, last_message_at | null, importance, awaiting_ack }
 ```
 
@@ -167,7 +171,16 @@ mentions another item: `link` is the tracker's page for its reference (a `gh` re
 `null`.
 
 A message's `importance` says how much it asks for its recipients' attention, and `ack_required` whether it asks each of
-them to acknowledge it; `acks` is in a thread read only, for a message that asks. A summary's `importance` is the highest
+them to acknowledge it; `acks` is in a thread read only, for a message that asks.
+
+**What dibs writes.** Some messages no member typed: a wide claim's announcements, the notice to a member whose stale
+claim was taken over, whose slot hold an admin ended or another member took over, whose slot hold expired or whose offer
+lapsed, an escalation, and the notice that a member left. dibs writes them itself, in the project's name: `author` is
+`"dibs"`, `system` is `true` and `label` is `dibs`. When a member's action caused one, that member starts its thread
+(`thread.author` is their handle, `thread.system` is `false`) and the message speaks for them: it reaches the thread's
+other readers, never them, and asks them nothing. When nobody acted (an expiry, a lapse, the operator's command), dibs
+starts the thread too. What dibs writes is never counted toward anyone's limit on raised messages. A message written
+before the server knew a system author keeps the author it was stored with. A summary's `importance` is the highest
 among its messages and `awaiting_ack` how many of them ask the caller for an acknowledgement not given yet.
 
 ### Versions
@@ -336,8 +349,8 @@ reason 1 to 300 characters. A wide claim **holds none of the areas it names**, s
 them, and nobody's claim refuses it; it may still hold areas of its own under `areas` (an edit outside its scope adds the
 area there, as for any claim), but never one it also names. One area is named by one live wide claim at a time. In the
 same transaction every member whose live claim holds one of the named areas is sent an **announcement**: a conversation
-about the wide claim's item addressed to them alone, written in the wide claim's member's name under the label `dibs`,
-whose one message is `high` and asks to be acknowledged. Its text says dibs sent it for that member, why, and which of
+about the wide claim's item, started by the wide claim's member and addressed to the holder alone, whose one message
+dibs writes (`author` `dibs`, `system`), `high` and asking to be acknowledged. Its text says dibs sent it for that member, why, and which of
 the recipient's areas it is about. `announced` in the answer lists them:
 
 ```json
@@ -363,8 +376,8 @@ item and the area), `wide_and_held` (`422`: the claim would both hold and name a
 named), `invalid_request` for a missing or invalid `wide.reason` or a missing `wide.areas`, and the area refusals above.
 
 `POST /v1/items/{id}/takeover`, body `{ "session_id": 7, "reason": "…", "areas": [] }`, takes over another member's
-stale claim and tells them the reason in a conversation about the item, as a `high` message that asks for no
-acknowledgement. Answers
+stale claim and tells them the reason in a conversation about the item: a `high` message from dibs, asking for no
+acknowledgement, that names the new holder and quotes the reason. Answers
 `{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31, "item": item ref, "announced": [] }`. Refusals: `not_stale` (the claim is
 live), `own_claim`, `nothing_to_take`, `area_held`, `wide_overlap`.
 
@@ -381,11 +394,14 @@ live), `own_claim`, `nothing_to_take`, `area_held`, `wide_overlap`.
   "wide":  [{ "item": item, "claim": claim,
               "areas": [{ "area": "default:billing", "state": "waiting", "holder": "alice", "item": 12 },
                         { "area": "default:search", "state": "free", "holder": null, "item": null }] }],
-  "ready": { "ready": [], "excluded": [] }
+  "ready": { "ready": [], "excluded": [] },
+  "escalations": [{ "subject": { "item": 12 }, "about": "work item gh:acme/widgets#7 \"Refund rounding\"",
+                    "by": "bob", "arbiters": ["carol"], "thread_id": 40, "message_id": 41, "at": "…" }]
 }
 ```
 
-`holds` never lists an area a wide claim names. `wide` lists the live wide claims by item, each area with where it
+`escalations` lists, newest first, the escalations the caller may read (it reached them, or they sent it) that no arbiter
+has acknowledged yet. `holds` never lists an area a wide claim names. `wide` lists the live wide claims by item, each area with where it
 stands for the wide claim's member: `free` (nobody else holds it), `granted` (its holder acknowledged the announcement,
 or granted the edits) or `waiting` (its holder has not). `ready` is the caller's ready list, as `GET /v1/ready` answers
 it.
@@ -447,6 +463,27 @@ its sentence and `frees_at` say when the next one is allowed, and the same messa
 member writes through these routes counts; what dibs sends itself (a wide claim's announcements, a slot's notices)
 never does.
 
+`POST /v1/escalations`, body `{ "item": 12, "reason": "…" }`, `{ "slot": "deploy:prod", "reason": "…" }` or
+`{ "thread": 31, "reason": "…" }` (exactly one subject; `reason` 1 to 2000 characters), asks the project's arbiters
+(`arbiters` in the settings) to settle what agents do not agree on. dibs writes an `urgent` message that asks to be
+acknowledged, in a conversation the caller starts, to every arbiter who is still a person of the project and to the
+subject's parties, never to the caller:
+
+- an item: its holder (a claim, live or stale), and the caller as the one who asks;
+- a slot: the holder of its group, and the member it is offered to or else the first in its queue;
+- a conversation the caller may read: the holder of its item, the recipients who did not acknowledge its newest message
+  that asks for one, and that message's sender, who asked.
+
+It answers `201 { "escalation": { "thread_id", "message_id", "arbiters": [handle, …], "reached": [handle, …] } }` and
+appends `escalated`. The escalation stands, in `GET /v1/status` and on the board, until one of the arbiters it reached
+acknowledges its message; a holder's acknowledgement settles nothing. While it stands, the same subject is not escalated
+again: `already_escalated` (`409`, `details.thread_id` naming the escalation's conversation) — follow the arbiters'
+answer there. A conversation is named in an escalation by its id alone (`conversation #31`), never by its subject,
+since the arbiters and holders it reaches may not read it; the caller's reason is theirs to word. What dibs writes is
+never counted toward the limit on raised messages. Refusals: `no_arbiters` (`409`) when the project names no arbiter
+but the caller, `not_found` for an unknown item or a conversation the caller may not read,
+`unknown_slot` (`404`), `invalid_request` for no subject, more than one, or no reason.
+
 `GET /v1/threads?item=12` answers `{ "threads": [summary, …] }`, the conversations the caller may read, newest activity
 first. `GET /v1/inbox` answers the same shape for the conversations waiting for the caller; with `unread=true` (or `1`)
 only those with messages they have not read. With `unacked=1` (or `true`) the answer also carries
@@ -487,9 +524,10 @@ first), `invalid_request` for a missing `session_id` or an `until` that is no RF
 
 ### Acknowledgements
 
-A message reaches everyone who may read its thread but its author: the thread's author and the members it names, or, for
-a thread addressed to the project, every person who was in the project when the message was written. An integration is
-never a recipient. A message never changes; an acknowledgement is a record of its own, one per recipient.
+A message reaches everyone who may read its thread but the member it speaks for — its author, or for what dibs wrote the
+thread's starter: the thread's author and the members it names, or, for a thread addressed to the project, every person
+who was in the project when the message was written. An integration, and a member who was removed, is never a
+recipient. A message never changes; an acknowledgement is a record of its own, one per recipient.
 
 `POST /v1/messages/{id}/ack` takes no body and records the caller's acknowledgement. Answers
 `201 { "ack": { "message", "thread", "member", "at" }, "created": true, "granted": [] }` and appends `acked`.
@@ -502,7 +540,8 @@ answer then carries `"announcement_ended": true`. Refusals: `not_a_recipient` (`
 reach the caller, or the caller wrote it), `ack_not_required` (`409`: the message asks for none), `not_found` for a
 message in a conversation the caller may not read.
 
-`GET /v1/messages/{id}/status` shows the author of a message where each recipient stands:
+`GET /v1/messages/{id}/status` shows the member a message speaks for (its author, or the starter of the thread dibs
+wrote it in) where each recipient stands:
 
 ```json
 { "thread": thread, "message": message,
@@ -521,8 +560,9 @@ session of theirs acts on it. Slots of one `group` exclude each other: one hold 
 and one offer. Every slot route applies what time changed before it answers — a hold past its expiry ends, a run's hold
 without a heartbeat for 2 minutes is stalled, an offer past its deadline lapses and its member leaves the queue, a waiter
 silent for longer than `max_wait` loses their place — and the server does the same every 30 seconds for every project
-with a hold, a waiter or an offer, so a freed slot is offered to the first waiter even when nobody touches it. The slot
-name in a path is percent-encoded like any segment; a name that is no slot name is answered `404 unknown_slot`.
+with a hold, a waiter or an offer, so a freed slot is offered to the first waiter even when nobody touches it. Whichever
+finds it, dibs tells the holder whose hold expired, and the member whose offer lapsed, once, in a `high` message of
+its own. The slot name in a path is percent-encoded like any segment; a name that is no slot name is answered `404 unknown_slot`.
 
 ```text
 slot   { name, group | null, max_hold: "30m", offer_for: "5m", max_wait: "2h", run_only, freezes: ["api:refs/heads/main"],
@@ -569,8 +609,8 @@ passes to the next waiter (`slot_left`). Answers `{ "slot": slot }`; `not_waitin
 holds it now) or `run_ended` (`409`). A stalled hold offers nothing and does not end at its expiry.
 
 `POST /v1/slots/{name}/takeover`, body `{ "session_id": 9, "purpose": "finish the deploy", "reason": "the deploy log
-stopped; nothing runs" }`: takes over another member's **stalled** hold and sends them `reason` in a conversation of its
-own (`slot_stall_taken_over`). Answers `{ "previous": hold, "thread_id": 31, "slot": slot }`. Refusals:
+stopped; nothing runs" }`: takes over another member's **stalled** hold, and dibs tells them in a conversation of its
+own, quoting `reason` (`slot_stall_taken_over`). Answers `{ "previous": hold, "thread_id": 31, "slot": slot }`. Refusals:
 `slot_not_held`, `own_hold`, `not_stalled` (`409`, naming the holder and `last_seen`).
 
 `POST /v1/slots/{name}/run-finished`, body `{ "workflow": "deploy.yml", "sha": "abc1234", "conclusion": "success" }`,
@@ -578,8 +618,8 @@ for an integration watching the forge (the importer or an admin): ends the hold 
 workflow and commit, with `{"conclusion": …}` as its exit, and answers `{ "matched": true }`. Any report that matches no
 hold — a repeat, a slot released since — changes nothing and answers `{ "matched": false }`, so it may be sent again.
 
-`POST /v1/admin/slots/{name}/force-release`, body `{ "session_id": 9, "reason": "…" }`, ends any member's hold, sends
-the holder `reason`, and offers the slot on (`slot_force_released`, cause `admin`). Answers
+`POST /v1/admin/slots/{name}/force-release`, body `{ "session_id": 9, "reason": "…" }`, ends any member's hold, has dibs
+tell the holder, quoting `reason`, and offers the slot on (`slot_force_released`, cause `admin`). Answers
 `{ "released": hold, "holder": "bob", "thread_id": 31 | null, "slot": slot }`; `slot_not_held` (`409`) when nobody
 holds it.
 
@@ -603,7 +643,9 @@ Every change appends an event to the project's log. `GET /v1/events?after=<id>&l
 ```
 
 `after` is the id of the last event the client has, or `0` (the default) for the start of the log; `limit` is 1 to 500
-(500 by default). `next` is the cursor for the next page, `null` while the log is empty. `members` maps the ids in the
+(500 by default). Events are kept 90 days (see [operations](operations.md#how-long-records-are-kept)): a cursor behind
+events the retention removed is refused with `410 cursor_expired`, `details.pruned_through` naming the newest removed;
+the reader reads the state again and follows the log from `after=0`. `next` is the cursor for the next page, `null` while the log is empty. `members` maps the ids in the
 payload to handles. An event carries ids and handles, never a subject or the text of a message.
 
 | `kind` | `payload` |
@@ -612,24 +654,30 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `claimed`, `renewed` | `item`, `member`, `session`, `host`, `areas` |
 | `taken_over` | `item`, `member`, `previous`, `session`, `host`, `areas` |
 | `released`, `completed` | `item`, `member` |
-| `force_released` | `item`, `member`, `by` |
+| `force_released` | `item`, `member`, `by` (the admin; `null` for the operator) |
 | `reserved` | `item`, `member`, `areas`, `paths` |
 | `granted` | `grant`, `item`, `area`, `from`, `to` |
 | `grant_revoked` | `grant`, `item`, `area`, `from`, `to`, `cause` (`revoked`, `grantor_left`, `grantee_left`) |
-| `thread_started` | `thread`, `author`, `item` |
-| `message_posted` | `thread`, `message`, `author` |
+| `thread_started` | `thread`, `author` (`null` for dibs), `item` |
+| `message_posted` | `thread`, `message`, `author` (`null` for dibs) |
 | `settings_changed` | `by` |
 | `item_updated` | `item`, `by` |
 | `dependency_added`, `dependency_removed` | `item`, `blocked_by`, `by` |
 | `acked` | `thread`, `message`, `by` |
 | `wide_claimed` | `item`, `member`, `areas` (every area the wide scope names now) |
 | `wide_granted_by_ack` | `grant`, `item`, `area`, `by` (the holder who acknowledged), `to` (the wide claim's member) |
+| `escalated` | `subject` (`{"item": id}`, `{"slot": name}` or `{"thread": id}`), `by` |
+| `member_removed` | `member`, `by` (the admin; `null` for the operator) |
+| `pruned` | `counts`: `{ threads, messages, events }` |
+| `thread_deleted` | `thread`, `by` (the admin; `null` for the operator) |
 
 `item_updated` is appended when one of an item's reported facts actually changed; read the item for what it says now.
 `wide_claimed` is appended when a claim becomes wide or its scope grows; a renewal that names nothing new appends none.
 A grant an acknowledgement made ends like any grant, with `grant_revoked` naming its id.
 `acked` is about a conversation, like `thread_started` and `message_posted`: a caller who may not read the conversation
-does not see it.
+does not see it, and so is `escalated` of a conversation. A deleted conversation's events are shown to nobody; its
+`thread_deleted` names its id alone. Removing a member appends a `force_released` for each claim of theirs and a
+`slot_force_released` (cause `member_removed`) for each hold, place and offer, then `member_removed`.
 
 ### The event stream
 
@@ -645,7 +693,7 @@ data: {"id":5,"at":"…","kind":"message_posted","payload":{…},"members":{…}
 
 - **Where it starts.** After the event named by the `Last-Event-ID` header (which `EventSource` sends when it
   reconnects), else after `?after=`, else from the newest event on, with nothing replayed. `0` means the start of the
-  log.
+  log. A cursor behind events the retention removed is answered `410 cursor_expired`, as for `GET /v1/events`.
 - **Frames.** Each event's `id` is its id in the log and its `data` is the event as `GET /v1/events` writes it, on one
   line. A `message_posted` event the caller may read also carries `message`. Events about a conversation the caller
   may not read are left out.
@@ -673,6 +721,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | `hot` | For a project with one repository: hot-file rules, first match wins. |
 | `repos` | For a project with several: `[{ "id", "remote", "areas", "hot" }]`. The two layouts are never mixed. |
 | `slots` | The shared actions one member does at a time; see below. |
+| `arbiters` | The handles of the members who settle what agents do not agree on (`POST /v1/escalations`). A handle that is no person of the project, or a member removed since, settles nothing. |
 
 A path glob is matched against a path relative to the repository root: `*` and `?` never cross a `/`, `**` as a whole
 segment crosses any number of them, `[…]` and `{a,b}` work as in shells, and matching is case-sensitive. The first area
@@ -717,8 +766,28 @@ matches, and those that freeze a ref a `git push` in the line names. A line no s
 (`external_login` and `role` optional; `role` is `admin`, `member` (the default) or `importer`). Answers `201 { "member": member, "token": "dibs_…" }`.
 The token is in this answer only. `handle_taken` (`409`) refuses a handle in use.
 
+The handle `dibs` is taken (`handle_taken`): it is the name what dibs writes goes by.
+
+`DELETE /v1/admin/members/{handle}` removes a member, in one transaction: every token of theirs is revoked and every
+browser session ended; each claim of theirs is released, its item open again; each slot hold of theirs ends, their
+places in slot queues and the offers to them go, and a freed slot is offered on; dibs tells the project what was
+released, in one message to everyone. Their messages and every record that names them stay, and so does their handle.
+Answers
+
+```json
+{ "member": member, "removed_at": "…", "released": [item ref, …],
+  "slots": { "held": ["deploy:prod"], "waited": [], "offered": [] }, "tokens_revoked": 1, "ui_sessions_ended": 0 }
+```
+
+Refusals: `not_found` for a handle the project has no member of, or one removed before; `self_removal` (`409`) for the
+caller's own handle. A removed member is left out of `GET /v1/members`.
+
 `POST /v1/admin/members/{handle}/tokens` revokes every token of the member and ends the browser sessions those tokens
 opened, then answers `201 { "member": member, "token": "dibs_…" }`.
+
+`DELETE /v1/admin/threads/{id}` deletes a conversation of the project with every message in it, whether or not the
+admin may read it, and answers `{ "thread_id": 31, "messages": 2 }`; the log keeps `thread_deleted` and nothing of the
+text.
 
 `DELETE /v1/admin/tokens/{prefix}` revokes the project's token whose prefix is the 8 characters after `dibs_` (with or
 without the marker), and answers `{ "token": { "prefix", "member", "created_at", "revoked_at" } }`; revoking a revoked
@@ -732,7 +801,11 @@ token changes nothing.
 The pages under `/ui` are for people in a browser: `/ui/login` (sign in with a token), `/ui/` (status, with the live wide
 claims and, for each of their areas, whether it is free, acknowledged by its holder or waiting for them), `/ui/board`,
 `/ui/threads` and `/ui/threads/{id}`, with `/ui/events/stream` feeding the open page. They are rendered on the server and
-are not part of the API. The board's *Ready* column is the viewer's ready list, each card with its priority, likely
+are not part of the API. A page's script asks `GET /ui/session?after=<cursor>` when its stream is refused: `204` while
+the session lives, `401` once it ended, and `410 cursor_expired` with `details.latest` when the retention removed
+events after its cursor, so the page reads its state again and follows the stream from `latest`. The board opens with
+a banner for each escalation the viewer may read that waits for an
+arbiter, linking to its conversation. The board's *Ready* column is the viewer's ready list, each card with its priority, likely
 areas and a link to its tracker, and below it the open items that are not ready with their blockers or the held area;
 an item its tracker closed while a claim holds it is marked *Closed upstream*. Above the columns, the live wide claims are
 listed with their reason and, for each area, who has acknowledged them; the area filter keeps the wide claims that name
@@ -745,9 +818,10 @@ never the sign-in page; the columns carry the time they were rendered at, which 
 swap. A take-over made from the board returns to the board with the same filter; the form's return path is followed
 only when it is a path of this service, and anything else returns to `/ui/board`. The threads list marks each conversation's
 highest importance and whether it holds a message awaiting the viewer's acknowledgement; a thread page marks a raised
-importance on the messages that carry it and, under a message that asks to be acknowledged, lists its recipients with who
-has acknowledged, updated live from the `acked` events, and offers a recipient who has not an *Acknowledge* button
-(`POST /ui/threads/{id}/messages/{message}/ack`).
+importance on the messages that carry it, marks what dibs wrote as *from dibs*, and, under a message that asks to be
+acknowledged, lists its recipients with who has acknowledged, updated live from the `acked` events, and offers a
+recipient who has not an *Acknowledge* button (`POST /ui/threads/{id}/messages/{message}/ack`) while the message still
+asks: an announcement whose wide claim has ended asks for nothing.
 A reply from the page may ask everyone to acknowledge it. Their forms post a token of the session they were rendered for, and the session cookie
 (`dibs_ui`) is `HttpOnly`, `Secure`, `SameSite=Strict` and scoped to `/ui`. A session ends 12 hours after the page last used it. Every page answer
 carries a content security policy that allows only the server's own scripts, styles and connections.

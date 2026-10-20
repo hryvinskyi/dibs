@@ -118,8 +118,9 @@ dibs claim gh:acme/widgets#42 --area billing
 dibs check packages/billing/rounding.rs
 ```
 
-Add a teammate with `dibs admin member add bob --name "Bob Example"`, which prints their token once; hand it over
-through a password manager. With the Claude Code plugin, step 5 happens by itself before every edit (see
+Add a teammate with `dibs admin member add bob --name "Bob Example" --github bob-gh`, which prints their token once;
+hand it over through a password manager, never chat or email. When someone leaves, `dibs admin member remove bob`
+revokes their tokens and releases everything they held at once. With the Claude Code plugin, step 5 happens by itself before every edit (see
 [Agent hosts](#agent-hosts)).
 
 ## Concepts
@@ -154,6 +155,13 @@ through a password manager. With the Claude Code plugin, step 5 happens by itsel
   area is in one live wide claim at a time, and whoever claims an area inside one later is asked too.
 - **Thread.** A conversation between members, or with the whole project, optionally about a work item. Agents and people
   use the same threads.
+- **Messages from dibs.** What dibs writes itself — a wide claim's announcements, the notice that a claim or a slot hold
+  was taken over, ended, expired or that an offer lapsed, an escalation, a member leaving — is authored by the project,
+  shown as *from dibs* everywhere and never counted toward anyone's limit on raised messages.
+- **Arbiters and escalation.** The members a project names (`arbiters` in its settings) to settle what agents do not
+  agree on. `dibs escalate` sends an urgent message, from dibs, to the arbiters and to whoever holds and whoever asked for
+  the item, slot or conversation in question; the board shows it until an arbiter acknowledges it. Agents do not settle
+  priority between people: they escalate and pick other work meanwhile.
 - **Importance and acknowledgement.** A message is `normal`, `high` or `urgent`, and may ask each recipient to
   acknowledge it. An acknowledgement is the recipient's own record that they read it; the message never changes, and its
   author sees who has acknowledged and who has not. An acknowledgement says "I read this"; it authorises nothing, except
@@ -167,6 +175,8 @@ through a password manager. With the Claude Code plugin, step 5 happens by itsel
 - **Session.** One running client of a member: a terminal, an agent. Claims are kept alive by their session's
   heartbeats.
 - **Event.** Everything above appends to the project's log, which the web pages and clients follow live.
+- **Retention.** A conversation is kept 180 days after its last message (as long as its work item is open, if it is
+  about one), an event 90 days, a snapshot 30 days; see [operations](docs/operations.md#how-long-records-are-kept).
 
 ## Running the server
 
@@ -264,7 +274,11 @@ in with `--keychain`) in the operating system's credential store.
 `DIBS_CONFIG_DIR` and `DIBS_STATE_DIR` move them. On macOS and Linux the credentials file must be readable by its user
 alone (mode `0600`) and is refused otherwise; on Windows it is written with an ACL that grants only the current user.
 `dibs login --keychain` keeps the token in the macOS Keychain, the Linux Secret Service or the Windows Credential
-Manager instead. `DIBS_OFF=1` switches the guard off on a machine.
+Manager instead. A hook never waits on the credential store: it reads it with a one-second deadline, and a store that
+asks the person to allow access, or answers late, counts as no token — the hook decides nothing and warns once, naming
+`dibs login`. The release binaries are not code-signed, and macOS ties a Keychain item to the binary that wrote it, so
+after each `dibs self-update` macOS may ask once to allow the new binary access: run `dibs whoami` in a terminal and
+allow it there, never from inside an agent's session. `DIBS_OFF=1` switches the guard off on a machine.
 
 ## Agent hosts
 
@@ -366,6 +380,7 @@ dibs inbox [--unread] [--unacked]                 # conversations waiting for yo
 dibs thread 31                                    # read one, with each message's id and who acknowledged it
 dibs read 31                                      # mark it read
 dibs ack 57                                       # acknowledge message 57 once you have read it (for a wide claim's announcement, that grants)
+dibs escalate gh:acme/widgets#42 --reason "alice's agent and mine both need billing today"   # or --slot, --thread
 dibs slot take deploy:prod --purpose "ship 2.4" [--wait 9m] [--until-run deploy.yml@<sha>]   # exit 1 while queued
 dibs slot run deploy:prod --purpose "ship 2.4" -- ./deploy.sh prod   # hold it while the command runs, then release
 dibs slot release deploy:prod                     # the first member waiting is offered it
@@ -378,8 +393,10 @@ dibs self-update [--version 1.2.3]                # install a newer release, che
 dibs mcp                                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook
 dibs doctor                                       # the agent hosts this build supports
-dibs admin member add bob --name "Bob Example" [--login bob-gh] [--role admin|member|importer]
+dibs admin member add bob --name "Bob Example" [--github bob-gh] [--role admin|member|importer]
+dibs admin member remove bob                      # revoke bob's tokens, release his claims and slots; his messages stay
 dibs admin token rotate bob                       # revoke bob's tokens and print a new one
+dibs admin thread delete 31                       # delete a conversation at once (a secret pasted by mistake)
 dibs admin settings apply settings.toml
 dibs admin force-release 12                       # end anyone's claim on item 12
 dibs admin slot force-release deploy:prod --reason "the release is cancelled"
@@ -407,15 +424,17 @@ The server also serves pages for people at `/ui`, where you sign in with your to
 
 - **Status** (`/ui/`): live claims, stale claims with a take-over form, the areas held, and the wide claims with who
   has acknowledged each of their areas.
-- **Board** (`/ui/board`): the slots with who holds each and why, until when, a stalled run in red and who waits, the
-  live wide claims with who has acknowledged them, your ready list with priorities, likely
+- **Board** (`/ui/board`): a banner for each escalation of yours, or to you, that waits for an arbiter; the slots with
+  who holds each and why, until when, a stalled run in red and who waits, the live wide claims with who has
+  acknowledged them, your ready list with priorities, likely
   areas and links to the tracker, the open items that wait with their blockers, what is in progress, what went stale and
   what was done today, filterable by area and member. The columns refresh by themselves when claims, items or slots change;
   while you are typing a take-over reason they stay as they are and a banner offers a reload instead.
 - **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply. Each conversation
   shows its importance and whether a message in it awaits your acknowledgement; a message that asks for one lists who has
-  acknowledged it, updated as they do, and offers you an *Acknowledge* button, and a reply can ask everyone to acknowledge
-  it.
+  acknowledged it, updated as they do, and offers you an *Acknowledge* button while it still asks (an ended wide claim's
+  announcement no longer does), and a reply can ask everyone to acknowledge it. What dibs wrote itself is marked *from
+  dibs*.
 
 The pages are rendered on the server and enhanced by a few scripts of its own; they follow the event log live. The
 session cookie is `Secure`, so use them over HTTPS (or on `localhost`).
@@ -423,8 +442,9 @@ session cookie is `Secure`, so use them over HTTPS (or on `localhost`).
 ## Security
 
 - **Tokens.** Every member has their own token, shown once when it is issued; the server stores only a hash. Hand a
-  token over through a password manager, never chat or email. Rotate on events (someone leaves, a token leaks, a laptop
-  is lost) with `dibs admin token rotate`. A token has no expiry.
+  token over through a password manager, never chat or email. Rotate on events (a token leaks, a laptop is lost) with
+  `dibs admin token rotate`; when someone leaves, `dibs admin member remove` revokes every token of theirs and releases
+  what they held. A token has no expiry.
 - **Tenancy.** A token belongs to one member of one project, and every query is scoped to that project: a record of
   another project is reported as missing, the same as one that does not exist. A conversation is visible to its
   participants only. Roles are `admin`, `member` and `importer`; an importer takes part in no conversation and holds

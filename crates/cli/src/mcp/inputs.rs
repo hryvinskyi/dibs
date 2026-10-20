@@ -8,6 +8,7 @@ use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
 use dibs_client::api::{GrantRequest, ItemFilter, NewItem, Recipients, WideRequest};
+use dibs_domain::escalation::EscalationReason;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
@@ -428,6 +429,65 @@ impl AckInput {
     }
 }
 
+/// `dibs_escalate`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EscalateInput {
+    /// The work item the dispute is about: its local id or its reference.
+    pub item: Option<ItemKeyInput>,
+    /// The slot instead (`deploy:prod`).
+    pub slot: Option<String>,
+    /// The conversation instead, by its id: one whose message asked for an acknowledgement that
+    /// did not come.
+    pub thread: Option<u64>,
+    /// Why, for the arbiters: what each side wants and what has been tried. Never a credential or
+    /// a customer's data.
+    pub reason: String,
+}
+
+/// What `dibs_escalate` is about, once read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EscalationTarget {
+    /// A work item, still to resolve.
+    Item(ItemKey),
+    /// A slot.
+    Slot(SlotName),
+    /// A conversation.
+    Thread(ThreadId),
+}
+
+impl EscalateInput {
+    /// The one subject it names.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it names none or more than one, or one that is not valid.
+    pub fn target(&self) -> Result<EscalationTarget, Failure> {
+        match (&self.item, &self.slot, self.thread) {
+            (Some(item), None, None) => Ok(EscalationTarget::Item(item.key("item")?)),
+            (None, Some(slot), None) => SlotName::parse(slot.trim())
+                .map(EscalationTarget::Slot)
+                .map_err(|error| invalid("slot", &format!("'{slot}' is not a slot ({error})"))),
+            (None, None, Some(thread)) if thread > 0 => {
+                Ok(EscalationTarget::Thread(ThreadId(thread)))
+            }
+            (None, None, Some(_)) => Err(invalid(
+                "thread",
+                "conversation ids are whole numbers starting at 1",
+            )),
+            _ => Err(invalid("item", "name exactly one of item, slot and thread")),
+        }
+    }
+
+    /// The reason, as the arbiters read it.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it is empty or longer than a reason may be.
+    pub fn reason(&self) -> Result<EscalationReason, Failure> {
+        EscalationReason::parse(&self.reason)
+            .map_err(|error| invalid("reason", &format!("the reason is not valid ({error})")))
+    }
+}
+
 /// `dibs_thread` and `dibs_read`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -800,6 +860,39 @@ mod tests {
                 .starts_with("`message`: ")
         );
         assert!(serde_json::from_value::<AckInput>(json!({"message": 7, "x": 1})).is_err());
+    }
+
+    #[test]
+    fn an_escalation_names_one_subject_and_a_reason() {
+        let input = |value: serde_json::Value| parse::<EscalateInput>(value);
+        assert_eq!(
+            input(json!({"item": 12, "reason": "who first?"}))
+                .target()
+                .unwrap(),
+            EscalationTarget::Item(ItemKey::parse("12").unwrap())
+        );
+        assert_eq!(
+            input(json!({"slot": "deploy:prod", "reason": "who first?"}))
+                .target()
+                .unwrap(),
+            EscalationTarget::Slot(SlotName::parse("deploy:prod").unwrap())
+        );
+        assert_eq!(
+            input(json!({"thread": 4, "reason": "no answer"}))
+                .target()
+                .unwrap(),
+            EscalationTarget::Thread(ThreadId(4))
+        );
+        for bad in [
+            json!({"reason": "?"}),
+            json!({"item": 1, "thread": 2, "reason": "?"}),
+            json!({"thread": 0, "reason": "?"}),
+            json!({"slot": "Not A Slot", "reason": "?"}),
+        ] {
+            assert_eq!(input(bad).target().unwrap_err().code, "invalid_input");
+        }
+        assert!(input(json!({"item": 1, "reason": " "})).reason().is_err());
+        assert!(serde_json::from_value::<EscalateInput>(json!({"item": 1})).is_err());
     }
 
     #[test]

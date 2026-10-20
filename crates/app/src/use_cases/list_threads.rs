@@ -37,7 +37,7 @@ impl ListThreads {
         item: Option<ItemId>,
     ) -> Result<Vec<NamedSummary>, AppError> {
         actor.require_person()?;
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let summaries = work
             .thread_summaries(actor.project, actor.member, item)
             .await?;

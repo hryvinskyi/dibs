@@ -13,6 +13,7 @@ const posted = {
     id: 9,
     thread: 4,
     author: 'bob',
+    system: false,
     label: 'web',
     body: '<b>hi</b>\nthere',
     importance: 'urgent',
@@ -29,12 +30,25 @@ test('a posted message parses with its text as written', () => {
     id: 9,
     thread: 4,
     author: 'bob',
+    system: false,
     label: 'web',
     body: '<b>hi</b>\nthere',
     importance: 'urgent',
     ackRequired: true,
     createdAt: '2026-03-02T09:00:00Z',
   });
+});
+
+test('what dibs wrote parses as written by the system', () => {
+  const fromDibs = {
+    ...posted,
+    payload: { thread: 4, message: 9, author: null },
+    members: {},
+    message: { ...posted.message, author: 'dibs', system: true, label: 'dibs' },
+  };
+  const event = parseEvent(JSON.stringify(fromDibs));
+  assert.equal(event.message?.system, true);
+  assert.equal(event.message?.author, 'dibs');
 });
 
 test('an event that announces no message parses without one', () => {
@@ -59,6 +73,8 @@ test('data of another shape is a contract error naming where it broke', () => {
     [JSON.stringify({ ...posted, message: { ...posted.message, importance: 'loud' } }), '$.message.importance'],
     [JSON.stringify({ ...posted, message: { ...posted.message, importance: undefined } }), '$.message.importance'],
     [JSON.stringify({ ...posted, message: { ...posted.message, ack_required: 'yes' } }), '$.message.ack_required'],
+    [JSON.stringify({ ...posted, message: { ...posted.message, system: undefined } }), '$.message.system'],
+    [JSON.stringify({ ...posted, message: { ...posted.message, system: 'no' } }), '$.message.system'],
   ];
   for (const [data, path] of cases) {
     assert.throws(

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
+use dibs_domain::escalation::EscalationReason;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
@@ -90,6 +91,9 @@ pub enum Command {
     Read(ThreadArgs),
     /// Acknowledge a message that asks for it, once you have read it.
     Ack(AckArgs),
+    /// Ask the project's arbiters to settle what you and another member's agent do not agree on:
+    /// who goes first on a work item, a slot, or a conversation left unanswered.
+    Escalate(EscalateArgs),
     /// Take, wait for and release slots: short holds on shared actions (a deploy, a release, a
     /// migration) that one member does at a time.
     #[command(subcommand)]
@@ -343,6 +347,24 @@ fn parse_message(text: &str) -> Result<MessageId, String> {
         .ok_or_else(|| format!("'{text}' is not a message id; ids are whole numbers"))
 }
 
+/// `dibs escalate`.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("subject").required(true).args(["item", "slot", "thread"])))]
+pub struct EscalateArgs {
+    /// The work item: its local id or its reference.
+    #[arg(value_parser = ItemKey::parse)]
+    pub item: Option<ItemKey>,
+    /// The slot instead (`deploy:prod`).
+    #[arg(long, value_parser = SlotName::parse)]
+    pub slot: Option<SlotName>,
+    /// The conversation instead, by its id.
+    #[arg(long, value_parser = parse_thread)]
+    pub thread: Option<ThreadId>,
+    /// Why, as the arbiters read it: what each side wants, and what has been tried.
+    #[arg(long, value_parser = EscalationReason::parse)]
+    pub reason: EscalationReason,
+}
+
 /// A conversation named by its id.
 #[derive(Debug, Args)]
 pub struct ThreadArgs {
@@ -376,6 +398,17 @@ pub enum AdminCommand {
     /// Manage slots.
     #[command(subcommand)]
     Slot(AdminSlotCommand),
+    /// Manage conversations.
+    #[command(subcommand)]
+    Thread(AdminThreadCommand),
+}
+
+/// `dibs admin thread`.
+#[derive(Debug, Subcommand)]
+pub enum AdminThreadCommand {
+    /// Delete a conversation and every message in it at once; the log keeps only that it was
+    /// deleted.
+    Delete(ThreadArgs),
 }
 
 /// `dibs admin slot`.
@@ -524,6 +557,9 @@ fn interval(text: &str) -> Result<Duration, String> {
 pub enum MemberCommand {
     /// Add a member and print their first token, once.
     Add(MemberAddArgs),
+    /// Remove a member: revoke their tokens, end their browser sessions, release their claims and
+    /// slots and take them out of slot queues. Their messages stay.
+    Remove(HandleArgs),
 }
 
 /// `dibs admin member add`.
@@ -535,8 +571,8 @@ pub struct MemberAddArgs {
     /// The name shown for them.
     #[arg(long, value_parser = DisplayName::parse)]
     pub name: DisplayName,
-    /// Their login in the outside tracker.
-    #[arg(long, value_parser = ExternalLogin::parse)]
+    /// Their login in the outside tracker, such as their GitHub login.
+    #[arg(long, visible_alias = "github", value_parser = ExternalLogin::parse)]
     pub login: Option<ExternalLogin>,
     /// Their role.
     #[arg(long, value_enum, default_value = "member")]

@@ -4,10 +4,13 @@ use dibs_client::api::{Enrolled, NewMember};
 use dibs_domain::member::Role;
 use dibs_domain::settings::SettingsDocument;
 
-use crate::cli::{AdminCommand, MemberCommand, SettingsCommand, TokenCommand};
+use std::fmt::Write as _;
+
+use crate::cli::{AdminCommand, AdminThreadCommand, MemberCommand, SettingsCommand, TokenCommand};
 use crate::commands::work::show_ended;
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
+use crate::output::item_label;
 
 /// Runs an admin command.
 ///
@@ -29,6 +32,50 @@ pub async fn run(command: AdminCommand, ctx: &Context) -> Result<(), Failure> {
                 .await
                 .map_err(|error| connection.failed(error))?;
             show_token(ctx, &enrolled, "Added");
+        }
+        AdminCommand::Member(MemberCommand::Remove(args)) => {
+            let removed = client
+                .remove_member(&args.handle)
+                .await
+                .map_err(|error| connection.failed(error))?;
+            ctx.printer.show(&removed, || {
+                let mut text = format!(
+                    "Removed {} from the project: {} token(s) revoked, {} browser session(s) ended. Their messages stay.",
+                    removed.member.handle, removed.tokens_revoked, removed.ui_sessions_ended
+                );
+                if !removed.released.is_empty() {
+                    let items: Vec<String> = removed
+                        .released
+                        .iter()
+                        .map(|item| item_label(Some(item), item.id))
+                        .collect();
+                    let _ = write!(text, "\nReleased: {}.", items.join(", "));
+                }
+                let slots = &removed.slots;
+                for (what, list) in [
+                    ("Slots they held", &slots.held),
+                    ("Queues they left", &slots.waited),
+                    ("Offers passed on", &slots.offered),
+                ] {
+                    if !list.is_empty() {
+                        let names: Vec<&str> = list.iter().map(|slot| slot.as_str()).collect();
+                        let _ = write!(text, "\n{what}: {}.", names.join(", "));
+                    }
+                }
+                text
+            });
+        }
+        AdminCommand::Thread(AdminThreadCommand::Delete(args)) => {
+            let deleted = client
+                .delete_thread(args.id)
+                .await
+                .map_err(|error| connection.failed(error))?;
+            ctx.printer.show(&deleted, || {
+                format!(
+                    "Deleted conversation #{} with its {} message(s).",
+                    deleted.thread_id, deleted.messages
+                )
+            });
         }
         AdminCommand::Token(TokenCommand::Rotate(args)) => {
             let enrolled = client

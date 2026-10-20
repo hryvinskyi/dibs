@@ -1527,3 +1527,167 @@ async fn the_board_shows_each_slot_its_holder_its_queue_and_a_stalled_run_from_r
         "{offered}"
     );
 }
+
+#[tokio::test]
+async fn a_message_from_dibs_reads_from_dibs_and_an_ended_announcement_offers_no_ack() {
+    let (world, alice, bob) = team().await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let held = world.item(&alice, Some("gh:acme/api#1"), "Invoices").await;
+    claim(&world, &alice, alice_session, held, json!(["api:billing"])).await;
+    let wide = world
+        .item(&bob, Some("gh:acme/api#2"), "Upgrade the HTTP client")
+        .await;
+    let made = world
+        .post(
+            &bob,
+            &format!("/v1/items/{wide}/claim"),
+            json!({"session_id": bob_session,
+                   "wide": {"areas": ["api:billing"], "reason": "One client everywhere"}}),
+        )
+        .await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.body);
+    let thread = made.body["announced"][0]["thread_id"].as_u64().unwrap();
+    let message = made.body["announced"][0]["message_id"].as_u64().unwrap();
+    let action = format!(r#"action="/ui/threads/{thread}/messages/{message}/ack""#);
+
+    let browser = sign_in(&world, &alice).await;
+    let page = browser.get(&world, &format!("/ui/threads/{thread}")).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    assert!(
+        page.text
+            .contains(&format!(r#"<li class="msg msg--system" id="m-{message}">"#)),
+        "{}",
+        page.text
+    );
+    assert!(
+        page.text
+            .contains(r#"<div class="msg__head"><span class="msg__author">from dibs</span>"#),
+        "from dibs, with no session: {}",
+        page.text
+    );
+    assert!(page.text.contains(r#"data-sender="bob""#), "{}", page.text);
+    assert!(page.text.contains(r#"data-system-author="from dibs""#));
+    assert!(page.text.contains(&action), "the holder may acknowledge it");
+
+    let released = world
+        .post(&bob, &format!("/v1/items/{wide}/release"), json!({}))
+        .await;
+    assert_eq!(released.status, StatusCode::OK, "{}", released.body);
+    let after = browser.get(&world, &format!("/ui/threads/{thread}")).await;
+    assert!(
+        !after.text.contains(&action),
+        "the wide claim ended, so its announcement asks for nothing: {}",
+        after.text
+    );
+    assert!(after.text.contains("msg--system"));
+
+    let starter = sign_in(&world, &bob).await;
+    let his = starter.get(&world, &format!("/ui/threads/{thread}")).await;
+    assert!(
+        !his.text.contains(&action),
+        "dibs wrote it for bob, who is not asked"
+    );
+    assert!(
+        !his.text.contains("msg--mine"),
+        "what dibs wrote is no member's own"
+    );
+}
+
+#[tokio::test]
+async fn the_board_shows_an_escalation_until_an_arbiter_acknowledges_it() {
+    let (world, alice, bob) = team().await;
+    let mut settings = two_repositories();
+    settings["arbiters"] = json!(["alice"]);
+    world.settings(&alice, settings).await;
+    let item = world
+        .item(&bob, Some("gh:acme/api#9"), "Shared rates")
+        .await;
+    let sent = world
+        .post(
+            &bob,
+            "/v1/escalations",
+            json!({"item": item, "reason": "Two agents keep undoing each other"}),
+        )
+        .await;
+    assert_eq!(sent.status, StatusCode::CREATED, "{}", sent.body);
+    let thread = sent.body["escalation"]["thread_id"].as_u64().unwrap();
+    let message = sent.body["escalation"]["message_id"].as_u64().unwrap();
+
+    let arbiter = sign_in(&world, &alice).await;
+    let board = arbiter.get(&world, "/ui/board").await;
+    assert_eq!(board.status, StatusCode::OK, "{}", board.text);
+    assert!(board.text.contains("data-escalation"), "{}", board.text);
+    assert!(
+        board.text.contains(
+            "Escalated by bob: work item gh:acme/api#9 &#34;Shared rates&#34; — waiting for an arbiter (alice) to acknowledge it"
+        ),
+        "{}",
+        board.text
+    );
+    assert!(
+        board
+            .text
+            .contains(&format!(r#"href="/ui/threads/{thread}""#))
+    );
+    let fragment = arbiter.get(&world, "/ui/board/fragment").await;
+    assert!(
+        fragment.text.contains("data-escalation"),
+        "the fragment carries it too"
+    );
+
+    let acked = arbiter
+        .post(
+            &world,
+            &format!("/ui/threads/{thread}/messages/{message}/ack"),
+            &[("csrf", &arbiter.token)],
+        )
+        .await;
+    assert_eq!(acked.status, StatusCode::SEE_OTHER, "{}", acked.text);
+    let settled = arbiter.get(&world, "/ui/board").await;
+    assert!(
+        !settled.text.contains("data-escalation"),
+        "{}",
+        settled.text
+    );
+}
+
+#[tokio::test]
+async fn a_page_whose_cursor_the_retention_passed_learns_where_to_follow_from() {
+    let (world, alice, _bob) = team().await;
+    let browser = sign_in(&world, &alice).await;
+    let first = world.get(&alice, "/v1/events?limit=1").await;
+    let early = first.body["next"].as_u64().unwrap();
+    world.item(&alice, None, "Old work").await;
+    assert_eq!(
+        browser
+            .get(&world, &format!("/ui/session?after={early}"))
+            .await
+            .status,
+        StatusCode::NO_CONTENT,
+        "nothing was removed yet"
+    );
+    world.fakes.clock.advance(Duration::days(91));
+    world.app.prune.execute().await.unwrap();
+    let fresh = sign_in(&world, &alice).await;
+    let behind = fresh
+        .get(&world, &format!("/ui/session?after={early}"))
+        .await;
+    assert_eq!(behind.status, StatusCode::GONE, "{}", behind.text);
+    let body: Value = serde_json::from_str(&behind.text).unwrap();
+    assert_eq!(body["error"]["code"], "cursor_expired");
+    let latest = body["error"]["details"]["latest"].as_u64().unwrap();
+    assert!(latest > early, "{body}");
+    assert_eq!(
+        fresh
+            .get(&world, &format!("/ui/session?after={latest}"))
+            .await
+            .status,
+        StatusCode::NO_CONTENT,
+        "from the newest event the page follows on"
+    );
+    assert_eq!(
+        fresh.get(&world, "/ui/session?after=x").await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}

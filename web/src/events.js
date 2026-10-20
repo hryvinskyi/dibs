@@ -29,7 +29,8 @@ export class ContractError extends Error {
  * @typedef {object} StreamMessage
  * @property {number} id
  * @property {number} thread
- * @property {string} author the author's handle
+ * @property {string} author the author's handle, or `dibs` for what dibs wrote
+ * @property {boolean} system whether dibs wrote it, in the project's name
  * @property {string} label the label of the session it was written from
  * @property {string} body plain text, never markup
  * @property {Importance} importance
@@ -132,6 +133,7 @@ function parseMessage(raw) {
     id: id(raw.id, '$.message.id'),
     thread: id(raw.thread, '$.message.thread'),
     author: text(raw.author, '$.message.author'),
+    system: flag(raw.system, '$.message.system'),
     label: text(raw.label, '$.message.label'),
     body: text(raw.body, '$.message.body'),
     importance: importance(raw.importance, '$.message.importance'),

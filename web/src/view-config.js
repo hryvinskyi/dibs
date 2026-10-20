@@ -20,9 +20,13 @@ import { ContractError } from './events.js';
  */
 
 /**
+ * `sender` is the handle of the member who started the thread, `''` for a thread dibs started;
+ * `systemAuthor` is how a message dibs wrote names its author.
  * @typedef {StreamConfig & {
  *   thread: number,
  *   me: string,
+ *   sender: string,
+ *   systemAuthor: string,
  *   newMessageLabel: string,
  *   newMessagesLabel: string,
  *   ackAction: string,
@@ -84,6 +88,8 @@ export function parseThreadConfig(data) {
     ...streamConfig(data),
     thread: integer(data, 'threadId', 1),
     me: required(data, 'me'),
+    sender: (data.sender ?? '').trim(),
+    systemAuthor: required(data, 'systemAuthor'),
     newMessageLabel: required(data, 'newMessageLabel'),
     newMessagesLabel: required(data, 'newMessagesLabel'),
     ackAction: placeholder(data, 'ackAction', '{message}'),

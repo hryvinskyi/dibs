@@ -14,27 +14,28 @@ use time::OffsetDateTime;
 use dibs_domain::claim::Claim;
 use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
+use dibs_domain::escalation::settled_by;
 use dibs_domain::event::{Event, EventKind};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
 };
 use dibs_domain::item::{ExternalRef, ItemStatus};
-use dibs_domain::message::{Ack, Recipients, SessionLabel};
+use dibs_domain::message::{Ack, Recipients, SessionLabel, speaks_for};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
 
 use crate::ports::{
-    AckRows, ClaimRows, DeliveryRows, DependencyRows, EventRows, GrantRows, ItemRows, MemberRows,
-    ProjectRows, RaisedRows, SessionRows, SettingsRows, SlotRows, Store, StoreError, StoreResult,
-    ThreadRows, TokenRows, Tx, UiSessionRows, WideAskRows,
+    AckRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows, GrantRows,
+    ItemRows, MemberRows, ProjectRows, RaisedRows, SessionRows, SettingsRows, SlotRows, Store,
+    StoreError, StoreResult, ThreadRows, TokenRows, Tx, UiSessionRows, WideAskRows,
 };
 use crate::records::{
-    CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
-    ProjectRecord, ReadMark, SessionRecord, ThreadRecord, ThreadSummary, TokenRecord,
-    UiSessionRecord,
+    CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
+    MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
+    ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -56,11 +57,13 @@ struct State {
     reads: BTreeMap<(ProjectId, MemberId, MessageId), OffsetDateTime>,
     acks: BTreeMap<(ProjectId, MessageId, MemberId), Ack>,
     wide_asks: BTreeMap<(ProjectId, MessageId), WideAsk>,
+    escalations: BTreeMap<(ProjectId, MessageId), EscalationRecord>,
     slots: BTreeMap<ProjectId, SlotBoard>,
     deliveries: BTreeMap<(ProjectId, MemberId, DeliverySubject), Delivery>,
     raised: BTreeMap<(ProjectId, MessageId), (MemberId, OffsetDateTime)>,
     events: Vec<Event>,
     last_event: u64,
+    pruned_through: BTreeMap<ProjectId, EventId>,
     settings: BTreeMap<ProjectId, SettingsDocument>,
     ui_sessions: BTreeMap<TokenHash, InProject<UiSessionRecord>>,
 }
@@ -123,7 +126,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 20] = [
+        let checks: [(&'static str, bool); 21] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -167,9 +170,10 @@ impl State {
             ),
             (
                 "a thread",
-                self.threads
-                    .iter()
-                    .all(|((p, _), t)| member(*p, t.author) && t.item.is_none_or(|i| item(*p, i))),
+                self.threads.iter().all(|((p, _), t)| {
+                    t.author.member().is_none_or(|m| member(*p, m))
+                        && t.item.is_none_or(|i| item(*p, i))
+                }),
             ),
             (
                 "a thread's recipient",
@@ -180,9 +184,9 @@ impl State {
             ),
             (
                 "a message",
-                self.messages
-                    .iter()
-                    .all(|((p, _), m)| thread(*p, m.thread) && member(*p, m.author)),
+                self.messages.iter().all(|((p, _), m)| {
+                    thread(*p, m.thread) && m.author.member().is_none_or(|a| member(*p, a))
+                }),
             ),
             (
                 "a read mark",
@@ -203,6 +207,15 @@ impl State {
                         && item(*p, ask.item)
                         && member(*p, ask.from)
                         && member(*p, ask.to)
+                }),
+            ),
+            (
+                "an escalation",
+                self.escalations.iter().all(|((p, message), e)| {
+                    self.messages.contains_key(&(*p, *message))
+                        && thread(*p, e.thread)
+                        && member(*p, e.by)
+                        && e.arbiters.iter().all(|a| member(*p, *a))
                 }),
             ),
             (
@@ -287,6 +300,10 @@ impl ProjectRows for MemoryTx {
             .find(|p| p.slug == *slug)
             .cloned())
     }
+
+    async fn project_ids(&mut self) -> StoreResult<Vec<ProjectId>> {
+        Ok(self.work.projects.keys().copied().collect())
+    }
 }
 
 #[async_trait]
@@ -342,6 +359,20 @@ impl MemberRows for MemoryTx {
             .collect();
         members.sort_by(|a, b| a.handle.cmp(&b.handle));
         Ok(members)
+    }
+
+    async fn remove_member(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        if let Some(record) = self.work.members.get_mut(&(project, member))
+            && record.removed_at.is_none()
+        {
+            record.removed_at = Some(at);
+        }
+        Ok(())
     }
 }
 
@@ -747,7 +778,7 @@ impl ThreadRows for MemoryTx {
                 let unread = messages
                     .iter()
                     .filter(|m| {
-                        m.author != reader
+                        speaks_for(thread.author, m.author) != Some(reader)
                             && !self.work.reads.contains_key(&(project, reader, m.id))
                     })
                     .count();
@@ -776,6 +807,60 @@ impl ThreadRows for MemoryTx {
         Ok(summaries)
     }
 
+    async fn quiet_threads(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<Vec<ThreadActivity>> {
+        Ok(self
+            .work
+            .threads
+            .iter()
+            .filter(|((p, _), _)| *p == project)
+            .map(|(_, t)| ThreadActivity {
+                thread: t.id,
+                item: t.item,
+                last_activity: self
+                    .work
+                    .messages
+                    .iter()
+                    .filter(|((p, _), m)| *p == project && m.thread == t.id)
+                    .map(|(_, m)| m.created_at)
+                    .max()
+                    .unwrap_or(t.created_at),
+            })
+            .filter(|activity| activity.last_activity < before)
+            .collect())
+    }
+
+    async fn delete_thread(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<u64> {
+        let gone: BTreeSet<MessageId> = self
+            .work
+            .messages
+            .iter()
+            .filter(|((p, _), m)| *p == project && m.thread == thread)
+            .map(|((_, id), _)| *id)
+            .collect();
+        let work = &mut self.work;
+        work.messages
+            .retain(|(p, id), _| !(*p == project && gone.contains(id)));
+        work.reads
+            .retain(|(p, _, id), _| !(*p == project && gone.contains(id)));
+        work.acks
+            .retain(|(p, id, _), _| !(*p == project && gone.contains(id)));
+        work.wide_asks
+            .retain(|(p, id), _| !(*p == project && gone.contains(id)));
+        work.escalations
+            .retain(|(p, id), _| !(*p == project && gone.contains(id)));
+        work.raised
+            .retain(|(p, id), _| !(*p == project && gone.contains(id)));
+        work.deliveries.retain(|(p, _, subject), _| {
+            !(*p == project && matches!(subject, DeliverySubject::Message(id) if gone.contains(id)))
+        });
+        work.threads.remove(&(project, thread));
+        Ok(u64::try_from(gone.len()).unwrap_or(u64::MAX))
+    }
+
     async fn mark_read(
         &mut self,
         project: ProjectId,
@@ -783,11 +868,19 @@ impl ThreadRows for MemoryTx {
         thread: ThreadId,
         at: OffsetDateTime,
     ) -> StoreResult<u64> {
+        let Some(thread_author) = self.work.threads.get(&(project, thread)).map(|t| t.author)
+        else {
+            return Ok(0);
+        };
         let ids: Vec<MessageId> = self
             .work
             .messages
             .iter()
-            .filter(|((p, _), m)| *p == project && m.thread == thread && m.author != reader)
+            .filter(|((p, _), m)| {
+                *p == project
+                    && m.thread == thread
+                    && speaks_for(thread_author, m.author) != Some(reader)
+            })
             .map(|(_, m)| m.id)
             .collect();
         let mut newly = 0;
@@ -855,9 +948,14 @@ impl AckRows for MemoryTx {
             .messages
             .iter()
             .filter(|((p, id), m)| {
+                let sender = self
+                    .work
+                    .threads
+                    .get(&(project, m.thread))
+                    .and_then(|t| speaks_for(t.author, m.author));
                 *p == project
                     && m.ack_required
-                    && m.author != member
+                    && sender != Some(member)
                     && !self.work.acks.contains_key(&(project, *id, member))
             })
             .map(|(_, m)| m.clone())
@@ -913,6 +1011,43 @@ impl WideAskRows for MemoryTx {
             })
             .map(|(_, ask)| ask.clone())
             .collect())
+    }
+}
+
+#[async_trait]
+impl EscalationRows for MemoryTx {
+    async fn insert_escalation(
+        &mut self,
+        project: ProjectId,
+        escalation: &EscalationRecord,
+    ) -> StoreResult<()> {
+        let key = (project, escalation.message);
+        if self.work.escalations.contains_key(&key) {
+            return Err(StoreError::Duplicate);
+        }
+        self.work.escalations.insert(key, escalation.clone());
+        Ok(())
+    }
+
+    async fn open_escalations(&mut self, project: ProjectId) -> StoreResult<Vec<EscalationRecord>> {
+        let mut found: Vec<EscalationRecord> = self
+            .work
+            .escalations
+            .iter()
+            .filter(|((p, message), e)| {
+                let acks: Vec<Ack> = self
+                    .work
+                    .acks
+                    .iter()
+                    .filter(|((ap, am, _), _)| ap == p && am == message)
+                    .map(|(_, ack)| *ack)
+                    .collect();
+                *p == project && settled_by(&e.arbiters, &acks).is_none()
+            })
+            .map(|(_, e)| e.clone())
+            .collect();
+        found.sort_by_key(|e| std::cmp::Reverse((e.created_at, e.message)));
+        Ok(found)
     }
 }
 
@@ -1079,6 +1214,36 @@ impl EventRows for MemoryTx {
             .map(|e| e.id))
     }
 
+    async fn delete_events_before(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<PrunedEvents> {
+        let gone: Vec<EventId> = self
+            .work
+            .events
+            .iter()
+            .filter(|e| e.project == project && e.at < before)
+            .map(|e| e.id)
+            .collect();
+        self.work
+            .events
+            .retain(|e| !(e.project == project && e.at < before));
+        let through = gone.iter().max().copied();
+        if let Some(through) = through {
+            let mark = self.work.pruned_through.entry(project).or_insert(through);
+            *mark = (*mark).max(through);
+        }
+        Ok(PrunedEvents {
+            count: u64::try_from(gone.len()).unwrap_or(u64::MAX),
+            through,
+        })
+    }
+
+    async fn events_pruned_through(&mut self, project: ProjectId) -> StoreResult<Option<EventId>> {
+        Ok(self.work.pruned_through.get(&project).copied())
+    }
+
     async fn completions_since(
         &mut self,
         project: ProjectId,
@@ -1175,6 +1340,18 @@ impl UiSessionRows for MemoryTx {
             self.work.ui_sessions.remove(hash);
         }
         Ok(())
+    }
+
+    async fn delete_ui_sessions_of(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<u64> {
+        let before = self.work.ui_sessions.len();
+        self.work
+            .ui_sessions
+            .retain(|_, session| !(session.project == project && session.record.member == member));
+        Ok(u64::try_from(before - self.work.ui_sessions.len()).unwrap_or(u64::MAX))
     }
 
     async fn delete_expired_ui_sessions(&mut self, now: OffsetDateTime) -> StoreResult<u64> {

@@ -9,7 +9,8 @@ use crate::ports::Store;
 use crate::records::MemberRecord;
 use crate::work::Work;
 
-/// Lists the members of the caller's project, ordered by handle.
+/// Lists the members of the caller's project, ordered by handle: those still in it, never one who
+/// was removed.
 pub struct ListMembers {
     store: Arc<dyn Store>,
 }
@@ -27,8 +28,13 @@ impl ListMembers {
     /// # Errors
     /// [`AppError::Store`] when the store fails.
     pub async fn execute(&self, actor: &Actor) -> Result<Vec<MemberRecord>, AppError> {
-        let mut work = Work::begin(&*self.store, actor.project).await?;
-        Ok(work.members(actor.project).await?)
+        let mut work = Work::begin_for(&*self.store, actor).await?;
+        Ok(work
+            .members(actor.project)
+            .await?
+            .into_iter()
+            .filter(MemberRecord::is_present)
+            .collect())
     }
 }
 

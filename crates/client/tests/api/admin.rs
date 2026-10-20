@@ -132,3 +132,83 @@ fn an_admin_force_releases_any_claim() {
         assert_eq!(ended.claim.holder.as_str(), "bob");
     });
 }
+
+#[test]
+fn an_escalation_a_removal_and_a_deletion_read_back_typed_and_from_dibs() {
+    use dibs_client::api::{EscalationRequest, InboxRequest};
+    use dibs_domain::escalation::{EscalationReason, EscalationSubject};
+
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    run(async {
+        let mut settings = dibs_test_server::two_repositories();
+        settings["arbiters"] = serde_json::json!(["alice"]);
+        let document: SettingsDocument = serde_json::from_value(settings).unwrap();
+        alice.apply_settings(&document).await.unwrap();
+        let item = bob
+            .create_item(&NewItem {
+                external_ref: None,
+                title: "Rates".parse().unwrap(),
+            })
+            .await
+            .unwrap()
+            .item
+            .id;
+        let sent = bob
+            .escalate(&EscalationRequest::about(
+                EscalationSubject::Item(item),
+                EscalationReason::parse("who goes first?").unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(sent.escalation.arbiters.len(), 1);
+        let status = alice.status().await.unwrap();
+        assert_eq!(status.escalations.len(), 1);
+        assert_eq!(status.escalations[0].subject, EscalationSubject::Item(item));
+        assert_eq!(status.escalations[0].by.as_str(), "bob");
+        let thread = alice.thread(sent.escalation.thread_id).await.unwrap();
+        assert!(thread.messages[0].system);
+        assert_eq!(thread.messages[0].author.as_str(), "dibs");
+        assert!(
+            !thread.thread.system,
+            "bob started it; dibs wrote in it for him"
+        );
+        let inbox = alice
+            .inbox(InboxRequest {
+                unacked: true,
+                ..InboxRequest::default()
+            })
+            .await
+            .unwrap();
+        assert!(inbox.unacked.iter().any(|unacked| unacked.message.system));
+
+        let refused = bob
+            .escalate(&EscalationRequest::about(
+                EscalationSubject::Slot("ghost".parse().unwrap()),
+                EscalationReason::parse("?").unwrap(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "unknown_slot");
+
+        let removed = alice.remove_member(&"bob".parse().unwrap()).await.unwrap();
+        assert_eq!(removed.member.handle.as_str(), "bob");
+        assert!(removed.removed_at.is_some());
+        assert_eq!(removed.tokens_revoked, 1);
+        assert_eq!(bob.me().await.unwrap_err().code(), "unauthorized");
+        let deleted = alice
+            .delete_thread(sent.escalation.thread_id)
+            .await
+            .unwrap();
+        assert_eq!(deleted.messages, 1);
+        assert_eq!(
+            alice
+                .delete_thread(sent.escalation.thread_id)
+                .await
+                .unwrap_err()
+                .code(),
+            "not_found"
+        );
+    });
+}

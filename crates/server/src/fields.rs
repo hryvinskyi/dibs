@@ -160,6 +160,17 @@ pub fn item_in_body(field: &str, value: Option<u64>) -> Result<ItemId, ApiError>
         .ok_or_else(|| AppError::NotFound(Missing::Item(ItemId(number))).into())
 }
 
+/// The conversation a body names. A number outside the id range names no conversation.
+///
+/// # Errors
+/// [`ApiError::missing_field`] when absent; the not-found refusal for a number no id can have.
+pub fn thread_in_body(field: &str, value: Option<u64>) -> Result<ThreadId, ApiError> {
+    let number = required(field, value)?;
+    record_id(number)
+        .map(ThreadId)
+        .ok_or_else(|| AppError::NotFound(Missing::Thread(ThreadId(number))).into())
+}
+
 fn not_found_text(message: &str) -> ApiError {
     ApiError::new(axum::http::StatusCode::NOT_FOUND, "not_found", message)
 }

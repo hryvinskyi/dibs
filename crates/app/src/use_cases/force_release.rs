@@ -47,7 +47,7 @@ impl ForceRelease {
     pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<EndedClaim, AppError> {
         actor.require_admin()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let item = existing_item(&mut work, item).await?;
         let current = work.claim(actor.project, item.id).await?;
         let forced = decide_force_release(current.as_ref(), actor.role)?;
@@ -56,7 +56,7 @@ impl ForceRelease {
             event: EventKind::ForceReleased(event::ForceReleased {
                 item: item.id,
                 member: forced.claim.member,
-                by: actor.member,
+                by: Some(actor.member),
             }),
         };
         end_claim(&mut work, &forced.claim, ending, now).await?;
@@ -126,7 +126,7 @@ mod tests {
             [EventKind::ForceReleased(event::ForceReleased {
                 item,
                 member: env.bob.actor.member,
-                by: env.alice.actor.member,
+                by: Some(env.alice.actor.member),
             })]
         );
         assert_eq!(status(&env, item).await, ItemStatus::Open);

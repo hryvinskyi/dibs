@@ -6,6 +6,7 @@ pub mod admin;
 pub mod claims;
 pub mod dependencies;
 pub mod edit_check;
+pub mod escalations;
 pub mod events;
 pub mod grants;
 pub mod items;

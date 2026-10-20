@@ -51,4 +51,13 @@ impl ProjectRows for SqliteTx {
             .map(project)
             .transpose()
     }
+
+    async fn project_ids(&mut self) -> StoreResult<Vec<ProjectId>> {
+        let statement = sqlx::query("SELECT id FROM projects ORDER BY id");
+        self.all(statement)
+            .await?
+            .iter()
+            .map(|row| Ok(ProjectId(Fields::of(row, "projects").number("id")?)))
+            .collect()
+    }
 }

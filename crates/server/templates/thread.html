@@ -2,7 +2,7 @@
 {% import "macros.html" as ui %}
 {% block title %}{{ subject }}{% endblock %}
 {% block main %}
-<main id="main" class="page" data-thread-view data-thread-id="{{ id }}" data-me="{{ chrome.handle }}" data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-after="{{ after }}" data-new-message-label="1 new message" data-new-messages-label="{count} new messages" data-ack-action="/ui/threads/{{ id }}/messages/{message}/ack">
+<main id="main" class="page" data-thread-view data-thread-id="{{ id }}" data-me="{{ chrome.handle }}" data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-after="{{ after }}" data-new-message-label="1 new message" data-new-messages-label="{count} new messages" data-ack-action="/ui/threads/{{ id }}/messages/{message}/ack" data-sender="{{ sender }}" data-system-author="from dibs">
 {% call ui::session_ended(rendered) %}{% endcall %}
 <div class="thread-head">
   <a class="back" href="/ui/threads">← Threads</a>
@@ -11,8 +11,8 @@
 </div>
 <p class="conn" role="status" data-conn hidden><span aria-hidden="true">◌</span>Reconnecting… new messages will appear when the connection is back.</p>
 <ol class="messages" aria-label="Messages, oldest first" data-messages>
-{% for message in messages %}<li class="msg{% if message.mine %} msg--mine{% endif %}" id="m-{{ message.id }}">
-  <div class="msg__head"><span class="msg__author">{{ message.author }}</span><span class="msg__session">{{ message.label }}</span>{% if message.importance.is_raised() %}{% call ui::importance(message.importance) %}{% endcall %}{% endif %}<span class="msg__time">{% call ui::time(message.at) %}{% endcall %}</span></div>
+{% for message in messages %}<li class="msg{% if message.system %} msg--system{% endif %}{% if message.mine %} msg--mine{% endif %}" id="m-{{ message.id }}">
+  <div class="msg__head">{% if message.system %}<span class="msg__author">from dibs</span>{% else %}<span class="msg__author">{{ message.author }}</span><span class="msg__session">{{ message.label }}</span>{% endif %}{% if message.importance.is_raised() %}{% call ui::importance(message.importance) %}{% endcall %}{% endif %}<span class="msg__time">{% call ui::time(message.at) %}{% endcall %}</span></div>
   <p class="msg__body">{{ message.body }}</p>
   {% if let Some(ack) = message.ack %}<div class="ack">
     <span class="label">Acknowledgement requested</span>

@@ -29,6 +29,7 @@ use crate::work::Work;
 pub struct SlotRunBeat {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
+    ids: Arc<dyn IdGen>,
     notifier: Arc<dyn EventNotifier>,
     hot_rules: Arc<HotRuleRegistry>,
 }
@@ -39,6 +40,7 @@ impl SlotRunBeat {
         Self {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
+            ids: deps.ids.clone(),
             notifier: deps.notifier.clone(),
             hot_rules: deps.hot_rules.clone(),
         }
@@ -58,20 +60,20 @@ impl SlotRunBeat {
     ) -> Result<SlotLine, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
         declared(&mut work, &scene, slot).await?;
         let beat = match decide_run_beat(&scene.board, slot, actor.member, run, now) {
             Ok(beat) => beat,
             Err(reason) => {
-                scene.save(&mut work, now).await?;
+                scene.save(&mut work, &*self.ids, now).await?;
                 let refusal = refuse(&mut work, reason).await;
                 work.commit(&*self.notifier).await?;
                 return Err(refusal);
             }
         };
         scene.apply(beat);
-        scene.save(&mut work, now).await?;
+        scene.save(&mut work, &*self.ids, now).await?;
         let line = line_of(&mut work, &scene, slot).await?;
         work.commit(&*self.notifier).await?;
         Ok(line)
@@ -139,7 +141,7 @@ impl TakeOverSlot {
     ) -> Result<TakenOverSlot, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let session = own_session(&mut work, actor, input.session).await?;
         let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
         let request = TakeRequest {
@@ -157,23 +159,26 @@ impl TakeOverSlot {
             Err(reason) => return Err(refuse(&mut work, reason).await),
         };
         let previous = scene.apply(transition);
-        scene.save(&mut work, now).await?;
+        scene.save(&mut work, &*self.ids, now).await?;
+        let names = Names::load(&mut work).await?;
+        let holder = names.handle(actor.member)?;
         let thread = Notice {
             ids: &*self.ids,
             from: actor.member,
-            label: session.label,
             to: previous.member,
             subject: format!("Your stalled hold on {} was taken over", input.slot),
-            body: input.reason,
+            lead: format!(
+                "{holder} took over your hold on {}: the run that held it sent no heartbeat for too long. The slot is theirs now.",
+                input.slot
+            ),
+            reason: input.reason,
         }
         .send(&mut work, now)
         .await?;
-        let names = Names::load(&mut work).await?;
         let previous = NamedHold {
             holder: names.handle(previous.member)?,
             hold: previous,
         };
-        let holder = names.handle(actor.member)?;
         let line = line_of(&mut work, &scene, &input.slot).await?;
         work.commit(&*self.notifier).await?;
         Ok(TakenOverSlot {

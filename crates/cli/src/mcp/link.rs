@@ -10,8 +10,10 @@ use dibs_client::api::{
     TakeOverRequest, TakenOver, ThreadDetail,
 };
 use dibs_client::api::{
-    HoldMode, ReleaseSlotRequest, SlotAnswer, SlotReleased, Slots, TakeSlotRequest, Took,
+    Escalated, EscalationRequest, HoldMode, ReleaseSlotRequest, SlotAnswer, SlotReleased, Slots,
+    TakeSlotRequest, Took,
 };
+use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::message::SessionLabel;
 
@@ -19,8 +21,9 @@ use crate::commands::check::Governed;
 use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::mcp::inputs::{
-    AckInput, CheckInput, ClaimInput, GrantInput, InboxInput, ItemsInput, KeyInput, NewInput,
-    SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
+    AckInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget, GrantInput, InboxInput,
+    ItemsInput, KeyInput, NewInput, SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput,
+    ThreadInput,
 };
 
 /// The kind of agent the sessions of the tool server report.
@@ -253,6 +256,27 @@ impl Link {
     pub async fn ack(&self, input: AckInput) -> Result<Acked, Failure> {
         let message = input.id()?;
         self.call(self.connection.client.ack(message)).await
+    }
+
+    /// Asks the project's arbiters to settle a dispute about a work item, a slot or a
+    /// conversation.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, a refusal when the project names no other arbiter, or
+    /// of the call.
+    pub async fn escalate(&self, input: EscalateInput) -> Result<Escalated, Failure> {
+        let reason = input.reason()?;
+        let subject = match input.target()? {
+            EscalationTarget::Item(key) => EscalationSubject::Item(self.resolve(&key).await?),
+            EscalationTarget::Slot(slot) => EscalationSubject::Slot(slot),
+            EscalationTarget::Thread(thread) => EscalationSubject::Thread(thread),
+        };
+        self.call(
+            self.connection
+                .client
+                .escalate(&EscalationRequest::about(subject, reason)),
+        )
+        .await
     }
 
     /// A conversation and its messages. Showing it does not mark it read.

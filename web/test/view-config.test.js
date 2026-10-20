@@ -10,6 +10,8 @@ const thread = {
   after: '17',
   threadId: '4',
   me: 'alice',
+  sender: 'bob',
+  systemAuthor: 'from dibs',
   newMessageLabel: '1 new message',
   newMessagesLabel: '{count} new messages',
   ackAction: '/ui/threads/4/messages/{message}/ack',
@@ -22,11 +24,15 @@ test('a thread page configuration parses from its attributes', () => {
     after: 17,
     thread: 4,
     me: 'alice',
+    sender: 'bob',
+    systemAuthor: 'from dibs',
     newMessageLabel: '1 new message',
     newMessagesLabel: '{count} new messages',
     ackAction: '/ui/threads/4/messages/{message}/ack',
   });
   assert.equal(parseThreadConfig({ ...thread, after: '0' }).after, 0);
+  assert.equal(parseThreadConfig({ ...thread, sender: '' }).sender, '', 'a thread dibs started');
+  assert.equal(parseThreadConfig({ ...thread, sender: undefined }).sender, '');
 });
 
 test('a missing or malformed attribute is a contract error naming it', () => {
@@ -40,6 +46,7 @@ test('a missing or malformed attribute is a contract error naming it', () => {
     { data: { ...thread, streamUrl: '' }, path: 'dataset.streamUrl' },
     { data: { ...thread, ackAction: undefined }, path: 'dataset.ackAction' },
     { data: { ...thread, ackAction: '/ui/threads/4/messages/ack' }, path: 'dataset.ackAction' },
+    { data: { ...thread, systemAuthor: undefined }, path: 'dataset.systemAuthor' },
   ];
   for (const { data, path } of cases) {
     assert.throws(

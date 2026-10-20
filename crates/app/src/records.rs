@@ -6,15 +6,18 @@ use std::collections::BTreeSet;
 use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::grant::Grant;
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
+use dibs_domain::ids::{
+    EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
+};
 use dibs_domain::import::KnownItem;
 use dibs_domain::item::{
     ExternalRef, ItemMeta, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
 };
 use dibs_domain::member::Role;
-use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
+use dibs_domain::message::{Author, Body, Importance, Recipients, SessionLabel, Subject};
 use dibs_domain::ready::Candidate;
 use dibs_domain::session::HostName;
 
@@ -59,6 +62,16 @@ pub struct MemberRecord {
     pub role: Role,
     /// When it joined.
     pub created_at: OffsetDateTime,
+    /// When it was removed from the project, if it was. A removed member is kept, so the records
+    /// that name them still read, but takes part in nothing any more.
+    pub removed_at: Option<OffsetDateTime>,
+}
+
+impl MemberRecord {
+    /// Whether the member is still in the project.
+    pub fn is_present(&self) -> bool {
+        self.removed_at.is_none()
+    }
 }
 
 /// An API token of a member, kept as its hash.
@@ -245,8 +258,8 @@ pub struct ThreadRecord {
     pub subject: Subject,
     /// The work item it is about, if any.
     pub item: Option<ItemId>,
-    /// Who started it.
-    pub author: MemberId,
+    /// Who started it: a member, or dibs.
+    pub author: Author,
     /// Whom it is addressed to.
     pub recipients: Recipients,
     /// When it started.
@@ -260,8 +273,8 @@ pub struct MessageRecord {
     pub id: MessageId,
     /// The thread.
     pub thread: ThreadId,
-    /// Who wrote it.
-    pub author: MemberId,
+    /// Who wrote it: a member, or dibs.
+    pub author: Author,
     /// The label of the session it was written from.
     pub label: SessionLabel,
     /// Its text.
@@ -320,4 +333,41 @@ pub struct UiSessionRecord {
     pub token: TokenHash,
     /// When it ends unless it is used before then.
     pub expires_at: OffsetDateTime,
+}
+
+/// An escalation: the message that asked the arbiters, what it is about, and whom it asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EscalationRecord {
+    /// The message, written by dibs, that asks for an acknowledgement.
+    pub message: MessageId,
+    /// Its thread.
+    pub thread: ThreadId,
+    /// What it is about.
+    pub subject: EscalationSubject,
+    /// The member who escalated.
+    pub by: MemberId,
+    /// The arbiters it reached; one of them acknowledging it settles it.
+    pub arbiters: BTreeSet<MemberId>,
+    /// When.
+    pub created_at: OffsetDateTime,
+}
+
+/// When a conversation was last active, and the work item it is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadActivity {
+    /// The thread.
+    pub thread: ThreadId,
+    /// The work item it is about, if any.
+    pub item: Option<ItemId>,
+    /// When its newest message was written, or when it started if it has none.
+    pub last_activity: OffsetDateTime,
+}
+
+/// What removing a project's old events did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrunedEvents {
+    /// How many went.
+    pub count: u64,
+    /// The newest id among them, if any went.
+    pub through: Option<EventId>,
 }

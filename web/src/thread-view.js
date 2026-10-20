@@ -1,13 +1,15 @@
 // @ts-check
 /**
  * The live thread page: messages posted to the open thread are appended as they arrive, cloned
- * from the page's `<template>` and filled with `textContent`, a raised importance shown with the
- * template's badge for it and, for a message that asks the person to acknowledge it, the
- * template's acknowledge form; a pill counts them and links to the first; an acknowledgement
+ * from the page's `<template>` and filled with `textContent` — what dibs wrote marked as such,
+ * named as the page says and without a session — a raised importance shown with the template's
+ * badge for it and, for a message that asks the person to acknowledge it, the template's
+ * acknowledge form; a pill counts them and links to the first; an acknowledgement
  * marks its recipient as having acknowledged in the message's list, cloned from the page's
  * `<template>` for it, and takes the person's own acknowledge button away once they acknowledged;
  * a notice shows while the connection is restored, and the page's session-ended banner when the
- * session is gone. Every wording comes from the template.
+ * session is gone. When the log no longer reaches back to what the page shows, the page loads
+ * again, unless a reply is being written. Every wording comes from the template.
  */
 
 import { ackOf, messageOf } from './events.js';
@@ -81,15 +83,20 @@ export function mount(root) {
       return;
     }
     item.id = anchor;
-    item.classList.toggle('msg--mine', message.author === config.me);
+    item.classList.toggle('msg--mine', !message.system && message.author === config.me);
+    item.classList.toggle('msg--system', message.system);
     const fill = (/** @type {string} */ field, /** @type {string} */ value) => {
       const target = item.querySelector(`[data-field="${field}"]`);
       if (target !== null) {
         target.textContent = value;
       }
     };
-    fill('author', message.author);
-    fill('session', message.label);
+    fill('author', message.system ? config.systemAuthor : message.author);
+    if (message.system) {
+      item.querySelector('[data-field="session"]')?.remove();
+    } else {
+      fill('session', message.label);
+    }
     fill('body', message.body);
     if (showsImportance(message.importance)) {
       const badge = item.querySelector(`[data-importance="${message.importance}"]`);
@@ -102,7 +109,7 @@ export function mount(root) {
       ack.hidden = false;
     }
     const ackForm = item.querySelector('form[data-ack-form]');
-    if (offersAck(message, config.me) && ackForm instanceof HTMLFormElement) {
+    if (offersAck(message, config.me, config.sender) && ackForm instanceof HTMLFormElement) {
       ackForm.action = ackAction(config.ackAction, message.id);
       ackForm.hidden = false;
     }
@@ -185,6 +192,12 @@ export function mount(root) {
             element.hidden = false;
           }
         });
+      }
+    },
+    onResync: () => {
+      const draft = find(root, 'textarea[name="body"]', HTMLTextAreaElement);
+      if (draft === null || draft.value.trim() === '') {
+        window.location.reload();
       }
     },
   });

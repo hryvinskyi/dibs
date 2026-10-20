@@ -63,9 +63,8 @@ impl CreateMember {
         by: &impl AdminAuthority,
         input: CreateMemberInput,
     ) -> Result<CreatedMember, AppError> {
-        let project = by.administered_project()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_administering(&*self.store, by).await?;
         let member = self
             .enrolment
             .add_member(&mut work, input.member, input.role, now)

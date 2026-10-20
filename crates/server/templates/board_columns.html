@@ -8,7 +8,12 @@
   {% endfor %}
 </li>{% endmacro %}
 <template data-updated-template>{% call ui::time(board.updated) %}{% endcall %}</template>
-{% if !board.slots.is_empty() %}<section class="section" aria-labelledby="b-slots">
+{% for escalation in board.escalations %}<div class="banner banner--danger" role="status" data-escalation>
+  <span class="banner__icon" aria-hidden="true">▲</span>
+  <p class="banner__text">Escalated by {{ escalation.by }}: {{ escalation.about }} — waiting for an arbiter ({{ escalation.arbiters }}) to acknowledge it</p>
+  <a class="banner__action" href="/ui/threads/{{ escalation.thread }}">Open the conversation</a>
+</div>
+{% endfor %}{% if !board.slots.is_empty() %}<section class="section" aria-labelledby="b-slots">
   <div class="section-head"><h2 id="b-slots">Slots</h2><p class="section-head__hint">Short holds for shared actions</p></div>
   <ul class="slots">
 {% for slot in board.slots %}<li class="slot{% match slot.state %}{% when SlotState::Free %} slot--free{% when SlotState::Held %} slot--held{% when SlotState::Queued %} slot--queued{% when SlotState::Stalled with { silent } %} slot--stalled{% when SlotState::Offered with { member, until } %} slot--offered{% endmatch %}" data-slot="{{ slot.name }}">

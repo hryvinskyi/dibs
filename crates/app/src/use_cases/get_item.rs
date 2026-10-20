@@ -40,7 +40,7 @@ impl GetItem {
     /// [`AppError::NotFound`] when the project has no such item; [`AppError::Store`] when the store
     /// fails.
     pub async fn execute(&self, actor: &Actor, item: ItemId) -> Result<ItemView, AppError> {
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let item = existing_item(&mut work, item).await?;
         let claim = work.claim(actor.project, item.id).await?;
         let names = Names::load(&mut work).await?;

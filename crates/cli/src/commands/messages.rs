@@ -5,13 +5,14 @@ use std::io::Read;
 
 use time::format_description::well_known::Rfc3339;
 
-use dibs_client::api::{InboxRequest, Message, Recipients, StartThread};
+use dibs_client::api::{EscalationRequest, InboxRequest, Message, Recipients, StartThread};
+use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::message::Body;
 
-use crate::cli::{AckArgs, InboxArgs, SendArgs, ThreadArgs};
+use crate::cli::{AckArgs, EscalateArgs, InboxArgs, SendArgs, ThreadArgs};
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
-use crate::output::{asking_text, thread_line, unacked_line};
+use crate::output::{asking_text, author_text, thread_line, unacked_line};
 
 /// Starts a conversation with members or the project; the body `-` is read from standard input.
 ///
@@ -68,6 +69,48 @@ pub async fn send(args: SendArgs, ctx: &Context) -> Result<(), Failure> {
             started.thread.id,
             started.thread.subject,
             asking_text(&started.message)
+        )
+    });
+    Ok(())
+}
+
+/// Asks the project's arbiters to settle a dispute about a work item, a slot or a conversation.
+///
+/// # Errors
+/// The [`Failure`] of the call.
+pub async fn escalate(args: EscalateArgs, ctx: &Context) -> Result<(), Failure> {
+    let connection = ctx.connect().await?;
+    let subject = match (&args.item, args.slot, args.thread) {
+        (Some(key), _, _) => EscalationSubject::Item(connection.resolve(key).await?),
+        (None, Some(slot), _) => EscalationSubject::Slot(slot),
+        (None, None, Some(thread)) => EscalationSubject::Thread(thread),
+        (None, None, None) => {
+            return Err(Failure::config(
+                "no_subject",
+                "Name what to escalate: a work item, --slot or --thread.",
+            ));
+        }
+    };
+    let sent = connection
+        .client
+        .escalate(&EscalationRequest::about(subject, args.reason))
+        .await
+        .map_err(|error| connection.failed(error))?;
+    ctx.printer.show(&sent, || {
+        let escalation = &sent.escalation;
+        let names = |handles: &[dibs_domain::handle::Handle]| {
+            handles
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "Escalated in conversation #{} to {} (arbiters: {}). It stands until an arbiter acknowledges it; meanwhile pick other work, and follow their answer there (dibs thread {}).",
+            escalation.thread_id,
+            names(&escalation.reached),
+            names(&escalation.arbiters),
+            escalation.thread_id
         )
     });
     Ok(())
@@ -132,10 +175,9 @@ pub async fn thread(args: ThreadArgs, ctx: &Context) -> Result<(), Failure> {
             let at = message.created_at.format(&Rfc3339).unwrap_or_default();
             let _ = write!(
                 text,
-                "\nmessage {}, {} ({}) at {at}{}:\n{}\n",
+                "\nmessage {}, {} at {at}{}:\n{}\n",
                 message.id,
-                message.author,
-                message.label,
+                author_text(message),
                 marks(message),
                 message.body
             );

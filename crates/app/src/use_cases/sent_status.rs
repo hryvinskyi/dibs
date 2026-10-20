@@ -7,7 +7,7 @@ use time::OffsetDateTime;
 
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::MessageId;
-use dibs_domain::message::AckState;
+use dibs_domain::message::{AckState, speaks_for};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -66,9 +66,9 @@ impl SentStatus {
         message: MessageId,
     ) -> Result<SentStatusView, AppError> {
         actor.require_person()?;
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let (message, thread) = readable_message(&mut work, actor, message).await?;
-        if message.author != actor.member {
+        if speaks_for(thread.author, message.author) != Some(actor.member) {
             return Err(AppError::NotAuthor);
         }
         let people = people(&mut work).await?;

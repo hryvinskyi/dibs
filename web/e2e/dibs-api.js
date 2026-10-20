@@ -2,8 +2,8 @@
 /**
  * The server's JSON API as the cases use it: start a conversation and post a message as a member,
  * each optionally raised in importance or asking to be acknowledged; acknowledge a message; import
- * items as an integration does; open a session and claim an item from it; apply settings and
- * take a slot.
+ * items as an integration does; open a session and claim an item from it; apply settings, take a
+ * slot, and escalate a work item to the project's arbiters.
  * Answers are parsed into the few values a case needs; a body of another shape is an error.
  */
 
@@ -195,4 +195,19 @@ export async function takeSlot(baseUrl, token, slot, sessionId, purpose) {
     { session_id: sessionId, purpose },
     200,
   );
+}
+
+/**
+ * Escalates a work item to the project's arbiters.
+ * @param {string} baseUrl
+ * @param {string} token the token of the member escalating
+ * @param {number} itemId
+ * @param {string} reason
+ * @returns {Promise<{ threadId: number, messageId: number }>} the escalation's conversation and
+ *   message
+ */
+export async function escalateItem(baseUrl, token, itemId, reason) {
+  const body = await post(baseUrl, token, '/v1/escalations', { item: itemId, reason });
+  const escalation = isRecord(body) ? body.escalation : undefined;
+  return { threadId: idAt(escalation, 'thread_id'), messageId: idAt(escalation, 'message_id') };
 }

@@ -9,7 +9,7 @@ use sqlx::sqlite::SqliteRow;
 use time::OffsetDateTime;
 
 use dibs_app::ports::{EventRows, StoreError, StoreResult};
-use dibs_app::records::CompletionRecord;
+use dibs_app::records::{CompletionRecord, PrunedEvents};
 use dibs_domain::event::{Event, EventKind};
 use dibs_domain::ids::{EventId, ProjectId};
 
@@ -90,6 +90,57 @@ impl EventRows for SqliteTx {
             .bind(int(project.get())?);
         let row = self.one(statement).await?;
         Ok(Fields::of(&row, "events").opt_number("id")?.map(EventId))
+    }
+
+    async fn delete_events_before(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<PrunedEvents> {
+        let project = int(project.get())?;
+        let before = nanos(before)?;
+        let row = self
+            .one(
+                sqlx::query(
+                    "SELECT COUNT(*) AS count, MAX(id) AS through FROM events \
+                     WHERE project_id = ?1 AND at < ?2",
+                )
+                .bind(project)
+                .bind(before),
+            )
+            .await?;
+        let f = Fields::of(&row, "events");
+        let count = f.number("count")?;
+        let through = f.opt_number("through")?.map(EventId);
+        let Some(newest) = through else {
+            return Ok(PrunedEvents { count, through });
+        };
+        self.run(
+            sqlx::query("DELETE FROM events WHERE project_id = ?1 AND at < ?2")
+                .bind(project)
+                .bind(before),
+        )
+        .await?;
+        self.run(
+            sqlx::query(
+                "INSERT INTO events_pruned (project_id, through) VALUES (?1, ?2) \
+                 ON CONFLICT (project_id) DO UPDATE SET through = MAX(through, excluded.through)",
+            )
+            .bind(project)
+            .bind(int(newest.get())?),
+        )
+        .await?;
+        Ok(PrunedEvents { count, through })
+    }
+
+    async fn events_pruned_through(&mut self, project: ProjectId) -> StoreResult<Option<EventId>> {
+        let statement = sqlx::query("SELECT through FROM events_pruned WHERE project_id = ?1")
+            .bind(int(project.get())?);
+        self.optional(statement)
+            .await?
+            .as_ref()
+            .map(|row| Ok(EventId(Fields::of(row, "events_pruned").number("through")?)))
+            .transpose()
     }
 
     async fn completions_since(

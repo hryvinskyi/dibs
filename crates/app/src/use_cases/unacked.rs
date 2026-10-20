@@ -39,7 +39,7 @@ impl Unacked {
     /// [`AppError::Forbidden`] for an integration; [`AppError::Store`] when the store fails.
     pub async fn execute(&self, actor: &Actor) -> Result<Vec<UnackedMessage>, AppError> {
         actor.require_person()?;
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         unacked(&mut work, actor).await
     }
 }

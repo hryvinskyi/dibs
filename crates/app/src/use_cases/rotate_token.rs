@@ -10,7 +10,7 @@ use crate::error::AppError;
 use crate::ports::{Clock, Store};
 use crate::records::MemberRecord;
 use crate::token::SecretToken;
-use crate::use_cases::common::{Enrolment, member_by_handle};
+use crate::use_cases::common::{Enrolment, present_member_by_handle};
 use crate::work::Work;
 
 /// The member's new token.
@@ -48,7 +48,7 @@ impl RotateToken {
     ///
     /// # Errors
     /// [`AppError::Forbidden`] unless `by` may administer the project; [`AppError::NotFound`] when
-    /// the project has no such member; [`AppError::Store`] when the store fails.
+    /// the project has no such member, or removed them; [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         by: &impl AdminAuthority,
@@ -56,8 +56,8 @@ impl RotateToken {
     ) -> Result<RotatedToken, AppError> {
         let project = by.administered_project()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, project).await?;
-        let member = member_by_handle(&mut work, handle).await?;
+        let mut work = Work::begin_administering(&*self.store, by).await?;
+        let member = present_member_by_handle(&mut work, handle).await?;
         for token in work.tokens_of(project, member.id).await? {
             if token.is_active() {
                 work.revoke_token(project, &token.hash, now).await?;

@@ -12,8 +12,10 @@ mod common;
 mod complete;
 mod create_item;
 mod create_member;
+mod delete_thread;
 mod deliver;
 mod edit_check;
+mod escalate;
 mod follow_events;
 mod force_release;
 mod get_item;
@@ -32,12 +34,14 @@ mod me;
 mod open_ui_session;
 mod operate_project;
 mod post_message;
+mod prune;
 mod read_thread;
 mod readable;
 mod ready;
 mod register_session;
 mod release;
 mod remove_dependency;
+mod remove_member;
 mod resolve_ui_session;
 mod revoke_grant;
 mod revoke_token;
@@ -65,8 +69,10 @@ pub use common::NewMember;
 pub use complete::Complete;
 pub use create_item::{CreateItem, CreateItemInput, CreatedItem};
 pub use create_member::{CreateMember, CreateMemberInput, CreatedMember};
+pub use delete_thread::{DeleteThread, DeletedThread};
 pub use deliver::{ClaimDelivery, DeliveryAsk};
 pub use edit_check::{EditCheck, EditCheckInput, EditVerdicts};
+pub use escalate::{Escalate, EscalateInput, Escalation, OpenEscalation};
 pub use follow_events::{FollowEvents, FollowPage, FollowedEvent};
 pub use force_release::ForceRelease;
 pub use get_item::{GetItem, ItemView};
@@ -87,11 +93,13 @@ pub use me::{Me, MeView};
 pub use open_ui_session::{OpenUiSession, OpenedUiSession, UI_SESSION_LIFETIME};
 pub use operate_project::OperateProject;
 pub use post_message::{PostMessage, PostMessageInput};
+pub use prune::{Prune, PruneReport};
 pub use read_thread::{ReadThread, RecipientAck, ThreadView};
 pub use ready::{ExcludedEntry, NamedNotReady, Ready, ReadyEntry, ReadyView};
 pub use register_session::{RegisterSession, RegisterSessionInput};
 pub use release::Release;
 pub use remove_dependency::RemoveDependency;
+pub use remove_member::{RemoveMember, RemovedMember};
 pub use resolve_ui_session::ResolveUiSession;
 pub use revoke_grant::RevokeGrant;
 pub use revoke_token::RevokeToken;
@@ -152,6 +160,8 @@ pub struct UseCases {
     pub status: Status,
     /// See [`EditCheck`].
     pub edit_check: EditCheck,
+    /// See [`Escalate`].
+    pub escalate: Escalate,
     /// See [`Grant`].
     pub grant: Grant,
     /// See [`RevokeGrant`].
@@ -188,6 +198,12 @@ pub struct UseCases {
     pub create_member: CreateMember,
     /// See [`RotateToken`].
     pub rotate_token: RotateToken,
+    /// See [`RemoveMember`].
+    pub remove_member: RemoveMember,
+    /// See [`DeleteThread`].
+    pub delete_thread: DeleteThread,
+    /// See [`Prune`].
+    pub prune: Prune,
     /// See [`RevokeToken`].
     pub revoke_token: RevokeToken,
     /// See [`ApplySettings`].
@@ -243,6 +259,7 @@ impl UseCases {
             complete: Complete::new(deps),
             status: Status::new(deps),
             edit_check: EditCheck::new(deps),
+            escalate: Escalate::new(deps),
             grant: Grant::new(deps),
             revoke_grant: RevokeGrant::new(deps),
             start_thread: StartThread::new(deps),
@@ -261,6 +278,9 @@ impl UseCases {
             operate_project: OperateProject::new(deps),
             create_member: CreateMember::new(deps),
             rotate_token: RotateToken::new(deps),
+            remove_member: RemoveMember::new(deps),
+            delete_thread: DeleteThread::new(deps),
+            prune: Prune::new(deps),
             revoke_token: RevokeToken::new(deps),
             apply_settings: ApplySettings::new(deps),
             force_release: ForceRelease::new(deps),

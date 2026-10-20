@@ -437,6 +437,37 @@ fn whatever_goes_wrong_a_hook_exits_0_without_a_decision() {
 }
 
 #[test]
+fn a_token_kept_in_the_os_store_that_cannot_be_read_is_no_decision_and_one_warning() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let file = setup
+        .home(&setup.bob)
+        .join("config")
+        .join("credentials.toml");
+    let kept_in_store = format!(
+        "[[credential]]\nserver = \"{}\"\nproject = \"acme\"\nkeychain = true\n",
+        setup.server.url()
+    );
+    let me = dibs_client::private_file::Principal::from_env(&|name| std::env::var(name).ok());
+    dibs_client::private_file::write(&file, &kept_in_store, &me).unwrap();
+    let started = Instant::now();
+    let out = setup.hook(
+        "bob",
+        &api,
+        "before-tool",
+        &edit(&api, &["src/billing/a.rs"]),
+    );
+    let answer = reply(&out);
+    assert_eq!(answer["decision"], "no_objection", "{answer}");
+    let notice = answer["notice"].as_str().unwrap_or_default();
+    assert!(notice.contains("dibs login"), "{answer}");
+    assert!(
+        started.elapsed() < StdDuration::from_secs(10),
+        "the hook never waits on the OS store"
+    );
+}
+
+#[test]
 fn doctor_lists_the_hosts_and_what_they_carry() {
     let setup = Setup::new();
     let api = setup.checkout("api", Some("api"), API_REMOTE);

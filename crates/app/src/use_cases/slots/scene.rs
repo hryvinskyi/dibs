@@ -4,17 +4,18 @@
 
 use time::OffsetDateTime;
 
-use dibs_domain::event::{EventKind, MessagePosted, ThreadStarted};
+use dibs_domain::event::EventKind;
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::{MemberId, MessageId, ThreadId};
-use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
+use dibs_domain::ids::{MemberId, ThreadId};
+use dibs_domain::message::{Author, Body, Importance, Recipients};
 use dibs_domain::settings::ProjectSettings;
-use dibs_domain::slot::{SlotBoard, SlotCatalog, Transition, decide_tick};
+use dibs_domain::slot::{
+    SlotBoard, SlotCatalog, SlotNotice, SlotNoticeKind, Transition, decide_tick, notices_owed,
+};
 
 use crate::error::AppError;
-use crate::ports::{IdGen, StoreError};
-use crate::records::{MessageRecord, ThreadRecord};
-use crate::use_cases::writing::{Authorship, write_message};
+use crate::ports::IdGen;
+use crate::use_cases::writing::{Posted, SystemPost, system_body};
 use crate::work::Work;
 
 /// The settings and the slots' board, and the events its changes record.
@@ -58,11 +59,14 @@ impl Scene {
         transition.answer
     }
 
-    /// Writes the board when it changed and records its events, in the order they happened;
-    /// answers how many it recorded.
+    /// Writes the board when it changed and records its events, in the order they happened, then
+    /// tells each member whose hold expired or whose offer lapsed among them; answers how many
+    /// events it recorded. Every change of the board is saved here, so a member is told once,
+    /// whichever use case or sweep found the change.
     pub(crate) async fn save(
         &mut self,
         work: &mut Work,
+        ids: &dyn IdGen,
         now: OffsetDateTime,
     ) -> Result<usize, AppError> {
         if self.board != self.stored {
@@ -72,22 +76,25 @@ impl Scene {
         }
         let events = std::mem::take(&mut self.events);
         let count = events.len();
-        for event in events {
-            work.record(now, event).await?;
+        for event in &events {
+            work.record(now, event.clone()).await?;
         }
+        tell_owed(work, ids, &events, now).await?;
         Ok(count)
     }
 }
 
-/// A message to one member about a slot, from a member who acted on it, in a thread of its own:
-/// `high`, asking for no acknowledgement, so it reaches them while they work.
+/// A message to one member about a slot, which dibs writes for a member who acted on it, in a
+/// thread of its own: `high`, asking for no acknowledgement, so it reaches them while they work.
 pub(crate) struct Notice<'a> {
     pub(crate) ids: &'a dyn IdGen,
     pub(crate) from: MemberId,
-    pub(crate) label: SessionLabel,
     pub(crate) to: MemberId,
     pub(crate) subject: String,
-    pub(crate) body: Body,
+    /// What happened, in dibs's words.
+    pub(crate) lead: String,
+    /// The reason the member gave.
+    pub(crate) reason: Body,
 }
 
 impl Notice<'_> {
@@ -97,48 +104,63 @@ impl Notice<'_> {
         work: &mut Work,
         now: OffsetDateTime,
     ) -> Result<ThreadId, AppError> {
-        let project = work.project_id();
-        let subject = Subject::parse(&self.subject).map_err(|_| StoreError::Corrupt {
-            what: "a slot's notice has no valid subject".to_owned(),
-        })?;
-        let thread = ThreadRecord {
-            id: ThreadId(self.ids.next()),
-            subject,
+        let posted = SystemPost {
+            ids: Posted::next(self.ids),
+            subject: self.subject,
             item: None,
-            author: self.from,
-            recipients: Recipients::Members([self.to].into()),
-            created_at: now,
-        };
-        let message = MessageRecord {
-            id: MessageId(self.ids.next()),
-            thread: thread.id,
-            author: self.from,
-            label: self.label,
-            body: self.body,
+            on_behalf_of: Author::Member(self.from),
+            to: Recipients::Members([self.to].into()),
+            body: system_body(&self.lead, Some(("Their reason", self.reason.as_str())))?,
             importance: Importance::High,
             ack_required: false,
-            created_at: now,
-        };
-        work.insert_thread(project, &thread).await?;
-        write_message(work, &message, Authorship::Dibs, now).await?;
-        work.record(
-            now,
-            EventKind::ThreadStarted(ThreadStarted {
-                thread: thread.id,
-                author: self.from,
-                item: None,
-            }),
-        )
+        }
+        .send(work, now)
         .await?;
-        work.record(
-            now,
-            EventKind::MessagePosted(MessagePosted {
-                thread: thread.id,
-                message: message.id,
-                author: self.from,
-            }),
-        )
+        Ok(posted.thread)
+    }
+}
+
+/// Tells each member what time alone ended of theirs among the changes `events` record: their hold
+/// expired, or the slot offered to them lapsed. dibs writes it in nobody's name, since nobody acted.
+async fn tell_owed(
+    work: &mut Work,
+    ids: &dyn IdGen,
+    events: &[EventKind],
+    now: OffsetDateTime,
+) -> Result<(), AppError> {
+    for notice in notices_owed(events) {
+        let (subject, body) = owed_text(&notice);
+        SystemPost {
+            ids: Posted::next(ids),
+            subject,
+            item: None,
+            on_behalf_of: Author::System,
+            to: Recipients::Members([notice.member].into()),
+            body: system_body(&body, None)?,
+            importance: Importance::High,
+            ack_required: false,
+        }
+        .send(work, now)
         .await?;
-        Ok(thread.id)
+    }
+    Ok(())
+}
+
+/// The subject and text of a notice time alone owes.
+fn owed_text(notice: &SlotNotice) -> (String, String) {
+    let slot = &notice.slot;
+    match notice.kind {
+        SlotNoticeKind::HoldExpired => (
+            format!("Your hold on {slot} expired"),
+            format!(
+                "Your hold on {slot} reached its expiry and ended. Nobody took it from you: it was not renewed in time. If you still need it, take it again (dibs_slot_take {slot}, or dibs slot take {slot}); it may be offered to someone waiting first."
+            ),
+        ),
+        SlotNoticeKind::OfferLapsed => (
+            format!("The offer of {slot} to you lapsed"),
+            format!(
+                "The slot {slot} was offered to you and the offer lapsed untaken, so it passed on and you are out of its queue. If you still need it, take it again (dibs_slot_take {slot}, or dibs slot take {slot}) to queue for it."
+            ),
+        ),
     }
 }

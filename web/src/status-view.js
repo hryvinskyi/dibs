@@ -64,6 +64,11 @@ export function mount(root) {
         reveal(root, '[data-session-ended]');
       }
     },
+    onResync: () => {
+      if (!ended) {
+        reveal(root, '[data-changed]');
+      }
+    },
   });
   return () => {
     controller.abort();

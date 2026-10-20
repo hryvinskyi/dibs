@@ -133,7 +133,7 @@ impl ClaimItem {
         actor.require_person()?;
         let now = self.clock.now();
         let project = actor.project;
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let session = own_session(&mut work, actor, input.session).await?;
         let item = existing_item(&mut work, input.item).await?;
         if item.is_closed() {

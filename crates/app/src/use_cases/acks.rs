@@ -10,17 +10,19 @@ use dibs_domain::wide::ask_stands;
 
 use crate::actor::Actor;
 use crate::error::AppError;
-use crate::records::{MessageRecord, ThreadRecord};
+use crate::records::{MemberRecord, MessageRecord, ThreadRecord};
 use crate::use_cases::readable::may_read_thread;
 use crate::work::Work;
 
-/// Every member of the transaction's project as recipients are told from.
+/// Every member still in the transaction's project, as recipients are told from: a member who was
+/// removed receives nothing and owes no acknowledgement.
 pub(crate) async fn people(work: &mut Work) -> Result<Vec<Person>, AppError> {
     let project = work.project_id();
     Ok(work
         .members(project)
         .await?
         .into_iter()
+        .filter(MemberRecord::is_present)
         .map(|member| Person {
             member: member.id,
             role: member.role,

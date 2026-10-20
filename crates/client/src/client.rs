@@ -31,8 +31,9 @@ use crate::api::{
     TakenOver, ThreadDetail, Threads, TokenRevoked, Versions,
 };
 use crate::api::{
-    ForceReleaseSlotRequest, ReleaseSlotRequest, SlotAnswer, SlotForced, SlotReleased,
-    SlotTakenOver, Slots, TakeOverSlotRequest, TakeSlotRequest, Took,
+    Escalated, EscalationRequest, ForceReleaseSlotRequest, MemberRemoved, ReleaseSlotRequest,
+    SlotAnswer, SlotForced, SlotReleased, SlotTakenOver, Slots, TakeOverSlotRequest,
+    TakeSlotRequest, ThreadDeleted, Took,
 };
 use crate::error::{ClientError, Response, decode};
 use crate::server_url::ServerUrl;
@@ -594,6 +595,37 @@ impl Client {
         self.send(
             self.request(Method::POST, &format!("/v1/admin/members/{handle}/tokens"))
                 .json(&Empty {}),
+        )
+        .await
+    }
+
+    /// `DELETE /v1/admin/members/{handle}`: removes a member from the project, releasing what they
+    /// held.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn remove_member(&self, handle: &Handle) -> Result<MemberRemoved, ClientError> {
+        self.send(self.request(Method::DELETE, &format!("/v1/admin/members/{handle}")))
+            .await
+    }
+
+    /// `DELETE /v1/admin/threads/{id}`: deletes a conversation with every message in it.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn delete_thread(&self, thread: ThreadId) -> Result<ThreadDeleted, ClientError> {
+        self.send(self.request(Method::DELETE, &format!("/v1/admin/threads/{thread}")))
+            .await
+    }
+
+    /// `POST /v1/escalations`: asks the project's arbiters to settle a dispute.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn escalate(&self, escalation: &EscalationRequest) -> Result<Escalated, ClientError> {
+        self.send(
+            self.request(Method::POST, "/v1/escalations")
+                .json(escalation),
         )
         .await
     }

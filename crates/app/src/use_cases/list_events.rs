@@ -59,6 +59,7 @@ impl ListEvents {
     /// between 1 and [`MAX_PAGE`].
     ///
     /// # Errors
+    /// [`AppError::CursorExpired`] for a cursor behind events the retention removed;
     /// [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
@@ -66,7 +67,7 @@ impl ListEvents {
         from: EventCursor,
         limit: usize,
     ) -> Result<EventPage, AppError> {
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let page = visible_page(&mut work, actor, from, limit).await?;
         let names = Names::load(&mut work).await?;
         let events = page
@@ -92,7 +93,9 @@ pub(crate) struct VisiblePage {
 }
 
 /// Reads up to `limit` events from `from` (held between 1 and [`MAX_PAGE`]) and keeps those the
-/// actor may see. From [`EventCursor::Latest`] the page holds no event, only the newest cursor.
+/// actor may see. From [`EventCursor::Latest`] the page holds no event, only the newest cursor. A
+/// cursor behind events the retention removed is refused: the reader missed what it cannot read
+/// any more, and reads the state again before following the log from the start.
 pub(crate) async fn visible_page(
     work: &mut Work,
     actor: &Actor,
@@ -102,7 +105,14 @@ pub(crate) async fn visible_page(
     let project = work.project_id();
     let after = match from {
         EventCursor::Start => None,
-        EventCursor::After(id) => Some(id),
+        EventCursor::After(id) => {
+            if let Some(through) = work.events_pruned_through(project).await?
+                && id < through
+            {
+                return Err(AppError::CursorExpired { through });
+            }
+            Some(id)
+        }
         EventCursor::Latest => {
             return Ok(VisiblePage {
                 events: Vec::new(),
@@ -155,7 +165,7 @@ mod tests {
     use dibs_domain::handle::Handle;
     use dibs_domain::ids::{ItemId, MemberId, MessageId, ProjectId};
     use dibs_domain::member::Role;
-    use dibs_domain::message::{Body, Recipients, SessionLabel, Subject};
+    use dibs_domain::message::{Author, Body, Recipients, SessionLabel, Subject};
 
     use super::*;
     use crate::token::TokenHash;
@@ -176,7 +186,7 @@ mod tests {
             id: ThreadId(id),
             subject: Subject::parse("Billing").unwrap(),
             item: None,
-            author: MemberId(author),
+            author: Author::Member(MemberId(author)),
             recipients,
             created_at: OffsetDateTime::UNIX_EPOCH,
         }
@@ -186,7 +196,7 @@ mod tests {
         EventKind::MessagePosted(MessagePosted {
             thread: ThreadId(thread),
             message: MessageId(1),
-            author: MemberId(1),
+            author: Some(MemberId(1)),
         })
     }
 
@@ -205,7 +215,7 @@ mod tests {
         ]);
         let started = EventKind::ThreadStarted(ThreadStarted {
             thread: ThreadId(10),
-            author: MemberId(1),
+            author: Some(MemberId(1)),
             item: None,
         });
         let completed = EventKind::Completed(Completed {

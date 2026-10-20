@@ -15,8 +15,8 @@ use crate::context::Context;
 use crate::failure::Failure;
 use crate::mcp::answer;
 use crate::mcp::inputs::{
-    AckInput, CheckInput, ClaimInput, GrantInput, InboxInput, ItemsInput, KeyInput, NewInput,
-    SendInput, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
+    AckInput, CheckInput, ClaimInput, EscalateInput, GrantInput, InboxInput, ItemsInput, KeyInput,
+    NewInput, SendInput, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
 };
 use crate::mcp::link::Link;
 
@@ -194,6 +194,14 @@ impl Tools {
     }
 
     #[tool(
+        description = "Escalate to the project's arbiters when you and another member's agent do not agree: who goes first on a work item, who holds a slot, or a conversation whose message asked for an acknowledgement that did not come within 30 minutes. Name exactly one of item, slot or thread, and give the reason the arbiters read. dibs sends it, urgent and asking to be acknowledged, to the arbiters and to the holder and the member who asked; it stands on the board until an arbiter acknowledges it. Agents do not settle priority between people: do not take over a live claim or a slot, do not edit in the area, pick other work with dibs_ready meanwhile, and follow the arbiter's answer in the conversation (dibs_thread). The server refuses with no_arbiters when the project names none, and with already_escalated, naming its conversation, while an escalation of the same subject still waits: follow that one instead."
+    )]
+    async fn dibs_escalate(&self, Parameters(input): Parameters<EscalateInput>) -> CallToolResult {
+        self.perform(|link| async move { link.escalate(input).await })
+            .await
+    }
+
+    #[tool(
         description = "Take a slot before you do a shared action one member does at a time (a deploy, a release, a migration of a shared database): give the slot and a purpose every member may read (never a credential, a host or a customer's data). outcome taken means it is yours until slot.hold.expires_at; taking it again renews it. outcome queued means another member holds it or it is offered to someone first: position is your place. Then wait for it with wait_seconds (up to 540) or do other work and take it again later; never run the action meanwhile. When it is offered to you, dibs tells you, and your next take gets it. A hold is your member's, shared by all your sessions. Release it with dibs_slot_release as soon as you are done."
     )]
     async fn dibs_slot_take(&self, Parameters(input): Parameters<SlotTakeInput>) -> CallToolResult {
@@ -256,6 +264,7 @@ mod tests {
                 "dibs_check",
                 "dibs_claim",
                 "dibs_done",
+                "dibs_escalate",
                 "dibs_grant",
                 "dibs_inbox",
                 "dibs_items",

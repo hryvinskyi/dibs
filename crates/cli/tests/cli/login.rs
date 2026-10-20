@@ -14,6 +14,11 @@ fn login_stores_the_token_for_its_project_and_whoami_reads_it_back() {
     let stored = std::fs::read_to_string(&file).unwrap();
     assert!(stored.contains("project = \"acme\""), "{stored}");
     assert!(stored.contains(&setup.server.url()), "{stored}");
+    assert!(
+        stored.contains(&format!("token = \"{}\"", setup.bob.token))
+            && !stored.contains("keychain"),
+        "without --keychain the token is in the private file and the OS store is never named: {stored}"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

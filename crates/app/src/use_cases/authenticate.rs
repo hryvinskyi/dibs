@@ -6,10 +6,11 @@ use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::ports::{Store, TokenHasher, Tx};
+use crate::records::MemberRecord;
 use crate::token::SecretToken;
 
 /// Finds the member a token authenticates. A malformed, unknown or revoked token, and a token whose
-/// member is gone, are all refused the same way.
+/// member is gone or was removed from the project, are all refused the same way.
 pub struct Authenticate {
     store: Arc<dyn Store>,
     hasher: Arc<dyn TokenHasher>,
@@ -51,6 +52,7 @@ pub(crate) async fn authenticate_in(
     let member = tx
         .member(found.project, found.record.member)
         .await?
+        .filter(MemberRecord::is_present)
         .ok_or(AppError::Unauthorized)?;
     Ok(Actor {
         project: found.project,

@@ -82,7 +82,7 @@ impl AckMessage {
     ) -> Result<Acknowledged, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let (message, thread) = readable_message(&mut work, actor, message).await?;
         let people = people(&mut work).await?;
         let acks = work.acks(actor.project, message.id).await?;

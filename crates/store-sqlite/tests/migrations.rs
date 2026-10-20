@@ -232,7 +232,8 @@ mod migrations {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 6);
+        let newest = MIGRATOR.iter().map(|m| m.version).max().unwrap();
+        assert_eq!(version, newest, "every migration was applied");
     }
 
     /// Two claims, a conversation with an acknowledged message and a grant, under the schema `0003`
@@ -516,6 +517,182 @@ mod migrations {
                 .await
                 .unwrap(),
             [OffsetDateTime::UNIX_EPOCH]
+        );
+    }
+
+    /// Every kind of row that refers to a thread or a message, under the schema `0006` left: a
+    /// thread to bob with an announcement, a reply, a read mark, an acknowledgement, a counted
+    /// message and a delivery; and a second thread to the project.
+    fn rows_at_deliveries() -> String {
+        format!(
+            "{}\n\
+             INSERT INTO thread_recipients (project_id, thread_id, member_id) VALUES (1, 81, 12);\n\
+             UPDATE threads SET to_project = 0 WHERE id = 81;\n\
+             INSERT INTO messages (project_id, id, thread_id, author_id, label, body, importance, \
+             ack_required, created_at) VALUES (1, 92, 81, 12, 'desktop/mcp', 'On it.', 'normal', 0, 23);\n\
+             INSERT INTO threads (project_id, id, subject, item_id, author_id, to_project, created_at) \
+             VALUES (1, 82, 'Lunch', NULL, 12, 1, 24);\n\
+             INSERT INTO messages (project_id, id, thread_id, author_id, label, body, importance, \
+             ack_required, created_at) VALUES (1, 93, 82, 12, 'web', 'Pizza?', 'urgent', 0, 25);\n\
+             INSERT INTO reads (project_id, member_id, message_id, read_at) VALUES (1, 11, 92, 26);\n\
+             INSERT INTO raised_messages (project_id, message_id, member_id, at) VALUES (1, 93, 12, 25);\n\
+             INSERT INTO message_deliveries (project_id, member_id, subject, session_id, at) \
+             VALUES (1, 11, '93', 31, 27);",
+            rows_at_wide()
+        )
+    }
+
+    #[tokio::test]
+    async fn people_keeps_every_thread_message_and_what_refers_to_them_and_lets_dibs_write() {
+        use dibs_app::records::{MessageRecord, ThreadRecord};
+        use dibs_domain::delivery::DeliverySubject;
+        use dibs_domain::message::{Author, Body, Recipients, SessionLabel, Subject};
+        use time::OffsetDateTime;
+
+        let (_dir, path) = database_at(6, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let project = ProjectId(1);
+        let members = tx.members(project).await.unwrap();
+        assert_eq!(members.len(), 2);
+        assert!(
+            members.iter().all(|m| m.removed_at.is_none()),
+            "nobody was removed"
+        );
+        let thread = tx.thread(project, ThreadId(81)).await.unwrap().unwrap();
+        assert_eq!(thread.author, Author::Member(MemberId(11)));
+        assert_eq!(
+            thread.recipients,
+            Recipients::members([MemberId(12)].into()).unwrap()
+        );
+        let messages = tx.messages(project, ThreadId(81)).await.unwrap();
+        let carried: Vec<(u64, Author, &str, Importance, bool)> = messages
+            .iter()
+            .map(|m| {
+                (
+                    m.id.get(),
+                    m.author,
+                    m.body.as_str(),
+                    m.importance,
+                    m.ack_required,
+                )
+            })
+            .collect();
+        assert_eq!(
+            carried,
+            [
+                (
+                    91,
+                    Author::Member(MemberId(11)),
+                    "Please read.",
+                    Importance::High,
+                    true
+                ),
+                (
+                    92,
+                    Author::Member(MemberId(12)),
+                    "On it.",
+                    Importance::Normal,
+                    false
+                ),
+            ],
+            "every message keeps its author, text, importance and request"
+        );
+        assert_eq!(tx.acks(project, MessageId(91)).await.unwrap().len(), 1);
+        assert_eq!(tx.reads_of(project, MessageId(92)).await.unwrap().len(), 1);
+        assert_eq!(
+            tx.wide_ask(project, MessageId(91))
+                .await
+                .unwrap()
+                .map(|a| a.to),
+            Some(MemberId(11))
+        );
+        assert_eq!(
+            tx.raised_since(project, MemberId(12), OffsetDateTime::UNIX_EPOCH)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            tx.delivery(
+                project,
+                MemberId(11),
+                &DeliverySubject::Message(MessageId(93))
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(tx.messages(project, ThreadId(82)).await.unwrap().len(), 1);
+        assert!(tx.open_escalations(project).await.unwrap().is_empty());
+        assert_eq!(tx.events_pruned_through(project).await.unwrap(), None);
+
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let of_dibs = ThreadRecord {
+            id: ThreadId(83),
+            subject: Subject::parse("bob left the project").unwrap(),
+            item: None,
+            author: Author::System,
+            recipients: Recipients::Project,
+            created_at: at,
+        };
+        tx.insert_thread(project, &of_dibs).await.unwrap();
+        let notice = MessageRecord {
+            id: MessageId(94),
+            thread: ThreadId(83),
+            author: Author::System,
+            label: SessionLabel::parse("dibs").unwrap(),
+            body: Body::parse("Nothing was released.").unwrap(),
+            importance: Importance::Normal,
+            ack_required: false,
+            created_at: at,
+        };
+        tx.insert_message(project, &notice).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.thread(project, ThreadId(83)).await.unwrap(),
+            Some(of_dibs)
+        );
+        assert_eq!(
+            tx.message(project, MessageId(94)).await.unwrap(),
+            Some(notice)
+        );
+        assert_eq!(tx.delete_thread(project, ThreadId(81)).await.unwrap(), 2);
+        tx.commit().await.unwrap();
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        let broken: Vec<(String,)> =
+            sqlx::query_as("SELECT \"table\" FROM pragma_foreign_key_check")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(
+            broken.is_empty(),
+            "no reference points at nothing: {broken:?}"
+        );
+        let indexes: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('threads', 'messages') \
+             AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let names: Vec<&str> = indexes.iter().map(|(name,)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "messages_asking_ack",
+                "messages_by_thread",
+                "messages_by_thread_time",
+                "threads_by_item"
+            ],
+            "the rebuilt tables keep their indexes"
         );
     }
 }

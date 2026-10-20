@@ -76,7 +76,7 @@ impl UpsertItems {
         actor.require_import()?;
         let now = self.clock.now();
         let project = actor.project;
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let settings = work.project_settings(&self.hot_rules).await?;
         let records = work.items(project, &ItemFilter::default()).await?;
         let graph = work.dependencies(project).await?;

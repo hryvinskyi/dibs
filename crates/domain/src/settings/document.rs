@@ -39,6 +39,9 @@ pub struct SettingsDocument {
     /// The project's slots: shared actions one member does at a time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<SlotDocument>,
+    /// The handles of the members who settle what agents do not agree on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arbiters: Vec<String>,
 }
 
 /// One slot as written.

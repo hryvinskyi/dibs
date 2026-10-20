@@ -58,7 +58,7 @@ impl ApplySettings {
         actor.require_admin()?;
         let settings = ProjectSettings::parse(&document, &self.hot_rules)?;
         let normal = settings.to_document();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let before = work.settings(actor.project).await?;
         let changed = before.as_ref() != Some(&normal);
         if changed {

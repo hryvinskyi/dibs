@@ -124,6 +124,9 @@ pub struct RememberedMessage {
     pub thread: ThreadId,
     /// Who wrote it.
     pub author: Handle,
+    /// Whether dibs wrote it, in the project's name.
+    #[serde(default)]
+    pub system: bool,
     /// Its thread's subject.
     pub subject: Subject,
     /// How much it asks for attention.
@@ -574,6 +577,7 @@ mod tests {
             wide: Vec::new(),
             ready: crate::api::ReadyList::default(),
             slots: Vec::new(),
+            escalations: Vec::new(),
         };
         let earlier: Status =
             serde_json::from_str(r#"{"live": [], "stale": [], "holds": []}"#).unwrap();

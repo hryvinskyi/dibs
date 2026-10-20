@@ -43,7 +43,7 @@ impl Me {
     /// # Errors
     /// [`AppError::Unauthorized`] when the member is gone; [`AppError::Store`] when the store fails.
     pub async fn execute(&self, actor: &Actor) -> Result<MeView, AppError> {
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let member = work
             .member(actor.project, actor.member)
             .await?

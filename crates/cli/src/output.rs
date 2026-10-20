@@ -6,8 +6,10 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use dibs_client::api::{
-    Claim, HeldReason, Item, ItemName, Message, PathVerdict, ThreadSummary, Unacked, Verdict,
+    Claim, HeldReason, Item, ItemName, Message, OpenEscalation, PathVerdict, ThreadSummary,
+    Unacked, Verdict,
 };
+use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
 
 use crate::failure::Failure;
@@ -195,6 +197,29 @@ pub fn unacked_line(unacked: &Unacked) -> String {
     }
     let _ = write!(line, "; dibs ack {}", message.id);
     line
+}
+
+/// Who a message is from, as a conversation shows it: `alice (laptop/cli)`, or `dibs` for what
+/// dibs wrote in the project's name, which comes from no session.
+pub fn author_text(message: &Message) -> String {
+    if message.system {
+        "dibs".to_owned()
+    } else {
+        format!("{} ({})", message.author, message.label)
+    }
+}
+
+/// One line for an escalation waiting for an arbiter:
+/// `Escalated by bob: work item gh:acme/api#7 "Invoices" — waiting for carol (conversation #31)`.
+pub fn escalation_line(escalation: &OpenEscalation) -> String {
+    let arbiters: Vec<&str> = escalation.arbiters.iter().map(Handle::as_str).collect();
+    format!(
+        "Escalated by {}: {} — waiting for {} (conversation #{})",
+        escalation.by,
+        escalation.about,
+        arbiters.join(", "),
+        escalation.thread_id
+    )
 }
 
 /// What a sent message asks of its recipients, as a sentence to follow the line that sent it;

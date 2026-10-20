@@ -231,8 +231,10 @@ pub struct PendingMessage {
     pub message: MessageId,
     /// Its thread.
     pub thread: ThreadId,
-    /// Who wrote it.
+    /// Who wrote it: a member's handle, or `dibs`.
     pub sender: Handle,
+    /// Whether dibs wrote it, in the project's name; it may quote a member's words.
+    pub from_dibs: bool,
     /// The subject of its thread.
     pub subject: Subject,
     /// How much it asks for the member's attention.

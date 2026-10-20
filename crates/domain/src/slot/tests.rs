@@ -249,7 +249,7 @@ fn every_way_a_hold_ends_offers_the_slot_to_the_first_waiter() {
                 event,
                 EventKind::SlotForceReleased(SlotForceReleased {
                     cause: ForceCause::SlotRemoved,
-                    by: DAVE,
+                    by: Some(DAVE),
                     ..
                 })
             )));
@@ -663,6 +663,55 @@ fn a_settings_change_ends_only_the_rows_of_removed_slots() {
     assert_eq!(done.board.holds.len(), 1);
     assert_eq!(done.board.holds[0].member, CAROL);
     assert!(done.board.waiters.is_empty());
+}
+
+#[test]
+fn removing_a_member_ends_their_holds_places_and_offers_and_offers_the_freed_slots_on() {
+    let mut run = Run::new();
+    run.take("deploy:prod", ALICE, 0);
+    run.take("deploy:prod", BOB, 1);
+    run.take("db:staging", CAROL, 1);
+    run.take("deploy:staging", ALICE, 2);
+    let done = decide_member_removed(&run.board, &run.catalog, ALICE, Some(DAVE), at(3));
+    assert_eq!(
+        done.answer,
+        RemovedFromSlots {
+            held: vec![name("deploy:prod")],
+            waited: vec![name("deploy:staging")],
+            offered: Vec::new(),
+        }
+    );
+    let ended = |slot: &str| {
+        EventKind::SlotForceReleased(SlotForceReleased {
+            slot: name(slot),
+            member: ALICE,
+            by: Some(DAVE),
+            cause: ForceCause::MemberRemoved,
+        })
+    };
+    assert_eq!(
+        done.events,
+        [
+            ended("deploy:prod"),
+            ended("deploy:staging"),
+            EventKind::SlotOffered(member_of("deploy:prod", BOB)),
+        ]
+    );
+    assert!(done.board.holds.iter().all(|hold| hold.member != ALICE));
+    assert!(
+        done.board
+            .waiters
+            .iter()
+            .all(|waiter| waiter.member != ALICE)
+    );
+    run.board = done.board;
+
+    let offered = decide_member_removed(&run.board, &run.catalog, BOB, None, at(4));
+    assert_eq!(offered.answer.offered, [name("deploy:prod")]);
+    assert!(offered.board.offers.is_empty(), "nobody else waits");
+    let nothing = decide_member_removed(&offered.board, &run.catalog, BOB, None, at(5));
+    assert!(nothing.answer.is_empty());
+    assert!(nothing.events.is_empty());
 }
 
 fn verdict(run: &Run, line: &str, me: MemberId) -> CommandVerdict {

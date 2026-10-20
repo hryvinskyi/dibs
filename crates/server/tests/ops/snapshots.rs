@@ -102,6 +102,90 @@ async fn retention_deletes_the_oldest_and_leaves_other_files_alone() {
 }
 
 #[tokio::test]
+async fn snapshots_older_than_thirty_days_go_on_top_of_the_count_and_the_newest_stays() {
+    let place = Place::new();
+    let store = Arc::new(SqliteStore::open(&place.database()).await.unwrap());
+    let start = datetime!(2026-03-01 00:00 UTC);
+    let clock = Arc::new(FixedClock::new(start));
+    let snapshots = Snapshots::new(
+        store.clone(),
+        clock.clone(),
+        &settings(&place.snapshots(), 28),
+    );
+    for _ in 0..3 {
+        snapshots.take().await.unwrap();
+        clock.advance(time::Duration::days(10));
+    }
+    assert_eq!(
+        place.snapshot_files().len(),
+        3,
+        "within 30 days and the count"
+    );
+    clock.set(start + time::Duration::days(35));
+    let taken = snapshots.take().await.unwrap();
+    assert_eq!(
+        taken.removed, 1,
+        "the one of 35 days ago goes, though 28 are allowed"
+    );
+    assert_eq!(
+        place.snapshot_files(),
+        [
+            "dibs-20260311T000000.000Z.db",
+            "dibs-20260321T000000.000Z.db",
+            "dibs-20260405T000000.000Z.db",
+        ]
+    );
+
+    clock.set(start + time::Duration::days(500));
+    let taken = snapshots.take().await.unwrap();
+    assert_eq!(
+        taken.removed, 3,
+        "every one past 30 days but the one just taken"
+    );
+    assert_eq!(place.snapshot_files(), ["dibs-20270714T000000.000Z.db"]);
+    store.close().await;
+}
+
+#[tokio::test]
+async fn an_unfinished_snapshot_a_crash_left_goes_after_an_hour_and_not_before() {
+    let place = Place::new();
+    let store = Arc::new(SqliteStore::open(&place.database()).await.unwrap());
+    let at = datetime!(2026-03-02 09:00 UTC);
+    let clock = Arc::new(FixedClock::new(at));
+    let snapshots = Snapshots::new(
+        store.clone(),
+        clock.clone(),
+        &settings(&place.snapshots(), 3),
+    );
+    let crashed = place
+        .snapshots()
+        .join(".dibs-20260302T073000.000Z.db.partial");
+    let recent = place
+        .snapshots()
+        .join(".dibs-20260302T083000.000Z.db.partial");
+    let other = place.snapshots().join(".notes.partial");
+    for path in [&crashed, &recent, &other] {
+        std::fs::write(path, b"half a copy").unwrap();
+    }
+    assert_eq!(
+        snapshots.abandoned().unwrap(),
+        std::slice::from_ref(&crashed)
+    );
+    snapshots.take().await.unwrap();
+    assert!(!crashed.exists(), "older than an hour: a crash left it");
+    assert!(
+        recent.exists(),
+        "half an hour old: it may still be being written"
+    );
+    assert!(other.exists(), "not a snapshot's");
+    clock.advance(time::Duration::hours(1));
+    snapshots.take().await.unwrap();
+    assert!(!recent.exists());
+    assert!(other.exists());
+    store.close().await;
+}
+
+#[tokio::test]
 async fn a_snapshot_of_a_taken_moment_is_refused_and_replaces_nothing() {
     let place = Place::new();
     let store = Arc::new(SqliteStore::open(&place.database()).await.unwrap());

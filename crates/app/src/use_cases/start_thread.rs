@@ -7,7 +7,7 @@ use dibs_domain::event::{EventKind, MessagePosted, ThreadStarted};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
-use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
+use dibs_domain::message::{Author, Body, Importance, Recipients, SessionLabel, Subject};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -15,8 +15,8 @@ use crate::error::AppError;
 use crate::named::{NamedMessage, NamedThread, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::{MessageRecord, ThreadRecord};
-use crate::use_cases::common::{existing_item, member_by_handle};
-use crate::use_cases::writing::{Authorship, write_message};
+use crate::use_cases::common::{existing_item, present_member_by_handle};
+use crate::use_cases::writing::write_message;
 use crate::work::Work;
 
 /// Whom a new thread is addressed to, as the caller names them.
@@ -93,13 +93,13 @@ impl StartThread {
         actor.require_person()?;
         let now = self.clock.now();
         let project = actor.project;
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let recipients = match input.to {
             Addressees::Project => Recipients::Project,
             Addressees::Members(handles) => {
                 let mut members = BTreeSet::new();
                 for handle in handles {
-                    let member = member_by_handle(&mut work, &handle).await?;
+                    let member = present_member_by_handle(&mut work, &handle).await?;
                     if !member.role.is_person() {
                         return Err(AppError::NotARecipient(handle));
                     }
@@ -115,14 +115,14 @@ impl StartThread {
             id: ThreadId(self.ids.next()),
             subject: input.subject,
             item: input.item,
-            author: actor.member,
+            author: Author::Member(actor.member),
             recipients,
             created_at: now,
         };
         let message = MessageRecord {
             id: MessageId(self.ids.next()),
             thread: thread.id,
-            author: actor.member,
+            author: Author::Member(actor.member),
             label: input.label,
             body: input.body,
             importance: input.importance,
@@ -134,12 +134,12 @@ impl StartThread {
             .await?
             .raised_per_hour();
         work.insert_thread(project, &thread).await?;
-        write_message(&mut work, &message, Authorship::Member { limit }, now).await?;
+        write_message(&mut work, &message, limit, now).await?;
         work.record(
             now,
             EventKind::ThreadStarted(ThreadStarted {
                 thread: thread.id,
-                author: actor.member,
+                author: Some(actor.member),
                 item: thread.item,
             }),
         )
@@ -149,7 +149,7 @@ impl StartThread {
             EventKind::MessagePosted(MessagePosted {
                 thread: thread.id,
                 message: message.id,
-                author: actor.member,
+                author: Some(actor.member),
             }),
         )
         .await?;
@@ -212,13 +212,13 @@ mod tests {
             [
                 EventKind::ThreadStarted(ThreadStarted {
                     thread: started.thread.record.id,
-                    author: env.alice.actor.member,
+                    author: Some(env.alice.actor.member),
                     item: Some(item),
                 }),
                 EventKind::MessagePosted(MessagePosted {
                     thread: started.thread.record.id,
                     message: started.message.record.id,
-                    author: env.alice.actor.member,
+                    author: Some(env.alice.actor.member),
                 }),
             ]
         );

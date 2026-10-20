@@ -45,7 +45,7 @@ impl RemoveDependency {
         actor.require_person()?;
         let now = self.clock.now();
         let project = actor.project;
-        let mut work = Work::begin(&*self.store, project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let item = existing_item(&mut work, input.item).await?;
         let blocked_by = existing_item(&mut work, input.blocked_by).await?;
         let changed = work

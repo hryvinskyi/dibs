@@ -6,9 +6,10 @@ use dibs_domain::claim::{ClaimRefused, ForceReleaseRefused, HolderOnly, Takeover
 use dibs_domain::delivery::DeliveryRefused;
 use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
+use dibs_domain::escalation::EscalationRefused;
 use dibs_domain::grant::{GrantRefused, RevokeRefused};
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{GrantId, ItemId, MessageId, SessionId, ThreadId};
+use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::import::BatchRefused;
 use dibs_domain::item::{CreateRefused, ItemStatus};
 use dibs_domain::message::{AckRefused, ImportanceLimited, RecipientsError};
@@ -152,6 +153,29 @@ pub enum AppError {
     /// The message names no recipient.
     #[error(transparent)]
     Recipients(#[from] RecipientsError),
+    /// The escalation was refused.
+    #[error(transparent)]
+    Escalation(#[from] EscalationRefused),
+    /// The subject has an escalation that no arbiter has settled yet.
+    #[error(
+        "this is escalated already, in conversation {thread}; follow the arbiters' answer there instead of escalating again"
+    )]
+    AlreadyEscalated {
+        /// The conversation of the escalation that stands.
+        thread: ThreadId,
+    },
+    /// An admin asked to remove themself.
+    #[error("you cannot remove yourself from the project; another admin, or the operator, can")]
+    SelfRemoval,
+    /// A reader's cursor is behind events the retention removed: what it missed cannot be read
+    /// any more.
+    #[error(
+        "events after this cursor were removed by the retention; read the current state again, then follow the log from event {through}"
+    )]
+    CursorExpired {
+        /// The newest event removed.
+        through: EventId,
+    },
     /// The stored settings no longer parse with the rule kinds this deployment knows.
     #[error("the service could not complete the request; an admin needs to check the settings")]
     StoredSettings(#[source] SettingsError),
@@ -247,6 +271,10 @@ impl AppError {
             Self::Settings(_) => "invalid_settings",
             Self::EditCheck(EditCheckRefused::UnknownRepo { .. }) => "unknown_repo",
             Self::Recipients(RecipientsError::Empty) => "no_recipients",
+            Self::Escalation(EscalationRefused::NoArbiters) => "no_arbiters",
+            Self::AlreadyEscalated { .. } => "already_escalated",
+            Self::SelfRemoval => "self_removal",
+            Self::CursorExpired { .. } => "cursor_expired",
             Self::StoredSettings(_) | Self::Store(_) => "internal",
         }
     }

@@ -6,13 +6,14 @@ use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::ports::{Clock, Store, TokenHasher};
+use crate::records::MemberRecord;
 use crate::token::SecretToken;
 use crate::use_cases::open_ui_session::UI_SESSION_LIFETIME;
 use crate::work::Work;
 
 /// Finds the person a browser session belongs to and moves its end to [`UI_SESSION_LIFETIME`] from
-/// now. A session that expired, whose token was revoked, or whose member is gone is refused and
-/// removed.
+/// now. A session that expired, whose token was revoked, or whose member is gone or was removed is
+/// refused and removed.
 pub struct ResolveUiSession {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -48,7 +49,9 @@ impl ResolveUiSession {
             .await?
             .filter(|token| token.project == project && token.record.is_active());
         let member = if token.is_some() {
-            work.member(project, session.member).await?
+            work.member(project, session.member)
+                .await?
+                .filter(MemberRecord::is_present)
         } else {
             None
         };

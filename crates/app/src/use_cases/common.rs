@@ -15,6 +15,7 @@ use dibs_domain::settings::ProjectSettings;
 
 use crate::actor::Actor;
 use crate::error::{AppError, Duplicate, Missing};
+use crate::named::AuthorName;
 use crate::ports::{IdGen, TokenGenerator, TokenHasher};
 use crate::records::{ItemRecord, MemberRecord, SessionRecord, TokenRecord};
 use crate::token::SecretToken;
@@ -52,6 +53,17 @@ pub(crate) async fn member_by_handle(
     let project = work.project_id();
     work.member_by_handle(project, handle)
         .await?
+        .ok_or_else(|| AppError::NotFound(Missing::Member(handle.clone())))
+}
+
+/// The member of this handle who is still in the transaction's project; a member removed from it
+/// is reported as missing, as one who never was.
+pub(crate) async fn present_member_by_handle(
+    work: &mut Work,
+    handle: &Handle,
+) -> Result<MemberRecord, AppError> {
+    Some(member_by_handle(work, handle).await?)
+        .filter(MemberRecord::is_present)
         .ok_or_else(|| AppError::NotFound(Missing::Member(handle.clone())))
 }
 
@@ -95,7 +107,8 @@ pub(crate) struct Enrolment {
 }
 
 impl Enrolment {
-    /// Stores a new member of the transaction's project, refusing a handle already taken there.
+    /// Stores a new member of the transaction's project, refusing a handle already taken there,
+    /// by a member present or removed, and the name dibs itself writes under.
     pub(crate) async fn add_member(
         &self,
         work: &mut Work,
@@ -104,7 +117,8 @@ impl Enrolment {
         at: OffsetDateTime,
     ) -> Result<MemberRecord, AppError> {
         let project = work.project_id();
-        if work.member_by_handle(project, &new.handle).await?.is_some() {
+        let reserved = new.handle.as_str() == AuthorName::DIBS;
+        if reserved || work.member_by_handle(project, &new.handle).await?.is_some() {
             return Err(AppError::Duplicate(Duplicate::Handle(new.handle)));
         }
         let member = MemberRecord {
@@ -114,6 +128,7 @@ impl Enrolment {
             external_login: new.external_login,
             role,
             created_at: at,
+            removed_at: None,
         };
         work.insert_member(project, &member).await?;
         Ok(member)

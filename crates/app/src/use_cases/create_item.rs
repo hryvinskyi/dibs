@@ -70,7 +70,7 @@ impl CreateItem {
         input: CreateItemInput,
     ) -> Result<CreatedItem, AppError> {
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         if let Some(reference) = &input.external_ref
             && let Some(item) = work.item_by_ref(actor.project, reference).await?
         {

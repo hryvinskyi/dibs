@@ -40,7 +40,7 @@ impl RevokeGrant {
     pub async fn execute(&self, actor: &Actor, grant: GrantId) -> Result<NamedGrant, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let record = work
             .grant(actor.project, grant)
             .await?

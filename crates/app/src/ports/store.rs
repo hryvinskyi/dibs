@@ -7,9 +7,9 @@
 //!
 //! Every method takes the project first, so tenancy is in the signature. The only exceptions find a
 //! record by a key unique across projects and return the project with it ([`TokenRows::token_by_hash`],
-//! [`UiSessionRows::ui_session`]), create or look up a project itself ([`ProjectRows`]), sweep
-//! expired browser sessions of every project ([`UiSessionRows::delete_expired_ui_sessions`]), or
-//! find the projects whose slots are in use ([`SlotRows::busy_slot_projects`]).
+//! [`UiSessionRows::ui_session`]), create, look up or list projects themselves ([`ProjectRows`]),
+//! sweep expired browser sessions of every project ([`UiSessionRows::delete_expired_ui_sessions`]),
+//! or find the projects whose slots are in use ([`SlotRows::busy_slot_projects`]).
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -31,9 +31,9 @@ use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
 
 use crate::records::{
-    CompletionRecord, GrantRecord, InProject, ItemFilter, ItemRecord, MemberRecord, MessageRecord,
-    ProjectRecord, ReadMark, SessionRecord, ThreadRecord, ThreadSummary, TokenRecord,
-    UiSessionRecord,
+    CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
+    MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
+    ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -84,6 +84,7 @@ pub trait Tx:
     + ThreadRows
     + AckRows
     + WideAskRows
+    + EscalationRows
     + SlotRows
     + DeliveryRows
     + RaisedRows
@@ -107,6 +108,8 @@ pub trait ProjectRows: Send {
     async fn project(&mut self, id: ProjectId) -> StoreResult<Option<ProjectRecord>>;
     /// The project of this slug.
     async fn project_by_slug(&mut self, slug: &ProjectSlug) -> StoreResult<Option<ProjectRecord>>;
+    /// Every project, ordered by id.
+    async fn project_ids(&mut self) -> StoreResult<Vec<ProjectId>>;
 }
 
 /// Members.
@@ -127,8 +130,15 @@ pub trait MemberRows: Send {
         project: ProjectId,
         handle: &Handle,
     ) -> StoreResult<Option<MemberRecord>>;
-    /// Every member, ordered by handle.
+    /// Every member, removed ones included, ordered by handle.
     async fn members(&mut self, project: ProjectId) -> StoreResult<Vec<MemberRecord>>;
+    /// Marks the member removed at `at`; a member removed before keeps their first time.
+    async fn remove_member(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
 }
 
 /// API tokens.
@@ -309,8 +319,21 @@ pub trait ThreadRows: Send {
         reader: MemberId,
         item: Option<ItemId>,
     ) -> StoreResult<Vec<ThreadSummary>>;
-    /// Records every message of the thread that `reader` did not write as read by them; answers
-    /// how many were not before. A member's own messages are never unread, so they are never counted.
+    /// Every thread whose newest message, or whose start when it has none, is older than
+    /// `before`, ordered by id.
+    async fn quiet_threads(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<Vec<ThreadActivity>>;
+    /// Removes a thread with its recipients and its messages, and with each message what refers to
+    /// it: read marks, acknowledgements, a wide claim's announcement, the record that it counted
+    /// toward its author's limit, its deliveries and its escalation. Answers how many messages
+    /// went; a thread that does not exist removes nothing.
+    async fn delete_thread(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<u64>;
+    /// Records every message of the thread that does not speak for `reader` as read by them;
+    /// answers how many were not before. A member's own messages, and what dibs wrote on their
+    /// behalf, are never unread, so they are never counted.
     async fn mark_read(
         &mut self,
         project: ProjectId,
@@ -330,9 +353,9 @@ pub trait AckRows: Send {
     async fn acks(&mut self, project: ProjectId, message: MessageId) -> StoreResult<Vec<Ack>>;
     /// The acknowledgements of every message of a thread, oldest first.
     async fn thread_acks(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<Vec<Ack>>;
-    /// Every message that asks to be acknowledged, that `member` did not write and has not
-    /// acknowledged, newest first. Whether the member is one of its recipients is decided by the
-    /// caller.
+    /// Every message that asks to be acknowledged, that does not speak for `member` and that
+    /// `member` has not acknowledged, newest first. Whether the member is one of its recipients is
+    /// decided by the caller.
     async fn ack_requests(
         &mut self,
         project: ProjectId,
@@ -360,6 +383,22 @@ pub trait WideAskRows: Send {
     ) -> StoreResult<Option<WideAsk>>;
     /// Every announcement its holder has not acknowledged yet, ordered by message.
     async fn open_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>>;
+}
+
+/// The escalations members sent to the arbiters.
+#[async_trait]
+pub trait EscalationRows: Send {
+    /// Stores an escalation. A second one for the same message fails with
+    /// [`StoreError::Duplicate`].
+    async fn insert_escalation(
+        &mut self,
+        project: ProjectId,
+        escalation: &EscalationRecord,
+    ) -> StoreResult<()>;
+    /// The escalations that still wait — none of the arbiters stored with each has acknowledged its
+    /// message — newest first. A settled one is never read, so the cost follows what is open, not
+    /// the history.
+    async fn open_escalations(&mut self, project: ProjectId) -> StoreResult<Vec<EscalationRecord>>;
 }
 
 /// What reached a member while they worked, one delivery per member and subject.
@@ -437,6 +476,15 @@ pub trait EventRows: Send {
     ) -> StoreResult<Vec<Event>>;
     /// The id of the newest event.
     async fn latest_event(&mut self, project: ProjectId) -> StoreResult<Option<EventId>>;
+    /// Removes the project's events appended before `before` and remembers the newest id among
+    /// them as the point a reader's cursor must not be behind; answers how many went.
+    async fn delete_events_before(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<PrunedEvents>;
+    /// The newest id removed from the project's log, `None` while nothing was ever removed.
+    async fn events_pruned_through(&mut self, project: ProjectId) -> StoreResult<Option<EventId>>;
     /// Up to `limit` completions the log records at or after `since`, newest first (by time, then
     /// by position in the log).
     async fn completions_since(
@@ -483,6 +531,12 @@ pub trait UiSessionRows: Send {
     ) -> StoreResult<()>;
     /// Removes a browser session.
     async fn delete_ui_session(&mut self, project: ProjectId, hash: &TokenHash) -> StoreResult<()>;
+    /// Removes every browser session of a member; answers how many.
+    async fn delete_ui_sessions_of(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+    ) -> StoreResult<u64>;
     /// Removes the browser sessions of every project that ended before `now`; answers how many.
     async fn delete_expired_ui_sessions(&mut self, now: OffsetDateTime) -> StoreResult<u64>;
 }

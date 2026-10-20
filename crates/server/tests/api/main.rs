@@ -22,6 +22,8 @@ mod events;
 #[cfg(test)]
 mod items;
 #[cfg(test)]
+mod people;
+#[cfg(test)]
 mod ready;
 #[cfg(test)]
 mod roles;

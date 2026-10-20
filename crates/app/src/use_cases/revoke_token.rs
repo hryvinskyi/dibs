@@ -38,7 +38,7 @@ impl RevokeToken {
     ) -> Result<NamedToken, AppError> {
         actor.require_admin()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let mut token = work
             .token_by_prefix(actor.project, &prefix)
             .await?

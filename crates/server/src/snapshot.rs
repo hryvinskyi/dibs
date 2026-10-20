@@ -1,11 +1,13 @@
 //! Snapshots of the database: consistent copies written into a directory while the server serves,
-//! on a schedule and on an operator's command, of which the newest few are kept.
+//! on a schedule and on an operator's command, of which the newest few, and none older than
+//! [`MAX_AGE`] but the newest, are kept.
 //!
 //! A snapshot is named after the moment it was taken, `dibs-<UTC timestamp>.db`, so the names sort
 //! by age and a person can tell them apart. It is first written under a hidden temporary name,
 //! flushed to the disk, and only then renamed into place, so a snapshot that carries its final
-//! name is always whole. The directory holds other files too; only the names of this form count as
-//! snapshots, and only those are ever deleted.
+//! name is always whole. A temporary file a crash left behind is removed once it is older than
+//! [`PARTIAL_AFTER`]. The directory holds other files too; only the names of these two forms count,
+//! and only those are ever deleted.
 
 use std::fs::File;
 use std::io;
@@ -26,6 +28,13 @@ use crate::stream::StopSignal;
 const PREFIX: &str = "dibs-";
 const SUFFIX: &str = ".db";
 const TEMPORARY_SUFFIX: &str = ".partial";
+
+/// How old a snapshot may be and still be kept, unless it is the newest.
+pub const MAX_AGE: time::Duration = time::Duration::days(30);
+
+/// How old a temporary file of a snapshot that was never finished may be before it is removed: a
+/// snapshot being written is far younger, so only what a crash left behind is that old.
+pub const PARTIAL_AFTER: time::Duration = time::Duration::hours(1);
 
 /// The name of one snapshot: the moment it was taken, to the millisecond, in UTC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -102,26 +111,46 @@ impl SnapshotName {
     fn temporary_name(&self) -> String {
         format!(".{}{TEMPORARY_SUFFIX}", self.file_name())
     }
+
+    /// The snapshot a temporary file of this name was being written for, or `None` for any other
+    /// file.
+    pub fn parse_temporary(file_name: &str) -> Option<Self> {
+        Self::parse(
+            file_name
+                .strip_prefix('.')?
+                .strip_suffix(TEMPORARY_SUFFIX)?,
+        )
+    }
 }
 
-/// Which snapshots are kept: the newest `keep` of them.
+/// Which snapshots are kept: the newest `keep` of them, of which none older than `max_age` — but
+/// the newest snapshot, whatever its age.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Retention {
     keep: NonZeroUsize,
+    max_age: time::Duration,
 }
 
 impl Retention {
-    /// Keeps the newest `keep` snapshots.
-    pub fn newest(keep: NonZeroUsize) -> Self {
-        Self { keep }
+    /// Keeps the newest `keep` snapshots that are at most `max_age` old, and the newest always.
+    pub fn new(keep: NonZeroUsize, max_age: time::Duration) -> Self {
+        Self { keep, max_age }
     }
 
-    /// The snapshots of `present` to delete, oldest first. The newest snapshot is never among them.
-    pub fn doomed(&self, present: &[SnapshotName]) -> Vec<SnapshotName> {
+    /// The snapshots of `present` to delete at `now`, oldest first. The newest snapshot is never
+    /// among them.
+    pub fn doomed(&self, present: &[SnapshotName], now: OffsetDateTime) -> Vec<SnapshotName> {
         let mut sorted = present.to_vec();
         sorted.sort_unstable_by(|a, b| b.cmp(a));
         sorted.dedup();
-        let mut doomed: Vec<SnapshotName> = sorted.into_iter().skip(self.keep.get()).collect();
+        let mut doomed: Vec<SnapshotName> = sorted
+            .into_iter()
+            .enumerate()
+            .filter(|(place, name)| {
+                *place > 0 && (*place >= self.keep.get() || now - name.taken_at() > self.max_age)
+            })
+            .map(|(_, name)| name)
+            .collect();
         doomed.reverse();
         doomed
     }
@@ -184,7 +213,7 @@ impl Snapshots {
             store,
             clock,
             dir: config.dir.clone(),
-            retention: Retention::newest(config.keep),
+            retention: Retention::new(config.keep, MAX_AGE),
         }
     }
 
@@ -279,9 +308,55 @@ impl Snapshots {
         every.saturating_sub(since).min(every)
     }
 
-    /// Deletes the snapshots past the retention and answers how many went. A snapshot that cannot
-    /// be deleted is logged and left for the next time.
+    /// The temporary files of snapshots that were never finished, older than [`PARTIAL_AFTER`] by
+    /// the clock, oldest first: what a crash while writing one left behind.
+    ///
+    /// # Errors
+    /// The failure to read the directory.
+    pub fn abandoned(&self) -> io::Result<Vec<PathBuf>> {
+        let now = self.clock.now();
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let Some(name) = entry
+                .file_name()
+                .to_str()
+                .and_then(SnapshotName::parse_temporary)
+            else {
+                continue;
+            };
+            if now - name.taken_at() > PARTIAL_AFTER {
+                found.push((name, entry.path()));
+            }
+        }
+        found.sort_unstable_by_key(|(name, _)| *name);
+        Ok(found.into_iter().map(|(_, path)| path).collect())
+    }
+
+    /// Deletes the snapshots past the retention and the temporary files a crash left behind, and
+    /// answers how many snapshots went. A file that cannot be deleted is logged and left for the
+    /// next time.
     fn prune(&self) -> usize {
+        match self.abandoned() {
+            Ok(abandoned) => {
+                for path in abandoned {
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {
+                            tracing::info!(file = %path.display(), "an unfinished snapshot left by an interrupted run was removed");
+                        }
+                        Err(error) => {
+                            tracing::warn!(file = %path.display(), error = %error, "an unfinished snapshot could not be removed");
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(dir = %self.dir.display(), error = %error, "unfinished snapshots could not be listed; none were removed");
+            }
+        }
         let present = match self.present() {
             Ok(present) => present,
             Err(error) => {
@@ -290,7 +365,7 @@ impl Snapshots {
             }
         };
         let mut removed = 0;
-        for name in self.retention.doomed(&present) {
+        for name in self.retention.doomed(&present, self.clock.now()) {
             let path = self.dir.join(name.file_name());
             match std::fs::remove_file(&path) {
                 Ok(()) => removed += 1,
@@ -426,13 +501,53 @@ mod tests {
         let names: Vec<SnapshotName> = (0..5)
             .map(|hour| name(datetime!(2026-03-02 00:00 UTC) + time::Duration::hours(hour)))
             .collect();
+        let now = datetime!(2026-03-02 05:00 UTC);
         let shuffled = vec![names[3], names[0], names[4], names[1], names[2]];
-        let retention = Retention::newest(NonZeroUsize::new(2).unwrap());
-        assert_eq!(retention.doomed(&shuffled), names[..3].to_vec());
-        let all = Retention::newest(NonZeroUsize::new(5).unwrap());
-        assert!(all.doomed(&shuffled).is_empty());
-        let one = Retention::newest(NonZeroUsize::MIN);
-        assert_eq!(one.doomed(&shuffled), names[..4].to_vec());
-        assert!(one.doomed(&[]).is_empty());
+        let keep = |n| Retention::new(NonZeroUsize::new(n).unwrap(), MAX_AGE);
+        assert_eq!(keep(2).doomed(&shuffled, now), names[..3].to_vec());
+        assert!(keep(5).doomed(&shuffled, now).is_empty());
+        assert_eq!(keep(1).doomed(&shuffled, now), names[..4].to_vec());
+        assert!(keep(1).doomed(&[], now).is_empty());
+    }
+
+    #[test]
+    fn retention_deletes_what_is_older_than_its_age_on_top_of_the_count_but_never_the_newest() {
+        let day = |n: i64| name(datetime!(2026-03-01 00:00 UTC) + time::Duration::days(n));
+        let names: Vec<SnapshotName> = (0..40).map(day).collect();
+        let retention = Retention::new(NonZeroUsize::new(35).unwrap(), MAX_AGE);
+        let now = datetime!(2026-03-01 00:00 UTC) + time::Duration::days(40);
+        let doomed = retention.doomed(&names, now);
+        assert_eq!(
+            doomed,
+            names[..10].to_vec(),
+            "the count keeps 35, and of those the five past 30 days go too"
+        );
+        let years_later = now + time::Duration::days(400);
+        assert_eq!(
+            retention.doomed(&names, years_later),
+            names[..39].to_vec(),
+            "the newest is kept, however old it is"
+        );
+        assert_eq!(
+            retention.doomed(&names[39..], years_later),
+            Vec::<SnapshotName>::new()
+        );
+    }
+
+    #[test]
+    fn a_temporary_name_reads_back_as_the_snapshot_it_was_for() {
+        let taken = name(datetime!(2026-03-02 09:05:07.123 UTC));
+        assert_eq!(
+            SnapshotName::parse_temporary(&taken.temporary_name()),
+            Some(taken)
+        );
+        for other in [
+            "dibs-20260302T090507.123Z.db",
+            "dibs-20260302T090507.123Z.db.partial",
+            ".dibs-20260302T090507.123Z.db",
+            ".notes.partial",
+        ] {
+            assert_eq!(SnapshotName::parse_temporary(other), None, "{other}");
+        }
     }
 }

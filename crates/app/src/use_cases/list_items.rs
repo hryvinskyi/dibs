@@ -48,7 +48,7 @@ impl ListItems {
         actor: &Actor,
         query: ItemQuery,
     ) -> Result<Vec<NamedItem>, AppError> {
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let names = Names::load(&mut work).await?;
         let holder = match &query.holder {
             None => None,

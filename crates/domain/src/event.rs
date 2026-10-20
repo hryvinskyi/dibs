@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::area::QualifiedArea;
+use crate::escalation::EscalationSubject;
 use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
 use crate::item::{ExternalRef, Title};
 use crate::paths::RepoPath;
+use crate::retention::PruneCounts;
 use crate::session::HostName;
 use crate::slot::{Purpose, RunExit, SlotName};
 
@@ -102,6 +104,14 @@ pub enum EventKind {
     SlotResumed(SlotMember),
     /// A member took over another member's stalled hold.
     SlotStallTakenOver(SlotStallTakenOver),
+    /// A member asked the project's arbiters to settle a dispute.
+    Escalated(Escalated),
+    /// A member was removed from the project; what they held was released before.
+    MemberRemoved(MemberRemoved),
+    /// The daily retention removed what was past its date.
+    Pruned(Pruned),
+    /// An admin deleted a conversation at once.
+    ThreadDeleted(ThreadDeleted),
 }
 
 impl EventKind {
@@ -139,45 +149,53 @@ impl EventKind {
             Self::SlotStalled(_) => "slot_stalled",
             Self::SlotResumed(_) => "slot_resumed",
             Self::SlotStallTakenOver(_) => "slot_stall_taken_over",
+            Self::Escalated(_) => "escalated",
+            Self::MemberRemoved(_) => "member_removed",
+            Self::Pruned(_) => "pruned",
+            Self::ThreadDeleted(_) => "thread_deleted",
         }
     }
 
     /// Every member the event names.
     pub fn members(&self) -> BTreeSet<MemberId> {
-        let named: &[MemberId] = match self {
-            Self::ItemCreated(e) => &[e.by],
-            Self::Claimed(e) => &[e.member],
-            Self::Renewed(e) => &[e.member],
-            Self::TakenOver(e) => &[e.member, e.previous],
-            Self::Released(e) => &[e.member],
-            Self::Completed(e) => &[e.member],
-            Self::ForceReleased(e) => &[e.member, e.by],
-            Self::Reserved(e) => &[e.member],
-            Self::Granted(e) => &[e.from, e.to],
-            Self::GrantRevoked(e) => &[e.from, e.to],
-            Self::ThreadStarted(e) => &[e.author],
-            Self::MessagePosted(e) => &[e.author],
-            Self::SettingsChanged(e) => &[e.by],
-            Self::ItemUpdated(e) => &[e.by],
-            Self::DependencyAdded(e) => &[e.by],
-            Self::DependencyRemoved(e) => &[e.by],
-            Self::Acked(e) => &[e.by],
-            Self::WideClaimed(e) => &[e.member],
-            Self::WideGrantedByAck(e) => &[e.by, e.to],
-            Self::SlotTaken(e) => &[e.member],
-            Self::SlotQueued(e) => &[e.member],
-            Self::SlotReleased(e) => &[e.member],
+        let named: Vec<Option<MemberId>> = match self {
+            Self::ItemCreated(e) => vec![Some(e.by)],
+            Self::Claimed(e) => vec![Some(e.member)],
+            Self::Renewed(e) => vec![Some(e.member)],
+            Self::TakenOver(e) => vec![Some(e.member), Some(e.previous)],
+            Self::Released(e) => vec![Some(e.member)],
+            Self::Completed(e) => vec![Some(e.member)],
+            Self::ForceReleased(e) => vec![Some(e.member), e.by],
+            Self::Reserved(e) => vec![Some(e.member)],
+            Self::Granted(e) => vec![Some(e.from), Some(e.to)],
+            Self::GrantRevoked(e) => vec![Some(e.from), Some(e.to)],
+            Self::ThreadStarted(e) => vec![e.author],
+            Self::MessagePosted(e) => vec![e.author],
+            Self::SettingsChanged(e) => vec![Some(e.by)],
+            Self::ItemUpdated(e) => vec![Some(e.by)],
+            Self::DependencyAdded(e) => vec![Some(e.by)],
+            Self::DependencyRemoved(e) => vec![Some(e.by)],
+            Self::Acked(e) => vec![Some(e.by)],
+            Self::WideClaimed(e) => vec![Some(e.member)],
+            Self::WideGrantedByAck(e) => vec![Some(e.by), Some(e.to)],
+            Self::SlotTaken(e) => vec![Some(e.member)],
+            Self::SlotQueued(e) => vec![Some(e.member)],
+            Self::SlotReleased(e) => vec![Some(e.member)],
             Self::SlotRenewed(e)
             | Self::SlotLeft(e)
             | Self::SlotOffered(e)
             | Self::SlotOfferLapsed(e)
             | Self::SlotExpired(e)
             | Self::SlotStalled(e)
-            | Self::SlotResumed(e) => &[e.member],
-            Self::SlotForceReleased(e) => &[e.member, e.by],
-            Self::SlotStallTakenOver(e) => &[e.member, e.previous],
+            | Self::SlotResumed(e) => vec![Some(e.member)],
+            Self::SlotForceReleased(e) => vec![Some(e.member), e.by],
+            Self::SlotStallTakenOver(e) => vec![Some(e.member), Some(e.previous)],
+            Self::Escalated(e) => vec![Some(e.by)],
+            Self::MemberRemoved(e) => vec![Some(e.member), e.by],
+            Self::Pruned(_) => Vec::new(),
+            Self::ThreadDeleted(e) => vec![e.by],
         };
-        named.iter().copied().collect()
+        named.into_iter().flatten().collect()
     }
 
     /// The message the event announces, for the kind that announces one.
@@ -213,16 +231,30 @@ impl EventKind {
             | Self::SlotForceReleased(_)
             | Self::SlotStalled(_)
             | Self::SlotResumed(_)
-            | Self::SlotStallTakenOver(_) => None,
+            | Self::SlotStallTakenOver(_)
+            | Self::Escalated(_)
+            | Self::MemberRemoved(_)
+            | Self::Pruned(_)
+            | Self::ThreadDeleted(_) => None,
         }
     }
 
-    /// The conversation the event is about, for the kinds that are about one.
+    /// The conversation the event is about, for the kinds that are about one: an escalation of a
+    /// conversation is about it too. A deleted conversation's event is about none, since there is
+    /// nothing left to read.
     pub const fn thread(&self) -> Option<ThreadId> {
         match self {
             Self::ThreadStarted(e) => Some(e.thread),
             Self::MessagePosted(e) => Some(e.thread),
             Self::Acked(e) => Some(e.thread),
+            Self::Escalated(Escalated {
+                subject: EscalationSubject::Thread(thread),
+                ..
+            }) => Some(*thread),
+            Self::Escalated(_)
+            | Self::MemberRemoved(_)
+            | Self::Pruned(_)
+            | Self::ThreadDeleted(_) => None,
             Self::ItemCreated(_)
             | Self::Claimed(_)
             | Self::Renewed(_)
@@ -359,8 +391,8 @@ pub struct ForceReleased {
     pub item: ItemId,
     /// The member who held it.
     pub member: MemberId,
-    /// The admin.
-    pub by: MemberId,
+    /// The admin; `None` when the service's operator did it from the server's command line.
+    pub by: Option<MemberId>,
 }
 
 /// A claim gained areas or shared paths through an edit check.
@@ -425,8 +457,8 @@ pub struct GrantRevoked {
 pub struct ThreadStarted {
     /// The thread.
     pub thread: ThreadId,
-    /// Who started it.
-    pub author: MemberId,
+    /// Who started it; `None` for dibs.
+    pub author: Option<MemberId>,
     /// The work item it is about, if any.
     pub item: Option<ItemId>,
 }
@@ -438,8 +470,8 @@ pub struct MessagePosted {
     pub thread: ThreadId,
     /// The message.
     pub message: MessageId,
-    /// Who wrote it.
-    pub author: MemberId,
+    /// Who wrote it; `None` for dibs.
+    pub author: Option<MemberId>,
 }
 
 /// The project's settings changed.
@@ -568,6 +600,8 @@ pub enum ForceCause {
     Admin,
     /// The settings no longer declare the slot.
     SlotRemoved,
+    /// The member was removed from the project.
+    MemberRemoved,
 }
 
 /// A hold, a place in a queue or an offer was ended by someone other than its member.
@@ -577,8 +611,9 @@ pub struct SlotForceReleased {
     pub slot: SlotName,
     /// The member who held it, waited for it or was offered it.
     pub member: MemberId,
-    /// The admin who ended it.
-    pub by: MemberId,
+    /// The admin who ended it; `None` when the service's operator did it from the server's
+    /// command line.
+    pub by: Option<MemberId>,
     /// Why.
     pub cause: ForceCause,
 }
@@ -594,6 +629,42 @@ pub struct SlotStallTakenOver {
     pub previous: MemberId,
     /// Why the new member holds it.
     pub purpose: Purpose,
+}
+
+/// A member asked the project's arbiters to settle a dispute. Carries no reason; the conversation
+/// it started holds it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Escalated {
+    /// What it is about.
+    pub subject: EscalationSubject,
+    /// The member who escalated.
+    pub by: MemberId,
+}
+
+/// A member was removed from the project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberRemoved {
+    /// The member.
+    pub member: MemberId,
+    /// The admin who removed them; `None` when the service's operator did it from the server's
+    /// command line.
+    pub by: Option<MemberId>,
+}
+
+/// The daily retention removed what was past its date.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pruned {
+    /// How much of each kind went.
+    pub counts: PruneCounts,
+}
+
+/// An admin deleted a conversation. Carries the id only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadDeleted {
+    /// The conversation.
+    pub thread: ThreadId,
+    /// The admin; `None` when the service's operator did it from the server's command line.
+    pub by: Option<MemberId>,
 }
 
 #[cfg(test)]
@@ -639,7 +710,7 @@ mod tests {
             EventKind::ForceReleased(ForceReleased {
                 item,
                 member: BOB,
-                by: ALICE,
+                by: Some(ALICE),
             }),
             EventKind::Reserved(Reserved {
                 item,
@@ -664,13 +735,13 @@ mod tests {
             }),
             EventKind::ThreadStarted(ThreadStarted {
                 thread: ThreadId(5),
-                author: ALICE,
+                author: Some(ALICE),
                 item: Some(item),
             }),
             EventKind::MessagePosted(MessagePosted {
                 thread: ThreadId(5),
                 message: MessageId(6),
-                author: ALICE,
+                author: Some(ALICE),
             }),
             EventKind::SettingsChanged(SettingsChanged { by: ALICE }),
             EventKind::ItemUpdated(ItemUpdated { item, by: BOB }),
@@ -700,6 +771,34 @@ mod tests {
                 area: area("api:billing"),
                 by: BOB,
                 to: ALICE,
+            }),
+            EventKind::Escalated(Escalated {
+                subject: EscalationSubject::Item(item),
+                by: BOB,
+            }),
+            EventKind::Escalated(Escalated {
+                subject: EscalationSubject::Thread(ThreadId(5)),
+                by: ALICE,
+            }),
+            EventKind::MemberRemoved(MemberRemoved {
+                member: BOB,
+                by: Some(ALICE),
+            }),
+            EventKind::Pruned(Pruned {
+                counts: PruneCounts {
+                    threads: 2,
+                    messages: 5,
+                    events: 40,
+                },
+            }),
+            EventKind::ThreadDeleted(ThreadDeleted {
+                thread: ThreadId(5),
+                by: None,
+            }),
+            EventKind::ThreadStarted(ThreadStarted {
+                thread: ThreadId(8),
+                author: None,
+                item: None,
             }),
         ]
     }
@@ -735,7 +834,7 @@ mod tests {
             EventKind::SlotForceReleased(SlotForceReleased {
                 slot: slot.clone(),
                 member: ALICE,
-                by: BOB,
+                by: Some(BOB),
                 cause: ForceCause::SlotRemoved,
             }),
             EventKind::SlotStalled(one()),
@@ -904,7 +1003,7 @@ mod tests {
             .collect();
         let messages: Vec<Option<MessageId>> =
             every_kind().iter().map(EventKind::message).collect();
-        let mut expected = vec![None; 19];
+        let mut expected = vec![None; 25];
         expected[11] = Some(MessageId(6));
         assert_eq!(messages, expected);
         let alice = BTreeSet::from([ALICE]);
@@ -930,10 +1029,43 @@ mod tests {
                 (BTreeSet::from([BOB]), None),
                 (alice.clone(), None),
                 (BTreeSet::from([BOB]), Some(ThreadId(5))),
-                (alice, None),
+                (alice.clone(), None),
                 (both_again(), None),
+                (BTreeSet::from([BOB]), None),
+                (alice, Some(ThreadId(5))),
+                (both_again(), None),
+                (BTreeSet::new(), None),
+                (BTreeSet::new(), None),
+                (BTreeSet::new(), Some(ThreadId(8))),
             ]
         );
+    }
+
+    #[test]
+    fn what_dibs_wrote_and_the_operators_acts_name_no_member() {
+        let started = serde_json::to_value(&every_kind()[24]).unwrap();
+        assert_eq!(
+            started["payload"],
+            serde_json::json!({"thread": 8, "author": null, "item": null})
+        );
+        let deleted = serde_json::to_value(&every_kind()[23]).unwrap();
+        assert_eq!(
+            deleted["payload"],
+            serde_json::json!({"thread": 5, "by": null})
+        );
+        let pruned = serde_json::to_value(&every_kind()[22]).unwrap();
+        assert_eq!(
+            pruned["payload"],
+            serde_json::json!({"counts": {"threads": 2, "messages": 5, "events": 40}})
+        );
+        let escalated = serde_json::to_value(&every_kind()[19]).unwrap();
+        assert_eq!(
+            escalated["payload"],
+            serde_json::json!({"subject": {"item": 4}, "by": 2})
+        );
+        let stored = r#"{"kind":"message_posted","payload":{"thread":1,"message":2,"author":7}}"#;
+        let read: EventKind = serde_json::from_str(stored).unwrap();
+        assert_eq!(read.members(), BTreeSet::from([MemberId(7)]));
     }
 
     #[test]

@@ -35,7 +35,7 @@ impl MarkRead {
     pub async fn execute(&self, actor: &Actor, thread: ThreadId) -> Result<u64, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let mut work = Work::begin(&*self.store, actor.project).await?;
+        let mut work = Work::begin_for(&*self.store, actor).await?;
         let thread = readable_thread(&mut work, actor, thread).await?;
         let newly = work
             .mark_read(actor.project, actor.member, thread.id, now)

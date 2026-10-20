@@ -41,6 +41,7 @@ mod sqlite_file {
             external_login: None,
             role: Role::Member,
             created_at: OffsetDateTime::UNIX_EPOCH,
+            removed_at: None,
         }
     }
 
@@ -84,7 +85,7 @@ mod sqlite_file {
             "SELECT group_concat(version || ':' || success) FROM _sqlx_migrations",
         )
         .await;
-        assert_eq!(applied, "1:1,2:1,3:1,4:1,5:1,6:1");
+        assert_eq!(applied, "1:1,2:1,3:1,4:1,5:1,6:1,7:1");
         assert_eq!(scalar(&path, "PRAGMA journal_mode").await, "wal");
     }
 
@@ -94,8 +95,10 @@ mod sqlite_file {
         SqliteStore::open(&path).await.unwrap().close().await;
         let mut connection = raw(&path).await;
         let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(
-            "EXPLAIN QUERY PLAN SELECT id FROM messages m \
-             WHERE m.project_id = 1 AND m.ack_required = 1 AND m.author_id <> 2 \
+            "EXPLAIN QUERY PLAN SELECT m.id FROM messages m \
+             JOIN threads t ON t.project_id = m.project_id AND t.id = m.thread_id \
+             WHERE m.project_id = 1 AND m.ack_required = 1 \
+             AND COALESCE(m.author_id, t.author_id) IS NOT 2 \
              ORDER BY m.created_at DESC, m.id DESC",
         )
         .fetch_all(&mut connection)
@@ -107,6 +110,45 @@ mod sqlite_file {
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(plan.contains("messages_asking_ack"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn the_events_past_their_date_are_found_through_their_index() {
+        let (_dir, path) = file();
+        SqliteStore::open(&path).await.unwrap().close().await;
+        let mut connection = raw(&path).await;
+        let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN DELETE FROM events WHERE project_id = 1 AND at < 1000",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        let plan = steps
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(plan.contains("events_by_time"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn the_deliveries_of_a_deleted_threads_messages_are_found_through_their_index() {
+        let (_dir, path) = file();
+        SqliteStore::open(&path).await.unwrap().close().await;
+        let mut connection = raw(&path).await;
+        let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN DELETE FROM message_deliveries WHERE project_id = 1 AND subject IN \
+             (SELECT CAST(id AS TEXT) FROM messages WHERE project_id = 1 AND thread_id = 7)",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        let plan = steps
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(plan.contains("message_deliveries_by_subject"), "{plan}");
     }
 
     #[tokio::test]
