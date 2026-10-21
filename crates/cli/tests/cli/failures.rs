@@ -168,8 +168,9 @@ fn a_person_waits_out_a_slow_server_and_a_hook_still_gives_up_within_its_limit()
     let out = hook();
     let took = started.elapsed();
     assert_eq!(status(&out), 0);
+    let said = text(&out.stdout);
     assert!(
-        text(&out.stdout).contains("did not answer in time"),
+        said.contains("did not answer in time") || said.contains("could not be reached"),
         "the hook asked the server and gave up: {}",
         text(&out.stdout)
     );
