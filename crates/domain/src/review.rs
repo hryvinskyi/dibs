@@ -362,11 +362,14 @@ pub fn merge_counts(settings: &ProjectSettings, pr: &PrRef, base: &str) -> bool 
     let Some(repo) = settings.repo_of_pr(pr) else {
         return true;
     };
-    if repo.protected_refs.is_empty() {
+    if !repo.protects_branch() {
         return true;
     }
-    repo.branch(base)
-        .is_some_and(|branch| repo.protected_refs.iter().any(|rule| rule.target == branch))
+    repo.branch(base).is_some_and(|branch| {
+        repo.protected_refs
+            .iter()
+            .any(|rule| rule.target.covers(&branch.name))
+    })
 }
 
 /// Decides what a merged or closed pull request does: it leaves the claim in review that recorded
@@ -825,6 +828,28 @@ mod tests {
             merge_counts(&protected, &pr("acme/other#3"), "anything"),
             "a repository the project no longer lists counts any base"
         );
+    }
+
+    #[test]
+    fn protected_tags_leave_which_merges_deliver_to_the_protected_branches() {
+        let tags_only = crate::testing::settings(
+            r#"{"repos":[
+                {"id":"api","remote":"example.com/acme/api",
+                 "protected_refs":[{"ref":"refs/tags/v*","pushers":["alice"]}]}]}"#,
+        );
+        assert!(
+            merge_counts(&tags_only, &pr("acme/api#12"), "bob/42-base"),
+            "a repository that protects only tags protects no branch, so any base counts"
+        );
+        let both = crate::testing::settings(
+            r#"{"repos":[
+                {"id":"api","remote":"example.com/acme/api",
+                 "protected_refs":[{"ref":"refs/tags/*","pushers":["alice"]},
+                                   {"ref":"refs/heads/main","pushers":["alice"]}]}]}"#,
+        );
+        assert!(merge_counts(&both, &pr("acme/api#12"), "main"));
+        assert!(!merge_counts(&both, &pr("acme/api#12"), "v1"));
+        assert!(!merge_counts(&both, &pr("acme/api#12"), "bob/42-base"));
     }
 
     #[test]

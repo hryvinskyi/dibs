@@ -159,32 +159,60 @@ pub enum RepoRefError {
     /// The text is not `<repo>:refs/heads/<name>`.
     #[error("a frozen ref is written '<repo>:refs/heads/<branch>'")]
     Malformed,
+    /// The text names a tag, which no slot freezes.
+    #[error(
+        "a slot freezes branches, not tags; a frozen ref is written '<repo>:refs/heads/<branch>'"
+    )]
+    Tag,
+}
+
+/// The longest full ref name, `refs/…` included.
+pub(crate) const MAX_REF_NAME: usize = 255;
+
+/// Whether `part`, a ref name after its `refs/<kind>/`, has nothing git refuses inside a name: no
+/// control character, space or `~^:?*[\`, no leading `/`, no `..`, `//` or `@{`. Whether it may be
+/// empty, or end with `/` or `.lock`, is the caller's to say.
+pub(crate) fn ref_part_is_clean(part: &str) -> bool {
+    let forbidden = |c: char| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c);
+    !part.chars().any(forbidden)
+        && !part.starts_with('/')
+        && !part.contains("..")
+        && !part.contains("//")
+        && !part.contains("@{")
 }
 
 impl RepoRef {
     /// Parses `<repo>:refs/heads/<name>`.
     ///
     /// # Errors
-    /// [`RepoRefError::Malformed`] when the repository id or the ref breaks its rules.
+    /// [`RepoRefError::Tag`] for a tag ref, [`RepoRefError::Malformed`] when the repository id or
+    /// the ref breaks its rules otherwise.
     pub fn parse(value: &str) -> Result<Self, RepoRefError> {
         let (repo, name) = value.split_once(':').ok_or(RepoRefError::Malformed)?;
         let repo = RepoId::parse(repo).map_err(|_| RepoRefError::Malformed)?;
+        Self::named(repo, name)
+    }
+
+    /// The branch ref `name` of `repo`.
+    ///
+    /// # Errors
+    /// [`RepoRefError::Tag`] when `name` is a `refs/tags/` ref, [`RepoRefError::Malformed`] when it
+    /// is no `refs/heads/` ref git would accept.
+    pub fn named(repo: RepoId, name: &str) -> Result<Self, RepoRefError> {
+        if name.starts_with("refs/tags/") {
+            return Err(RepoRefError::Tag);
+        }
         Self::of(repo, name).ok_or(RepoRefError::Malformed)
     }
 
     /// The branch ref `name` of `repo`, when `name` is a `refs/heads/` ref git would accept.
     pub fn of(repo: RepoId, name: &str) -> Option<Self> {
         let branch = name.strip_prefix("refs/heads/")?;
-        let forbidden = |c: char| c.is_control() || c.is_whitespace() || "~^:?*[\\".contains(c);
         let valid = !branch.is_empty()
-            && name.len() <= 255
-            && !branch.chars().any(forbidden)
-            && !branch.starts_with('/')
+            && name.len() <= MAX_REF_NAME
+            && ref_part_is_clean(branch)
             && !branch.ends_with('/')
-            && !branch.ends_with(".lock")
-            && !branch.contains("..")
-            && !branch.contains("//")
-            && !branch.contains("@{");
+            && !branch.ends_with(".lock");
         valid.then(|| Self {
             repo,
             name: name.to_owned(),
@@ -426,6 +454,12 @@ mod tests {
         ] {
             assert!(RepoRef::parse(bad).is_err(), "{bad}");
         }
+        assert_eq!(
+            RepoRef::parse("api:refs/tags/v1"),
+            Err(RepoRefError::Tag),
+            "a tag is refused as one"
+        );
+        assert_eq!(RepoRef::parse("api:main"), Err(RepoRefError::Malformed));
     }
 
     #[test]

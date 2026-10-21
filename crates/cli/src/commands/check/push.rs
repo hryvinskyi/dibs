@@ -2,8 +2,8 @@
 //! command check uses. It knows the exact refs pushed to whatever the command line said and
 //! whoever typed it, so it covers a push from a terminal and one with no refspec.
 //!
-//! It refuses only on a verdict: a protected branch of the repository pushed to that the member is
-//! not among the pushers of — judged from what this machine remembers, so it holds while the server
+//! It refuses only on a verdict: a protected branch or tag of the repository pushed to that the
+//! member is not among the pushers of — judged from what this machine remembers, so it holds while the server
 //! cannot be reached — or a ref frozen by a slot another member holds. Anything else that keeps it
 //! from deciding — no checkout, no token, a server that cannot be reached for a freeze, a machine
 //! that remembers nothing yet and cannot reach the server — lets the push go with one warning;
@@ -65,8 +65,8 @@ pub struct PushedTo<'a> {
 /// so they are judged only when the server answers.
 ///
 /// # Errors
-/// A refusal naming who may push, when a ref pushed to is a protected branch the member may not
-/// push to; a refusal naming the slot, its holder, why they hold it and until when, when a ref
+/// A refusal naming who may push, when a ref pushed to is a protected branch or tag the member may
+/// not push to; a refusal naming the slot, its holder, why they hold it and until when, when a ref
 /// pushed to is frozen by a slot another member holds.
 pub async fn check_push(stdin: &str, to: PushedTo<'_>, ctx: &Context) -> Result<(), Failure> {
     let refs = pushed_refs(stdin);
@@ -130,8 +130,8 @@ pub async fn check_push(stdin: &str, to: PushedTo<'_>, ctx: &Context) -> Result<
     }
 }
 
-/// The refusal of the push, when a ref it goes to is a protected branch of the repository of the
-/// remote pushed to that `member` may not push to. Without the remote, the push is judged as one to
+/// The refusal of the push, when a ref it goes to is a protected branch or tag of the repository of
+/// the remote pushed to that `member` may not push to. Without the remote, the push is judged as one to
 /// the repository the checkout governs.
 fn protected(
     workspace: &dyn Workspace,
@@ -164,10 +164,7 @@ fn protected(
     else {
         return None;
     };
-    Some(format!(
-        "{} A push with git push --no-verify gets past this check and breaks the team's rule.",
-        wording::needs_permission(&target.to_string(), &pushers, certain)
-    ))
+    Some(wording::push_needs_permission(&target, &pushers, certain))
 }
 
 /// The branches of `repo` among the refs pushed to.

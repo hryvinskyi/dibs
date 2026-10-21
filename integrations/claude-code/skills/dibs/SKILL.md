@@ -135,6 +135,9 @@ serve many teams:
   who may push; a push dibs cannot read — every branch, a wildcard, another directory — is refused too, so name the
   branch and the remote you push. A push to a fork is not judged. The way on is your branch and a pull request. A person
   in a terminal can still push with `git push --no-verify`; that breaks the team's rule.
+- Do not push or delete a protected tag, such as a release tag, unless the project lists you as its pusher: it is
+  refused for anyone else, and so is a push that may carry tags (`--tags`, `--follow-tags`, `--mirror`) or names a
+  short name a protected tag covers. Leave tagging to those members, and push your branch by its name without tags.
 - Once the pull request is open, record it on your claim: `dibs_review` with the item and `pr` (`owner/repo#number`), or
   `dibs claim review <item> --pr <owner>/<repo>#<number>`. Your claim is then in review: it keeps its areas, so nobody
   edits the files under review, and it needs no heartbeat while the pull request is open. You may go on pushing review

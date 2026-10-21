@@ -92,3 +92,48 @@ async fn without_versions_set_no_client_is_refused_and_none_is_recommended() {
     assert_eq!(versions.body["min_client"], serde_json::Value::Null);
     assert_eq!(versions.body["latest_client"], serde_json::Value::Null);
 }
+
+#[tokio::test]
+async fn a_client_older_than_protected_tags_is_served_the_settings_without_them() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    world
+        .settings(
+            &alice,
+            serde_json::json!({
+                "protected_refs": [
+                    {"ref": "refs/heads/main", "pushers": ["alice"]},
+                    {"ref": "refs/tags/v*", "pushers": ["alice"]}
+                ]
+            }),
+        )
+        .await;
+    let rules = |answer: &crate::support::Answer| -> Vec<String> {
+        answer.body["settings"]["protected_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule["ref"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let older = as_agent(&world, &alice, "/v1/me", Some("dibs/0.1.0")).await;
+    assert_eq!(older.status, StatusCode::OK, "{}", older.body);
+    assert_eq!(
+        rules(&older),
+        ["refs/heads/main"],
+        "the branch rule is served, the tag rule it cannot read is not"
+    );
+    for agent in [
+        Some("dibs/0.1.1"),
+        Some("dibs/0.2.0 (x86_64-unknown-linux-gnu)"),
+        Some("curl/8.0"),
+        None,
+    ] {
+        let answer = as_agent(&world, &alice, "/v1/me", agent).await;
+        assert_eq!(
+            rules(&answer),
+            ["refs/heads/main", "refs/tags/v*"],
+            "{agent:?}"
+        );
+    }
+}

@@ -30,6 +30,7 @@ pub use spec::{
     RepoRef, RepoRefError, SlotCatalog, SlotGroup, SlotGroupError, SlotName, SlotNameError,
     SlotSpec,
 };
+pub(crate) use spec::{MAX_REF_NAME, ref_part_is_clean};
 pub use state::{
     CommitSha, CommitShaError, EndWord, EndWordError, Liveness, RunExit, STALL_AFTER, SlotBoard,
     SlotHold, SlotOffer, SlotStanding, SlotWaiter, WorkflowName, WorkflowNameError,

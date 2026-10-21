@@ -1,7 +1,7 @@
 //! `GET /v1/me`: the caller, their project, and its settings.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use serde::Serialize;
 
@@ -12,6 +12,7 @@ use dibs_domain::settings::SettingsDocument;
 use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::http::AppState;
+use crate::versions;
 use crate::views::{MemberView, reply};
 
 #[derive(Serialize)]
@@ -36,14 +37,19 @@ struct RepoView {
 }
 
 /// Answers who the caller is: their member record, their project's slug, the repositories a
-/// checkout may name, and the settings in their normal form, which parse back to the same settings.
+/// checkout may name, and the settings in their normal form, which parse back to the same settings,
+/// as far as the caller's client can read them.
 ///
 /// # Errors
 /// The answer for the use case's failure.
 pub async fn me(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok());
     let view = state.app.me.execute(&actor).await?;
     let answer = MeAnswer {
         member: MemberView::of(&view.member),
@@ -59,7 +65,7 @@ pub async fn me(
                 remote: repo.remote.clone(),
             })
             .collect(),
-        settings: view.settings.to_document(),
+        settings: versions::settings_for(&view.settings, agent),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

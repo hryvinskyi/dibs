@@ -369,3 +369,74 @@ fn a_protected_main_is_refused_from_what_the_machine_remembers_while_the_server_
         text(&branch.stderr)
     );
 }
+
+/// The setup with `api`'s release tags `v*` protected for alice alone, and no branch protected.
+fn protected_tags() -> Setup {
+    let setup = Setup::new();
+    let mut settings = two_repositories();
+    settings["repos"][0]["protected_refs"] = json!([{"ref": "refs/tags/v*", "pushers": ["alice"]}]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    setup
+}
+
+const TAG: &str = "refs/tags/v2.4.0 1111111111111111111111111111111111111111 refs/tags/v2.4.0 0000000000000000000000000000000000000000\n";
+const TAG_DELETED: &str = "(delete) 0000000000000000000000000000000000000000 refs/tags/v2.3.0 3333333333333333333333333333333333333333\n";
+const NIGHTLY: &str = "refs/tags/nightly 1111111111111111111111111111111111111111 refs/tags/nightly 0000000000000000000000000000000000000000\n";
+
+#[test]
+fn a_protected_tag_pushed_or_deleted_by_a_member_who_is_no_pusher_is_refused() {
+    let setup = protected_tags();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    for (what, line) in [("a pushed tag", TAG), ("a deleted tag", TAG_DELETED)] {
+        let refused = check(&setup, "bob", &api, line);
+        assert_eq!(status(&refused), 1, "{what}");
+        let said = text(&refused.stderr);
+        for part in [
+            "the tags of api that v* covers",
+            "only alice may push to",
+            "Do not push or delete tags that v* covers",
+            "(refusal r-",
+        ] {
+            assert!(said.contains(part), "{what}, {part}: {said}");
+        }
+        assert!(!said.contains("open a pull request"), "{what}: {said}");
+        assert!(!said.contains("--no-verify"), "{what}: {said}");
+    }
+    let other = check(&setup, "bob", &api, NIGHTLY);
+    assert_eq!(status(&other), 0, "a tag no pattern covers is free");
+    assert_eq!(text(&other.stderr), "");
+    let main = check(&setup, "bob", &api, MAIN);
+    assert_eq!(status(&main), 0, "protected tags protect no branch");
+    assert_eq!(text(&main.stderr), "");
+    for line in [TAG, TAG_DELETED] {
+        let pusher = check(&setup, "alice", &api, line);
+        assert_eq!(status(&pusher), 0, "{}", text(&pusher.stderr));
+        assert_eq!(text(&pusher.stderr), "");
+    }
+}
+
+#[test]
+fn git_refuses_a_members_push_of_a_protected_tag_through_its_pre_push_hook() {
+    let setup = protected_tags();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    shared_remote(&setup, &api, "bob");
+    git(&api, &["config", "tag.gpgsign", "false"]);
+    git(&api, &["tag", "v2.4.0"]);
+    git(&api, &["tag", "nightly"]);
+    let refused = push(&api, &["shared", "v2.4.0"]);
+    assert!(!refused.status.success(), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains("only alice may push to"),
+        "{}",
+        text(&refused.stderr)
+    );
+    let refused = push(&api, &["shared", "--tags"]);
+    assert!(
+        !refused.status.success(),
+        "every tag pushed includes the protected one"
+    );
+    let free = push(&api, &["shared", "nightly"]);
+    assert!(free.status.success(), "{}", text(&free.stderr));
+    let branch = push(&api, &["shared", "main"]);
+    assert!(branch.status.success(), "{}", text(&branch.stderr));
+}

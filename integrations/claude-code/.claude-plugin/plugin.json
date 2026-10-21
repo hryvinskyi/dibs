@@ -1,7 +1,7 @@
 {
   "name": "dibs",
   "displayName": "dibs",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Coordinates your edits with your team through dibs: a brief when a session starts, a check before each file edit, heartbeats while you work, and the dibs tools for claims and messages.",
   "author": {
     "name": "The dibs authors",
@@ -12,6 +12,6 @@
   "license": "MIT",
   "keywords": ["coordination", "claims", "team", "mcp"],
   "metadata": {
-    "min_binary": "0.1.0"
+    "min_binary": "0.1.1"
   }
 }

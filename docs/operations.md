@@ -203,7 +203,13 @@ standard output and a sentence about it on standard error, so `token=$(… 2>/de
 token is shown once; the server keeps only a hash. Exit status: 0 done, 1 refused or failed, 2 configuration refused.
 
 Members can also be added, and their tokens rotated, with `dibs admin member add` and `dibs admin token rotate` from a
-client signed in as an admin. `--role` is `member` by default; `importer` makes the token of an integration worker that
+client signed in as an admin. At a terminal they print the sentence with the token on the line after it; into a pipe or
+a file (and without `--json`) they keep to the contract above, the token alone on standard output and the sentence on
+standard error, so an admin replaces their own token with `dibs admin token rotate <your-handle> | dibs login`. Pipe
+only your own token into your login: another member's would sign you in as them. If the login half fails after the
+rotation, the new token is lost and the old one is revoked already: rotate again on the server,
+`dibs-server admin token rotate <project> <handle>`. A token that cannot be written (the pipe closed early) is
+reported on standard error with exit status 1, and is just as lost. `--role` is `member` by default; `importer` makes the token of an integration worker that
 feeds the project's items from an outside tracker (`PUT /v1/items`): it may read members, items, the event log and the
 ready list, and nothing else — no claim, no conversation.
 
@@ -317,7 +323,7 @@ note = "a migration runs inside dibs slot run"
   a heartbeat every 30 seconds and releases it with the command's exit status. To stop a run from a script, send
   `SIGTERM` to `dibs slot run`: it passes the signal to the command and records it as the release's exit. A run whose heartbeats stop for 2
   minutes is shown stalled, not freed; another member takes it over only with `dibs slot takeover <slot> --reason …`.
-- **`freezes`** names branches nobody but the holder may push while the slot is held.
+- **`freezes`** names branches nobody but the holder may push while the slot is held; a tag is refused there.
 - Removing a slot from the settings ends its hold, its queue and its offer in the same change.
 
 The server sweeps the slots every 30 seconds — expiries, stalls, lapsed offers, silent waiters, and the offer to the
@@ -328,13 +334,17 @@ ends any hold with `dibs admin slot force-release <slot> --reason …`; the hold
 
 ## Pull requests and the integration
 
-A team that works on branches and pull requests declares, per repository, the branches only some members may push to
-and whether its pull requests get a status (`docs/api.md` lists the fields). For a project with several repositories
+A team that works on branches and pull requests declares, per repository, the branches and tags only some members may
+push to and whether its pull requests get a status (`docs/api.md` lists the fields). For a project with several repositories
 each entry of `repos` carries its own; a project with one writes them at the top level:
 
 ```toml
 [[protected_refs]]
 ref = "refs/heads/main"
+pushers = ["alice"]
+
+[[protected_refs]]
+ref = "refs/tags/v*"          # release tags: a literal prefix, optionally ending in one '*'
 pushers = ["alice"]
 
 [pr_status]
@@ -350,6 +360,18 @@ describe_holder = false
   `exec dibs check --push --remote "$1" --url "$2"`. It judges protected branches from what the machine remembers, so
   a push to one is refused while the server cannot be reached. Nothing on the server can stop a person who pushes with
   `git push --no-verify`, or a merge through the forge's web pages; the rule is the team's agreement.
+- **Protected tags** (`refs/tags/<name>`, or `refs/tags/<prefix>*` for every tag that starts with the prefix) keep
+  release tags to the members who cut releases. The agent's command check and the pre-push hook both judge them, and
+  both fail closed: a push that names a covered tag (`refs/tags/v1.0`, or a short name such as `v1.0`, which git may
+  resolve to that tag), deletes one (`:refs/tags/v1.0`, `--delete`), or may push any tag (`--tags`, `--follow-tags`,
+  `push.followTags`, `--mirror`, a `remote.<name>.push` setting) is refused for anyone not in `pushers`. A tag's
+  refusal names no way past it. A branch is always named exactly, and a slot's `freezes` takes branches only.
+- **Do not rely on a tag rule until every member runs dibs 0.1.1 or newer.** A client older than 0.1.1 cannot read a
+  tag rule, so the server leaves tag rules out of the settings it serves such a client (it knows the version from the
+  `User-Agent`): that client still judges the protected branches, and lets every tag push through, from its agents'
+  command check and from its pre-push hook alike. Once 0.1.1 has been out long enough, raise `DIBS_MIN_CLIENT` to it
+  ([client versions](#client-versions)); an older client is then refused and says so, rather than letting tags through
+  without a word.
 - **A claim lives through review.** A member records their pull request on their claim (`dibs claim review <item> --pr
   <owner>/<repo>#<number>`); the claim keeps its areas and never goes stale while in review. Its review ends when the
   integration reports the merge or the close of a pull request it recorded, or when its holder removes one recorded by
@@ -550,6 +572,11 @@ to. To keep the old database in place instead, restore to another path and point
 1. Read the release's notes.
 2. Take a snapshot: `docker compose exec dibs /dibs-server admin snapshot`.
 3. Set `DIBS_VERSION` in `.env` to the new release, then `docker compose pull && docker compose up -d`.
+
+**0.1.1 and protected tags.** A server of 0.1.1 accepts tag rules in `protected_refs`; clients older than 0.1.1 are
+served the settings without them and judge no tag (see [Pull requests and the integration](#pull-requests-and-the-integration)).
+Upgrade the server first, then the clients, and add a tag rule only once every member runs 0.1.1; the plugin of 0.1.1
+names 0.1.1 as its `min_binary`, so a plugin that updated ahead of its binary says so once per session.
 
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the

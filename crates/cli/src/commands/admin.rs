@@ -31,7 +31,7 @@ pub async fn run(command: AdminCommand, ctx: &Context) -> Result<(), Failure> {
                 .add_member(&member)
                 .await
                 .map_err(|error| connection.failed(error))?;
-            show_token(ctx, &enrolled, "Added");
+            show_token(ctx, &enrolled, "Added")?;
         }
         AdminCommand::Member(MemberCommand::Remove(args)) => {
             let removed = client
@@ -82,7 +82,7 @@ pub async fn run(command: AdminCommand, ctx: &Context) -> Result<(), Failure> {
                 .rotate_token(&args.handle)
                 .await
                 .map_err(|error| connection.failed(error))?;
-            show_token(ctx, &enrolled, "Revoked every token of");
+            show_token(ctx, &enrolled, "Revoked every token of")?;
         }
         AdminCommand::Settings(SettingsCommand::Apply(args)) => {
             let text = std::fs::read_to_string(&args.file).map_err(|_| {
@@ -128,13 +128,27 @@ pub async fn run(command: AdminCommand, ctx: &Context) -> Result<(), Failure> {
     Ok(())
 }
 
-fn show_token(ctx: &Context, enrolled: &Enrolled, verb: &str) {
-    ctx.printer.show(enrolled, || {
-        format!(
-            "{verb} {} ({}). Their new token is shown only this once; hand it over through a password manager:\n{}",
-            enrolled.member.handle,
-            enrolled.member.display_name,
-            enrolled.token.expose()
-        )
-    });
+/// Prints the member's new token: after its sentence at a terminal, alone on standard output into
+/// a pipe, so that `dibs admin token rotate <own handle> | dibs login` signs in with it.
+///
+/// # Errors
+/// A [`Failure`] when standard output cannot take the token: it is lost, and rotating again is the
+/// way to a usable one.
+fn show_token(ctx: &Context, enrolled: &Enrolled, verb: &str) -> Result<(), Failure> {
+    let sentence = format!(
+        "{verb} {} ({}). Their new token is shown only this once; hand it over through a password manager",
+        enrolled.member.handle, enrolled.member.display_name,
+    );
+    ctx.printer
+        .show_secret(enrolled, &sentence, enrolled.token.expose())
+        .map_err(|_| {
+            Failure::refused(
+                "token_not_written",
+                format!(
+                    "The new token of {} could not be written to standard output, so it is lost and the old tokens are revoked; rotate it again (dibs admin token rotate {}, or dibs-server admin token rotate on the server).",
+                    enrolled.member.handle, enrolled.member.handle
+                ),
+            )
+            .after_answer()
+        })
 }

@@ -168,7 +168,9 @@ revokes their tokens and releases everything they held at once. With the Claude 
   refused a push there, with the pull request as the way on, and so is a push whose branches dibs cannot read. A push to
   a fork is not judged. The pre-push check judges protection from what the machine remembers, so it holds while the
   server cannot be reached. Where the forge offers no branch protection, this is how the agents keep that rule;
-  `git push --no-verify` breaks it.
+  `git push --no-verify` breaks it. Tags are protected the same way, by name or by a prefix ending in `*`
+  (`refs/tags/v*`), by the agents' command check and the pre-push check alike; a tag's refusal names no way past it.
+  A tag rule holds only for clients of 0.1.1 or newer: an older one is served the settings without it.
 - **Edit policy.** With `require-claim` (the default), a member may edit a governed path only under a live claim that
   covers it; with `advise` they may, and are told who else is in the area. A path no area or rule governs is free.
 - **Hot-file rules.** Policies for files many people touch, matched by glob: `regenerate` (anyone may change it, nobody
@@ -289,7 +291,15 @@ Globs are matched against the path from the repository root: `*` and `?` stay in
 directories, `[…]` and `{a,b}` work as in a shell, and case matters. The first area that contains a path governs it.
 
 **Credentials.** `dibs login` reads a token from standard input, checks it with the server and stores it for the
-project. The token is found, in order, in the `DIBS_TOKEN` variable, then in the credentials file, then (if you signed
+project. At a terminal it reads one line without showing it; where the line cannot be read hidden (no controlling
+terminal) it says so on standard error and reads it visibly. Piped in, it reads all of standard input. On Windows, in
+Git Bash's mintty or another terminal without a console, use `dibs login < token.txt`: the token is then never shown,
+and the read never waits on a console that is not there. An admin replaces their own token with
+`dibs admin token rotate <your-handle> | dibs login`: into a pipe, the admin commands that issue a token print the
+token alone and their sentence on standard error. Pipe only your own token into your login; another member's would sign
+you in as them. If the login half fails after the rotation (the server cannot be reached, the pipe breaks), the new
+token is lost and the old one is revoked already: rotate again on the server with
+`dibs-server admin token rotate <project> <handle>`. The token is found, in order, in the `DIBS_TOKEN` variable, then in the credentials file, then (if you signed
 in with `--keychain`) in the operating system's credential store.
 
 | | Credentials file | State (caches, sessions) |
@@ -422,7 +432,14 @@ that a hook that cannot start never blocks a call; the MCP tools work either way
 
 ## Command line
 
-Every command takes `--json` to print its answer as JSON.
+Every command takes `--json` to print its answer as JSON. A command you run gives each sending of a request 5 seconds
+to connect and 20 seconds in all, so a request sent once more may take up to 40 seconds. It sends once more: a read (`GET`) whose connection timed out opening or was reset; and, only when its connection timed
+out opening so that nothing reached the server, registering a session, applying the settings, acknowledging a message,
+adding or removing a dependency, narrowing a claim, revoking a token, and creating an item named by a reference.
+Nothing else is sent again, and nothing is sent again after a reset but a read, so that an answer never reports as
+unchanged what a lost first sending changed. The hooks,
+`dibs sync`, `dibs mcp` and the checks git's hooks run (`dibs check --push`, `dibs check --git-range`) keep their
+limits (a hook's calls 2 seconds; the others 2 seconds to connect and 5 in all) and send nothing again.
 
 ```sh
 dibs login [--server <url>] [--keychain]          # sign in; the token comes from standard input
@@ -443,7 +460,7 @@ dibs release 12                                   # give the item back
 dibs done 12                                      # the item is finished
 dibs check packages/billing/a.rs                  # may I edit these paths?
 dibs check --git-range origin/main..HEAD [--author me]   # warn about what a range of commits changed
-dibs check --push --remote "$1" --url "$2"       # git's pre-push hook: refuse a push to a protected branch or one a held slot freezes
+dibs check --push --remote "$1" --url "$2"       # git's pre-push hook: refuse a push to a protected branch or tag, or one a held slot freezes
 dibs grant 14 --area api:billing --to bob         # let bob edit in an area you hold, for his item 14
 dibs send --to alice --subject "Rounding" "May I touch round.rs?"    # or --project; "-" reads stdin
 dibs send --project --subject "Freeze" --importance urgent --ack "No pushes to main until noon."
@@ -468,7 +485,7 @@ dibs hook <host> <event>                          # answer an agent host's hook
 dibs doctor                                       # the agent hosts this build supports
 dibs admin member add bob --name "Bob Example" [--github bob-gh] [--role admin|member|importer]
 dibs admin member remove bob                      # revoke bob's tokens, release his claims and slots; his messages stay
-dibs admin token rotate bob                       # revoke bob's tokens and print a new one
+dibs admin token rotate bob                       # revoke bob's tokens and print a new one (alone, into a pipe)
 dibs admin thread delete 31                       # delete a conversation at once (a secret pasted by mistake)
 dibs admin settings apply settings.toml
 dibs admin force-release 12                       # end anyone's claim on item 12

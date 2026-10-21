@@ -185,6 +185,71 @@ async fn settings_are_applied_once_and_answered_in_their_normal_form() {
 }
 
 #[tokio::test]
+async fn protected_tags_are_applied_in_their_normal_form_and_a_bad_pattern_is_refused_by_name() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let tagged = json!({
+        "protected_refs": [
+            {"ref": "refs/heads/main", "pushers": ["alice"]},
+            {"ref": "refs/tags/v*", "pushers": ["alice"]},
+            {"ref": "refs/tags/stable"}
+        ]
+    });
+    let applied = world.put(&alice, "/v1/admin/settings", tagged).await;
+    assert_eq!(applied.status, StatusCode::OK, "{}", applied.body);
+    assert_eq!(
+        applied.body["settings"]["protected_refs"],
+        json!([
+            {"ref": "refs/heads/main", "pushers": ["alice"]},
+            {"ref": "refs/tags/v*", "pushers": ["alice"]},
+            {"ref": "refs/tags/stable", "pushers": []}
+        ])
+    );
+    let me = world.get(&alice, "/v1/me").await;
+    assert_eq!(applied.body["settings"], me.body["settings"]);
+
+    for (pattern, said) in [
+        ("refs/tags/v*.0", "'*' at the end only"),
+        ("refs/tags/v**", "'**' is not accepted"),
+        ("refs/tags/", "after 'refs/tags/'"),
+        ("refs/heads/release/*", "one branch exactly"),
+    ] {
+        let refused = world
+            .put(
+                &alice,
+                "/v1/admin/settings",
+                json!({"protected_refs": [{"ref": pattern}]}),
+            )
+            .await;
+        assert_error(
+            &refused,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_settings",
+        );
+        let message = refused.body["error"]["message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(message.contains(said), "{pattern}: {message}");
+    }
+    let frozen_tag = world
+        .put(
+            &alice,
+            "/v1/admin/settings",
+            json!({"slots": [{"name": "release", "max_hold": "1h", "freezes": ["refs/tags/v1"]}]}),
+        )
+        .await;
+    assert_error(
+        &frozen_tag,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_settings",
+    );
+    let message = frozen_tag.body["error"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(message.contains("not tags"), "{message}");
+}
+
+#[tokio::test]
 async fn an_admin_forces_a_release() {
     let world = World::new().await;
     let alice = world.project("acme", "alice").await;

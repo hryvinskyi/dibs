@@ -1,6 +1,44 @@
 //! `dibs admin`.
 
+use std::path::Path;
+use std::process::{Output, Stdio};
+
 use crate::support::{API_REMOTE, Setup, json, status, text};
+
+/// `dibs <args>` as `admin`, its standard output piped straight into `dibs login --server <url>`
+/// run as `handle`: answers what the first printed on standard error, and the second's output.
+fn piped_into_login(setup: &Setup, admin: &str, args: &[&str], handle: &str) -> (String, Output) {
+    let dir = setup.elsewhere();
+    let mut issuing = setup
+        .process_as(admin, &dir)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let token = issuing.stdout.take().unwrap();
+    let login = setup
+        .process_as(handle, &dir)
+        .args(["login", "--server", &setup.server.url()])
+        .stdin(Stdio::from(token))
+        .output()
+        .unwrap();
+    let issued = issuing.wait_with_output().unwrap();
+    assert!(issued.status.success(), "{}", text(&issued.stderr));
+    (text(&issued.stderr), login)
+}
+
+/// The stored token of the person with this handle, as `dibs login` wrote it.
+fn stored_token(home: &Path) -> String {
+    let stored = std::fs::read_to_string(home.join("config").join("credentials.toml")).unwrap();
+    let line = stored
+        .lines()
+        .find(|line| line.starts_with("token = "))
+        .unwrap();
+    line.trim_start_matches("token = ")
+        .trim_matches('"')
+        .to_owned()
+}
 
 #[test]
 fn an_admin_adds_a_member_whose_printed_token_signs_in() {
@@ -23,7 +61,8 @@ fn an_admin_adds_a_member_whose_printed_token_signs_in() {
         .output()
         .unwrap();
     assert_eq!(status(&rotated), 0);
-    assert!(text(&rotated.stdout).contains("shown only this once"));
+    assert!(text(&rotated.stderr).contains("shown only this once"));
+    assert!(text(&rotated.stdout).trim_end().starts_with("dibs_"));
     let stale = setup.dibs_as("carol", &dir).arg("whoami").output().unwrap();
     assert_eq!(status(&stale), 2);
     assert!(text(&stale.stderr).contains("dibs login"));
@@ -244,4 +283,87 @@ fn a_member_escalates_from_the_command_line_and_the_arbiter_reads_it_from_dibs()
         "{}",
         text(&slot.stderr)
     );
+}
+
+#[test]
+fn a_new_members_token_piped_into_login_signs_them_in() {
+    let setup = Setup::new();
+    let (said, login) = piped_into_login(
+        &setup,
+        "alice",
+        &["admin", "member", "add", "dave", "--name", "Dave"],
+        "dave",
+    );
+    assert_eq!(status(&login), 0, "the pipe carried the token alone");
+    let token = stored_token(&setup.home_of("dave"));
+    assert!(token.starts_with("dibs_"), "{token}");
+    assert!(
+        said.contains("Added dave (Dave)") && said.contains("shown only this once"),
+        "the sentence goes to standard error: {said}"
+    );
+    assert!(!said.contains(&token), "{said}");
+    let whoami = setup
+        .dibs_as("dave", &setup.elsewhere())
+        .arg("whoami")
+        .output()
+        .unwrap();
+    assert_eq!(status(&whoami), 0);
+    assert!(text(&whoami.stdout).starts_with("dave (Dave)"));
+}
+
+#[test]
+fn an_admin_rotating_their_own_token_into_login_is_signed_in_with_the_new_one() {
+    let setup = Setup::new();
+    let before = stored_token(&setup.home(&setup.alice));
+    let (said, login) = piped_into_login(
+        &setup,
+        "alice",
+        &["admin", "token", "rotate", "alice"],
+        "alice",
+    );
+    assert_eq!(status(&login), 0);
+    let after = stored_token(&setup.home(&setup.alice));
+    assert_ne!(after, before);
+    assert!(said.contains("Revoked every token of alice"), "{said}");
+    let whoami = setup
+        .dibs(&setup.alice, &setup.elsewhere())
+        .arg("whoami")
+        .output()
+        .unwrap();
+    assert_eq!(status(&whoami), 0, "alice signs in with the rotated token");
+}
+
+#[test]
+fn a_token_whose_pipe_closed_early_is_reported_as_lost_without_a_panic() {
+    let setup = Setup::new();
+    let mut rotating = setup
+        .process_as("alice", &setup.elsewhere())
+        .args(["admin", "token", "rotate", "bob"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(rotating.stdout.take());
+    let out = rotating.wait_with_output().unwrap();
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        said.contains("could not be written to standard output, so it is lost")
+            && said.contains("rotate it again"),
+        "{said}"
+    );
+    assert!(!said.contains("panicked"), "{said}");
+}
+
+#[test]
+fn with_json_the_token_stays_in_the_answer_into_a_pipe_too() {
+    let setup = Setup::new();
+    let out = setup
+        .dibs(&setup.alice, &setup.elsewhere())
+        .args(["admin", "token", "rotate", "bob", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&out), 0);
+    assert!(json(&out)["token"].as_str().unwrap().starts_with("dibs_"));
+    assert!(text(&out.stderr).is_empty(), "{}", text(&out.stderr));
 }

@@ -514,7 +514,8 @@ mod tests {
         let ctx = Context::new(
             HashMap::new(),
             dir.path().to_path_buf(),
-            Printer::new(false),
+            Printer::new(false, false),
+            dibs_client::ClientOptions::default(),
         );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()

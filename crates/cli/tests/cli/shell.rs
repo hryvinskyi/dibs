@@ -227,3 +227,54 @@ fn a_push_to_a_protected_branch_is_denied_without_a_call_and_its_pusher_passes()
     let pusher = before(&setup, "alice", &api, "git push origin main");
     assert_eq!(pusher["decision"], "no_objection", "{pusher}");
 }
+
+#[test]
+fn a_push_that_names_deletes_or_may_carry_a_protected_tag_is_denied_and_its_pusher_passes() {
+    let setup = Setup::new();
+    let mut settings = two_repositories();
+    settings["repos"][0]["protected_refs"] = json!([{"ref": "refs/tags/v*", "pushers": ["alice"]}]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let warm = before(&setup, "bob", &api, "git status");
+    assert_eq!(warm["decision"], "no_objection", "{warm}");
+    for line in [
+        "git push origin v2.4.0",
+        "git push origin refs/tags/v2.4.0",
+        "git push origin :refs/tags/v2.3.0",
+        "git push origin --delete v2.3.0",
+        "git push --tags",
+        "git push --follow-tags origin main",
+        "git push --mirror origin",
+    ] {
+        let answer = before(&setup, "bob", &api, line);
+        assert_eq!(answer["decision"], "deny", "{line}: {answer}");
+        let reason = answer["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("only alice may push to") && reason.contains("Do not push or delete"),
+            "{line}: {reason}"
+        );
+        assert!(!reason.contains("--no-verify"), "{line}: {reason}");
+    }
+    crate::support::git(&api, &["config", "push.followTags", "true"]);
+    let following = before(&setup, "bob", &api, "git push origin main");
+    assert_eq!(
+        following["decision"], "deny",
+        "push.followTags carries tags: {following}"
+    );
+    crate::support::git(&api, &["config", "--unset", "push.followTags"]);
+    for line in ["git push origin main", "git push origin nightly"] {
+        let answer = before(&setup, "bob", &api, line);
+        assert_eq!(answer["decision"], "no_objection", "{line}: {answer}");
+    }
+    for line in [
+        "git push origin v2.4.0",
+        "git push --tags",
+        "git push origin :refs/tags/v2.3.0",
+    ] {
+        let answer = before(&setup, "alice", &api, line);
+        assert_eq!(
+            answer["decision"], "no_objection",
+            "the pusher: {line}: {answer}"
+        );
+    }
+}

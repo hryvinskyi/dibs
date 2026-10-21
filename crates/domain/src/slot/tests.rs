@@ -1003,7 +1003,8 @@ fn a_protected_branch_is_judged_before_any_freeze_and_lets_its_pushers_through()
     }];
     let protected =
         ProjectSettings::parse(&document, &crate::hot_rule::HotRuleRegistry::standard()).unwrap();
-    let main = RepoRef::of(RepoId::implicit(), "refs/heads/main").unwrap();
+    let main =
+        crate::protection::ProtectedTarget::parse(RepoId::implicit(), "refs/heads/main").unwrap();
     let facts = GitFacts {
         branch: Some("feature".to_owned()),
         config: Vec::new(),
@@ -1051,7 +1052,7 @@ fn a_protected_branch_is_judged_before_any_freeze_and_lets_its_pushers_through()
             holder: ALICE,
             purpose: run.board.holds[0].purpose.clone(),
             until: run.board.holds[0].expires_at,
-            target: main,
+            target: RepoRef::of(RepoId::implicit(), "refs/heads/main").unwrap(),
         },
         "without protection no branch counts as protected"
     );

@@ -30,7 +30,8 @@ pub const AGENT: &str = "cli";
 /// The longest session label.
 const MAX_LABEL: usize = 64;
 
-/// The environment, the current directory and the output form.
+/// The environment, the current directory, the output form and the time limits of the command's
+/// requests.
 #[derive(Clone)]
 pub struct Context {
     env: HashMap<String, String>,
@@ -38,6 +39,7 @@ pub struct Context {
     pub cwd: PathBuf,
     /// The output form.
     pub printer: Printer,
+    options: ClientOptions,
 }
 
 /// A signed-in connection to one project.
@@ -57,9 +59,24 @@ pub struct Connection {
 }
 
 impl Context {
-    /// A context over this environment and directory.
-    pub fn new(env: HashMap<String, String>, cwd: PathBuf, printer: Printer) -> Self {
-        Self { env, cwd, printer }
+    /// A context over this environment and directory, its requests bounded by `options`.
+    pub fn new(
+        env: HashMap<String, String>,
+        cwd: PathBuf,
+        printer: Printer,
+        options: ClientOptions,
+    ) -> Self {
+        Self {
+            env,
+            cwd,
+            printer,
+            options,
+        }
+    }
+
+    /// The time limits of the command's requests.
+    pub fn client_options(&self) -> ClientOptions {
+        self.options
     }
 
     /// A variable of the environment.
@@ -144,7 +161,7 @@ impl Context {
                 ));
             }
         };
-        let client = Client::new(key.server.clone(), token, ClientOptions::default())?;
+        let client = Client::new(key.server.clone(), token, self.options)?;
         let state = StateDir::new(self.locations()?.state_dir(), &key);
         let me = match client.me().await {
             Ok(me) => me,

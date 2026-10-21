@@ -16,6 +16,7 @@ use time::OffsetDateTime;
 
 use crate::handle::Handle;
 use crate::ids::MemberId;
+use crate::protection::ProtectedTarget;
 use crate::push::{PushProtection, git_pushes};
 use crate::repo::RepoId;
 use crate::slot::command::SimpleCommand;
@@ -27,11 +28,11 @@ use crate::slot::state::{Liveness, SlotBoard, SlotHold};
 pub enum CommandVerdict {
     /// Nothing: no slot governs it.
     Free,
-    /// A push that updates, or may update, a protected branch the member is not among the pushers
-    /// of; a pull request is the way there.
+    /// A push that updates, or may update, a protected branch or tag the member is not among the
+    /// pushers of; for a branch, a pull request is the way there.
     NeedsPermission {
-        /// The branch.
-        target: RepoRef,
+        /// The protected branch, or the tags.
+        target: ProtectedTarget,
         /// The members who may push to it, by handle.
         pushers: BTreeSet<Handle>,
         /// Whether the push names that branch; `false` when it pushes every branch, or which ones

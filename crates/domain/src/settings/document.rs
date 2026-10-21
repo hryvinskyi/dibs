@@ -149,11 +149,11 @@ pub struct ContractDocument {
     pub consumers: Vec<String>,
 }
 
-/// One protected branch as written.
+/// One protected ref as written.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectedRefDocument {
-    /// The branch, `refs/heads/<name>`.
+    /// The branch, `refs/heads/<name>`, or the tags, `refs/tags/<name>` or `refs/tags/<prefix>*`.
     #[serde(rename = "ref")]
     pub target: String,
     /// The handles of the members who may push to it; none means nobody pushes to it directly.

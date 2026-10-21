@@ -128,3 +128,67 @@ fn an_invalid_configuration_file_exits_2_naming_it() {
     assert_eq!(status(&out), 2);
     assert!(text(&out.stderr).contains(".dibs.toml"));
 }
+
+#[test]
+fn a_person_waits_out_a_slow_server_and_a_hook_still_gives_up_within_its_limit() {
+    use std::time::{Duration, Instant};
+
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let edit = serde_json::json!({
+        "protocol": 1,
+        "session": "sess-1234-abcd",
+        "cwd": api.to_string_lossy(),
+        "thread": "main",
+        "tool": {"kind": "edit", "paths": ["src/billing/a.rs"]},
+    })
+    .to_string();
+    let hook = || {
+        setup
+            .dibs(&setup.bob, &api)
+            .args(["hook", "neutral", "before-tool"])
+            .write_stdin(edit.clone())
+            .output()
+            .unwrap()
+    };
+    assert_eq!(
+        status(&hook()),
+        0,
+        "a first hook warms this machine's cache"
+    );
+    setup.server.delay_answers(Duration::from_secs(6));
+
+    let started = Instant::now();
+    let out = setup.dibs(&setup.bob, &api).arg("whoami").output().unwrap();
+    assert_eq!(status(&out), 0, "past the five seconds a hook may wait");
+    assert!(text(&out.stdout).starts_with("bob"));
+    assert!(started.elapsed() >= Duration::from_secs(6));
+
+    let started = Instant::now();
+    let out = hook();
+    let took = started.elapsed();
+    assert_eq!(status(&out), 0);
+    assert!(
+        text(&out.stdout).contains("did not answer in time"),
+        "the hook asked the server and gave up: {}",
+        text(&out.stdout)
+    );
+    assert!(
+        took < Duration::from_secs(4),
+        "the hook kept its two-second limit: {took:?}"
+    );
+}
+
+#[test]
+fn a_connection_reset_under_a_persons_sign_in_is_tried_once_more() {
+    let setup = Setup::new();
+    let resetting = dibs_test_server::resetting_first_connection(&setup.server.url()).unwrap();
+    let out = setup
+        .dibs_as("bob-elsewhere", &setup.elsewhere())
+        .args(["login", "--server", &resetting])
+        .write_stdin(format!("{}\n", setup.bob.token))
+        .output()
+        .unwrap();
+    assert_eq!(status(&out), 0, "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("as bob"));
+}

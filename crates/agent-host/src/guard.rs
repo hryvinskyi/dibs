@@ -806,11 +806,7 @@ fn command_outcome(verdict: &CommandVerdict, known: &KnownBoard) -> GuardOutcome
             pushers,
             certain,
         } => GuardOutcome::Deny {
-            reason: Text::new(wording::needs_permission(
-                &target.to_string(),
-                pushers,
-                *certain,
-            )),
+            reason: Text::new(wording::needs_permission(target, pushers, *certain)),
         },
         CommandVerdict::Frozen {
             slot,

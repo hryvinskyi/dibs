@@ -1,4 +1,4 @@
-//! The protected branches and the pull-request status of one repository of a settings document,
+//! The protected refs and the pull-request status of one repository of a settings document,
 //! validated and written back.
 
 use std::collections::BTreeSet;
@@ -7,22 +7,22 @@ use super::SettingsError;
 use super::document::{PrStatusDocument, ProtectedRefDocument};
 use crate::handle::Handle;
 use crate::pr_status::{PrStatusSettings, StatusContext};
-use crate::protection::ProtectedRef;
+use crate::protection::{ProtectedRef, ProtectedTarget};
 use crate::repo::RepoId;
-use crate::slot::RepoRef;
 
-/// Validates the protected branches of `repo`: each `refs/heads/<branch>`, each once, every pusher
-/// a handle.
+/// Validates the protected refs of `repo`: each a branch `refs/heads/<branch>` or tags
+/// `refs/tags/<name>` or `refs/tags/<prefix>*`, each once, every pusher a handle.
 pub(super) fn parse_protected_refs(
     repo: &RepoId,
     documents: &[ProtectedRefDocument],
 ) -> Result<Vec<ProtectedRef>, SettingsError> {
     let mut protected: Vec<ProtectedRef> = Vec::with_capacity(documents.len());
     for document in documents {
-        let target = RepoRef::of(repo.clone(), &document.target).ok_or_else(|| {
+        let target = ProtectedTarget::parse(repo.clone(), &document.target).map_err(|error| {
             SettingsError::ProtectedRef {
                 repo: repo.clone(),
                 text: document.target.clone(),
+                error,
             }
         })?;
         if protected.iter().any(|known| known.target == target) {
@@ -72,12 +72,12 @@ pub(super) fn parse_pr_status(
     })
 }
 
-/// The protected branches written back.
+/// The protected refs written back.
 pub(super) fn protected_documents(protected: &[ProtectedRef]) -> Vec<ProtectedRefDocument> {
     protected
         .iter()
         .map(|rule| ProtectedRefDocument {
-            target: rule.target.name.clone(),
+            target: rule.target.name().to_owned(),
             pushers: rule.pushers.iter().map(ToString::to_string).collect(),
         })
         .collect()
@@ -96,6 +96,7 @@ pub(super) fn pr_status_document(settings: &PrStatusSettings) -> Option<PrStatus
 mod tests {
     use super::*;
     use crate::hot_rule::HotRuleRegistry;
+    use crate::protection::RefKind;
     use crate::settings::ProjectSettings;
     use crate::testing::document;
 
@@ -158,7 +159,109 @@ mod tests {
     }
 
     #[test]
-    fn protected_refs_are_branches_each_once_with_handles_for_pushers() {
+    fn tags_are_protected_by_name_or_by_a_trailing_star_and_round_trip() {
+        let settings = parse(
+            r#"{"repos":[
+                {"id":"api","remote":"example.com/acme/api",
+                 "protected_refs":[{"ref":"refs/heads/main","pushers":["alice"]},
+                                   {"ref":"refs/tags/v*","pushers":["carol"]},
+                                   {"ref":"refs/tags/stable","pushers":[]}]}]}"#,
+        )
+        .unwrap();
+        let api = &settings.repos()[0];
+        let names: Vec<String> = api
+            .protected_refs
+            .iter()
+            .map(|rule| rule.target.to_string())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "api:refs/heads/main",
+                "api:refs/tags/v*",
+                "api:refs/tags/stable"
+            ]
+        );
+        assert_eq!(api.protected_refs[1].target.kind(), RefKind::Tag);
+        assert!(api.protected_refs[1].target.covers("refs/tags/v2.4.0"));
+        assert!(api.protects_branch());
+        let document = settings.to_document();
+        let written = &document.repos[0].protected_refs;
+        assert_eq!(written[1].target, "refs/tags/v*");
+        assert_eq!(written[1].pushers, ["carol"]);
+        let again = ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap();
+        assert_eq!(again, settings);
+
+        let tags_only =
+            parse(r#"{"protected_refs":[{"ref":"refs/tags/v*","pushers":["carol"]}]}"#).unwrap();
+        assert!(
+            !tags_only.repos()[0].protects_branch(),
+            "protected tags protect no branch"
+        );
+    }
+
+    #[test]
+    fn without_protected_tags_the_branches_and_everything_else_stay() {
+        let settings = parse(
+            r#"{"stale_after":"2h",
+                "protected_refs":[{"ref":"refs/tags/v*","pushers":["carol"]},
+                                  {"ref":"refs/heads/main","pushers":["alice"]}]}"#,
+        )
+        .unwrap();
+        let older = settings.without_protected_tags();
+        let rules: Vec<String> = older.repos()[0]
+            .protected_refs
+            .iter()
+            .map(|rule| rule.target.to_string())
+            .collect();
+        assert_eq!(rules, ["default:refs/heads/main"]);
+        assert_eq!(older.stale_after(), settings.stale_after());
+        let mut expected = settings.to_document();
+        expected.protected_refs.remove(0);
+        assert_eq!(older.to_document(), expected);
+        let none = parse(r#"{"stale_after":"2h"}"#).unwrap();
+        assert_eq!(none.without_protected_tags(), none);
+    }
+
+    #[test]
+    fn a_tag_pattern_with_a_star_inside_two_stars_or_nothing_is_refused_by_name() {
+        let refused = |text: &str| {
+            parse(&format!(r#"{{"protected_refs":[{{"ref":"{text}"}}]}}"#))
+                .map_err(|error| error.to_string())
+                .unwrap_err()
+        };
+        let inside = refused("refs/tags/v*.0");
+        assert!(
+            inside.starts_with("protected ref 'refs/tags/v*.0' of repository 'default':")
+                && inside.contains("'*' at the end only"),
+            "{inside}"
+        );
+        let double = refused("refs/tags/v**");
+        assert!(double.contains("'**' is not accepted"), "{double}");
+        let empty = refused("refs/tags/");
+        assert!(empty.contains("after 'refs/tags/'"), "{empty}");
+        let branch_glob = refused("refs/heads/release/*");
+        assert!(branch_glob.contains("one branch exactly"), "{branch_glob}");
+        assert!(matches!(
+            parse_protected_refs(
+                &RepoId::implicit(),
+                &[
+                    ProtectedRefDocument {
+                        target: "refs/tags/v*".to_owned(),
+                        pushers: Vec::new(),
+                    },
+                    ProtectedRefDocument {
+                        target: "refs/tags/v*".to_owned(),
+                        pushers: vec!["alice".to_owned()],
+                    },
+                ]
+            ),
+            Err(SettingsError::DuplicateProtectedRef { .. })
+        ));
+    }
+
+    #[test]
+    fn protected_refs_are_branches_or_tags_each_once_with_handles_for_pushers() {
         let repo = RepoId::implicit();
         let written = |target: &str, pushers: &[&str]| ProtectedRefDocument {
             target: target.to_owned(),
@@ -168,8 +271,9 @@ mod tests {
             parse_protected_refs(&repo, &[written("main", &[])]),
             Err(SettingsError::ProtectedRef { .. })
         ));
+        assert!(parse_protected_refs(&repo, &[written("refs/tags/v1", &[])]).is_ok());
         assert!(matches!(
-            parse_protected_refs(&repo, &[written("refs/tags/v1", &[])]),
+            parse_protected_refs(&repo, &[written("refs/notes/x", &[])]),
             Err(SettingsError::ProtectedRef { .. })
         ));
         assert!(matches!(

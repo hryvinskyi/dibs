@@ -2,12 +2,16 @@
 //! answer or a [`ClientError`].
 //!
 //! Every request carries the member's bearer token and `User-Agent: dibs/<version>`, connects
-//! within 2 s and is answered within 5 s unless [`ClientOptions`] say otherwise. Nothing is
-//! retried here: a caller decides what a failure means for it. The event stream is the one
-//! long-lived request; it has no total limit, notices a silent connection by its read limit, and
-//! reconnects where it left off.
+//! within 2 s and is answered within 5 s unless [`ClientOptions`] say otherwise, each sending with
+//! limits of its own. Only what the options allow is sent once more: a `GET`, or a request whose
+//! repeat changes nothing the first did not, when its connection could not be opened in time and
+//! so nothing was sent; and a `GET` also when its connection was reset, since only a read is
+//! answered the same however often the server saw it. A caller decides what any other failure means
+//! for it. The event stream is the one long-lived request; it has no total limit, notices a silent
+//! connection by its read limit, and reconnects where it left off.
 
 use std::collections::VecDeque;
+use std::error::Error as _;
 use std::time::Duration;
 
 use futures_util::stream::{self, BoxStream, Stream, StreamExt};
@@ -65,9 +69,15 @@ pub struct ClientOptions {
     pub stream_backoff: Duration,
     /// The longest wait before the event stream reconnects.
     pub stream_backoff_max: Duration,
+    /// Whether a request is sent once more when its connection is lost: a `GET`, or a route
+    /// documented as one whose repeat changes nothing, when its connection could not be opened in
+    /// time; a `GET` alone when its connection was reset.
+    pub retry_lost_connection: bool,
 }
 
 impl Default for ClientOptions {
+    /// The limits of a caller someone waits on: an agent's tool call or git's hook. Nothing is
+    /// retried.
     fn default() -> Self {
         Self {
             connect_timeout: Duration::from_secs(2),
@@ -75,8 +85,31 @@ impl Default for ClientOptions {
             stream_silence: Duration::from_secs(60),
             stream_backoff: Duration::from_secs(1),
             stream_backoff_max: Duration::from_secs(30),
+            retry_lost_connection: false,
         }
     }
+}
+
+impl ClientOptions {
+    /// The limits of a command a person runs and watches: 5 s to connect and 20 s in all for each
+    /// sending, longer than the server's own 10 s limit on a request, and a request sent once more
+    /// when its connection is lost as [`ClientOptions::retry_lost_connection`] says, so that one
+    /// request may take up to 40 s.
+    pub fn for_person() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(5),
+            timeout: Duration::from_secs(20),
+            retry_lost_connection: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// What a request was answered with, before it is decoded.
+struct Answer {
+    status: u16,
+    content_type: Option<String>,
+    body: Vec<u8>,
 }
 
 /// A member's connection to one server.
@@ -219,7 +252,7 @@ impl Client {
         &self,
         session: &RegisterSession,
     ) -> Result<Session, ClientError> {
-        self.send(self.request(Method::POST, "/v1/sessions").json(session))
+        self.send_repeatable(self.request(Method::POST, "/v1/sessions").json(session))
             .await
     }
 
@@ -298,8 +331,12 @@ impl Client {
     /// # Errors
     /// [`ClientError`].
     pub async fn create_item(&self, item: &NewItem) -> Result<CreatedItem, ClientError> {
-        self.send(self.request(Method::POST, "/v1/items").json(item))
-            .await
+        let request = self.request(Method::POST, "/v1/items").json(item);
+        if item.external_ref.is_some() {
+            self.send_repeatable(request).await
+        } else {
+            self.send(request).await
+        }
     }
 
     /// `POST /v1/items/{id}/claim`: claims the item, or renews the caller's own claim.
@@ -324,7 +361,7 @@ impl Client {
         id: ItemId,
         narrow: &NarrowRequest,
     ) -> Result<Narrowed, ClientError> {
-        self.send(
+        self.send_repeatable(
             self.request(Method::POST, &format!("/v1/items/{id}/claim/narrow"))
                 .json(narrow),
         )
@@ -412,7 +449,7 @@ impl Client {
         id: ItemId,
         blocked_by: ItemId,
     ) -> Result<DependencyChange, ClientError> {
-        self.send(
+        self.send_repeatable(
             self.request(Method::POST, &format!("/v1/items/{id}/dependencies"))
                 .json(&AddDependency { blocked_by }),
         )
@@ -428,7 +465,7 @@ impl Client {
         id: ItemId,
         blocked_by: ItemId,
     ) -> Result<DependencyChange, ClientError> {
-        self.send(
+        self.send_repeatable(
             self.request(Method::DELETE, &format!("/v1/items/{id}/dependencies"))
                 .query(&[("blocked_by", blocked_by.get())]),
         )
@@ -526,7 +563,7 @@ impl Client {
     /// # Errors
     /// [`ClientError`].
     pub async fn ack(&self, message: MessageId) -> Result<Acked, ClientError> {
-        self.send(
+        self.send_repeatable(
             self.request(Method::POST, &format!("/v1/messages/{message}/ack"))
                 .json(&Empty {}),
         )
@@ -711,7 +748,7 @@ impl Client {
     /// [`ClientError`].
     pub async fn revoke_token(&self, prefix: &str) -> Result<TokenRevoked, ClientError> {
         let segment = percent_encode_segment(prefix);
-        self.send(self.request(Method::DELETE, &format!("/v1/admin/tokens/{segment}")))
+        self.send_repeatable(self.request(Method::DELETE, &format!("/v1/admin/tokens/{segment}")))
             .await
     }
 
@@ -723,7 +760,7 @@ impl Client {
         &self,
         settings: &SettingsDocument,
     ) -> Result<SettingsApplied, ClientError> {
-        self.send(
+        self.send_repeatable(
             self.request(Method::PUT, "/v1/admin/settings")
                 .json(settings),
         )
@@ -859,19 +896,63 @@ impl Client {
             .header(ACCEPT, HeaderValue::from_static("application/json"))
     }
 
+    /// Sends a request: a `GET` as a read, anything else once.
     async fn send<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T, ClientError> {
-        let response = request.send().await.map_err(|error| self.failed(&error))?;
-        let status = response.status().as_u16();
-        let content_type = content_type(&response);
-        let body = response
-            .bytes()
-            .await
-            .map_err(|error| self.failed(&error))?;
+        self.exchange(request, Repeat::Once).await
+    }
+
+    /// Sends a request whose repeat changes nothing the first did not.
+    async fn send_repeatable<T: DeserializeOwned>(
+        &self,
+        request: RequestBuilder,
+    ) -> Result<T, ClientError> {
+        self.exchange(request, Repeat::Repeatable).await
+    }
+
+    async fn exchange<T: DeserializeOwned>(
+        &self,
+        request: RequestBuilder,
+        repeat: Repeat,
+    ) -> Result<T, ClientError> {
+        let request = request.build().map_err(|error| self.failed(&error))?;
+        let repeat = if request.method() == Method::GET {
+            Repeat::Read
+        } else {
+            repeat
+        };
+        let spare = if self.options.retry_lost_connection {
+            request.try_clone()
+        } else {
+            None
+        };
+        let answer = match (self.attempt(request).await, spare) {
+            (Err(error), Some(spare))
+                if lost(&error).is_some_and(|lost| sends_again(lost, repeat)) =>
+            {
+                tracing::debug!(error = %error, "the connection was lost; sending the request once more");
+                self.attempt(spare).await
+            }
+            (answer, _) => answer,
+        }
+        .map_err(|error| self.failed(&error))?;
         decode(Response {
             server: self.server.as_str(),
+            status: answer.status,
+            content_type: answer.content_type.as_deref(),
+            body: &answer.body,
+        })
+    }
+
+    /// One sending of `request`, its answer read whole.
+    async fn attempt(&self, request: reqwest::Request) -> Result<Answer, reqwest::Error> {
+        let response = self.http.execute(request).await?;
+        let status = response.status().as_u16();
+        let content_type = content_type(&response);
+        let body = response.bytes().await?.to_vec();
+        Ok(Answer {
             status,
-            content_type: content_type.as_deref(),
-            body: &body,
+            content_type,
+            body,
         })
     }
 
@@ -905,6 +986,58 @@ fn percent_encode_segment(text: &str) -> String {
         }
     }
     out
+}
+
+/// How a request's connection was lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lost {
+    /// It could not be opened in time: nothing was sent.
+    Unopened,
+    /// It was reset before the answer was read whole: the server may have acted on the request.
+    Reset,
+}
+
+/// What sending a request again would do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    /// A read, answered the same however often the server sees it.
+    Read,
+    /// A change whose repeat changes nothing more, though its answer may say "nothing changed"
+    /// where the first sending changed something.
+    Repeatable,
+    /// A change sent once only.
+    Once,
+}
+
+/// Whether a request is sent again after its connection was lost. A read always is. A
+/// repeatable change is sent again only when nothing was sent, so that its answer never reports
+/// as unchanged what the lost sending changed. Any other change never is.
+fn sends_again(lost: Lost, repeat: Repeat) -> bool {
+    match (lost, repeat) {
+        (_, Repeat::Read) | (Lost::Unopened, Repeat::Repeatable) => true,
+        (Lost::Reset, Repeat::Repeatable) | (_, Repeat::Once) => false,
+    }
+}
+
+/// How the connection of a failed request was lost, when it was: not opened within the connect
+/// limit, or reset before the answer was read whole.
+fn lost(error: &reqwest::Error) -> Option<Lost> {
+    if error.is_connect() && error.is_timeout() {
+        return Some(Lost::Unopened);
+    }
+    let mut cause = error.source();
+    while let Some(inner) = cause {
+        if let Some(io) = inner.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            )
+        {
+            return Some(Lost::Reset);
+        }
+        cause = inner.source();
+    }
+    None
 }
 
 /// Makes rustls use the `ring` provider for every TLS connection of this process, unless one is
@@ -1055,8 +1188,34 @@ mod tests {
         let options = ClientOptions::default();
         assert_eq!(options.connect_timeout, Duration::from_secs(2));
         assert_eq!(options.timeout, Duration::from_secs(5));
+        assert!(!options.retry_lost_connection);
         assert!(USER_AGENT.starts_with("dibs/"));
         assert_eq!(USER_AGENT, format!("dibs/{}", env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn a_person_waits_longer_than_the_server_answers_and_a_lost_connection_is_tried_again() {
+        let person = ClientOptions::for_person();
+        assert_eq!(person.connect_timeout, Duration::from_secs(5));
+        assert_eq!(person.timeout, Duration::from_secs(20));
+        assert!(person.retry_lost_connection);
+        let machine = ClientOptions::default();
+        assert_eq!(person.stream_silence, machine.stream_silence);
+        assert_eq!(person.stream_backoff, machine.stream_backoff);
+        assert_eq!(person.stream_backoff_max, machine.stream_backoff_max);
+    }
+
+    #[test]
+    fn a_read_is_sent_again_after_any_lost_connection_and_a_change_only_when_nothing_was_sent() {
+        assert!(sends_again(Lost::Unopened, Repeat::Read));
+        assert!(sends_again(Lost::Reset, Repeat::Read));
+        assert!(sends_again(Lost::Unopened, Repeat::Repeatable));
+        assert!(
+            !sends_again(Lost::Reset, Repeat::Repeatable),
+            "a reset may follow the change: its repeat would answer that nothing changed"
+        );
+        assert!(!sends_again(Lost::Unopened, Repeat::Once));
+        assert!(!sends_again(Lost::Reset, Repeat::Once));
     }
 
     #[test]

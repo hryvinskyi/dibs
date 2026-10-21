@@ -18,6 +18,7 @@ mod release;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -61,7 +62,7 @@ fn main() -> ExitCode {
             error.exit()
         }
     };
-    let printer = Printer::new(cli.json);
+    let printer = Printer::new(cli.json, std::io::stdout().is_terminal());
     let command = match cli.command {
         Invocation::Hook(hook) => {
             return commands::hook::hook(&hook.host, &hook.event, &env, started);
@@ -108,7 +109,8 @@ fn run(command: Command, env: HashMap<String, String>, printer: Printer) -> Resu
         .map_err(|_| Failure::config("no_runtime", "The command could not start its runtime."))?;
     let off = guard::switched_off(env.get(guard::OFF_VAR).map(String::as_str));
     let reports_after = command.reports_after(off);
-    let ctx = Context::new(env, cwd, printer);
+    let options = command.client_options();
+    let ctx = Context::new(env, cwd, printer, options);
     let result = runtime.block_on(commands::run(command, &ctx));
     if reports_after {
         commands::sync::report_later(&ctx);

@@ -12,6 +12,7 @@ use dibs_domain::hot_rule::Note;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ExternalRef;
 use dibs_domain::paths::RelPath;
+use dibs_domain::protection::{ProtectedTarget, RefKind};
 use dibs_domain::report::RefusalId;
 use dibs_domain::review::PrRef;
 use dibs_domain::settings::EditPolicy;
@@ -116,15 +117,44 @@ fn pr_list(prs: &[PrRef]) -> String {
 }
 
 /// The reason a push is refused: it updates `target`, or — when not `certain` — may update it, and
-/// only `pushers` may push to that branch. The way on is a branch of one's own and a pull request,
-/// recorded on the claim.
-pub fn needs_permission(target: &str, pushers: &BTreeSet<Handle>, certain: bool) -> String {
+/// only `pushers` may push there. For a branch, the way on is a branch of one's own and a pull
+/// request, recorded on the claim; for a tag, one of its pushers pushes it.
+pub fn needs_permission(
+    target: &ProtectedTarget,
+    pushers: &BTreeSet<Handle>,
+    certain: bool,
+) -> String {
     let who = if pushers.is_empty() {
         "nobody pushes to directly".to_owned()
     } else {
         let names: Vec<String> = pushers.iter().map(ToString::to_string).collect();
         format!("only {} may push to", names.join(", "))
     };
+    match target.kind() {
+        RefKind::Branch => branch_needs_permission(&target.to_string(), &who, certain),
+        RefKind::Tag => tag_needs_permission(target, &who, certain),
+    }
+}
+
+/// The reason git's pre-push hook refuses a push: [`needs_permission`], and for a branch, that
+/// `git push --no-verify` gets past the check and breaks the team's rule. A protected tag's
+/// refusal names no way past it.
+pub fn push_needs_permission(
+    target: &ProtectedTarget,
+    pushers: &BTreeSet<Handle>,
+    certain: bool,
+) -> String {
+    let reason = needs_permission(target, pushers, certain);
+    match target.kind() {
+        RefKind::Branch => format!(
+            "{reason} A push with git push --no-verify gets past this check and breaks the team's rule."
+        ),
+        RefKind::Tag => reason,
+    }
+}
+
+/// [`needs_permission`] for a protected branch, `who` saying who may push to it.
+fn branch_needs_permission(target: &str, who: &str, certain: bool) -> String {
     let what = if certain {
         format!("This push goes to {target}, which {who}.")
     } else {
@@ -134,6 +164,32 @@ pub fn needs_permission(target: &str, pushers: &BTreeSet<Handle>, certain: bool)
     };
     format!(
         "{what} Do not push to a protected branch: push your own branch, open a pull request, and record it on your claim (dibs_review, or dibs claim review <item> --pr <owner>/<repo>#<number>)."
+    )
+}
+
+/// [`needs_permission`] for protected tags, `who` saying who may push them: the tag by its name
+/// when the protection names one, the tags its pattern covers otherwise.
+fn tag_needs_permission(target: &ProtectedTarget, who: &str, certain: bool) -> String {
+    let repo = target.repo();
+    let (tags, them) = match target.prefix() {
+        None => (
+            format!("the tag {} of {repo}", target.short_name()),
+            format!("the tag {}", target.short_name()),
+        ),
+        Some(_) => (
+            format!("the tags of {repo} that {} covers", target.short_name()),
+            format!("tags that {} covers", target.short_name()),
+        ),
+    };
+    let what = if certain {
+        format!("This push creates, moves or deletes {tags}, which {who}.")
+    } else {
+        format!(
+            "This push may create, move or delete {tags}, which {who}: it pushes every tag, or dibs cannot tell from the command and the checkout's git settings which tags it pushes. Push your branch without --tags or --follow-tags, and name it and the remote (git push origin <your-branch>)."
+        )
+    };
+    format!(
+        "{what} Do not push or delete {them}: leave them to a member who may push them, and push your work on your own branch."
     )
 }
 
@@ -965,10 +1021,69 @@ mod tests {
         assert!(nobody.contains("another member holds"), "{nobody}");
     }
 
+    fn protected(text: &str) -> ProtectedTarget {
+        ProtectedTarget::parse(dibs_domain::repo::RepoId::parse("api").unwrap(), text).unwrap()
+    }
+
+    #[test]
+    fn a_push_of_a_protected_tag_names_who_may_push_it_and_never_a_pull_request() {
+        let pushers: BTreeSet<Handle> = [handle("carol")].into();
+        let exact = protected("refs/tags/v1.0");
+        let text = needs_permission(&exact, &pushers, true);
+        assert!(
+            text.contains(
+                "This push creates, moves or deletes the tag v1.0 of api, which only carol may push to."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Do not push or delete the tag v1.0"),
+            "{text}"
+        );
+        assert!(!text.contains("pull request"), "{text}");
+
+        let tags = protected("refs/tags/v*");
+        let text = needs_permission(&tags, &pushers, true);
+        assert!(
+            text.contains("the tags of api that v* covers, which only carol may push to"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Do not push or delete tags that v* covers"),
+            "{text}"
+        );
+        let unsure = needs_permission(&tags, &pushers, false);
+        assert!(unsure.contains("may create, move or delete"), "{unsure}");
+        assert!(
+            unsure.contains("without --tags or --follow-tags"),
+            "{unsure}"
+        );
+        let nobody = needs_permission(&tags, &BTreeSet::new(), true);
+        assert!(nobody.contains("nobody pushes to directly"), "{nobody}");
+        for certain in [true, false] {
+            let refused = push_needs_permission(&tags, &pushers, certain);
+            assert!(!refused.contains("--no-verify"), "{refused}");
+        }
+    }
+
+    #[test]
+    fn a_refused_push_of_a_protected_branch_names_the_way_past_the_hook_and_its_cost() {
+        let pushers: BTreeSet<Handle> = [handle("alice")].into();
+        let refused = push_needs_permission(&protected("refs/heads/main"), &pushers, true);
+        assert!(refused.contains("open a pull request"), "{refused}");
+        assert!(
+            refused.ends_with(
+                "A push with git push --no-verify gets past this check and breaks the team's rule."
+            ),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn a_push_to_a_protected_branch_names_who_may_push_and_the_pull_request_way() {
         let pushers: BTreeSet<Handle> = [handle("alice"), handle("carol")].into();
-        let text = needs_permission("api:refs/heads/main", &pushers, true);
+        let main = protected("refs/heads/main");
+        let text = needs_permission(&main, &pushers, true);
         assert!(
             text.contains(
                 "This push goes to api:refs/heads/main, which only alice, carol may push to"
@@ -980,13 +1095,13 @@ mod tests {
             !text.contains("Refs #"),
             "a ticket convention is the team's: {text}"
         );
-        let unsure = needs_permission("api:refs/heads/main", &pushers, false);
+        let unsure = needs_permission(&main, &pushers, false);
         assert!(
             unsure.contains("may update api:refs/heads/main"),
             "{unsure}"
         );
         assert!(unsure.contains("Name the branch you push"), "{unsure}");
-        let nobody = needs_permission("api:refs/heads/main", &BTreeSet::new(), true);
+        let nobody = needs_permission(&main, &BTreeSet::new(), true);
         assert!(nobody.contains("nobody pushes to directly"), "{nobody}");
     }
 

@@ -26,7 +26,7 @@ use crate::hot_rule::{
 };
 use crate::paths::{PathGlob, PathGlobError, RelPath, RepoPath};
 use crate::pr_status::PrStatusSettings;
-use crate::protection::ProtectedRef;
+use crate::protection::{ProtectedRef, ProtectedTarget, ProtectedTargetError, RefKind};
 use crate::radar::Contract;
 use crate::repo::{RemoteUrl, RemoteUrlError, RepoId, RepoIdError};
 use crate::review::PrRef;
@@ -55,7 +55,8 @@ pub struct RepoSpec {
     pub areas: Vec<Area>,
     /// Its hot-file rules, in declaration order.
     pub hot: Vec<HotRuleSpec>,
-    /// Its branches only some members may push to, in declaration order, each branch once.
+    /// Its branches and tags only some members may push to, in declaration order, each ref or
+    /// pattern once.
     pub protected_refs: Vec<ProtectedRef>,
     /// Whether and how its pull requests get a status.
     pub pr_status: PrStatusSettings,
@@ -85,6 +86,13 @@ impl RepoSpec {
     /// Whether an area or a hot-file rule matches the path.
     pub fn is_governed(&self, path: &RelPath) -> bool {
         self.hot_rule_for(path).is_some() || self.area_for(path).is_some()
+    }
+
+    /// Whether it protects a branch; protected tags alone do not count.
+    pub fn protects_branch(&self) -> bool {
+        self.protected_refs
+            .iter()
+            .any(|rule| rule.target.kind() == RefKind::Branch)
     }
 
     /// The branch `name` (`refs/heads/main`, or `main`) of this repository.
@@ -292,15 +300,18 @@ pub enum SettingsError {
         /// The text as written.
         text: String,
     },
-    /// A protected branch is not a branch.
-    #[error("protected ref '{text}' of repository '{repo}' is not written 'refs/heads/<branch>'")]
+    /// A protected ref names no branch exactly and no tags.
+    #[error("protected ref '{text}' of repository '{repo}': {error}")]
     ProtectedRef {
         /// The repository.
         repo: RepoId,
         /// The ref as written.
         text: String,
+        /// What is wrong with it.
+        #[source]
+        error: ProtectedTargetError,
     },
-    /// A branch is protected twice.
+    /// A ref or pattern is protected twice.
     #[error("protected ref '{text}' of repository '{repo}' is declared twice")]
     DuplicateProtectedRef {
         /// The repository.
@@ -311,8 +322,8 @@ pub enum SettingsError {
     /// A pusher is not a handle.
     #[error("protected ref '{target}': pusher '{text}' is not a member's handle")]
     Pusher {
-        /// The branch.
-        target: RepoRef,
+        /// The protected ref.
+        target: ProtectedTarget,
         /// The text as written.
         text: String,
     },
@@ -617,6 +628,18 @@ impl ProjectSettings {
     /// The repositories, in declaration order; never empty.
     pub fn repos(&self) -> &[RepoSpec] {
         &self.repos
+    }
+
+    /// The same settings with every protected tag left out and the protected branches kept: what
+    /// a reader that knows protected branches only can parse.
+    #[must_use]
+    pub fn without_protected_tags(&self) -> Self {
+        let mut kept = self.clone();
+        for repo in &mut kept.repos {
+            repo.protected_refs
+                .retain(|rule| rule.target.kind() == RefKind::Branch);
+        }
+        kept
     }
 
     /// The repository of this id.

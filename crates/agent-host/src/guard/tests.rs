@@ -2237,6 +2237,82 @@ fn a_push_to_a_protected_branch_is_refused_from_the_settings_alone_and_its_pushe
     assert!(pusher.calls().is_empty());
 }
 
+/// One repository whose release tags `v*` only alice may push, and no protected branch.
+fn tagged_settings(member: &str) -> KnownSettings {
+    let document: SettingsDocument = serde_json::from_value(json!({
+        "repos": [{
+            "id": "api",
+            "remote": "https://example.com/acme/api.git",
+            "protected_refs": [{"ref": "refs/tags/v*", "pushers": ["alice"]}]
+        }]
+    }))
+    .unwrap();
+    KnownSettings {
+        member: handle(member),
+        settings: ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+    }
+}
+
+#[test]
+fn a_push_that_names_or_may_push_a_protected_tag_is_refused_from_the_settings_alone() {
+    let world = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: tagged_settings("bob"),
+            at: at(0),
+        });
+    });
+    for line in [
+        "git push origin v2.4.0",
+        "git push origin refs/tags/v2.4.0",
+        "git push origin :refs/tags/v2.3.0",
+        "git push --tags",
+        "git push origin feature --follow-tags",
+        "git push --mirror origin",
+    ] {
+        let before = world.0.borrow().git_reads;
+        let reason = denial(&run(&world, "neutral", "before-tool", &shell(line)));
+        assert!(
+            reason.contains("only alice may push to") && reason.contains("Do not push or delete"),
+            "{line}: {reason}"
+        );
+        assert!(!reason.contains("--no-verify"), "{line}: {reason}");
+        assert!(!reason.contains("pull request"), "{line}: {reason}");
+        assert_eq!(
+            world.0.borrow().git_reads - before,
+            1,
+            "one reading of the checkout's git settings, as for a branch: {line}"
+        );
+    }
+    for line in [
+        "git push origin main",
+        "git push origin nightly",
+        "git push --all origin",
+    ] {
+        let answer = run(&world, "neutral", "before-tool", &shell(line));
+        assert_eq!(no_objection(&answer)["notice"], Value::Null, "{line}");
+    }
+    assert!(world.calls().is_empty(), "a protected tag costs no call");
+
+    let pusher = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: tagged_settings("alice"),
+            at: at(0),
+        });
+    });
+    for line in [
+        "git push origin v2.4.0",
+        "git push --tags",
+        "git push origin :refs/tags/v2.3.0",
+    ] {
+        let answer = run(&pusher, "neutral", "before-tool", &shell(line));
+        assert_eq!(
+            reply(&answer),
+            json!({"protocol": 1, "decision": "no_objection"}),
+            "{line}"
+        );
+    }
+}
+
 #[test]
 fn a_protected_branch_is_refused_before_a_freeze_would_be_asked_about() {
     let world = World::new().with(|state| {

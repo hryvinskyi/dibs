@@ -20,7 +20,16 @@ members `alice` and `bob`.
   (see [operations](operations.md#client-versions)), a `dibs` client older than it is answered
   `426 client_too_old` on every `/v1` route but `GET /v1/version`, with a sentence saying how to update and
   `details.min_client`. Another agent, a browser or a probe is not judged by its `User-Agent`. The client's hooks treat
-  this answer as a server that cannot be reached: no decision, one warning.
+  this answer as a server that cannot be reached: no decision, one warning. A `dibs` client older than 0.1.1 cannot
+  read protected tags, so `GET /v1/me` serves it the settings without them (its protected branches stay); every other
+  caller gets them whole.
+- **Retries.** The `dibs` command line, run by a person, gives each sending of a request 5 seconds to connect and 20
+  seconds in all, so a request sent once more may take up to 40 seconds. It sends once more: a read (`GET`) whose connection timed out opening or was reset; and, only when its connection timed
+out opening so that nothing reached the server, registering a session, applying the settings, acknowledging a message,
+adding or removing a dependency, narrowing a claim, revoking a token, and creating an item named by a reference.
+Nothing else is sent again, and nothing is sent again after a reset but a read, so that an answer never reports as
+unchanged what a lost first sending changed. Its hooks, its background
+  sync, its tool server and the checks git's hooks run send nothing again.
 - **Unknown fields.** A field a route does not read is ignored in a request, except in the settings document and in an
   import batch (`PUT /v1/items`), which refuse unknown fields.
 
@@ -582,7 +591,7 @@ so a worker may send every report again; a match answers
 (`files`, the paths the merge changed relative to the repository's root, is optional and holds at most 3000; `head`,
 the branch the pull request was merged from, is optional; the body may be up to 2 MiB). The pull request leaves its claim (`pr_merged`). A merge that delivers also **moves the base** under
 other members' branches: see [Branches and overlaps](#branches-and-overlaps). That happens whether or not a claim
-recorded the pull request, so a merge no claim recorded still answers `matched: false` and changes no claim. A merge **delivers** the work when its repository protects no branch, or when
+recorded the pull request, so a merge no claim recorded still answers `matched: false` and changes no claim. A merge **delivers** the work when its repository protects no branch (protected tags do not count), or when
 `base` (`main` or `refs/heads/main`) is one of its protected branches; a merge into any other base — a stacked pull
 request merged into the branch of the one below it — delivers nothing yet, and is treated as a close (below).
 After a merge that delivers, with other pull requests recorded, the claim stays in review (`in_review`). With none left,
@@ -1038,7 +1047,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | `raised_per_hour` | How many `high` or `urgent` messages one member may write within an hour: 1 to 1000; default 10. What dibs writes itself is not counted. |
 | `areas` | For a project with one repository: `[{ "name": "billing", "paths": ["packages/billing/**"] }]`. |
 | `hot` | For a project with one repository: hot-file rules, first match wins. |
-| `protected_refs` | For a project with one repository: the branches only some members may push to; see below. |
+| `protected_refs` | For a project with one repository: the branches and tags only some members may push to; see below. |
 | `pr_status` | For a project with one repository: whether and how its pull requests get a status; see below. |
 | `contracts` | For a project with one repository: its published contracts; see below. |
 | `area_deps` | For a project with one repository: which of its areas depend on which; see below. |
@@ -1068,7 +1077,7 @@ A slot has a `name` (1 to 64 characters: lowercase letters, digits and `:._-`) a
 | `commands` | Up to 20 `{ "matches": "<regex>", "unless": "<regex>" }`, each 1 to 500 characters, matched against one simple command of a command line (below). |
 | `run_only` | Its commands run only inside `dibs slot run`: a hold from a plain take does not let them through. |
 | `group` | Slots of one group exclude each other. |
-| `freezes` | Branch refs nobody but the holder may push while it is held: `api:refs/heads/main`, or `refs/heads/main` in a project with one repository. |
+| `freezes` | Branch refs nobody but the holder may push while it is held: `api:refs/heads/main`, or `refs/heads/main` in a project with one repository. A tag is refused (`invalid_settings`): a slot freezes branches only. |
 | `note` | Shown with the slot, 1 to 500 characters. |
 
 The patterns are regular expressions of the Rust `regex` crate, which match in time linear in the input and have no
@@ -1083,26 +1092,48 @@ it keeps, and asks the server only `GET /v1/slots/{name}` for the few slots its 
 matches, and those that freeze a ref a `git push` in the line names. A line no slot governs asks the server nothing.
 `dibs check --push`, run from git's `pre-push` hook, judges the refs git says a push goes to by the same rule.
 
-**Protected branches.** `protected_refs: [{ "ref": "refs/heads/main", "pushers": ["alice"] }]` names, per repository,
-the branches only the members listed (by handle) may push to; an empty `pushers` means nobody pushes there directly.
-Where the forge offers no branch protection, this is how the agents keep a team's rule that everyone else's way to the
-branch is a pull request. A push is judged against the repository of the remote it goes to: the listed repository whose
+**Protected branches and tags.** `protected_refs: [{ "ref": "refs/heads/main", "pushers": ["alice"] }]` names, per
+repository, the branches and tags only the members listed (by handle) may push to; an empty `pushers` means nobody
+pushes there directly. Where the forge offers no branch protection, this is how the agents keep a team's rule that
+everyone else's way to the branch is a pull request, and that only the members who cut releases push release tags.
+A `ref` is one of:
+
+- `refs/heads/<branch>`: that branch, exactly; a branch takes no pattern.
+- `refs/tags/<name>`: that tag, exactly.
+- `refs/tags/<prefix>*`: every tag whose name starts with the prefix (`refs/tags/v*` covers `v1.2.0` and `v2/rc1`;
+  `refs/tags/*` covers every tag). The `*` comes once, at the end: `refs/tags/v*.0`, `refs/tags/v**` and an empty
+  `refs/tags/` are refused (`invalid_settings`, naming the ref and what is wrong with it), as is a name git would not
+  accept.
+
+Each `ref` is declared once per repository. A tag that several entries cover is pushed only by a member every one of
+them lists. A pusher of a branch is no pusher of a tag unless the tag's entry lists them too. A `dibs` client older than
+0.1.1 is served the settings without the tag entries (see *Client versions* above) and judges no tag. A push is judged against the repository of the remote it goes to: the listed repository whose
 `remote` is the URL of that remote (its fetch URL, after `url.<base>.insteadOf`); a remote no listed repository has — a
 fork — protects nothing, and in a project that lists no repositories every remote is its one repository. Protection is
 judged before any freeze and **fails closed**:
 
 - The agent's command check reads what a `git push` updates from the line and, where the line leaves it to git, from the
-  checkout's git settings — the current branch, its push remote and upstream, `push.default`, `remote.<name>.push` —
-  read only for a line that pushes, in a project that protects a branch, without asking the server. `HEAD`, a bare
+  checkout's git settings — the current branch, its push remote and upstream, `push.default`, `push.followTags`,
+  `remote.<name>.push` — read once, only for a line that pushes, in a project that protects a branch or a tag, without
+  asking the server. `HEAD`, a bare
   `git push`, `--repo`, `-C .`, `--delete`, `+` and `:` refspecs are read as git reads them.
 - A push that may update every branch (`--all`, `--branches`, `--mirror`, `--prune`, `push.default=matching`, a `:`
   refspec), a wildcard refspec that matches a protected branch, and a push whose branches cannot be read (another
   directory with `-C`, `--git-dir`, a `remote.<name>.push` setting, `HEAD` pushed from a detached head, or git settings that
   cannot be read) is refused for anyone who is not a pusher, saying it may update the branch.
+- Tags are judged the same way. A refspec under `refs/tags/` names its tag, a deletion included (`:refs/tags/v1.0`,
+  `--delete refs/tags/v1.0`); a short name (`v1.0`, `--delete v1.0`) is judged both as the branch and as the tag of that
+  name, since git may resolve it to either; a wildcard refspec that may match a covered tag counts as one that does. A
+  push that may push any tag (`--tags`, `--follow-tags`, `push.followTags`, `--mirror`, `--prune`, a
+  `remote.<name>.push` setting) and a push whose refs cannot be read are refused for anyone who is not a pusher of a
+  protected tag, saying it may update those tags. A tag's refusal never names a way past the check.
 - `dibs check --push`, run from git's `pre-push` hook as `dibs check --push --remote "$1" --url "$2"`, judges the exact
-  refs git hands it against the repository of that remote, from the settings and the member this machine remembers, so a
-  server that cannot be reached does not let such a push through (exit 1). Only a machine that remembers nothing yet
-  asks the server, and lets the push go with a warning when it cannot reach it.
+  refs git hands it — branches and tags, a deleted ref counting as a push of it — against the repository of that remote,
+  from the settings and the member this machine remembers, so a server that cannot be reached does not let such a push
+  through (exit 1). A push that names no remote is judged against the repository the checkout governs; with none, it is
+  refused for any protected branch of the project the member may not push to, and for a protected tag of any repository
+  that covers a tag it pushes. Only a machine that remembers nothing yet asks the server, and lets the push go with a
+  warning when it cannot reach it.
 
 A person in a terminal can still push with `git push --no-verify`; that breaks the team's rule.
 
@@ -1173,7 +1204,7 @@ machine, and the heartbeats of the background sync carry them (see [Sessions](#s
 | `frozen` | a shell command was refused because a slot another member holds freezes what it pushes to |
 | `needs_permission` | a shell command was refused because it pushes to a protected branch |
 | `unreachable` | a hook answered without a decision because the server could not be reached |
-| `push_needs_permission`, `push_frozen` | `dibs check --push` refused a push, for the same reasons |
+| `push_needs_permission`, `push_frozen` | `dibs check --push` refused a push, for the same reasons; `push_needs_permission` counts a protected tag too |
 | `switched_off` | a session ran with `DIBS_OFF` set: each session once, on the day it was first seen switched off |
 
 A refusal of several paths counts once per kind. `durations` gives how long the machine's hooks took, per hook adapter

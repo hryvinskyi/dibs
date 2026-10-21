@@ -33,6 +33,7 @@ rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
 semver = "1.0.28"
 rand = "0.10.3"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+rpassword = "7.5.4"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

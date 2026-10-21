@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
+use dibs_client::ClientOptions;
 use dibs_domain::escalation::EscalationReason;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{MessageId, ThreadId};
@@ -128,6 +129,18 @@ impl Command {
             Self::Sync(_) | Self::Mcp(_) | Self::SelfUpdate(_) => false,
             Self::Check(args) => !(args.push && switched_off),
             _ => true,
+        }
+    }
+
+    /// The time limits of the command's requests. A person who runs a command and watches it
+    /// waits longer, and a repeatable request of theirs is sent once more when its connection is
+    /// lost; the background sync, the tool server an agent calls, and the checks git's hooks run
+    /// (`--push`, `--git-range`) keep the short limits the caller waiting on them allows.
+    pub fn client_options(&self) -> ClientOptions {
+        match self {
+            Self::Sync(_) | Self::Mcp(_) => ClientOptions::default(),
+            Self::Check(args) if args.push || args.git_range.is_some() => ClientOptions::default(),
+            _ => ClientOptions::for_person(),
         }
     }
 }
@@ -816,6 +829,37 @@ mod tests {
         }
         assert!(reports(&["dibs", "check", "--push"], false));
         assert!(!reports(&["dibs", "check", "--push"], true));
+    }
+
+    #[test]
+    fn a_persons_commands_wait_longer_than_the_sync_the_tool_server_and_gits_hooks() {
+        let options = |line: &[&str]| {
+            let Invocation::Service(command) = Cli::try_parse_from(line).unwrap().command else {
+                panic!("{line:?} is no command of the server");
+            };
+            command.client_options()
+        };
+        for line in [
+            &["dibs", "login"][..],
+            &["dibs", "whoami"],
+            &["dibs", "status"],
+            &["dibs", "claim", "12"],
+            &["dibs", "check", "src/a.rs"],
+            &["dibs", "admin", "token", "rotate", "bob"],
+            &["dibs", "admin", "member", "add", "carol", "--name", "Carol"],
+        ] {
+            assert_eq!(options(line), ClientOptions::for_person(), "{line:?}");
+        }
+        for line in [
+            &["dibs", "sync"][..],
+            &["dibs", "sync", "--report"],
+            &["dibs", "mcp"],
+            &["dibs", "check", "--push"],
+            &["dibs", "check", "--push", "--remote", "origin"],
+            &["dibs", "check", "--git-range", "origin/main..HEAD"],
+        ] {
+            assert_eq!(options(line), ClientOptions::default(), "{line:?}");
+        }
     }
 
     use clap::CommandFactory;

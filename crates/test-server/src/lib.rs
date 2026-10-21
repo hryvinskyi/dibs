@@ -575,3 +575,121 @@ pub fn unreachable() -> Setup<String> {
     drop(listener);
     Ok(format!("http://{address}"))
 }
+
+/// A server in front of `target` (a base URL such as [`TestServer::url`] answers) that resets the
+/// first connection it accepts once the request starts to arrive, and passes every later one
+/// through unchanged. Answers its base URL; it listens until the process ends.
+///
+/// # Errors
+/// When no port can be bound, or `target` is no `http://<address>` URL.
+pub fn resetting_first_connection(target: &str) -> Setup<String> {
+    let upstream: SocketAddr = target
+        .strip_prefix("http://")
+        .and_then(|address| address.parse().ok())
+        .ok_or_else(|| SetupError(format!("{target} is not http://<address>")))?;
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(failed("an ephemeral port"))?;
+    let address = listener.local_addr().map_err(failed("the bound address"))?;
+    std::thread::spawn(move || {
+        let mut incoming = listener.incoming();
+        if let Some(Ok(mut first)) = incoming.next() {
+            // Closing a socket with unread bytes in its buffer resets the connection.
+            let mut started = [0_u8; 1];
+            let _ = first.read(&mut started);
+            drop(first);
+        }
+        for stream in incoming {
+            let Ok(client) = stream else { continue };
+            std::thread::spawn(move || pass_through(client, upstream));
+        }
+    });
+    Ok(format!("http://{address}"))
+}
+
+/// Copies the bytes of `client` to `upstream` and back until either side closes.
+fn pass_through(client: std::net::TcpStream, upstream: SocketAddr) {
+    let Ok(server) = std::net::TcpStream::connect(upstream) else {
+        return;
+    };
+    let (Ok(mut client_in), Ok(mut server_out)) = (client.try_clone(), server.try_clone()) else {
+        return;
+    };
+    let forward = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client_in, &mut server_out);
+        let _ = server_out.shutdown(std::net::Shutdown::Write);
+    });
+    let (mut server_in, mut client_out) = (server, client);
+    let _ = std::io::copy(&mut server_in, &mut client_out);
+    let _ = client_out.shutdown(std::net::Shutdown::Write);
+    let _ = forward.join();
+}
+
+/// A server in front of `target` that opens no connection for `hold`: its queue of connections
+/// waiting to be accepted is kept full, so a client's connection stays unopened and its connect
+/// limit runs out, where the system drops a connection to a full queue rather than refusing it, as
+/// Linux does. After `hold` it passes every connection through to `target`. Answers its base
+/// URL; it listens until the process ends.
+///
+/// # Errors
+/// When no port can be bound, the queue cannot be filled, or `target` is no `http://<address>`
+/// URL.
+pub fn unopened_for(target: &str, hold: StdDuration) -> Setup<String> {
+    let upstream: SocketAddr = target
+        .strip_prefix("http://")
+        .and_then(|address| address.parse().ok())
+        .ok_or_else(|| SetupError(format!("{target} is not http://<address>")))?;
+    let (ready, address) = std::sync::mpsc::channel::<Setup<SocketAddr>>();
+    std::thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = ready.send(Err(failed("a runtime")(error)));
+                return;
+            }
+        };
+        runtime.block_on(async move {
+            let listening = async {
+                let socket = tokio::net::TcpSocket::new_v4().map_err(failed("a socket"))?;
+                let local: SocketAddr = ([127, 0, 0, 1], 0).into();
+                socket.bind(local).map_err(failed("an ephemeral port"))?;
+                let listener = socket.listen(1).map_err(failed("a listening socket"))?;
+                let address = listener.local_addr().map_err(failed("the bound address"))?;
+                let mut fillers = Vec::new();
+                loop {
+                    let connect = tokio::net::TcpStream::connect(address);
+                    match tokio::time::timeout(StdDuration::from_millis(300), connect).await {
+                        Ok(Ok(stream)) if fillers.len() < 64 => fillers.push(stream),
+                        Ok(_) => {
+                            return Err(SetupError(
+                                "a full queue refuses connections here instead of keeping them unopened"
+                                    .to_owned(),
+                            ));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                Ok((listener, address, fillers))
+            };
+            let (listener, address, fillers) = match listening.await {
+                Ok(listening) => listening,
+                Err(error) => {
+                    let _ = ready.send(Err(error));
+                    return;
+                }
+            };
+            let _ = ready.send(Ok(address));
+            tokio::time::sleep(hold).await;
+            drop(fillers);
+            while let Ok((stream, _)) = listener.accept().await {
+                let Ok(client) = stream.into_std() else { continue };
+                if client.set_nonblocking(false).is_ok() {
+                    std::thread::spawn(move || pass_through(client, upstream));
+                }
+            }
+        });
+    });
+    let address = address.recv().map_err(failed("the listening address"))??;
+    Ok(format!("http://{address}"))
+}

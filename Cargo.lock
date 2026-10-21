@@ -770,7 +770,7 @@ dependencies = [
 
 [[package]]
 name = "dibs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -786,6 +786,7 @@ dependencies = [
  "nix",
  "rand",
  "rmcp",
+ "rpassword",
  "semver",
  "serde",
  "serde_json",
@@ -800,7 +801,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-agent-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dibs-agent-host",
  "dibs-domain",
@@ -813,7 +814,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-lock",
  "async-trait",
@@ -827,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "apple-native-keyring-store",
  "dbus-secret-service-keyring-store",
@@ -860,7 +861,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "globset",
  "regex",
@@ -872,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-e2e"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -880,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-host-claude-code"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dibs-agent-host",
  "dibs-domain",
@@ -891,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "askama",
  "axum",
@@ -919,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-store-sqlite"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "dibs-app",
@@ -935,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "dibs-test-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "dibs-app",
@@ -3920,7 +3921,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "tempfile",

@@ -169,7 +169,8 @@ fn in_range(
     Ok(value)
 }
 
-/// A frozen ref: `repo:refs/heads/<name>`, or, in a project with one repository, the bare ref.
+/// A frozen ref: `repo:refs/heads/<name>`, or, in a project with one repository, the bare ref; a
+/// tag is refused.
 fn freeze(text: &str, repos: &[RepoSpec], lists_repositories: bool) -> Result<RepoRef, SlotError> {
     let malformed = |error| SlotError::Freeze {
         text: text.to_owned(),
@@ -177,7 +178,7 @@ fn freeze(text: &str, repos: &[RepoSpec], lists_repositories: bool) -> Result<Re
     };
     let parsed = match (text.split_once(':'), repos.first()) {
         (None, Some(sole)) if !lists_repositories => {
-            RepoRef::of(sole.id.clone(), text).ok_or(malformed(RepoRefError::Malformed))?
+            RepoRef::named(sole.id.clone(), text).map_err(malformed)?
         }
         _ => RepoRef::parse(text).map_err(malformed)?,
     };
@@ -369,5 +370,27 @@ mod tests {
             refusal(&with(r#""docs:refs/heads/main""#)),
             SlotError::FreezeRepo { .. }
         ));
+        assert_eq!(
+            refusal(&with(r#""api:refs/tags/v*""#)),
+            SlotError::Freeze {
+                text: "api:refs/tags/v*".to_owned(),
+                error: RepoRefError::Tag,
+            }
+        );
+    }
+
+    #[test]
+    fn a_slot_freezes_branches_and_refuses_a_tag_saying_so() {
+        let Err(error) =
+            parse(r#"{"slots":[{"name":"release","max_hold":"1h","freezes":["refs/tags/v1.0"]}]}"#)
+        else {
+            panic!("a tag was accepted as a frozen ref");
+        };
+        let said = error.to_string();
+        assert!(
+            said.starts_with("slot 'release': freezes 'refs/tags/v1.0':")
+                && said.contains("freezes branches, not tags"),
+            "{said}"
+        );
     }
 }

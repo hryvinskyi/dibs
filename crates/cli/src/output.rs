@@ -2,6 +2,7 @@
 //! typed answer in JSON.
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 
 use serde::Serialize;
 
@@ -19,12 +20,40 @@ use crate::failure::Failure;
 #[derive(Debug, Clone, Copy)]
 pub struct Printer {
     json: bool,
+    terminal: bool,
+}
+
+/// Where the text of an answer that hands over a secret goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretShown {
+    /// What is printed on standard output.
+    pub out: String,
+    /// What is printed on standard error, if anything.
+    pub err: Option<String>,
+}
+
+/// An answer that hands over a secret, as a person reads it: at a terminal, the sentence and the
+/// secret on the line after it; otherwise the secret alone on standard output and the sentence on
+/// standard error, so that a pipe or `$(…)` takes exactly the secret.
+pub fn secret_shown(terminal: bool, sentence: &str, secret: &str) -> SecretShown {
+    if terminal {
+        SecretShown {
+            out: format!("{sentence}:\n{secret}"),
+            err: None,
+        }
+    } else {
+        SecretShown {
+            out: secret.to_owned(),
+            err: Some(format!("{sentence}.")),
+        }
+    }
 }
 
 impl Printer {
-    /// A printer of JSON when `json`, of text otherwise.
-    pub fn new(json: bool) -> Self {
-        Self { json }
+    /// A printer of JSON when `json`, of text otherwise; `terminal` says whether standard output
+    /// is a terminal.
+    pub fn new(json: bool, terminal: bool) -> Self {
+        Self { json, terminal }
     }
 
     /// Whether it prints JSON.
@@ -45,6 +74,31 @@ impl Printer {
                 println!("{}", text.trim_end());
             }
         }
+    }
+
+    /// Prints an answer that hands over `secret`: as JSON, or as [`secret_shown`] says, `sentence`
+    /// being what it says about the secret, without a closing full stop.
+    ///
+    /// # Errors
+    /// When standard output cannot take it, a closed pipe say: the secret did not reach anyone.
+    pub fn show_secret<T: Serialize>(
+        self,
+        value: &T,
+        sentence: &str,
+        secret: &str,
+    ) -> std::io::Result<()> {
+        let out = if self.json {
+            serde_json::to_string_pretty(value).map_err(std::io::Error::other)?
+        } else {
+            let shown = secret_shown(self.terminal, sentence, secret);
+            if let Some(err) = &shown.err {
+                eprintln!("{err}");
+            }
+            shown.out
+        };
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{out}")?;
+        stdout.flush()
     }
 
     /// Prints a failure: the sentence on standard error, and with `--json`, unless the command
@@ -319,5 +373,24 @@ pub fn asking_text(message: &Message) -> String {
             " It is marked {}, and each recipient is asked to acknowledge it.",
             message.importance
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn at_a_terminal_the_secret_follows_its_sentence_on_standard_output() {
+        let shown = secret_shown(true, "Added bob; hand it over", "dibs_secret");
+        assert_eq!(shown.out, "Added bob; hand it over:\ndibs_secret");
+        assert_eq!(shown.err, None);
+    }
+
+    #[test]
+    fn into_a_pipe_the_secret_goes_alone_and_its_sentence_to_standard_error() {
+        let shown = secret_shown(false, "Added bob; hand it over", "dibs_secret");
+        assert_eq!(shown.out, "dibs_secret");
+        assert_eq!(shown.err.as_deref(), Some("Added bob; hand it over."));
     }
 }

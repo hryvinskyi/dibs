@@ -13,6 +13,8 @@ use axum::response::{IntoResponse, Response};
 use semver::Version;
 use std::sync::Arc;
 
+use dibs_domain::settings::{ProjectSettings, SettingsDocument};
+
 use crate::error::ApiError;
 
 /// Where the latest release can be installed from by hand.
@@ -20,6 +22,23 @@ pub const INSTALL_URL: &str = "https://github.com/hryvinskyi/dibs#install";
 
 /// The route that tells clients which versions the server accepts and recommends.
 pub const VERSION_ROUTE: &str = "/v1/version";
+
+/// The first client that reads protected tags in the settings. An older one refuses settings that
+/// hold one, and then judges nothing.
+pub const PROTECTED_TAGS_SINCE: Version = Version::new(0, 1, 1);
+
+/// The settings as the client whose `User-Agent` is `user_agent` can read them: without protected
+/// tags for a `dibs` client older than [`PROTECTED_TAGS_SINCE`], whole for any other caller.
+pub fn settings_for(settings: &ProjectSettings, user_agent: Option<&str>) -> SettingsDocument {
+    let older = user_agent
+        .and_then(client_version)
+        .is_some_and(|client| client < PROTECTED_TAGS_SINCE);
+    if older {
+        settings.without_protected_tags().to_document()
+    } else {
+        settings.to_document()
+    }
+}
 
 /// The oldest client version served and the version clients are told to update to, each when set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

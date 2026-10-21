@@ -361,3 +361,298 @@ fn the_pre_push_refs_are_judged_against_the_repository_of_the_remote_pushed_to()
         Some(API_MAIN.to_owned())
     );
 }
+
+/// `api` protects the tags `v*` for carol and `main` for alice, the tags declared first.
+fn tagged() -> ProjectSettings {
+    settings(
+        r#"{"repos":[
+            {"id":"api","remote":"example.com/acme/api",
+             "protected_refs":[{"ref":"refs/tags/v*","pushers":["carol"]},
+                               {"ref":"refs/heads/main","pushers":["alice"]}]},
+            {"id":"web","remote":"example.com/acme/web"}]}"#,
+    )
+}
+
+/// The protected ref the refs git names for a push to `remote` are refused for, as `who`.
+fn pre_push(
+    settings: &ProjectSettings,
+    who: &str,
+    remote: Option<&str>,
+    names: &[&str],
+    fallback: bool,
+) -> Judged {
+    let pusher = handle(who);
+    let here = |_: &str| true;
+    let facts = facts(Some("feature"), &[]);
+    let protection = PushProtection {
+        pusher: &pusher,
+        settings,
+        facts: Some(&facts),
+        here: &here,
+    };
+    let refs: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+    let governing = settings
+        .repo(&crate::repo::RepoId::parse("api").unwrap())
+        .filter(|_| fallback);
+    match protection.refs_refusal(remote, None, &refs, governing) {
+        Some(CommandVerdict::NeedsPermission {
+            target, certain, ..
+        }) => Some((target.to_string(), certain)),
+        Some(other) => panic!("{names:?}: {other:?}"),
+        None => None,
+    }
+}
+
+const API_TAGS: &str = "api:refs/tags/v*";
+
+#[test]
+fn a_tag_git_pushes_or_deletes_is_refused_for_anyone_its_protection_does_not_list() {
+    let settings = tagged();
+    let release = ["refs/tags/v2.4.0"];
+    assert_eq!(
+        pre_push(&settings, "bob", Some("origin"), &release, true),
+        Some((API_TAGS.to_owned(), true)),
+        "a push of a release tag by someone who is not its pusher"
+    );
+    assert_eq!(
+        pre_push(&settings, "carol", Some("origin"), &release, true),
+        None,
+        "its pusher pushes it"
+    );
+    assert_eq!(
+        pre_push(&settings, "alice", Some("origin"), &release, true),
+        Some((API_TAGS.to_owned(), true)),
+        "pushing a protected branch lets nobody push a protected tag"
+    );
+    assert_eq!(
+        pre_push(
+            &settings,
+            "bob",
+            Some("origin"),
+            &["refs/tags/nightly"],
+            true
+        ),
+        None,
+        "a tag the pattern does not cover is free"
+    );
+    assert_eq!(
+        pre_push(&settings, "bob", Some("fork"), &release, true),
+        None,
+        "a fork protects nothing"
+    );
+    assert_eq!(
+        pre_push(
+            &settings,
+            "bob",
+            Some("origin"),
+            &["refs/heads/feature", "refs/tags/v2.4.0"],
+            true
+        ),
+        Some((API_TAGS.to_owned(), true)),
+        "one protected tag among the refs refuses the push"
+    );
+    assert_eq!(
+        pre_push(
+            &settings,
+            "carol",
+            Some("origin"),
+            &["refs/heads/main"],
+            true
+        ),
+        Some((API_MAIN.to_owned(), true)),
+        "the tags' pusher may not push the branch"
+    );
+}
+
+#[test]
+fn a_tag_pushed_where_the_repository_cannot_be_told_is_refused_when_some_protection_covers_it() {
+    let tags_only = settings(
+        r#"{"repos":[
+            {"id":"api","remote":"example.com/acme/api",
+             "protected_refs":[{"ref":"refs/tags/v*","pushers":["carol"]}]}]}"#,
+    );
+    assert_eq!(
+        pre_push(&tags_only, "bob", None, &["refs/tags/v1"], false),
+        Some((API_TAGS.to_owned(), false))
+    );
+    assert_eq!(
+        pre_push(&tags_only, "bob", None, &["refs/tags/nightly"], false),
+        None
+    );
+    assert_eq!(
+        pre_push(&tags_only, "bob", None, &["refs/heads/main"], false),
+        None,
+        "protected tags alone protect no branch"
+    );
+    assert_eq!(
+        pre_push(&tags_only, "carol", None, &["refs/tags/v1"], false),
+        None
+    );
+}
+
+/// What `who` pushing `line` needs under `settings`, from a checkout of `api` on `feature` with
+/// `extra` git settings.
+fn line_judged(
+    settings: &ProjectSettings,
+    line: &str,
+    who: &str,
+    extra: &[(&str, &str)],
+) -> Judged {
+    let facts = facts(Some("feature"), extra);
+    let pusher = handle(who);
+    let here = |dir: &str| dir == "." || dir == "./";
+    let protection = PushProtection {
+        pusher: &pusher,
+        settings,
+        facts: Some(&facts),
+        here: &here,
+    };
+    let commands = split_commands(line);
+    let commands: Vec<&SimpleCommand> = commands.iter().collect();
+    match protection.refusal(&git_pushes(&commands)) {
+        Some(CommandVerdict::NeedsPermission {
+            target, certain, ..
+        }) => Some((target.to_string(), certain)),
+        Some(other) => panic!("{line}: {other:?}"),
+        None => None,
+    }
+}
+
+#[test]
+fn a_command_line_that_names_or_may_push_a_protected_tag_is_refused_for_anyone_not_listed() {
+    let settings = tagged();
+    let named = Some((API_TAGS.to_owned(), true));
+    let unsure = Some((API_TAGS.to_owned(), false));
+    for (line, expected) in [
+        ("git push origin v2.4.0", &named),
+        ("git push origin refs/tags/v2.4.0", &named),
+        ("git push origin v2.4.0:refs/tags/v2.4.0", &named),
+        ("git push origin :refs/tags/v2.3.0", &named),
+        ("git push origin --delete v2.3.0", &named),
+        ("git push origin -d refs/tags/v2.3.0", &named),
+        ("git push origin 'refs/tags/*:refs/tags/*'", &named),
+        ("git push origin 'refs/tags/v2*:refs/tags/v2*'", &named),
+        ("git push --tags", &unsure),
+        ("git push origin --tags", &unsure),
+        ("git push origin feature --tags", &unsure),
+        ("git push --follow-tags origin feature", &unsure),
+    ] {
+        assert_eq!(
+            &line_judged(&settings, line, "bob", &[]),
+            expected,
+            "{line}"
+        );
+    }
+    for line in [
+        "git push origin nightly",
+        "git push origin refs/tags/nightly",
+        "git push origin feature",
+        "git push origin 'refs/tags/release-*:refs/tags/release-*'",
+        "git push fork v2.4.0",
+        "git push fork --tags",
+    ] {
+        assert_eq!(line_judged(&settings, line, "bob", &[]), None, "{line}");
+    }
+    assert_eq!(
+        line_judged(&settings, "git push", "bob", &[("push.followtags", "true")]),
+        unsure,
+        "push.followTags makes a bare push carry tags"
+    );
+    assert_eq!(
+        line_judged(
+            &settings,
+            "git push origin",
+            "bob",
+            &[("remote.origin.push", "refs/heads/feature")]
+        ),
+        Some((API_MAIN.to_owned(), false)),
+        "a push setting may push anything; the branch is named first"
+    );
+    for line in [
+        "git push origin v2.4.0",
+        "git push origin :refs/tags/v2.3.0",
+        "git push --tags",
+        "git push origin feature --follow-tags",
+    ] {
+        assert_eq!(
+            line_judged(&settings, line, "carol", &[]),
+            None,
+            "the pusher: {line}"
+        );
+    }
+    assert_eq!(
+        line_judged(&settings, "git push --all origin", "carol", &[]),
+        Some((API_MAIN.to_owned(), false)),
+        "every branch pushed is refused for the branch, not the tags declared before it"
+    );
+    assert_eq!(
+        line_judged(&settings, "git push --mirror origin", "carol", &[]),
+        Some((API_MAIN.to_owned(), false))
+    );
+
+    let tags_only = settings_of_tags_only();
+    assert_eq!(
+        line_judged(&tags_only, "git push --mirror origin", "bob", &[]),
+        Some(("default:refs/tags/v*".to_owned(), false)),
+        "a mirror pushes every tag"
+    );
+    assert_eq!(
+        line_judged(&tags_only, "git push --all origin", "bob", &[]),
+        None
+    );
+    assert_eq!(
+        line_judged(&tags_only, "git push origin main", "bob", &[]),
+        None
+    );
+    let pusher = handle("bob");
+    let here = |_: &str| false;
+    let unreadable = PushProtection {
+        pusher: &pusher,
+        settings: &tags_only,
+        facts: None,
+        here: &here,
+    };
+    let commands = split_commands("git push origin feature");
+    let commands: Vec<&SimpleCommand> = commands.iter().collect();
+    assert!(
+        matches!(
+            unreadable.refusal(&git_pushes(&commands)),
+            Some(CommandVerdict::NeedsPermission { certain: false, .. })
+        ),
+        "a push whose git settings cannot be read may push a tag, so it is refused"
+    );
+}
+
+#[test]
+fn an_exact_tag_rule_covers_that_tag_alone() {
+    let exact = settings(
+        r#"{"repos":[
+            {"id":"api","remote":"example.com/acme/api",
+             "protected_refs":[{"ref":"refs/tags/stable","pushers":["carol"]}]}]}"#,
+    );
+    assert_eq!(
+        line_judged(&exact, "git push origin stable", "bob", &[]),
+        Some(("api:refs/tags/stable".to_owned(), true))
+    );
+    assert_eq!(
+        line_judged(
+            &exact,
+            "git push origin 'refs/tags/st*:refs/tags/st*'",
+            "bob",
+            &[]
+        ),
+        Some(("api:refs/tags/stable".to_owned(), true))
+    );
+    assert_eq!(
+        line_judged(&exact, "git push origin stable2", "bob", &[]),
+        None
+    );
+    assert_eq!(
+        line_judged(&exact, "git push origin stable", "carol", &[]),
+        None
+    );
+}
+
+fn settings_of_tags_only() -> ProjectSettings {
+    settings(r#"{"protected_refs":[{"ref":"refs/tags/v*","pushers":["carol"]}]}"#)
+}
