@@ -17,6 +17,7 @@ mod verdict;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use command::assigned_name;
 pub use command::{MAX_COMMAND_BYTES, SimpleCommand, split_commands};
 pub use decide::{
     BeatRefused, RemovedFromSlots, SlotRefused, TakeAnswer, TakeRequest, Transition,
@@ -24,15 +25,19 @@ pub use decide::{
     decide_run_finished, decide_slots_removed, decide_stall_takeover, decide_take, decide_tick,
 };
 pub use notice::{SlotNotice, SlotNoticeKind, notices_owed};
-pub use spec::{
-    CommandPattern, DEFAULT_MAX_WAIT, DEFAULT_OFFER_FOR, GroupKey, MAX_HOLD_RANGE,
-    MAX_PATTERN_CHARS, MAX_PATTERNS, PATTERN_SIZE_LIMIT, PatternError, Purpose, PurposeError,
-    RepoRef, RepoRefError, SlotCatalog, SlotGroup, SlotGroupError, SlotName, SlotNameError,
-    SlotSpec,
+pub(crate) use spec::{
+    BRANCHES, MAX_REF_NAME, StarFault, TAGS, Written, ref_name_is_clean, written,
 };
-pub(crate) use spec::{MAX_REF_NAME, ref_part_is_clean};
+pub use spec::{
+    BranchPattern, BranchPatternError, CommandPattern, DEFAULT_MAX_WAIT, DEFAULT_OFFER_FOR,
+    GroupKey, MAX_HOLD_RANGE, MAX_PATTERN_CHARS, MAX_PATTERNS, PATTERN_SIZE_LIMIT, PatternError,
+    Purpose, PurposeError, RepoRef, RepoRefError, SlotCatalog, SlotGroup, SlotGroupError, SlotName,
+    SlotNameError, SlotSpec,
+};
 pub use state::{
     CommitSha, CommitShaError, EndWord, EndWordError, Liveness, RunExit, STALL_AFTER, SlotBoard,
     SlotHold, SlotOffer, SlotStanding, SlotWaiter, WorkflowName, WorkflowNameError,
 };
-pub use verdict::{CommandVerdict, command_verdict, push_targets, push_verdict, slots_in_question};
+pub use verdict::{
+    CommandVerdict, command_verdict, push_targets, push_verdict, slot_needed, slots_in_question,
+};

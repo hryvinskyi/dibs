@@ -8,7 +8,7 @@ use dibs_domain::hot_rule::Note;
 use dibs_domain::ids::{ItemId, RunId, SessionId, ThreadId};
 use dibs_domain::session::HostName;
 use dibs_domain::slot::{
-    CommitSha, Liveness, Purpose, RepoRef, RunExit, SlotGroup, SlotName, WorkflowName,
+    BranchPattern, CommitSha, Liveness, Purpose, RunExit, SlotGroup, SlotName, WorkflowName,
 };
 
 /// A hold of a slot.
@@ -87,9 +87,10 @@ pub struct Slot {
     pub max_wait: String,
     /// Whether its commands run only inside `dibs slot run`.
     pub run_only: bool,
-    /// The refs nobody but the holder may push while it is held.
+    /// The branches nobody but the holder may push to while it is held, each named exactly or by
+    /// a prefix (`api:refs/heads/release/*`).
     #[serde(default)]
-    pub freezes: Vec<RepoRef>,
+    pub freezes: Vec<BranchPattern>,
     /// Its note.
     pub note: Option<Note>,
     /// Its group's hold.

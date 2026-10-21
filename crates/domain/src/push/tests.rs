@@ -656,3 +656,481 @@ fn an_exact_tag_rule_covers_that_tag_alone() {
 fn settings_of_tags_only() -> ProjectSettings {
     settings(r#"{"protected_refs":[{"ref":"refs/tags/v*","pushers":["carol"]}]}"#)
 }
+
+/// `api` protects `main` for alice and every `release/` branch for alice and carol, the release
+/// branches declared first.
+fn release_train() -> ProjectSettings {
+    settings(
+        r#"{"repos":[
+            {"id":"api","remote":"example.com/acme/api",
+             "protected_refs":[{"ref":"refs/heads/release/*","pushers":["alice","carol"]},
+                               {"ref":"refs/heads/main","pushers":["alice"]}]},
+            {"id":"web","remote":"example.com/acme/web"}]}"#,
+    )
+}
+
+const API_RELEASES: &str = "api:refs/heads/release/*";
+
+#[test]
+fn a_command_line_that_names_or_may_push_a_branch_a_pattern_covers_is_refused_for_anyone_not_listed()
+ {
+    let settings = release_train();
+    let named = Some((API_RELEASES.to_owned(), true));
+    let unsure = Some((API_RELEASES.to_owned(), false));
+    for (line, expected) in [
+        ("git push origin release/2026.10.3", &named),
+        ("git push origin refs/heads/release/2026.10.3", &named),
+        ("git push origin feature:release/2026.10.3", &named),
+        ("git push origin HEAD:refs/heads/release/2026.10.3", &named),
+        ("git push origin +release/2026.10.3", &named),
+        ("git push origin :release/2026.10.3", &named),
+        ("git push origin :refs/heads/release/2026.10.3", &named),
+        ("git push origin --delete release/2026.10.3", &named),
+        ("git push -d origin refs/heads/release/2026.10.3", &named),
+        ("git push origin 'refs/heads/*:refs/heads/*'", &named),
+        ("git push origin 'refs/heads/rel*:refs/heads/rel*'", &named),
+        (
+            "git push origin 'refs/heads/release/2026*:refs/heads/release/2026*'",
+            &named,
+        ),
+        ("git push --all origin", &unsure),
+        ("git push --branches origin", &unsure),
+        ("git push --mirror origin", &unsure),
+        ("git push origin ':'", &unsure),
+    ] {
+        assert_eq!(
+            &line_judged(&settings, line, "bob", &[]),
+            expected,
+            "{line}"
+        );
+    }
+    for line in [
+        "git push origin feature",
+        "git push origin bob/42-rounding",
+        "git push origin release",
+        "git push origin release-notes",
+        "git push origin 'refs/heads/feat*:refs/heads/feat*'",
+        "git push fork release/2026.10.3",
+        "git push web release/2026.10.3",
+    ] {
+        assert_eq!(line_judged(&settings, line, "bob", &[]), None, "{line}");
+    }
+    for line in [
+        "git push origin release/2026.10.3",
+        "git push origin --delete release/2026.10.3",
+        "git push origin 'refs/heads/release/*:refs/heads/release/*'",
+    ] {
+        assert_eq!(
+            line_judged(&settings, line, "carol", &[]),
+            None,
+            "a pusher of the pattern: {line}"
+        );
+    }
+    assert_eq!(
+        line_judged(&settings, "git push --all origin", "carol", &[]),
+        Some((API_MAIN.to_owned(), false)),
+        "every branch pushed reaches main too, which carol may not push"
+    );
+    assert_eq!(
+        line_judged(&settings, "git push --mirror origin", "alice", &[]),
+        None,
+        "alice is listed in every rule"
+    );
+}
+
+#[test]
+fn a_bare_push_from_a_branch_a_pattern_covers_is_refused_and_one_from_a_task_branch_is_not() {
+    let settings = release_train();
+    let judged_on = |branch: &str, who: &str| {
+        let facts = facts(
+            Some(branch),
+            &[
+                (&format!("branch.{branch}.remote"), "origin"),
+                (
+                    &format!("branch.{branch}.merge"),
+                    &format!("refs/heads/{branch}"),
+                ),
+            ],
+        );
+        let pusher = handle(who);
+        let here = |_: &str| true;
+        let protection = PushProtection {
+            pusher: &pusher,
+            settings: &settings,
+            facts: Some(&facts),
+            here: &here,
+        };
+        let commands = split_commands("git push");
+        let commands: Vec<&SimpleCommand> = commands.iter().collect();
+        match protection.refusal(&git_pushes(&commands)) {
+            Some(CommandVerdict::NeedsPermission {
+                target, certain, ..
+            }) => Some((target.to_string(), certain)),
+            _ => None,
+        }
+    };
+    assert_eq!(
+        judged_on("release/2026.10.3", "bob"),
+        Some((API_RELEASES.to_owned(), true))
+    );
+    assert_eq!(judged_on("release/2026.10.3", "carol"), None);
+    assert_eq!(judged_on("bob/42-rounding", "bob"), None);
+}
+
+#[test]
+fn a_branch_several_rules_cover_is_pushed_only_by_a_member_every_one_lists() {
+    let nested = settings(
+        r#"{"repos":[
+            {"id":"api","remote":"example.com/acme/api",
+             "protected_refs":[{"ref":"refs/heads/release/*","pushers":["alice","carol"]},
+                               {"ref":"refs/heads/release/2026.10.3","pushers":["alice"]}]}]}"#,
+    );
+    assert_eq!(
+        line_judged(&nested, "git push origin release/2026.10.3", "carol", &[]),
+        Some(("api:refs/heads/release/2026.10.3".to_owned(), true)),
+        "carol is a pusher of the pattern, not of the exact rule"
+    );
+    assert_eq!(
+        line_judged(&nested, "git push origin release/2026.10.4", "carol", &[]),
+        None
+    );
+    assert_eq!(
+        line_judged(&nested, "git push origin release/2026.10.3", "alice", &[]),
+        None
+    );
+    assert_eq!(
+        pre_push(
+            &nested,
+            "carol",
+            Some("origin"),
+            &["refs/heads/release/2026.10.3"],
+            true
+        ),
+        Some(("api:refs/heads/release/2026.10.3".to_owned(), true))
+    );
+}
+
+#[test]
+fn the_pre_push_refs_a_branch_pattern_covers_are_refused_for_anyone_it_does_not_list() {
+    let settings = release_train();
+    let release = ["refs/heads/release/2026.10.3"];
+    assert_eq!(
+        pre_push(&settings, "bob", Some("origin"), &release, true),
+        Some((API_RELEASES.to_owned(), true))
+    );
+    assert_eq!(
+        pre_push(&settings, "carol", Some("origin"), &release, true),
+        None
+    );
+    assert_eq!(
+        pre_push(&settings, "alice", Some("origin"), &release, true),
+        None
+    );
+    assert_eq!(
+        pre_push(
+            &settings,
+            "bob",
+            Some("origin"),
+            &["refs/heads/bob/42-rounding", "refs/heads/release/2026.10.3"],
+            true
+        ),
+        Some((API_RELEASES.to_owned(), true)),
+        "one covered branch among the refs refuses the push, a deletion as much as a push"
+    );
+    assert_eq!(
+        pre_push(
+            &settings,
+            "bob",
+            Some("origin"),
+            &["refs/heads/bob/42-rounding"],
+            true
+        ),
+        None
+    );
+    assert_eq!(
+        pre_push(&settings, "bob", Some("fork"), &release, true),
+        None
+    );
+    assert_eq!(
+        pre_push(
+            &settings,
+            "bob",
+            None,
+            &["refs/heads/bob/42-rounding"],
+            false
+        ),
+        Some((API_RELEASES.to_owned(), false)),
+        "a push that may go anywhere is refused for the first protected branch bob may not push"
+    );
+    assert_eq!(pre_push(&settings, "alice", None, &release, false), None);
+}
+
+#[test]
+fn a_destination_git_may_resolve_to_a_protected_branch_is_refused_however_it_is_spelled() {
+    let settings = release_train();
+    let named = |branch: &str| Some((branch.to_owned(), true));
+    let unsure = |branch: &str| Some((branch.to_owned(), false));
+    let on = |branch: &str, extra: &[(&str, &str)]| -> GitFacts {
+        let mut facts = facts(Some(branch), extra);
+        facts.config.retain(|(key, _)| !key.starts_with("branch."));
+        facts.config.extend(
+            extra
+                .iter()
+                .filter(|(key, _)| key.starts_with("branch."))
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+        );
+        facts
+    };
+    let cases: Vec<(&str, GitFacts, Judged)> = vec![
+        (
+            "git push origin heads/release/x",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin HEAD:heads/release/x",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin --delete heads/release/x",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin feature:heads/main",
+            on("bob/1", &[]),
+            named(API_MAIN),
+        ),
+        (
+            "git push origin 'refs/*:refs/*'",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin '+refs/*:refs/*'",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin 'refs/h*:refs/h*'",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin 'refs/*/main:refs/*/main'",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin '*:*'",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin 'release*'",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin 'refs/heads/release/*'",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin tag release/x",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push --force-with-lease origin release/x",
+            on("bob/1", &[]),
+            named(API_RELEASES),
+        ),
+        ("git push", on("release/x", &[]), named(API_RELEASES)),
+        (
+            "git push origin @",
+            on("release/x", &[]),
+            named(API_RELEASES),
+        ),
+        (
+            "git push",
+            on(
+                "bob/1",
+                &[
+                    ("push.default", "upstream"),
+                    ("branch.bob/1.remote", "origin"),
+                    ("branch.bob/1.merge", "refs/heads/release/x"),
+                ],
+            ),
+            named(API_RELEASES),
+        ),
+        (
+            "git push origin",
+            on("bob/1", &[("remote.origin.mirror", "true")]),
+            unsure(API_RELEASES),
+        ),
+        (
+            "git push origin bob/1",
+            on("bob/1", &[("remote.origin.mirror", "yes")]),
+            unsure(API_RELEASES),
+        ),
+        (
+            "git push",
+            on(
+                "bob/1",
+                &[
+                    ("push.default", "current"),
+                    ("remote.pushdefault", "origin"),
+                ],
+            ),
+            None,
+        ),
+        ("git push origin bob/1", on("bob/1", &[]), None),
+        ("git push origin heads/bob/1", on("bob/1", &[]), None),
+        (
+            "git push origin 'refs/heads/bob/*:refs/heads/bob/*'",
+            on("bob/1", &[]),
+            None,
+        ),
+        (
+            "git push origin 'refs/notes/*:refs/notes/*'",
+            on("bob/1", &[]),
+            None,
+        ),
+    ];
+    for (line, facts, expected) in cases {
+        assert_eq!(
+            line_judged_with(&settings, line, "bob", &facts),
+            expected,
+            "{line}"
+        );
+    }
+    let carol = on("bob/1", &[]);
+    assert_eq!(
+        line_judged_with(
+            &settings,
+            "git push origin heads/release/x",
+            "carol",
+            &carol
+        ),
+        None
+    );
+    assert_eq!(
+        line_judged_with(
+            &settings,
+            "git push origin 'refs/*:refs/*'",
+            "carol",
+            &carol
+        ),
+        named(API_MAIN),
+        "every ref reaches main, which carol may not push"
+    );
+}
+
+#[test]
+fn settings_git_c_sets_for_the_run_are_judged_and_settings_from_elsewhere_make_a_push_unreadable() {
+    let settings = release_train();
+    let feature = facts(Some("feature"), &[]);
+    let unsure = Some((API_RELEASES.to_owned(), false));
+    for (line, expected) in [
+        ("git -c push.default=matching push", &unsure),
+        ("git -c remote.origin.mirror=true push origin", &unsure),
+        ("git -c Remote.origin.Mirror push origin", &unsure),
+        (
+            "git -c 'remote.origin.push=refs/heads/*:refs/heads/release/*' push",
+            &unsure,
+        ),
+        ("git -c push.followTags=on push origin feature", &None),
+        (
+            "git --config-env=remote.origin.url=URL push origin feature",
+            &unsure,
+        ),
+        (
+            "git --config-env remote.origin.url=URL push origin feature",
+            &unsure,
+        ),
+        ("git -c include.path=/tmp/more push origin feature", &unsure),
+        (
+            "git -c includeIf.onbranch:x.path=/tmp/more push origin feature",
+            &unsure,
+        ),
+        ("git -c noseparator push origin feature", &unsure),
+        ("GIT_DIR=../other/.git git push origin feature", &unsure),
+        (
+            "env GIT_WORK_TREE=../other git push origin feature",
+            &unsure,
+        ),
+        (
+            "export GIT_CONFIG_GLOBAL=/tmp/cfg; git push origin feature",
+            &unsure,
+        ),
+        (
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.default GIT_CONFIG_VALUE_0=matching git push",
+            &unsure,
+        ),
+        ("GIT_CONFIG_PARAMETERS=x git push origin feature", &unsure),
+        ("HOME=/tmp/elsewhere git push origin feature", &unsure),
+        ("GIT_DIR=../other/.git; git push origin feature", &unsure),
+        ("FOO=1 git push origin feature", &None),
+        ("git -c user.name=bob push origin feature", &None),
+        ("GIT_DIR=../other/.git git status", &None),
+    ] {
+        assert_eq!(
+            &line_judged_with(&settings, line, "bob", &feature),
+            expected,
+            "{line}"
+        );
+    }
+    assert_eq!(
+        line_judged_with(
+            &settings,
+            "git -c remote.origin.url=https://example.com/acme/web.git push origin release/x",
+            "bob",
+            &feature
+        ),
+        None,
+        "a remote's URL set for the run names the repository the push goes to"
+    );
+    assert_eq!(
+        line_judged_with(
+            &settings,
+            "git -c remote.fork.url=git@example.com:acme/api.git push fork release/x",
+            "bob",
+            &feature
+        ),
+        Some((API_RELEASES.to_owned(), true)),
+        "and so a fork that is the protected repository for the run is judged as it"
+    );
+    assert_eq!(
+        line_judged_with(
+            &settings,
+            "GIT_DIR=x git push origin feature",
+            "alice",
+            &feature
+        ),
+        None,
+        "a member every rule lists pushes anything"
+    );
+}
+
+/// What `who` pushing `line` needs under `settings`, from a checkout with `facts`.
+fn line_judged_with(settings: &ProjectSettings, line: &str, who: &str, facts: &GitFacts) -> Judged {
+    let pusher = handle(who);
+    let here = |dir: &str| dir == "." || dir == "./";
+    let protection = PushProtection {
+        pusher: &pusher,
+        settings,
+        facts: Some(facts),
+        here: &here,
+    };
+    let commands = split_commands(line);
+    let commands: Vec<&SimpleCommand> = commands.iter().collect();
+    match protection.refusal(&git_pushes(&commands)) {
+        Some(CommandVerdict::NeedsPermission {
+            target, certain, ..
+        }) => Some((target.to_string(), certain)),
+        Some(other) => panic!("{line}: {other:?}"),
+        None => None,
+    }
+}

@@ -3,6 +3,12 @@
 //! branches cannot be read from the command line and the checkout's git settings is treated as one
 //! that may update a protected branch.
 //!
+//! A protected branch is named exactly or by a prefix (`refs/heads/release/*`); a pattern covers
+//! every branch whose name starts with its prefix and is judged as any protected branch: a refspec
+//! that names such a branch, deletes one, or may match one (a wildcard refspec whose pattern
+//! overlaps the prefix), and a push of every branch, are refused for anyone the rule does not list.
+//! Where several rules cover one ref, a member pushes it only when every one of them lists them.
+//!
 //! Protected tags are judged the same way, failing closed too: `--tags`, `--follow-tags` (or
 //! `push.followTags`), `--mirror` and a `remote.<name>.push` setting may push any tag; a refspec
 //! under `refs/tags/` names its tag; and a short name such as `v1.0`, which git may resolve to a
@@ -10,9 +16,15 @@
 //! are judged against both, a deletion counting as a push of the ref it deletes.
 //!
 //! What a push updates comes from the line — the remote, the refspecs, `--all`, `--mirror`,
-//! `--delete` — and, where the line leaves it to git, from the checkout's settings: the current
-//! branch, its push remote and upstream, `push.default`, `remote.<name>.push`, the remotes' URLs
-//! and `url.<base>.insteadOf`. Which repository it pushes to is the listed repository whose remote
+//! `--delete`, the settings `git -c` sets for the run — and, where the line leaves it to git, from
+//! the checkout's settings: the current branch, its push remote and upstream, `push.default`,
+//! `remote.<name>.push`, `remote.<name>.mirror`, the remotes' URLs and `url.<base>.insteadOf`. A
+//! destination is read as git may resolve it: a full ref as written, a wildcard under `refs/` as
+//! every ref it may match, and a short name as `refs/<name>`, the branch of that name and the tag
+//! of that name (so `heads/main` is `main`). A line that points git at other settings or another
+//! repository — `--config-env`, a `-c include.path`, or an assignment of `GIT_DIR`,
+//! `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_CONFIG*`, `HOME` or
+//! `XDG_CONFIG_HOME` anywhere on it — makes its pushes unreadable. Which repository it pushes to is the listed repository whose remote
 //! is the URL of the remote pushed to; a remote no listed repository has — a fork — protects
 //! nothing. A project that lists no repositories has one repository, which every remote is.
 
@@ -22,7 +34,7 @@ use crate::handle::Handle;
 use crate::protection::{ProtectedRef, ProtectedTarget, RefKind};
 use crate::repo::RemoteUrl;
 use crate::settings::{ProjectSettings, RepoSpec};
-use crate::slot::{CommandVerdict, SimpleCommand};
+use crate::slot::{CommandVerdict, SimpleCommand, assigned_name};
 
 /// The remote a push goes to when git is left to choose and nothing else names one.
 const DEFAULT_REMOTE: &str = "origin";
@@ -55,17 +67,88 @@ pub struct GitPush {
     pub delete: bool,
     /// Whether it pushes tags besides what the refspecs name (`--tags`, `--follow-tags`).
     pub tags: bool,
+    /// The settings `git -c <key>=<value>` sets for this run, in order, each key as git writes it
+    /// (section and name in lower case, a subsection as written).
+    pub config: Vec<(String, String)>,
     /// Whether something on the line makes its target unreadable: another git directory or work
-    /// tree, a namespace, an option whose value is missing.
+    /// tree, a namespace, settings read from elsewhere, an option whose value is missing.
     pub unreadable: bool,
 }
 
-/// The `git push` commands among `commands`, in order.
+/// The variables that point git at another repository or at other settings: assigned anywhere on
+/// a line, they make its pushes unreadable.
+const GIT_ENVIRONMENT: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "HOME",
+    "XDG_CONFIG_HOME",
+];
+
+/// The shell's words that assign the variables named after them.
+const DECLARERS: &[&str] = &["export", "declare", "typeset", "readonly", "local"];
+
+/// The `git push` commands among `commands`, in order. When any of `commands` assigns a variable
+/// that points git elsewhere, every push among them is unreadable.
 pub fn git_pushes(commands: &[&SimpleCommand]) -> Vec<GitPush> {
+    let elsewhere = commands
+        .iter()
+        .any(|command| assigns_git_environment(command));
     commands
         .iter()
         .filter_map(|command| git_push(&command.words))
+        .map(|mut push| {
+            push.unreadable |= elsewhere;
+            push
+        })
         .collect()
+}
+
+/// Whether `command` assigns a variable that points git elsewhere, in front of it or through
+/// `export` and its kin.
+fn assigns_git_environment(command: &SimpleCommand) -> bool {
+    let declared = command
+        .words
+        .first()
+        .is_some_and(|word| DECLARERS.contains(&word.as_str()));
+    let through_declarer = command
+        .words
+        .iter()
+        .skip(1)
+        .filter(|_| declared)
+        .filter_map(|word| assigned_name(word).or(Some(word.as_str())));
+    command
+        .assigned
+        .iter()
+        .map(String::as_str)
+        .chain(through_declarer)
+        .any(is_git_environment)
+}
+
+fn is_git_environment(name: &str) -> bool {
+    GIT_ENVIRONMENT.contains(&name) || name.starts_with("GIT_CONFIG")
+}
+
+/// The setting `git -c <pair>` sets, its key as git writes it; `None` for a pair git would refuse,
+/// and for one that includes settings from elsewhere.
+fn one_off_setting(pair: &str) -> Option<(String, String)> {
+    let (key, value) = pair.split_once('=').unwrap_or((pair, "true"));
+    let (section, rest) = key.split_once('.')?;
+    let (subsection, name) = match rest.rsplit_once('.') {
+        Some((subsection, name)) => (Some(subsection), name),
+        None => (None, rest),
+    };
+    let section = section.to_ascii_lowercase();
+    if section.is_empty() || name.is_empty() || section.starts_with("include") {
+        return None;
+    }
+    let name = name.to_ascii_lowercase();
+    let key = match subsection {
+        Some(subsection) => format!("{section}.{subsection}.{name}"),
+        None => format!("{section}.{name}"),
+    };
+    Some((key, value.to_owned()))
 }
 
 fn program_name(word: &str) -> &str {
@@ -86,23 +169,26 @@ fn git_push(words: &[String]) -> Option<GitPush> {
         scope: PushScope::Refspecs,
         delete: false,
         tags: false,
+        config: Vec::new(),
         unreadable: false,
     };
     loop {
         match words.next()? {
             "push" => break,
             "-C" => push.dir = Some(words.next()?.to_owned()),
-            "-c" => {
-                words.next()?;
-            }
-            "--git-dir" | "--work-tree" | "--namespace" => {
+            "-c" => match one_off_setting(words.next()?) {
+                Some(setting) => push.config.push(setting),
+                None => push.unreadable = true,
+            },
+            "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
                 words.next();
                 push.unreadable = true;
             }
             option
                 if option.starts_with("--git-dir=")
                     || option.starts_with("--work-tree=")
-                    || option.starts_with("--namespace=") =>
+                    || option.starts_with("--namespace=")
+                    || option.starts_with("--config-env=") =>
             {
                 push.unreadable = true;
             }
@@ -192,6 +278,22 @@ impl GitFacts {
         self.get(key).is_some()
     }
 
+    /// Whether `key` is set to a value git reads as true: `true`, `yes`, `on` or `1`.
+    fn is_true(&self, key: &str) -> bool {
+        self.get(key).is_some_and(|value| {
+            ["true", "yes", "on", "1"]
+                .iter()
+                .any(|truth| value.eq_ignore_ascii_case(truth))
+        })
+    }
+
+    /// These settings with `config` set on top, as `git -c` sets them for one run.
+    fn with(&self, config: &[(String, String)]) -> Self {
+        let mut combined = self.clone();
+        combined.config.extend(config.iter().cloned());
+        combined
+    }
+
     /// The remote a push without one goes to, from the current branch.
     fn default_remote(&self) -> String {
         let branch = self.branch.as_deref().unwrap_or_default();
@@ -244,7 +346,12 @@ enum Reach {
 /// The branches and tags a push updates in the repository it goes to; empty when it updates
 /// none.
 fn reach(push: &GitPush, remote: &str, facts: &GitFacts) -> Vec<Reach> {
-    let mut reached = match push.scope {
+    let scope = if facts.is_true(&format!("remote.{remote}.mirror")) {
+        PushScope::Mirror
+    } else {
+        push.scope
+    };
+    let mut reached = match scope {
         PushScope::AllBranches => vec![Reach::AnyBranch],
         PushScope::Mirror => vec![Reach::AnyBranch, Reach::AnyTag],
         PushScope::TagsOnly => vec![Reach::AnyTag],
@@ -255,7 +362,7 @@ fn reach(push: &GitPush, remote: &str, facts: &GitFacts) -> Vec<Reach> {
             .flat_map(|spec| refspec_reach(spec, push.delete, facts))
             .collect(),
     };
-    let follows_tags = facts.get("push.followtags") == Some("true");
+    let follows_tags = facts.is_true("push.followtags");
     if push.tags || follows_tags {
         reached.push(Reach::AnyTag);
     }
@@ -311,16 +418,15 @@ fn refspec_reach(spec: &str, delete: bool, facts: &GitFacts) -> Vec<Reach> {
     destination_reach(destination)
 }
 
-/// What a destination names: a full branch or tag ref as written; a short name both as the branch
-/// and as the tag of that name, since git may resolve it to either; nothing for another ref.
+/// What a destination names: a full ref as written, a wildcard under `refs/` being every ref it
+/// may match; a short name as `refs/<name>`, as the branch and as the tag of that name, since git
+/// may resolve it to any of them (`heads/main` is the branch `main`).
 fn destination_reach(name: &str) -> Vec<Reach> {
-    if name.starts_with("refs/heads/") || name.starts_with("refs/tags/") {
+    if name.starts_with("refs/") {
         return vec![full_reach(name.to_owned())];
     }
-    if name.starts_with("refs/") {
-        return Vec::new();
-    }
     vec![
+        full_reach(format!("refs/{name}")),
         full_reach(format!("refs/heads/{name}")),
         full_reach(format!("refs/tags/{name}")),
     ]
@@ -337,7 +443,7 @@ fn full_reach(full: String) -> Reach {
 
 /// Whether a ref a one-`*` refspec pattern matches may be one `target` covers. For a target that
 /// is a pattern itself, any overlap of the two counts, so that a push that might reach a protected
-/// tag is judged as one that does.
+/// branch or tag is judged as one that does.
 fn pattern_reaches(pattern: &str, target: &ProtectedTarget) -> bool {
     match target.prefix() {
         Some(prefix) => {
@@ -405,6 +511,13 @@ impl PushProtection<'_> {
         let Some(facts) = self.facts.filter(|_| readable) else {
             return self.any_repo_refusal();
         };
+        let combined;
+        let facts = if push.config.is_empty() {
+            facts
+        } else {
+            combined = facts.with(&push.config);
+            &combined
+        };
         let remote = push
             .remote
             .clone()
@@ -465,18 +578,23 @@ impl PushProtection<'_> {
                 .copied()
         };
         reached.iter().find_map(|reach| {
-            let (rule, certain) = match reach {
-                Reach::Ref(name) => (*blocked.iter().find(|rule| rule.target.covers(name))?, true),
+            let (rule, certain, pushed) = match reach {
+                Reach::Ref(name) => (
+                    *blocked.iter().find(|rule| rule.target.covers(name))?,
+                    true,
+                    Some(name.clone()),
+                ),
                 Reach::Pattern(pattern) => (
                     *blocked
                         .iter()
                         .find(|rule| pattern_reaches(pattern, &rule.target))?,
                     true,
+                    None,
                 ),
-                Reach::AnyBranch => (first_of(RefKind::Branch)?, false),
-                Reach::AnyTag => (first_of(RefKind::Tag)?, false),
+                Reach::AnyBranch => (first_of(RefKind::Branch)?, false, None),
+                Reach::AnyTag => (first_of(RefKind::Tag)?, false, None),
             };
-            Some(needs_permission(rule, certain))
+            Some(needs_permission(rule, certain, pushed))
         })
     }
 
@@ -494,7 +612,7 @@ impl PushProtection<'_> {
             .iter()
             .flat_map(|repo| self.blocked(repo))
             .find(|rule| rule.target.kind() == kind)
-            .map(|rule| needs_permission(rule, false))
+            .map(|rule| needs_permission(rule, false, None))
     }
 
     /// The refusal of a push of `refs` whose repository cannot be read, for its tags: a protected
@@ -508,15 +626,16 @@ impl PushProtection<'_> {
                 rule.target.kind() == RefKind::Tag
                     && refs.iter().any(|name| rule.target.covers(name))
             })
-            .map(|rule| needs_permission(rule, false))
+            .map(|rule| needs_permission(rule, false, None))
     }
 }
 
-fn needs_permission(rule: &ProtectedRef, certain: bool) -> CommandVerdict {
+fn needs_permission(rule: &ProtectedRef, certain: bool, pushed: Option<String>) -> CommandVerdict {
     CommandVerdict::NeedsPermission {
         target: rule.target.clone(),
         pushers: BTreeSet::clone(&rule.pushers),
         certain,
+        pushed,
     }
 }
 

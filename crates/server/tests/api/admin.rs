@@ -212,7 +212,6 @@ async fn protected_tags_are_applied_in_their_normal_form_and_a_bad_pattern_is_re
         ("refs/tags/v*.0", "'*' at the end only"),
         ("refs/tags/v**", "'**' is not accepted"),
         ("refs/tags/", "after 'refs/tags/'"),
-        ("refs/heads/release/*", "one branch exactly"),
     ] {
         let refused = world
             .put(
@@ -247,6 +246,111 @@ async fn protected_tags_are_applied_in_their_normal_form_and_a_bad_pattern_is_re
         .as_str()
         .unwrap_or_default();
     assert!(message.contains("not tags"), "{message}");
+}
+
+#[tokio::test]
+async fn branch_patterns_are_applied_in_their_normal_form_and_a_bad_one_is_refused_by_name() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let train = json!({
+        "protected_refs": [
+            {"ref": "refs/heads/main", "pushers": ["alice"]},
+            {"ref": "refs/heads/release/*", "pushers": ["alice"]}
+        ],
+        "slots": [{"name": "release:cut", "max_hold": "1h", "freezes": ["refs/heads/release/*"]}]
+    });
+    let applied = world.put(&alice, "/v1/admin/settings", train).await;
+    assert_eq!(applied.status, StatusCode::OK, "{}", applied.body);
+    assert_eq!(
+        applied.body["settings"]["protected_refs"],
+        json!([
+            {"ref": "refs/heads/main", "pushers": ["alice"]},
+            {"ref": "refs/heads/release/*", "pushers": ["alice"]}
+        ])
+    );
+    assert_eq!(
+        applied.body["settings"]["slots"][0]["freezes"],
+        json!(["default:refs/heads/release/*"])
+    );
+    let me = world.get(&alice, "/v1/me").await;
+    assert_eq!(applied.body["settings"], me.body["settings"]);
+    assert_eq!(applied.body["warnings"], json!([]), "main is protected too");
+
+    let releases_only = world
+        .put(
+            &alice,
+            "/v1/admin/settings",
+            json!({"repos": [
+                {"id": "api", "remote": "https://github.com/acme/api.git",
+                 "protected_refs": [{"ref": "refs/heads/release/*", "pushers": ["alice"]}]},
+                {"id": "web", "remote": "git@github.com:acme/web.git"}
+            ]}),
+        )
+        .await;
+    assert_eq!(
+        releases_only.status,
+        StatusCode::OK,
+        "{}",
+        releases_only.body
+    );
+    assert_eq!(
+        releases_only.body["warnings"],
+        json!([
+            "Repository 'api' protects branches but not main, so a pull request merged into main completes no claim; protect refs/heads/main too, or the repository's default branch if it is another."
+        ]),
+        "the repository that protects nothing is not named"
+    );
+    let me = world.get(&alice, "/v1/me").await;
+
+    for (pattern, said) in [
+        ("refs/heads/release/*/x", "'*' at the end only"),
+        ("refs/heads/release/**", "'**' is not accepted"),
+        ("refs/heads/*", "would cover every branch"),
+        ("refs/heads/.release/*", "not one git accepts"),
+    ] {
+        let refused = world
+            .put(
+                &alice,
+                "/v1/admin/settings",
+                json!({"protected_refs": [{"ref": pattern}]}),
+            )
+            .await;
+        assert_error(
+            &refused,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_settings",
+        );
+        let message = refused.body["error"]["message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            message.starts_with(&format!("Protected ref '{pattern}'")) && message.contains(said),
+            "{pattern}: {message}"
+        );
+        let frozen = world
+            .put(
+                &alice,
+                "/v1/admin/settings",
+                json!({"slots": [{"name": "cut", "max_hold": "1h", "freezes": [pattern]}]}),
+            )
+            .await;
+        assert_error(
+            &frozen,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_settings",
+        );
+        let message = frozen.body["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.starts_with(&format!("Slot 'cut': freezes '{pattern}'"))
+                && message.contains(said),
+            "{pattern}: {message}"
+        );
+    }
+    let kept = world.get(&alice, "/v1/me").await;
+    assert_eq!(
+        kept.body["settings"], me.body["settings"],
+        "a refused document changes nothing"
+    );
 }
 
 #[tokio::test]

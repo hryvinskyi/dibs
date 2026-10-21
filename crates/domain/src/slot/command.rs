@@ -16,19 +16,28 @@ pub const MAX_COMMAND_BYTES: usize = 64 * 1024;
 /// How deep `sh -c` scripts are unwrapped.
 const MAX_DEPTH: usize = 4;
 
-/// One simple command: its words, quotes removed, and the text a pattern is matched against.
+/// One simple command: its words, quotes removed, the text a pattern is matched against, and the
+/// variables assigned before it. An assignment with no command after it (`GIT_DIR=x` alone) is a
+/// simple command with no words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimpleCommand {
     /// The words, quotes removed.
     pub words: Vec<String>,
     /// The words joined by single spaces, cut to [`MAX_COMMAND_BYTES`] at a character boundary.
     pub text: String,
+    /// The names of the variables assigned in front of it (`NAME=value`, and those `env` sets), in
+    /// order.
+    pub assigned: Vec<String>,
 }
 
 impl SimpleCommand {
-    fn of(words: Vec<String>) -> Self {
+    fn of(words: Vec<String>, assigned: Vec<String>) -> Self {
         let text = cap(&words.join(" "));
-        Self { words, text }
+        Self {
+            words,
+            text,
+            assigned,
+        }
     }
 }
 
@@ -43,6 +52,7 @@ fn split_at(line: &str, depth: usize) -> Vec<SimpleCommand> {
         return vec![SimpleCommand {
             words,
             text: cap(line.trim()),
+            assigned: Vec::new(),
         }];
     };
     commands
@@ -106,11 +116,21 @@ const KEYWORDS: &[&str] = &[
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash"];
 
 fn unwrap(mut words: Vec<String>, depth: usize) -> Vec<SimpleCommand> {
+    let mut assigned = Vec::new();
     loop {
         let Some(first) = words.first() else {
-            return Vec::new();
+            return if assigned.is_empty() {
+                Vec::new()
+            } else {
+                vec![SimpleCommand::of(Vec::new(), assigned)]
+            };
         };
-        if KEYWORDS.contains(&first.as_str()) || is_assignment(first) {
+        if let Some(name) = assigned_name(first) {
+            assigned.push(name.to_owned());
+            words.remove(0);
+            continue;
+        }
+        if KEYWORDS.contains(&first.as_str()) {
             words.remove(0);
             continue;
         }
@@ -118,7 +138,7 @@ fn unwrap(mut words: Vec<String>, depth: usize) -> Vec<SimpleCommand> {
             break;
         };
         words.remove(0);
-        drop_options(&mut words, prefix.with_value);
+        drop_options(&mut words, prefix.with_value, &mut assigned);
     }
     if let Some(script) = shell_script(&words)
         && depth < MAX_DEPTH
@@ -131,17 +151,19 @@ fn unwrap(mut words: Vec<String>, depth: usize) -> Vec<SimpleCommand> {
     {
         *first = rest.to_owned();
     }
-    vec![SimpleCommand::of(words)]
+    vec![SimpleCommand::of(words, assigned)]
 }
 
-/// Drops the options at the front of `words`, and the assignments `env` takes among them.
-fn drop_options(words: &mut Vec<String>, with_value: &[&str]) {
+/// Drops the options at the front of `words`, and the assignments `env` takes among them, whose
+/// names go to `assigned`.
+fn drop_options(words: &mut Vec<String>, with_value: &[&str], assigned: &mut Vec<String>) {
     while let Some(word) = words.first() {
         if word == "--" {
             words.remove(0);
             return;
         }
-        if is_assignment(word) {
+        if let Some(name) = assigned_name(word) {
+            assigned.push(name.to_owned());
             words.remove(0);
             continue;
         }
@@ -156,15 +178,15 @@ fn drop_options(words: &mut Vec<String>, with_value: &[&str]) {
     }
 }
 
-fn is_assignment(word: &str) -> bool {
-    let Some((name, _)) = word.split_once('=') else {
-        return false;
-    };
+/// The name `word` assigns when it is a shell assignment, `NAME=value`.
+pub(crate) fn assigned_name(word: &str) -> Option<&str> {
+    let (name, _) = word.split_once('=')?;
     let mut chars = name.chars();
-    chars
+    let valid = chars
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    valid.then_some(name)
 }
 
 /// The script of `sh -c '<script>'` and its kin.
@@ -511,5 +533,26 @@ mod tests {
     #[test]
     fn nested_shells_unwrap_to_a_limit() {
         assert_eq!(texts("sh -c \"bash -c './deploy.sh'\""), ["deploy.sh"]);
+    }
+
+    #[test]
+    fn the_variables_assigned_before_a_command_are_named_and_a_bare_assignment_has_no_words() {
+        let commands = split_commands(
+            "GIT_DIR=x FOO=1 git push; env -u BAR GIT_WORK_TREE=y git status; HOME=/tmp; ls",
+        );
+        let shapes: Vec<(Vec<String>, Vec<String>)> = commands
+            .into_iter()
+            .map(|command| (command.words, command.assigned))
+            .collect();
+        let words = |list: &[&str]| list.iter().map(|word| (*word).to_owned()).collect();
+        assert_eq!(
+            shapes,
+            [
+                (words(&["git", "push"]), words(&["GIT_DIR", "FOO"])),
+                (words(&["git", "status"]), words(&["GIT_WORK_TREE"])),
+                (Vec::new(), words(&["HOME"])),
+                (words(&["ls"]), Vec::new()),
+            ]
+        );
     }
 }

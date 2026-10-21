@@ -478,3 +478,88 @@ async fn the_holder_drops_a_pull_request_and_a_refusal_names_the_claim_that_reco
         (&json!(team.item), &json!("gh:acme/api#42"), &json!("bob"))
     );
 }
+
+/// [`settings`] with `api`'s release branches protected beside `main` and a slot that freezes
+/// every one of them.
+fn release_train() -> Value {
+    let mut train = settings();
+    train["repos"][0]["protected_refs"] = json!([
+        {"ref": "refs/heads/main", "pushers": ["alice"]},
+        {"ref": "refs/heads/release/*", "pushers": ["alice"]}
+    ]);
+    train["slots"] = json!([
+        {"name": "release:cut", "max_hold": "1h", "freezes": ["api:refs/heads/release/*"]}
+    ]);
+    train
+}
+
+#[tokio::test]
+async fn a_merge_into_a_release_branch_a_pattern_protects_completes_the_claim() {
+    let team = Team::new().await;
+    team.world.settings(&team.alice, release_train()).await;
+    team.review(&team.bob, "acme/api#7", false).await;
+    let stacked = team
+        .world
+        .post(
+            &team.worker,
+            "/v1/prs/merged",
+            json!({"pr": "acme/api#7", "base": "release", "merged_at": "2026-03-02T10:00:00Z"}),
+        )
+        .await;
+    assert_eq!(stacked.status, StatusCode::OK, "{}", stacked.body);
+    assert_eq!(
+        stacked.body["claim"], "working",
+        "a branch the pattern does not cover delivers nothing"
+    );
+    team.review(&team.bob, "acme/api#8", false).await;
+    let merged = team
+        .world
+        .post(
+            &team.worker,
+            "/v1/prs/merged",
+            json!({"pr": "acme/api#8", "base": "release/2026.10.3",
+                   "merged_at": "2026-03-02T11:00:00Z"}),
+        )
+        .await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.body);
+    assert_eq!(
+        merged.body,
+        json!({"matched": true, "item": team.item, "claim": "completed"})
+    );
+}
+
+#[tokio::test]
+async fn the_pr_status_of_a_release_branch_fails_while_a_slot_that_freezes_its_pattern_is_held() {
+    let team = Team::new().await;
+    team.world.settings(&team.alice, release_train()).await;
+    let read = |base: &'static str| {
+        let world = &team.world;
+        let worker = &team.worker;
+        async move {
+            world
+                .get(worker, &format!("/v1/pr-status?repo=api&base={base}"))
+                .await
+        }
+    };
+    assert_eq!(read("release/2026.10.3").await.body["state"], "success");
+    let taken = team
+        .world
+        .post(
+            &team.alice,
+            "/v1/slots/release:cut/take",
+            json!({"session_id": team.alice_session, "purpose": "cut 2026.10.3"}),
+        )
+        .await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+    assert_eq!(
+        taken.body["slot"]["freezes"],
+        json!(["api:refs/heads/release/*"])
+    );
+    for base in ["release/2026.10.3", "refs/heads/release/2026.11.1"] {
+        let frozen = read(base).await;
+        assert_eq!(frozen.body["state"], "failure", "{base}: {}", frozen.body);
+    }
+    for base in ["main", "release", "bob/42-rounding"] {
+        assert_eq!(read(base).await.body["state"], "success", "{base}");
+    }
+}

@@ -27,6 +27,7 @@ use crate::fields::{
     item_in_body, parse, parse_required, record_id_text, required, session_in_body,
 };
 use crate::http::AppState;
+use crate::versions::ClientReads;
 use crate::views::slots::{HoldView, SlotView};
 use crate::views::{DeliveryView, reply};
 
@@ -60,12 +61,16 @@ struct SlotAnswer {
 pub async fn list(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
 ) -> Result<Response, ApiError> {
     let lines = state.app.slots.execute(&actor).await?;
     Ok(reply(
         StatusCode::OK,
         &SlotsAnswer {
-            slots: lines.into_iter().map(SlotView::of).collect(),
+            slots: lines
+                .into_iter()
+                .map(|line| SlotView::of(line, reads))
+                .collect(),
         },
     ))
 }
@@ -77,6 +82,7 @@ pub async fn list(
 pub async fn get(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let slot = slot_in_path(path)?;
@@ -84,7 +90,7 @@ pub async fn get(
     Ok(reply(
         StatusCode::OK,
         &SlotAnswer {
-            slot: SlotView::of(line),
+            slot: SlotView::of(line, reads),
         },
     ))
 }
@@ -124,6 +130,7 @@ struct TakeAnswer {
 pub async fn take(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<TakeBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -166,7 +173,7 @@ pub async fn take(
             outcome,
             position,
             run_id: took.run,
-            slot: SlotView::of(took.line),
+            slot: SlotView::of(took.line, reads),
         },
     ))
 }
@@ -195,6 +202,7 @@ struct EndedAnswer {
 pub async fn release(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<ReleaseBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -217,7 +225,7 @@ pub async fn release(
         StatusCode::OK,
         &EndedAnswer {
             released: HoldView::of(ended.hold),
-            slot: SlotView::of(ended.line),
+            slot: SlotView::of(ended.line, reads),
         },
     ))
 }
@@ -230,6 +238,7 @@ pub async fn release(
 pub async fn leave(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Response, ApiError> {
     actor.require_person()?;
@@ -238,7 +247,7 @@ pub async fn leave(
     Ok(reply(
         StatusCode::OK,
         &SlotAnswer {
-            slot: SlotView::of(line),
+            slot: SlotView::of(line, reads),
         },
     ))
 }
@@ -259,6 +268,7 @@ pub struct BeatBody {
 pub async fn heartbeat(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<BeatBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -270,7 +280,7 @@ pub async fn heartbeat(
     Ok(reply(
         StatusCode::OK,
         &SlotAnswer {
-            slot: SlotView::of(line),
+            slot: SlotView::of(line, reads),
         },
     ))
 }
@@ -300,6 +310,7 @@ struct TakeOverAnswer {
 pub async fn take_over(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<TakeOverBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -318,7 +329,7 @@ pub async fn take_over(
         &TakeOverAnswer {
             previous: HoldView::of(taken.previous),
             thread_id: taken.thread,
-            slot: SlotView::of(taken.line),
+            slot: SlotView::of(taken.line, reads),
         },
     ))
 }
@@ -389,6 +400,7 @@ struct ForcedAnswer {
 pub async fn force_release(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<ForceBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
@@ -407,7 +419,7 @@ pub async fn force_release(
             holder: forced.ended.hold.holder.clone(),
             released: HoldView::of(forced.ended.hold),
             thread_id: forced.thread,
-            slot: SlotView::of(forced.ended.line),
+            slot: SlotView::of(forced.ended.line, reads),
         },
     ))
 }

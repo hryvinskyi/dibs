@@ -131,10 +131,11 @@ serve many teams:
 - Many teams name a pull request's ticket in its description as `Refs #<number>` rather than `Closes`, `Fixes` or
   `Resolves #<number>`, because a forge closes those tickets at the merge, before anyone has checked the change where it
   runs. Follow your team's rule where it has one.
-- Do not push to a protected branch. A push there by anyone the project does not list as its pusher is refused, naming
-  who may push; a push dibs cannot read — every branch, a wildcard, another directory — is refused too, so name the
-  branch and the remote you push. A push to a fork is not judged. The way on is your branch and a pull request. A person
-  in a terminal can still push with `git push --no-verify`; that breaks the team's rule.
+- Do not push to a protected branch. A project protects a branch by its name, or every branch whose name starts with a
+  prefix (`release/*`, for the release branches). A push there by anyone the project does not list as its pusher is
+  refused, naming who may push; a push dibs cannot read — every branch, a wildcard, another directory — is refused too,
+  so name the branch and the remote you push. A push to a fork is not judged. The way on is your branch and a pull
+  request. A person in a terminal can still push with `git push --no-verify`; that breaks the team's rule.
 - Do not push or delete a protected tag, such as a release tag, unless the project lists you as its pusher: it is
   refused for anyone else, and so is a push that may carry tags (`--tags`, `--follow-tags`, `--mirror`) or names a
   short name a protected tag covers. Leave tagging to those members, and push your branch by its name without tags.

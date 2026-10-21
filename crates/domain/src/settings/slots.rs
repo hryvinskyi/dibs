@@ -8,8 +8,8 @@ use super::document::{CommandDocument, SlotDocument};
 use super::duration::{DurationError, format_duration, parse_duration};
 use crate::hot_rule::{Note, NoteError};
 use crate::slot::{
-    CommandPattern, DEFAULT_MAX_WAIT, DEFAULT_OFFER_FOR, MAX_HOLD_RANGE, MAX_PATTERNS,
-    PatternError, RepoRef, RepoRefError, SlotCatalog, SlotGroup, SlotGroupError, SlotName,
+    BranchPattern, BranchPatternError, CommandPattern, DEFAULT_MAX_WAIT, DEFAULT_OFFER_FOR,
+    MAX_HOLD_RANGE, MAX_PATTERNS, PatternError, SlotCatalog, SlotGroup, SlotGroupError, SlotName,
     SlotNameError, SlotSpec,
 };
 
@@ -63,7 +63,7 @@ pub enum SlotError {
         text: String,
         /// What is wrong with it.
         #[source]
-        error: RepoRefError,
+        error: BranchPatternError,
     },
     /// A frozen ref names a repository the settings do not declare.
     #[error("freezes '{text}' names a repository the project does not declare")]
@@ -169,20 +169,24 @@ fn in_range(
     Ok(value)
 }
 
-/// A frozen ref: `repo:refs/heads/<name>`, or, in a project with one repository, the bare ref; a
-/// tag is refused.
-fn freeze(text: &str, repos: &[RepoSpec], lists_repositories: bool) -> Result<RepoRef, SlotError> {
+/// A frozen ref: `repo:refs/heads/<name>` or `repo:refs/heads/<prefix>*`, or, in a project with
+/// one repository, the bare ref; a tag is refused.
+fn freeze(
+    text: &str,
+    repos: &[RepoSpec],
+    lists_repositories: bool,
+) -> Result<BranchPattern, SlotError> {
     let malformed = |error| SlotError::Freeze {
         text: text.to_owned(),
         error,
     };
     let parsed = match (text.split_once(':'), repos.first()) {
         (None, Some(sole)) if !lists_repositories => {
-            RepoRef::named(sole.id.clone(), text).map_err(malformed)?
+            BranchPattern::named(sole.id.clone(), text).map_err(malformed)?
         }
-        _ => RepoRef::parse(text).map_err(malformed)?,
+        _ => BranchPattern::parse(text).map_err(malformed)?,
     };
-    if repos.iter().any(|repo| repo.id == parsed.repo) {
+    if repos.iter().any(|repo| repo.id == *parsed.repo()) {
         Ok(parsed)
     } else {
         Err(SlotError::FreezeRepo {
@@ -222,6 +226,7 @@ mod tests {
     use super::*;
     use crate::hot_rule::HotRuleRegistry;
     use crate::settings::{ProjectSettings, SettingsDocument, SettingsError};
+    use crate::slot::RepoRef;
     use crate::testing::{document, two_repo_json};
 
     fn parse(json: &str) -> Result<ProjectSettings, SettingsError> {
@@ -374,8 +379,77 @@ mod tests {
             refusal(&with(r#""api:refs/tags/v*""#)),
             SlotError::Freeze {
                 text: "api:refs/tags/v*".to_owned(),
-                error: RepoRefError::Tag,
+                error: BranchPatternError::Tag,
             }
+        );
+    }
+
+    #[test]
+    fn a_slot_freezes_branches_by_a_prefix_that_ends_in_a_star_and_round_trips() {
+        let with = |freezes: &str| {
+            let base = two_repo_json("advise");
+            let slots = format!(
+                r#","slots":[{{"name":"deploy","max_hold":"1h","freezes":[{freezes}]}}]}}"#
+            );
+            format!("{}{slots}", base.trim_end().trim_end_matches('}'))
+        };
+        let settings = parse(&with(r#""api:refs/heads/release/*","api:refs/heads/main""#)).unwrap();
+        let spec = &settings.slots().slots()[0];
+        assert_eq!(spec.freezes[0].to_string(), "api:refs/heads/release/*");
+        let branch = |text: &str| RepoRef::parse(text).unwrap();
+        assert!(spec.freezes_branch(&branch("api:refs/heads/release/2026.10.3")));
+        assert!(spec.freezes_branch(&branch("api:refs/heads/main")));
+        assert!(!spec.freezes_branch(&branch("api:refs/heads/release")));
+        assert!(!spec.freezes_branch(&branch("api:refs/heads/bob/42-rounding")));
+        assert!(
+            !spec.freezes_branch(&branch("web:refs/heads/release/2026.10.3")),
+            "a pattern covers the branches of its own repository"
+        );
+        let document = settings.to_document();
+        assert_eq!(
+            document.slots[0].freezes,
+            ["api:refs/heads/release/*", "api:refs/heads/main"]
+        );
+        let again = ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap();
+        assert_eq!(again, settings);
+
+        for (text, error) in [
+            ("api:refs/heads/*", BranchPatternError::EmptyPrefix),
+            ("api:refs/heads/release/**", BranchPatternError::DoubleStar),
+            (
+                "api:refs/heads/release/*/x",
+                BranchPatternError::StarNotAtEnd,
+            ),
+            ("api:refs/heads/.release/*", BranchPatternError::Name),
+            ("api:refs/tags/v*", BranchPatternError::Tag),
+        ] {
+            assert_eq!(
+                refusal(&with(&format!(r#""{text}""#))),
+                SlotError::Freeze {
+                    text: text.to_owned(),
+                    error,
+                },
+                "{text}"
+            );
+        }
+        let single = parse(
+            r#"{"slots":[{"name":"cut","max_hold":"1h","freezes":["refs/heads/release/*"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            single.slots().slots()[0].freezes[0].to_string(),
+            "default:refs/heads/release/*"
+        );
+        let Err(error) =
+            parse(r#"{"slots":[{"name":"cut","max_hold":"1h","freezes":["refs/heads/*"]}]}"#)
+        else {
+            panic!("a pattern with no prefix was accepted");
+        };
+        let said = error.to_string();
+        assert!(
+            said.starts_with("slot 'cut': freezes 'refs/heads/*':")
+                && said.contains("would cover every branch"),
+            "{said}"
         );
     }
 

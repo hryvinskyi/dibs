@@ -1,5 +1,7 @@
 //! A server with a project and a member signed in, a checkout of theirs, and `dibs hook` run there
-//! on a warm cache, process start included: what the hook benchmarks share.
+//! on a warm cache, process start included: what the hook benchmarks share. The checkout's
+//! repository protects `main` and every `release/` branch for another member, who holds a slot
+//! that freezes every `hotfix/` branch; a second checkout of it keeps its refs in a reftable.
 
 use std::error::Error;
 use std::fs;
@@ -24,6 +26,8 @@ pub struct World {
     pub server: TestServer,
     home: PathBuf,
     pub api: PathBuf,
+    /// A checkout of the same repository whose refs git keeps in a reftable, on a release branch.
+    pub reftable: PathBuf,
     _root: TempDir,
 }
 
@@ -60,21 +64,42 @@ pub fn world() -> Setup<World> {
     let server = TestServer::start()?;
     let alice = server.project("acme", "alice")?;
     let bob = server.member(&alice, "bob", Role::Member)?;
-    server.settings(&alice, two_repositories())?;
+    let mut settings = two_repositories();
+    settings["repos"][0]["protected_refs"] = json!([
+        {"ref": "refs/heads/main", "pushers": ["alice"]},
+        {"ref": "refs/heads/release/*", "pushers": ["alice"]}
+    ]);
+    settings["slots"] = json!([
+        {"name": "hotfix:freeze", "max_hold": "24h", "freezes": ["api:refs/heads/hotfix/*"]}
+    ]);
+    server.settings(&alice, settings)?;
     let root = tempfile::tempdir()?;
     let home = root.path().join("home");
     let alices = root.path().join("alice");
     let api = root.path().join("api");
-    fs::create_dir_all(&api)?;
-    git(&api, &["init", "-q", "-b", "main"])?;
-    git(&api, &["remote", "add", "origin", REMOTE])?;
-    fs::write(
-        api.join(".dibs.toml"),
-        format!(
-            "server = \"{}\"\nproject = \"acme\"\nrepo = \"api\"\n",
-            server.url()
-        ),
-    )?;
+    let reftable = root.path().join("api-reftable");
+    for (dir, format) in [(&api, "files"), (&reftable, "reftable")] {
+        fs::create_dir_all(dir)?;
+        git(
+            dir,
+            &[
+                "init",
+                "-q",
+                "-b",
+                "main",
+                &format!("--ref-format={format}"),
+            ],
+        )?;
+        git(dir, &["remote", "add", "origin", REMOTE])?;
+        fs::write(
+            dir.join(".dibs.toml"),
+            format!(
+                "server = \"{}\"\nproject = \"acme\"\nrepo = \"api\"\n",
+                server.url()
+            ),
+        )?;
+    }
+    git(&reftable, &["checkout", "-q", "-b", "release/2.4"])?;
     for (who, token) in [(&home, &bob.token), (&alices, &alice.token)] {
         let login = dibs(
             who,
@@ -89,6 +114,13 @@ pub fn world() -> Setup<World> {
     for args in [
         &["new", "gh:acme/api#1", "--title", "Billing"][..],
         &["claim", "gh:acme/api#1", "--area", "billing"],
+        &[
+            "slot",
+            "take",
+            "hotfix:freeze",
+            "--purpose",
+            "hotfix review",
+        ],
     ] {
         if !dibs(&alices, &api, args, None)?.status.success() {
             return Err(format!("dibs {args:?} failed").into());
@@ -98,6 +130,7 @@ pub fn world() -> Setup<World> {
         server,
         home,
         api,
+        reftable,
         _root: root,
     })
 }
@@ -105,8 +138,13 @@ pub fn world() -> Setup<World> {
 impl World {
     /// The neutral host's input for an event of the session, with a tool when given.
     pub fn input(&self, tool: Option<Value>) -> String {
+        self.input_in(&self.api, tool)
+    }
+
+    /// [`World::input`] for a session working in `cwd`.
+    pub fn input_in(&self, cwd: &Path, tool: Option<Value>) -> String {
         let mut value = json!({
-            "protocol": 1, "session": SESSION, "cwd": self.api.to_string_lossy(), "thread": "main"
+            "protocol": 1, "session": SESSION, "cwd": cwd.to_string_lossy(), "thread": "main"
         });
         if let Some(tool) = tool {
             value["tool"] = tool;
@@ -114,7 +152,8 @@ impl World {
         value.to_string()
     }
 
-    /// Fills every cache and sends the heartbeat, so nothing is due for a while.
+    /// Fills every cache, for both checkouts, and sends the heartbeat, so nothing is due for a
+    /// while.
     pub fn warm(&self) -> Setup<()> {
         let sync = dibs(
             &self.home,
@@ -134,6 +173,10 @@ impl World {
             return Err("dibs sync failed".into());
         }
         self.hook("before-tool", &self.input(Some(edit_readme())))?;
+        self.hook(
+            "before-tool",
+            &self.input_in(&self.reftable, Some(edit_readme())),
+        )?;
         Ok(())
     }
 

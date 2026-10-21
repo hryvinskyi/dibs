@@ -440,3 +440,128 @@ fn git_refuses_a_members_push_of_a_protected_tag_through_its_pre_push_hook() {
     let branch = push(&api, &["shared", "main"]);
     assert!(branch.status.success(), "{}", text(&branch.stderr));
 }
+
+/// The setup with `api`'s `main` protected for alice alone and its `release/` branches for alice
+/// and carol, and a slot that freezes every release branch.
+fn release_train() -> Setup {
+    let setup = Setup::new();
+    let mut settings = two_repositories();
+    settings["repos"][0]["protected_refs"] = json!([
+        {"ref": "refs/heads/main", "pushers": ["alice"]},
+        {"ref": "refs/heads/release/*", "pushers": ["alice", "carol"]}
+    ]);
+    settings["slots"] = json!([
+        {"name": "release:cut", "max_hold": "1h", "freezes": ["api:refs/heads/release/*"]}
+    ]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    setup
+}
+
+const RELEASE: &str = "refs/heads/release/2026.10.3 1111111111111111111111111111111111111111 refs/heads/release/2026.10.3 0000000000000000000000000000000000000000\n";
+const RELEASE_DELETED: &str = "(delete) 0000000000000000000000000000000000000000 refs/heads/release/2026.10.1 3333333333333333333333333333333333333333\n";
+const TASK: &str = "refs/heads/bob/42-rounding 1111111111111111111111111111111111111111 refs/heads/bob/42-rounding 0000000000000000000000000000000000000000\n";
+
+#[test]
+fn a_release_branch_a_pattern_protects_is_refused_for_a_member_who_is_no_pusher_naming_the_pattern()
+{
+    let setup = release_train();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    for (what, line, branch) in [
+        ("a pushed release branch", RELEASE, "release/2026.10.3"),
+        (
+            "a deleted release branch",
+            RELEASE_DELETED,
+            "release/2026.10.1",
+        ),
+    ] {
+        let refused = check(&setup, "bob", &api, line);
+        assert_eq!(status(&refused), 1, "{what}");
+        let said = text(&refused.stderr);
+        let named = format!(
+            "This push goes to the branch {branch} of api, which release/* covers and only alice, carol may push to."
+        );
+        for part in [
+            named.as_str(),
+            "open a pull request",
+            "--no-verify",
+            "(refusal r-",
+        ] {
+            assert!(said.contains(part), "{what}, {part}: {said}");
+        }
+    }
+    let task = check(&setup, "bob", &api, TASK);
+    assert_eq!(status(&task), 0, "a task branch is free");
+    assert_eq!(text(&task.stderr), "");
+    let main = check(&setup, "bob", &api, MAIN);
+    assert_eq!(status(&main), 1, "main stays protected beside the pattern");
+    for line in [RELEASE, RELEASE_DELETED, MAIN] {
+        let pusher = check(&setup, "alice", &api, line);
+        assert_eq!(status(&pusher), 0, "{}", text(&pusher.stderr));
+        assert_eq!(text(&pusher.stderr), "");
+    }
+}
+
+#[test]
+fn a_push_to_a_release_branch_is_refused_while_another_member_holds_the_slot_that_freezes_them() {
+    let setup = release_train();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let out = setup
+        .dibs_as("alice", &api)
+        .args(["slot", "take", "release:cut", "--purpose", "cut 2026.10.3"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&out), 0);
+    let mut settings = two_repositories();
+    settings["slots"] = json!([
+        {"name": "release:cut", "max_hold": "1h", "freezes": ["api:refs/heads/release/*"]}
+    ]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    let frozen = check(&setup, "bob", &api, RELEASE);
+    assert_eq!(status(&frozen), 1);
+    let said = text(&frozen.stderr);
+    for part in [
+        "api:refs/heads/release/2026.10.3",
+        "with every branch release/* covers",
+        "release:cut",
+        "alice",
+        "cut 2026.10.3",
+        "--no-verify",
+    ] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+    let task = check(&setup, "bob", &api, TASK);
+    assert_eq!(status(&task), 0);
+    assert_eq!(text(&task.stderr), "");
+    let own = check(&setup, "alice", &api, RELEASE);
+    assert_eq!(status(&own), 0, "my own hold never freezes me");
+}
+
+#[test]
+fn git_refuses_a_members_push_to_a_release_branch_through_its_pre_push_hook_and_lets_a_pusher_through()
+ {
+    let setup = release_train();
+    let bobs = setup.checkout("api", Some("api"), API_REMOTE);
+    shared_remote(&setup, &bobs, "bob");
+    git(&bobs, &["checkout", "-q", "-b", "release/2026.10.3"]);
+    let refused = push(&bobs, &["shared", "release/2026.10.3"]);
+    assert!(!refused.status.success(), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr)
+            .contains("the branch release/2026.10.3 of api, which release/* covers"),
+        "{}",
+        text(&refused.stderr)
+    );
+    git(&bobs, &["checkout", "-q", "-b", "bob/42-rounding"]);
+    let task = push(&bobs, &["shared", "bob/42-rounding"]);
+    assert!(task.status.success(), "{}", text(&task.stderr));
+    let bare = push(&bobs, &["shared", "HEAD:refs/heads/release/2026.10.3"]);
+    assert!(!bare.status.success(), "whatever the command line names");
+
+    let alices = setup.checkout("api-alice", Some("api"), API_REMOTE);
+    shared_remote(&setup, &alices, "alice");
+    git(&alices, &["checkout", "-q", "-b", "release/2026.10.3"]);
+    let pushed = push(&alices, &["shared", "release/2026.10.3"]);
+    assert!(pushed.status.success(), "{}", text(&pushed.stderr));
+    let deleted = push(&alices, &["shared", "--delete", "release/2026.10.3"]);
+    assert!(deleted.status.success(), "{}", text(&deleted.stderr));
+}

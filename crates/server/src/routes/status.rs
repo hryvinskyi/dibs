@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::http::AppState;
+use crate::versions::ClientReads;
 use crate::views::slots::SlotView;
 use crate::views::{HeldItemView, OverlapView, ReadyView, reply};
 
@@ -124,6 +125,7 @@ struct HoldView {
 pub async fn status(
     State(state): State<AppState>,
     Authed(actor): Authed,
+    reads: ClientReads,
 ) -> Result<Response, ApiError> {
     actor.require_person()?;
     let view = state.app.status.execute(&actor).await?;
@@ -141,7 +143,11 @@ pub async fn status(
             .collect(),
         wide: view.wide.into_iter().map(WideClaimView::of).collect(),
         ready: ReadyView::of(view.ready),
-        slots: view.slots.into_iter().map(SlotView::of).collect(),
+        slots: view
+            .slots
+            .into_iter()
+            .map(|line| SlotView::of(line, reads))
+            .collect(),
         escalations: view
             .escalations
             .into_iter()

@@ -1532,6 +1532,9 @@ pub struct SettingsApplied {
     pub settings: SettingsDocument,
     /// Whether they differ from the ones before.
     pub changed: bool,
+    /// What in them works otherwise than the admin may expect, one sentence each.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]

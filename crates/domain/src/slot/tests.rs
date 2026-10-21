@@ -1032,6 +1032,7 @@ fn a_protected_branch_is_judged_before_any_freeze_and_lets_its_pushers_through()
             target: main.clone(),
             pushers: [Handle::parse("alice").unwrap()].into(),
             certain: true,
+            pushed: Some("refs/heads/main".to_owned()),
         },
         "refused for permission before the freeze is even looked at"
     );
@@ -1053,7 +1054,87 @@ fn a_protected_branch_is_judged_before_any_freeze_and_lets_its_pushers_through()
             purpose: run.board.holds[0].purpose.clone(),
             until: run.board.holds[0].expires_at,
             target: RepoRef::of(RepoId::implicit(), "refs/heads/main").unwrap(),
+            frozen: BranchPattern::parse("default:refs/heads/main").unwrap(),
         },
         "without protection no branch counts as protected"
     );
+}
+
+/// A board whose one slot, `release:cut`, freezes every `release/` branch.
+fn release_run() -> Run {
+    Run {
+        catalog: settings(
+            r#"{"slots":[{"name":"release:cut","max_hold":"1h",
+                          "freezes":["refs/heads/release/*"]}]}"#,
+        )
+        .slots()
+        .clone(),
+        board: SlotBoard::default(),
+    }
+}
+
+#[test]
+fn a_held_slot_freezes_every_branch_its_pattern_covers() {
+    let mut run = release_run();
+    assert_eq!(
+        verdict(&run, "git push origin release/2026.10.3", BOB),
+        CommandVerdict::Free
+    );
+    run.take("release:cut", ALICE, 0);
+    let frozen_at = |line: &str| match verdict(&run, line, BOB) {
+        CommandVerdict::Frozen {
+            holder: ALICE,
+            target,
+            ..
+        } => Some(target.to_string()),
+        _ => None,
+    };
+    for (line, branch) in [
+        ("git push origin release/2026.10.3", "release/2026.10.3"),
+        (
+            "git push origin feature:release/2026.10.4",
+            "release/2026.10.4",
+        ),
+        (
+            "git push origin :refs/heads/release/2026.10.1",
+            "release/2026.10.1",
+        ),
+    ] {
+        assert_eq!(
+            frozen_at(line),
+            Some(format!("default:refs/heads/{branch}")),
+            "{line}"
+        );
+    }
+    for line in [
+        "git push origin release",
+        "git push origin bob/42-rounding",
+        "git push origin main",
+    ] {
+        assert_eq!(frozen_at(line), None, "{line}");
+    }
+    assert_eq!(
+        verdict(&run, "git push origin release/2026.10.3", ALICE),
+        CommandVerdict::Free,
+        "my own hold never freezes me"
+    );
+    let release = RepoRef::of(RepoId::implicit(), "refs/heads/release/2026.10.3").unwrap();
+    assert!(matches!(
+        push_verdict(std::slice::from_ref(&release), &run.catalog, &run.board, BOB),
+        CommandVerdict::Frozen { ref target, ref frozen, .. }
+            if *target == release && frozen.name() == "refs/heads/release/*"
+    ));
+    assert_eq!(
+        verdict(&run, "GIT_DIR=../other/.git", BOB),
+        CommandVerdict::Free,
+        "an assignment alone runs nothing a slot governs"
+    );
+    let asked = |line: &str| {
+        slots_in_question(&split_commands(line), &RepoId::implicit(), &run.catalog)
+            .into_iter()
+            .map(|slot| slot.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(asked("git push origin release/2026.10.3"), ["release:cut"]);
+    assert!(asked("git push origin bob/42-rounding").is_empty());
 }

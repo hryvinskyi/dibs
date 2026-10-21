@@ -59,7 +59,14 @@ pub struct CachedSettings {
     pub fetched_at: OffsetDateTime,
     /// The settings in their normal form.
     pub settings: SettingsDocument,
+    /// The version of the `dibs` that fetched them: a server serves a client the settings as far
+    /// as its version can read them, so another version's copy may lack what this one reads.
+    #[serde(default)]
+    pub client: Option<String>,
 }
+
+/// The version of this `dibs`, which names the settings it fetched.
+const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The status as last fetched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,9 +210,11 @@ impl StateDir {
         )
     }
 
-    /// The settings as last fetched.
+    /// The settings as last fetched by this version of `dibs`; none when another version fetched
+    /// them, so that they are fetched again as this version reads them.
     pub fn settings(&self) -> Option<CachedSettings> {
-        read_json(&self.cache.join("settings.json"))
+        read_json::<CachedSettings>(&self.cache.join("settings.json"))
+            .filter(|cached| cached.client.as_deref() == Some(CLIENT_VERSION))
     }
 
     /// Remembers the settings fetched at `at`.
@@ -222,6 +231,7 @@ impl StateDir {
             &CachedSettings {
                 fetched_at: at,
                 settings: settings.clone(),
+                client: Some(CLIENT_VERSION.to_owned()),
             },
         )
     }
@@ -640,9 +650,30 @@ mod tests {
             state.settings().unwrap(),
             CachedSettings {
                 fetched_at: at,
-                settings
+                settings: settings.clone(),
+                client: Some(env!("CARGO_PKG_VERSION").to_owned()),
             }
         );
+        for (older, written) in [
+            ("an older dibs", r#""client":"0.1.1","#),
+            ("a dibs that named no version", ""),
+        ] {
+            std::fs::write(
+                dir.path()
+                    .join("cache")
+                    .join(scope(&key("acme")))
+                    .join("settings.json"),
+                format!(
+                    r#"{{{written}"fetched_at":"1970-01-02T00:00:00Z","settings":{}}}"#,
+                    serde_json::to_string(&settings).unwrap()
+                ),
+            )
+            .unwrap();
+            assert!(
+                state.settings().is_none(),
+                "the settings {older} fetched are fetched again"
+            );
+        }
         let status = Status {
             live: Vec::new(),
             stale: Vec::new(),

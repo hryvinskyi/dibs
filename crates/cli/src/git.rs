@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dibs_client::branch::Head;
 use dibs_domain::push::GitFacts;
 use dibs_domain::repo::RemoteUrl;
 
@@ -32,18 +33,42 @@ impl Git {
     }
 
     /// What a push from this directory reads: the current branch (`None` on a detached head) and
-    /// every setting in force. `None` when git cannot list the settings. Two git runs.
-    pub fn push_facts(&self) -> Option<GitFacts> {
+    /// every setting in force. `head` is what the checkout's `HEAD` file says: the branch it names,
+    /// or a detached head, is taken from it, and only a `HEAD` it leaves to git is asked of git.
+    /// `None` when git cannot list the settings, or says the head is a ref that is no branch, or
+    /// cannot say what it is: such a push cannot be read. One git run, two for such a `HEAD`.
+    pub fn push_facts(&self, head: Head) -> Option<GitFacts> {
         let config = self.run(&["config", "--list", "-z"]).ok()?;
-        let branch = self
-            .run(&["symbolic-ref", "-q", "--short", "HEAD"])
-            .ok()
-            .map(|out| String::from_utf8_lossy(&out).trim().to_owned())
-            .filter(|branch| !branch.is_empty());
+        let branch = match head {
+            Head::Branch(branch) => Some(branch.to_string()),
+            Head::Detached => None,
+            Head::Unknown => self.symbolic_head()?,
+        };
         Some(GitFacts {
             branch,
             config: parse_config(&config),
         })
+    }
+
+    /// The branch `git symbolic-ref -q HEAD` names, after `refs/heads/`: `Some(None)` when the head
+    /// is detached, which git says by exiting 1; `None` when it names a ref outside `refs/heads/`
+    /// or git cannot say.
+    fn symbolic_head(&self) -> Option<Option<String>> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["symbolic-ref", "-q", "HEAD"])
+            .output()
+            .ok()?;
+        match output.status.code() {
+            Some(0) => {
+                let full = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                let branch = full.strip_prefix("refs/heads/")?;
+                (!branch.is_empty()).then(|| Some(branch.to_owned()))
+            }
+            Some(1) => Some(None),
+            _ => None,
+        }
     }
 
     /// The paths the non-merge commits of `range` changed, both sides of every rename, relative

@@ -1,7 +1,7 @@
 //! `GET /v1/me`: the caller, their project, and its settings.
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::Response;
 use serde::Serialize;
 
@@ -12,7 +12,7 @@ use dibs_domain::settings::SettingsDocument;
 use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::http::AppState;
-use crate::versions;
+use crate::versions::ClientReads;
 use crate::views::{MemberView, reply};
 
 #[derive(Serialize)]
@@ -45,11 +45,8 @@ struct RepoView {
 pub async fn me(
     State(state): State<AppState>,
     Authed(actor): Authed,
-    headers: HeaderMap,
+    reads: ClientReads,
 ) -> Result<Response, ApiError> {
-    let agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|value| value.to_str().ok());
     let view = state.app.me.execute(&actor).await?;
     let answer = MeAnswer {
         member: MemberView::of(&view.member),
@@ -65,7 +62,7 @@ pub async fn me(
                 remote: repo.remote.clone(),
             })
             .collect(),
-        settings: versions::settings_for(&view.settings, agent),
+        settings: reads.settings(&view.settings),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

@@ -344,6 +344,10 @@ ref = "refs/heads/main"
 pushers = ["alice"]
 
 [[protected_refs]]
+ref = "refs/heads/release/*"  # release branches: a prefix and one '*' at the end
+pushers = ["alice"]
+
+[[protected_refs]]
 ref = "refs/tags/v*"          # release tags: a literal prefix, optionally ending in one '*'
 pushers = ["alice"]
 
@@ -360,18 +364,36 @@ describe_holder = false
   `exec dibs check --push --remote "$1" --url "$2"`. It judges protected branches from what the machine remembers, so
   a push to one is refused while the server cannot be reached. Nothing on the server can stop a person who pushes with
   `git push --no-verify`, or a merge through the forge's web pages; the rule is the team's agreement.
+- **Branch patterns** (`refs/heads/<prefix>*`) protect every branch whose name starts with the prefix, such as the
+  release branches of a team that cuts release branches named `release/<version>` and lets only the members who cut
+  releases push to them, while everyone else's work reaches `main` through pull requests. A pattern is judged as a
+  branch named exactly, failing closed the same way, and a refusal names the branch pushed and the pattern. The prefix
+  is not empty (`refs/heads/*` would cover every branch) and the `*` comes once, at the end. A merge into a branch a
+  pattern covers delivers the work as a merge into a protected `main` does. A slot's `freezes` takes a pattern too
+  (`api:refs/heads/release/*`): while it is held, nobody else pushes to any release branch, and the pull-request status
+  of every pull request into one is `failure`.
+- **Protect `main` too.** A merge delivers its work, and completes the claim that recorded it, only into a protected
+  branch; a repository that protects no branch at all counts a merge into any. So a repository that protects
+  `refs/heads/release/*` and not `refs/heads/main` counts no merge into `main`: protect `main` beside the pattern for
+  merges into it to complete claims. Applying such settings answers with a warning that names the repository.
 - **Protected tags** (`refs/tags/<name>`, or `refs/tags/<prefix>*` for every tag that starts with the prefix) keep
   release tags to the members who cut releases. The agent's command check and the pre-push hook both judge them, and
   both fail closed: a push that names a covered tag (`refs/tags/v1.0`, or a short name such as `v1.0`, which git may
   resolve to that tag), deletes one (`:refs/tags/v1.0`, `--delete`), or may push any tag (`--tags`, `--follow-tags`,
   `push.followTags`, `--mirror`, a `remote.<name>.push` setting) is refused for anyone not in `pushers`. A tag's
-  refusal names no way past it. A branch is always named exactly, and a slot's `freezes` takes branches only.
+  refusal names no way past it. A slot's `freezes` takes branches only.
 - **Do not rely on a tag rule until every member runs dibs 0.1.1 or newer.** A client older than 0.1.1 cannot read a
   tag rule, so the server leaves tag rules out of the settings it serves such a client (it knows the version from the
   `User-Agent`): that client still judges the protected branches, and lets every tag push through, from its agents'
   command check and from its pre-push hook alike. Once 0.1.1 has been out long enough, raise `DIBS_MIN_CLIENT` to it
   ([client versions](#client-versions)); an older client is then refused and says so, rather than letting tags through
   without a word.
+- **Do not rely on a branch pattern until every member runs dibs 0.1.2 or newer.** A client older than 0.1.2 cannot
+  read one, so the server leaves the branch patterns out of what it serves such a client — the protected refs and the
+  frozen refs that are patterns, in the settings and in the slots' answers — and keeps the branches named exactly: that
+  client lets a push to a branch only a pattern protects or freezes through, from its agents' command check and its
+  pre-push hook alike. A machine that upgrades fetches the settings again rather than judging from what its older
+  release remembered. Once 0.1.2 has been out long enough, raise `DIBS_MIN_CLIENT` to it.
 - **A claim lives through review.** A member records their pull request on their claim (`dibs claim review <item> --pr
   <owner>/<repo>#<number>`); the claim keeps its areas and never goes stale while in review. Its review ends when the
   integration reports the merge or the close of a pull request it recorded, or when its holder removes one recorded by
@@ -577,6 +599,12 @@ to. To keep the old database in place instead, restore to another path and point
 served the settings without them and judge no tag (see [Pull requests and the integration](#pull-requests-and-the-integration)).
 Upgrade the server first, then the clients, and add a tag rule only once every member runs 0.1.1; the plugin of 0.1.1
 names 0.1.1 as its `min_binary`, so a plugin that updated ahead of its binary says so once per session.
+
+**0.1.2 and branch patterns.** A server of 0.1.2 accepts branch patterns, `refs/heads/<prefix>*`, in `protected_refs`
+and in a slot's `freezes`; clients older than 0.1.2 are served the settings and the slots without them, and judge only
+the branches named exactly (see [Pull requests and the integration](#pull-requests-and-the-integration)). Upgrade the
+server first, then the clients, and add a pattern only once every member runs 0.1.2; the plugin of 0.1.2 names 0.1.2 as
+its `min_binary`.
 
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the

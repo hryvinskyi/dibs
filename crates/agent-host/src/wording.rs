@@ -13,11 +13,12 @@ use dibs_domain::ids::ItemId;
 use dibs_domain::item::ExternalRef;
 use dibs_domain::paths::RelPath;
 use dibs_domain::protection::{ProtectedTarget, RefKind};
+use dibs_domain::repo::RepoId;
 use dibs_domain::report::RefusalId;
 use dibs_domain::review::PrRef;
 use dibs_domain::settings::EditPolicy;
 
-use dibs_domain::slot::{Purpose, SlotName};
+use dibs_domain::slot::{BranchPattern, Purpose, RepoRef, SlotName};
 
 use crate::ports::{
     ClaimLine, HeldWay, InboxView, NewerRelease, OfferLine, Pending, ReadyLine, SlotLine,
@@ -117,12 +118,14 @@ fn pr_list(prs: &[PrRef]) -> String {
 }
 
 /// The reason a push is refused: it updates `target`, or — when not `certain` — may update it, and
-/// only `pushers` may push there. For a branch, the way on is a branch of one's own and a pull
-/// request, recorded on the claim; for a tag, one of its pushers pushes it.
+/// only `pushers` may push there; `pushed` is the ref the push names, when it names one exactly.
+/// For a branch, the way on is a branch of one's own and a pull request, recorded on the claim; for
+/// a tag, one of its pushers pushes it.
 pub fn needs_permission(
     target: &ProtectedTarget,
     pushers: &BTreeSet<Handle>,
     certain: bool,
+    pushed: Option<&str>,
 ) -> String {
     let who = if pushers.is_empty() {
         "nobody pushes to directly".to_owned()
@@ -131,7 +134,7 @@ pub fn needs_permission(
         format!("only {} may push to", names.join(", "))
     };
     match target.kind() {
-        RefKind::Branch => branch_needs_permission(&target.to_string(), &who, certain),
+        RefKind::Branch => branch_needs_permission(target, &who, certain, pushed),
         RefKind::Tag => tag_needs_permission(target, &who, certain),
     }
 }
@@ -143,8 +146,9 @@ pub fn push_needs_permission(
     target: &ProtectedTarget,
     pushers: &BTreeSet<Handle>,
     certain: bool,
+    pushed: Option<&str>,
 ) -> String {
-    let reason = needs_permission(target, pushers, certain);
+    let reason = needs_permission(target, pushers, certain, pushed);
     match target.kind() {
         RefKind::Branch => format!(
             "{reason} A push with git push --no-verify gets past this check and breaks the team's rule."
@@ -153,14 +157,60 @@ pub fn push_needs_permission(
     }
 }
 
-/// [`needs_permission`] for a protected branch, `who` saying who may push to it.
-fn branch_needs_permission(target: &str, who: &str, certain: bool) -> String {
-    let what = if certain {
-        format!("This push goes to {target}, which {who}.")
+/// A full ref of `repo` as a sentence names it: `api:refs/heads/main`, or `refs/heads/main` alone in
+/// a project with one repository, which has no name of its own.
+fn ref_shown(repo: &RepoId, name: &str) -> String {
+    if *repo == RepoId::implicit() {
+        name.to_owned()
     } else {
-        format!(
-            "This push may update {target}, which {who}: it pushes every branch, or dibs cannot tell from the command and the checkout's git settings which branches it pushes. Name the branch you push and the remote (git push origin <your-branch>)."
-        )
+        format!("{repo}:{name}")
+    }
+}
+
+/// ` of <repo>` after what a sentence names in `repo`; nothing in a project with one repository.
+fn of_repo(repo: &RepoId) -> String {
+    if *repo == RepoId::implicit() {
+        String::new()
+    } else {
+        format!(" of {repo}")
+    }
+}
+
+/// [`needs_permission`] for protected branches, `who` saying who may push to them: the branch by
+/// its full ref when the protection names one; for a pattern, the branch pushed and the pattern
+/// that covers it, or the branches the pattern covers when the push names none exactly.
+fn branch_needs_permission(
+    target: &ProtectedTarget,
+    who: &str,
+    certain: bool,
+    pushed: Option<&str>,
+) -> String {
+    let repo = target.repo();
+    let pattern = target.short_name();
+    let what = match (target.prefix(), certain) {
+        (None, true) => format!(
+            "This push goes to {}, which {who}.",
+            ref_shown(repo, target.name())
+        ),
+        (Some(_), true) => match pushed.and_then(|name| name.strip_prefix("refs/heads/")) {
+            Some(branch) => format!(
+                "This push goes to the branch {branch}{}, which {pattern} covers and {who}.",
+                of_repo(repo)
+            ),
+            None => format!(
+                "This push goes to a branch{} that {pattern} covers, which {who}.",
+                of_repo(repo)
+            ),
+        },
+        (exact, false) => {
+            let branches = match exact {
+                None => ref_shown(repo, target.name()),
+                Some(_) => format!("the branches{} that {pattern} covers", of_repo(repo)),
+            };
+            format!(
+                "This push may update {branches}, which {who}: it pushes every branch, or dibs cannot tell from the command and the checkout's git settings which branches it pushes. Name the branch you push and the remote (git push origin <your-branch>)."
+            )
+        }
     };
     format!(
         "{what} Do not push to a protected branch: push your own branch, open a pull request, and record it on your claim (dibs_review, or dibs claim review <item> --pr <owner>/<repo>#<number>)."
@@ -170,14 +220,14 @@ fn branch_needs_permission(target: &str, who: &str, certain: bool) -> String {
 /// [`needs_permission`] for protected tags, `who` saying who may push them: the tag by its name
 /// when the protection names one, the tags its pattern covers otherwise.
 fn tag_needs_permission(target: &ProtectedTarget, who: &str, certain: bool) -> String {
-    let repo = target.repo();
+    let of = of_repo(target.repo());
     let (tags, them) = match target.prefix() {
         None => (
-            format!("the tag {} of {repo}", target.short_name()),
+            format!("the tag {}{of}", target.short_name()),
             format!("the tag {}", target.short_name()),
         ),
         Some(_) => (
-            format!("the tags of {repo} that {} covers", target.short_name()),
+            format!("the tags{of} that {} covers", target.short_name()),
             format!("tags that {} covers", target.short_name()),
         ),
     };
@@ -326,13 +376,30 @@ pub fn needs_slot(needed: &SlotNeeded<'_>) -> String {
     text
 }
 
-/// The reason a push is refused: a slot another member holds freezes the ref it goes to.
-pub fn frozen(slot: &SlotName, hold: &HoldShown<'_>, target: &str) -> String {
+/// The reason a push is refused: a slot another member holds freezes `target`, the branch it goes
+/// to, by `frozen`, the branch itself or a pattern that covers it.
+pub fn frozen(
+    slot: &SlotName,
+    hold: &HoldShown<'_>,
+    target: &RepoRef,
+    frozen: &BranchPattern,
+) -> String {
     let who = hold
         .holder
         .map_or_else(|| "another member".to_owned(), ToString::to_string);
+    let branch = ref_shown(&target.repo, &target.name);
+    let by = match frozen.prefix() {
+        Some(_) => format!(
+            " with every branch {} covers,",
+            frozen
+                .name()
+                .strip_prefix("refs/heads/")
+                .unwrap_or(frozen.name())
+        ),
+        None => String::new(),
+    };
     format!(
-        "This push goes to {target}, which the slot {slot} freezes while {who} holds it for \"{}\" until {}. Do not push there now: taking the slot is not the way on. Wait until the hold ends (dibs_slots, or dibs slot list, shows it), push to another branch, or message {who} (dibs_send, or dibs send --to {who} --ack).",
+        "This push goes to {branch}, which the slot {slot} freezes{by} while {who} holds it for \"{}\" until {}. Do not push there now: taking the slot is not the way on. Wait until the hold ends (dibs_slots, or dibs slot list, shows it), push to another branch, or message {who} (dibs_send, or dibs send --to {who} --ack).",
         hold.purpose,
         clock(hold.until)
     )
@@ -1029,7 +1096,7 @@ mod tests {
     fn a_push_of_a_protected_tag_names_who_may_push_it_and_never_a_pull_request() {
         let pushers: BTreeSet<Handle> = [handle("carol")].into();
         let exact = protected("refs/tags/v1.0");
-        let text = needs_permission(&exact, &pushers, true);
+        let text = needs_permission(&exact, &pushers, true, None);
         assert!(
             text.contains(
                 "This push creates, moves or deletes the tag v1.0 of api, which only carol may push to."
@@ -1043,7 +1110,7 @@ mod tests {
         assert!(!text.contains("pull request"), "{text}");
 
         let tags = protected("refs/tags/v*");
-        let text = needs_permission(&tags, &pushers, true);
+        let text = needs_permission(&tags, &pushers, true, None);
         assert!(
             text.contains("the tags of api that v* covers, which only carol may push to"),
             "{text}"
@@ -1052,16 +1119,16 @@ mod tests {
             text.contains("Do not push or delete tags that v* covers"),
             "{text}"
         );
-        let unsure = needs_permission(&tags, &pushers, false);
+        let unsure = needs_permission(&tags, &pushers, false, None);
         assert!(unsure.contains("may create, move or delete"), "{unsure}");
         assert!(
             unsure.contains("without --tags or --follow-tags"),
             "{unsure}"
         );
-        let nobody = needs_permission(&tags, &BTreeSet::new(), true);
+        let nobody = needs_permission(&tags, &BTreeSet::new(), true, None);
         assert!(nobody.contains("nobody pushes to directly"), "{nobody}");
         for certain in [true, false] {
-            let refused = push_needs_permission(&tags, &pushers, certain);
+            let refused = push_needs_permission(&tags, &pushers, certain, None);
             assert!(!refused.contains("--no-verify"), "{refused}");
         }
     }
@@ -1069,7 +1136,7 @@ mod tests {
     #[test]
     fn a_refused_push_of_a_protected_branch_names_the_way_past_the_hook_and_its_cost() {
         let pushers: BTreeSet<Handle> = [handle("alice")].into();
-        let refused = push_needs_permission(&protected("refs/heads/main"), &pushers, true);
+        let refused = push_needs_permission(&protected("refs/heads/main"), &pushers, true, None);
         assert!(refused.contains("open a pull request"), "{refused}");
         assert!(
             refused.ends_with(
@@ -1083,7 +1150,7 @@ mod tests {
     fn a_push_to_a_protected_branch_names_who_may_push_and_the_pull_request_way() {
         let pushers: BTreeSet<Handle> = [handle("alice"), handle("carol")].into();
         let main = protected("refs/heads/main");
-        let text = needs_permission(&main, &pushers, true);
+        let text = needs_permission(&main, &pushers, true, None);
         assert!(
             text.contains(
                 "This push goes to api:refs/heads/main, which only alice, carol may push to"
@@ -1095,14 +1162,128 @@ mod tests {
             !text.contains("Refs #"),
             "a ticket convention is the team's: {text}"
         );
-        let unsure = needs_permission(&main, &pushers, false);
+        let unsure = needs_permission(&main, &pushers, false, None);
         assert!(
             unsure.contains("may update api:refs/heads/main"),
             "{unsure}"
         );
         assert!(unsure.contains("Name the branch you push"), "{unsure}");
-        let nobody = needs_permission(&main, &BTreeSet::new(), true);
+        let nobody = needs_permission(&main, &BTreeSet::new(), true, None);
         assert!(nobody.contains("nobody pushes to directly"), "{nobody}");
+    }
+
+    #[test]
+    fn a_push_to_a_branch_a_pattern_protects_names_the_branch_the_pattern_and_the_pull_request_way()
+    {
+        let pushers: BTreeSet<Handle> = [handle("alice")].into();
+        let releases = protected("refs/heads/release/*");
+        let named = needs_permission(
+            &releases,
+            &pushers,
+            true,
+            Some("refs/heads/release/2026.10.3"),
+        );
+        assert!(
+            named.starts_with(
+                "This push goes to the branch release/2026.10.3 of api, which release/* covers and only alice may push to."
+            ),
+            "{named}"
+        );
+        assert!(named.contains("open a pull request"), "{named}");
+        let wildcard = needs_permission(&releases, &pushers, true, None);
+        assert!(
+            wildcard.starts_with(
+                "This push goes to a branch of api that release/* covers, which only alice may push to."
+            ),
+            "{wildcard}"
+        );
+        let unsure = needs_permission(&releases, &pushers, false, None);
+        assert!(
+            unsure.starts_with(
+                "This push may update the branches of api that release/* covers, which only alice may push to: it pushes every branch"
+            ),
+            "{unsure}"
+        );
+        let refused = push_needs_permission(
+            &releases,
+            &pushers,
+            true,
+            Some("refs/heads/release/2026.10.3"),
+        );
+        assert!(
+            refused.contains("release/* covers")
+                && refused.ends_with(
+                    "A push with git push --no-verify gets past this check and breaks the team's rule."
+                ),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_project_with_one_repository_is_not_named_in_a_refusal() {
+        let pushers: BTreeSet<Handle> = [handle("alice")].into();
+        let sole = |text: &str| ProtectedTarget::parse(RepoId::implicit(), text).unwrap();
+        let main = needs_permission(&sole("refs/heads/main"), &pushers, true, None);
+        assert!(
+            main.starts_with("This push goes to refs/heads/main, which only alice may push to."),
+            "{main}"
+        );
+        let release = needs_permission(
+            &sole("refs/heads/release/*"),
+            &pushers,
+            true,
+            Some("refs/heads/release/2026.10.3"),
+        );
+        assert!(
+            release.starts_with(
+                "This push goes to the branch release/2026.10.3, which release/* covers and only alice may push to."
+            ),
+            "{release}"
+        );
+        let unsure = needs_permission(&sole("refs/heads/release/*"), &pushers, false, None);
+        assert!(
+            unsure.starts_with("This push may update the branches that release/* covers"),
+            "{unsure}"
+        );
+        let tags = needs_permission(&sole("refs/tags/v*"), &pushers, true, None);
+        assert!(tags.contains("the tags that v* covers"), "{tags}");
+        let tag = needs_permission(&sole("refs/tags/v1.0"), &pushers, true, None);
+        assert!(tag.contains("the tag v1.0, which"), "{tag}");
+        for text in [main, release, unsure, tags, tag] {
+            assert!(!text.contains("default"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_frozen_push_names_the_branch_and_the_pattern_that_freezes_it() {
+        let slot = SlotName::parse("release:cut").unwrap();
+        let alice = handle("alice");
+        let purpose = Purpose::parse("cut 2026.10.3").unwrap();
+        let hold = HoldShown {
+            slot: &slot,
+            holder: Some(&alice),
+            purpose: &purpose,
+            until: OffsetDateTime::UNIX_EPOCH,
+        };
+        let api = RepoId::parse("api").unwrap();
+        let branch = RepoRef::of(api.clone(), "refs/heads/release/2026.10.3").unwrap();
+        let pattern = BranchPattern::named(api, "refs/heads/release/*").unwrap();
+        let text = frozen(&slot, &hold, &branch, &pattern);
+        assert!(
+            text.starts_with(
+                "This push goes to api:refs/heads/release/2026.10.3, which the slot release:cut freezes with every branch release/* covers, while alice holds it for \"cut 2026.10.3\""
+            ),
+            "{text}"
+        );
+        let main = RepoRef::of(RepoId::implicit(), "refs/heads/main").unwrap();
+        let exact = BranchPattern::named(RepoId::implicit(), "refs/heads/main").unwrap();
+        let text = frozen(&slot, &hold, &main, &exact);
+        assert!(
+            text.starts_with(
+                "This push goes to refs/heads/main, which the slot release:cut freezes while alice holds it"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

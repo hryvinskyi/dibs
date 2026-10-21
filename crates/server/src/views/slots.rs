@@ -10,7 +10,9 @@ use dibs_domain::hot_rule::Note;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::session::HostName;
 use dibs_domain::settings::format_duration;
-use dibs_domain::slot::{Liveness, Purpose, RepoRef, SlotGroup, SlotName};
+use dibs_domain::slot::{BranchPattern, Liveness, Purpose, SlotGroup, SlotName};
+
+use crate::versions::ClientReads;
 
 /// A hold.
 #[derive(Debug, Serialize)]
@@ -132,8 +134,9 @@ pub struct SlotView {
     pub max_wait: String,
     /// Whether its commands run only inside `dibs slot run`.
     pub run_only: bool,
-    /// The refs nobody but the holder may push while it is held.
-    pub freezes: Vec<RepoRef>,
+    /// The branches nobody but the holder may push to while it is held, as the caller's client can
+    /// read them.
+    pub freezes: Vec<BranchPattern>,
     /// Its note.
     pub note: Option<Note>,
     /// The hold of its group.
@@ -145,8 +148,8 @@ pub struct SlotView {
 }
 
 impl SlotView {
-    /// The view of a slot's line.
-    pub fn of(line: SlotLine) -> Self {
+    /// The view of a slot's line for a caller whose client reads what `reads` says.
+    pub fn of(line: SlotLine, reads: ClientReads) -> Self {
         let spec = line.spec;
         Self {
             name: spec.name,
@@ -155,7 +158,7 @@ impl SlotView {
             offer_for: format_duration(spec.offer_for),
             max_wait: format_duration(spec.max_wait),
             run_only: spec.run_only,
-            freezes: spec.freezes,
+            freezes: reads.freezes(spec.freezes),
             note: spec.note,
             hold: line.hold.map(HoldView::of),
             queue: line.queue.into_iter().map(WaiterView::of).collect(),

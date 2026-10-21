@@ -34,7 +34,8 @@ use dibs_domain::repo::RepoId;
 use dibs_domain::report::{ReportDay, Tally};
 use dibs_domain::settings::{EditPolicy, ProjectSettings};
 use dibs_domain::slot::{
-    CommandVerdict, SimpleCommand, SlotHold, command_verdict, slots_in_question, split_commands,
+    CommandVerdict, SimpleCommand, SlotCatalog, SlotHold, SlotName, command_verdict, slot_needed,
+    slots_in_question, split_commands,
 };
 
 use crate::adapter::{HostAdapter, HostReply};
@@ -44,7 +45,7 @@ use crate::event::{EventKind, HostEvent, Thread, ToolCall};
 use crate::outcome::GuardOutcome;
 use crate::ports::{
     Activity, Cached, Clock, CoordinationGateway, KnownSettings, PathAnswer, PortError, Seen,
-    SessionRef, Workspace, Workspaces,
+    SessionRef, SlotState, Workspace, Workspaces,
 };
 use crate::registry::HostRegistry;
 use crate::slots::KnownBoard;
@@ -387,7 +388,9 @@ impl Run<'_> {
 
     /// The command check: the line is split and judged on this machine, against the cached
     /// settings and the fresh state of the few slots its verdict reads. The line itself never
-    /// leaves the machine. A push is judged against the protected branches from the settings and
+    /// leaves the machine. A line that needs no slot by its pattern, and is in question only for
+    /// the refs it pushes to, is judged against the slots of the cached status while it is fresh,
+    /// as freezes are best effort; `dibs check --push` asks the server. A push is judged against the protected branches from the settings and
     /// the checkout's git settings alone, failing closed; git is asked only about a line that
     /// pushes, in a project that protects a branch, and a line that touches no slot is answered
     /// without the server. A line that neither pushes nor touches a slot needs nothing from the
@@ -433,7 +436,10 @@ impl Run<'_> {
         if names.is_empty() {
             return Ok(Judged::plain(GuardOutcome::silent()));
         }
-        let states = self.call(|gateway| gateway.slots(&names))?;
+        let states = match self.cached_freezes(&commands, catalog, &names) {
+            Some(states) => states,
+            None => self.call(|gateway| gateway.slots(&names))?,
+        };
         let known_board = KnownBoard::of(&states, &known.value.member);
         let verdict = command_verdict(
             &commands,
@@ -444,6 +450,34 @@ impl Run<'_> {
             judged.then_some(&protection),
         );
         Ok(command_judged(&verdict, &known_board))
+    }
+
+    /// The state of `names` from the cached status, when it is fresh and the line is in question
+    /// only for the refs it pushes to; `None` when the server is to be asked.
+    fn cached_freezes(
+        &self,
+        commands: &[SimpleCommand],
+        catalog: &SlotCatalog,
+        names: &[SlotName],
+    ) -> Option<Vec<SlotState>> {
+        if slot_needed(commands, catalog).is_some() {
+            return None;
+        }
+        let cached = self
+            .workspace
+            .cache()
+            .slot_states()
+            .filter(|cached| is_fresh(cached.at, self.now, STATUS_FRESH))?;
+        names
+            .iter()
+            .map(|name| {
+                cached
+                    .value
+                    .iter()
+                    .find(|state| state.slot == *name)
+                    .cloned()
+            })
+            .collect()
     }
 
     /// What a session may be shown between its tool calls or with a prompt: only on the main
@@ -805,8 +839,14 @@ fn command_outcome(verdict: &CommandVerdict, known: &KnownBoard) -> GuardOutcome
             target,
             pushers,
             certain,
+            pushed,
         } => GuardOutcome::Deny {
-            reason: Text::new(wording::needs_permission(target, pushers, *certain)),
+            reason: Text::new(wording::needs_permission(
+                target,
+                pushers,
+                *certain,
+                pushed.as_deref(),
+            )),
         },
         CommandVerdict::Frozen {
             slot,
@@ -814,6 +854,7 @@ fn command_outcome(verdict: &CommandVerdict, known: &KnownBoard) -> GuardOutcome
             purpose,
             until,
             target,
+            frozen,
         } => {
             let hold = wording::HoldShown {
                 slot,
@@ -822,7 +863,7 @@ fn command_outcome(verdict: &CommandVerdict, known: &KnownBoard) -> GuardOutcome
                 until: *until,
             };
             GuardOutcome::Deny {
-                reason: Text::new(wording::frozen(slot, &hold, &target.to_string())),
+                reason: Text::new(wording::frozen(slot, &hold, target, frozen)),
             }
         }
     }

@@ -9,13 +9,10 @@ use thiserror::Error;
 
 use crate::handle::Handle;
 use crate::repo::RepoId;
-use crate::slot::{MAX_REF_NAME, RepoRef, ref_part_is_clean};
-
-/// Where the branches of a repository are.
-const BRANCHES: &str = "refs/heads/";
-
-/// Where the tags of a repository are.
-const TAGS: &str = "refs/tags/";
+use crate::slot::{
+    BRANCHES, BranchPattern, BranchPatternError, MAX_REF_NAME, StarFault, TAGS, Written,
+    ref_name_is_clean, written,
+};
 
 /// The kind of ref a protection covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,24 +23,32 @@ pub enum RefKind {
     Tag,
 }
 
-/// The refs one protection covers in one repository: a branch, `refs/heads/<branch>`, exactly; or
-/// tags, `refs/tags/<name>` exactly, or `refs/tags/<prefix>*` for every tag whose name starts with
-/// the prefix.
+/// The refs one protection covers in one repository: branches, `refs/heads/<branch>` exactly or
+/// `refs/heads/<prefix>*` for every branch whose name starts with the prefix; or tags,
+/// `refs/tags/<name>` exactly or `refs/tags/<prefix>*` for every tag whose name starts with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtectedTarget {
-    repo: RepoId,
-    name: String,
+pub struct ProtectedTarget(Covered);
+
+/// What a protection covers, by kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Covered {
+    /// A branch, or the branches of a pattern.
+    Branches(BranchPattern),
+    /// A tag, or the tags of a pattern, written in full.
+    Tags { repo: RepoId, name: String },
 }
 
 /// Why a text names no ref a protection may cover.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProtectedTargetError {
     /// Neither a branch ref nor a tag ref.
-    #[error("it is written 'refs/heads/<branch>', 'refs/tags/<name>' or 'refs/tags/<prefix>*'")]
+    #[error(
+        "it is written 'refs/heads/<branch>', 'refs/heads/<prefix>*', 'refs/tags/<name>' or 'refs/tags/<prefix>*'"
+    )]
     Unknown,
-    /// A branch ref git would not accept, a pattern included: a branch is named exactly.
-    #[error("'refs/heads/<branch>' names one branch exactly, without a pattern")]
-    Branch,
+    /// A branch ref, or a branch pattern, that breaks its rules.
+    #[error(transparent)]
+    Branch(BranchPatternError),
     /// Nothing after `refs/tags/`.
     #[error("a tag ref names a tag, or a prefix followed by '*', after 'refs/tags/'")]
     EmptyTag,
@@ -60,113 +65,99 @@ pub enum ProtectedTargetError {
     Tag,
 }
 
-/// Whether `tag`, a tag's name after `refs/tags/`, or with `pattern` the prefix before a pattern's
-/// `*`, follows git's rules for a ref name: [`ref_part_is_clean`], no part between slashes that is
-/// empty, starts with `.` or ends with `.lock`, and no `.` or `/` at the end. A prefix may be empty,
-/// and its last part is unfinished: it may end with `/`, `.` or `.lock`, or be empty, since what
-/// the `*` adds completes it.
-fn tag_is_clean(tag: &str, pattern: bool) -> bool {
-    if !ref_part_is_clean(tag) {
-        return false;
-    }
-    let mut parts: Vec<&str> = tag.split('/').collect();
-    let last = parts.pop().unwrap_or_default();
-    let whole =
-        |part: &&str| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock");
-    if !parts.iter().all(whole) || last.starts_with('.') {
-        return false;
-    }
-    pattern || (!last.is_empty() && !last.ends_with('.') && !last.ends_with(".lock"))
-}
-
 impl ProtectedTarget {
-    /// The refs `text` names in `repo`.
+    /// The refs `text` names in `repo`. A branch pattern has a prefix before its `*`; a tag
+    /// pattern's prefix may be empty, so `refs/tags/*` covers every tag.
     ///
     /// # Errors
-    /// [`ProtectedTargetError`] for a text that names no branch exactly and no tags as above.
+    /// [`ProtectedTargetError`] for a text that names no branches and no tags as above.
     pub fn parse(repo: RepoId, text: &str) -> Result<Self, ProtectedTargetError> {
         if text.starts_with(BRANCHES) {
-            let branch = RepoRef::of(repo, text).ok_or(ProtectedTargetError::Branch)?;
-            return Ok(Self {
-                repo: branch.repo,
-                name: branch.name,
-            });
+            return BranchPattern::named(repo, text)
+                .map(|branches| Self(Covered::Branches(branches)))
+                .map_err(ProtectedTargetError::Branch);
         }
         let tag = text
             .strip_prefix(TAGS)
             .ok_or(ProtectedTargetError::Unknown)?;
-        if tag.is_empty() {
-            return Err(ProtectedTargetError::EmptyTag);
-        }
-        if tag.contains("**") {
-            return Err(ProtectedTargetError::DoubleStar);
-        }
-        let (literal, pattern) = match tag.strip_suffix('*') {
-            Some(prefix) => (prefix, true),
-            None => (tag, false),
+        let (literal, pattern) = match written(tag) {
+            Err(StarFault::Empty) => return Err(ProtectedTargetError::EmptyTag),
+            Err(StarFault::Double) => return Err(ProtectedTargetError::DoubleStar),
+            Err(StarFault::NotAtEnd) => return Err(ProtectedTargetError::StarNotAtEnd),
+            Ok(Written::Exact(name)) => (name, false),
+            Ok(Written::Prefix(prefix)) => (prefix, true),
         };
-        if literal.contains('*') {
-            return Err(ProtectedTargetError::StarNotAtEnd);
-        }
-        if text.len() > MAX_REF_NAME || !tag_is_clean(literal, pattern) {
+        if text.len() > MAX_REF_NAME || !ref_name_is_clean(literal, pattern) {
             return Err(ProtectedTargetError::Tag);
         }
-        Ok(Self {
+        Ok(Self(Covered::Tags {
             repo,
             name: text.to_owned(),
-        })
+        }))
     }
 
     /// The repository.
     pub fn repo(&self) -> &RepoId {
-        &self.repo
+        match &self.0 {
+            Covered::Branches(branches) => branches.repo(),
+            Covered::Tags { repo, .. } => repo,
+        }
     }
 
-    /// The ref or the pattern as written: `refs/heads/main`, `refs/tags/v1.0`, `refs/tags/v*`.
+    /// The ref or the pattern as written: `refs/heads/main`, `refs/heads/release/*`,
+    /// `refs/tags/v1.0`, `refs/tags/v*`.
     pub fn name(&self) -> &str {
-        &self.name
+        match &self.0 {
+            Covered::Branches(branches) => branches.name(),
+            Covered::Tags { name, .. } => name,
+        }
     }
 
-    /// The name after `refs/heads/` or `refs/tags/`: `main`, `v1.0`, `v*`.
+    /// The name after `refs/heads/` or `refs/tags/`: `main`, `release/*`, `v1.0`, `v*`.
     pub fn short_name(&self) -> &str {
-        self.name
-            .strip_prefix(BRANCHES)
-            .or_else(|| self.name.strip_prefix(TAGS))
-            .unwrap_or(&self.name)
+        let name = self.name();
+        name.strip_prefix(BRANCHES)
+            .or_else(|| name.strip_prefix(TAGS))
+            .unwrap_or(name)
     }
 
-    /// What precedes the `*` of a pattern, the full ref (`refs/tags/v`); `None` for a ref named
-    /// exactly.
+    /// What precedes the `*` of a pattern, the full ref (`refs/heads/release/`, `refs/tags/v`);
+    /// `None` for a ref named exactly.
     pub fn prefix(&self) -> Option<&str> {
-        self.name.strip_suffix('*')
+        match &self.0 {
+            Covered::Branches(branches) => branches.prefix(),
+            Covered::Tags { name, .. } => name.strip_suffix('*'),
+        }
     }
 
     /// Whether it covers branches or tags.
     pub fn kind(&self) -> RefKind {
-        if self.name.starts_with(BRANCHES) {
-            RefKind::Branch
-        } else {
-            RefKind::Tag
+        match self.0 {
+            Covered::Branches(_) => RefKind::Branch,
+            Covered::Tags { .. } => RefKind::Tag,
         }
     }
 
     /// Whether the full ref `name` of this repository is one it covers: the same ref, or for a
     /// pattern, a ref that starts with what precedes its `*`.
     pub fn covers(&self, name: &str) -> bool {
-        match self.prefix() {
-            Some(prefix) => name.starts_with(prefix),
-            None => self.name == name,
+        match &self.0 {
+            Covered::Branches(branches) => branches.covers(name),
+            Covered::Tags { name: tags, .. } => match tags.strip_suffix('*') {
+                Some(prefix) => name.starts_with(prefix),
+                None => tags == name,
+            },
         }
     }
 }
 
 impl fmt::Display for ProtectedTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.repo, self.name)
+        write!(f, "{}:{}", self.repo(), self.name())
     }
 }
 
-/// A branch or tags only `pushers` may push to.
+/// A branch, branches or tags only `pushers` may push to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectedRef {
     /// The refs it covers.
@@ -227,15 +218,80 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_takes_no_pattern() {
-        for text in [
-            "refs/heads/release/*",
-            "refs/heads/*",
-            "refs/heads/",
-            "refs/heads/a..b",
+    fn branches_are_covered_by_a_prefix_that_ends_in_a_star() {
+        let releases = target("refs/heads/release/*").unwrap();
+        assert_eq!(releases.kind(), RefKind::Branch);
+        assert_eq!(releases.to_string(), "api:refs/heads/release/*");
+        assert_eq!(releases.short_name(), "release/*");
+        assert_eq!(releases.prefix(), Some("refs/heads/release/"));
+        for name in [
+            "refs/heads/release/2026.10.3",
+            "refs/heads/release/",
+            "refs/heads/release/2026.10/hotfix",
         ] {
-            assert_eq!(target(text), Err(ProtectedTargetError::Branch), "{text}");
+            assert!(releases.covers(name), "{name}");
         }
+        for name in [
+            "refs/heads/release",
+            "refs/heads/release-2026.10.3",
+            "refs/heads/main",
+            "refs/tags/release/2026.10.3",
+        ] {
+            assert!(!releases.covers(name), "{name}");
+        }
+        let dashed = target("refs/heads/release-*").unwrap();
+        assert!(dashed.covers("refs/heads/release-2026.10.3"));
+        assert!(!dashed.covers("refs/heads/release/2026.10.3"));
+        for text in [
+            "refs/heads/rel*",
+            "refs/heads/release/2026.*",
+            "refs/heads/x.lock*",
+            "refs/heads/hotfix/x.*",
+        ] {
+            assert!(target(text).is_ok(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_branch_pattern_has_one_star_at_its_end_after_a_prefix_git_accepts() {
+        let branch = |text: &str| match target(text) {
+            Err(ProtectedTargetError::Branch(error)) => error,
+            other => panic!("{text}: {other:?}"),
+        };
+        assert_eq!(branch("refs/heads/"), BranchPatternError::Empty);
+        assert_eq!(branch("refs/heads/*"), BranchPatternError::EmptyPrefix);
+        assert_eq!(branch("refs/heads/**"), BranchPatternError::DoubleStar);
+        assert_eq!(
+            branch("refs/heads/release/**"),
+            BranchPatternError::DoubleStar
+        );
+        for text in [
+            "refs/heads/*/release",
+            "refs/heads/release/*/x",
+            "refs/heads/rel*ease",
+            "refs/heads/release/*.x",
+        ] {
+            assert_eq!(branch(text), BranchPatternError::StarNotAtEnd, "{text}");
+        }
+        for text in [
+            "refs/heads/a..b",
+            "refs/heads/a..*",
+            "refs/heads/release//*",
+            "refs/heads/.release/*",
+            "refs/heads/release/.*",
+            "refs/heads/x.lock/*",
+            "refs/heads/re lease/*",
+            "refs/heads/release?/*",
+            "refs/heads/release@{/*",
+            "refs/heads/main.lock",
+            "refs/heads/main/",
+        ] {
+            assert_eq!(branch(text), BranchPatternError::Name, "{text}");
+        }
+        let long = format!("refs/heads/{}*", "r".repeat(MAX_REF_NAME));
+        assert_eq!(branch(&long), BranchPatternError::Name);
+        let said = ProtectedTargetError::Branch(BranchPatternError::EmptyPrefix).to_string();
+        assert!(said.contains("would cover every branch"), "{said}");
     }
 
     #[test]

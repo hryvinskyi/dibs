@@ -20,7 +20,7 @@ use crate::protection::ProtectedTarget;
 use crate::push::{PushProtection, git_pushes};
 use crate::repo::RepoId;
 use crate::slot::command::SimpleCommand;
-use crate::slot::spec::{Purpose, RepoRef, SlotCatalog, SlotName, SlotSpec};
+use crate::slot::spec::{BranchPattern, Purpose, RepoRef, SlotCatalog, SlotName, SlotSpec};
 use crate::slot::state::{Liveness, SlotBoard, SlotHold};
 
 /// What a command line needs.
@@ -31,13 +31,16 @@ pub enum CommandVerdict {
     /// A push that updates, or may update, a protected branch or tag the member is not among the
     /// pushers of; for a branch, a pull request is the way there.
     NeedsPermission {
-        /// The protected branch, or the tags.
+        /// The protected branch or branches, or the tags.
         target: ProtectedTarget,
         /// The members who may push to it, by handle.
         pushers: BTreeSet<Handle>,
         /// Whether the push names that branch; `false` when it pushes every branch, or which ones
         /// it pushes cannot be read.
         certain: bool,
+        /// The full ref the push names, when it names one exactly (`refs/heads/release/2026.10.3`);
+        /// `None` for a wildcard refspec or a push whose refs cannot be read.
+        pushed: Option<String>,
     },
     /// A push to a ref another member's held slot freezes.
     Frozen {
@@ -49,8 +52,10 @@ pub enum CommandVerdict {
         purpose: Purpose,
         /// When the hold ends unless renewed.
         until: OffsetDateTime,
-        /// The ref pushed.
+        /// The branch pushed.
         target: RepoRef,
+        /// The frozen ref of the slot that covers it: the branch itself, or a pattern.
+        frozen: BranchPattern,
     },
     /// The command needs a slot the member does not hold (or, for a slot that runs only inside
     /// `dibs slot run`, holds only through a plain take).
@@ -94,11 +99,7 @@ pub fn command_verdict(
     if pushed != CommandVerdict::Free {
         return pushed;
     }
-    let Some(spec) = catalog
-        .slots()
-        .iter()
-        .find(|spec| governed.iter().any(|command| spec.matches(&command.text)))
-    else {
+    let Some(spec) = first_matching(catalog, &governed) else {
         return CommandVerdict::Free;
     };
     let key = spec.group_key();
@@ -135,13 +136,10 @@ pub fn slots_in_question(
     let mut names: Vec<SlotName> = catalog
         .slots()
         .iter()
-        .filter(|spec| targets.iter().any(|target| spec.freezes.contains(target)))
+        .filter(|spec| targets.iter().any(|target| spec.freezes_branch(target)))
         .map(|spec| spec.name.clone())
         .collect();
-    if let Some(spec) = catalog
-        .slots()
-        .iter()
-        .find(|spec| governed.iter().any(|command| spec.matches(&command.text)))
+    if let Some(spec) = first_matching(catalog, &governed)
         && !names.contains(&spec.name)
     {
         names.push(spec.name.clone());
@@ -161,13 +159,14 @@ pub fn push_verdict(
     me: MemberId,
 ) -> CommandVerdict {
     for target in targets {
-        if let Some((spec, hold)) = freezing(catalog, board, target, me) {
+        if let Some((spec, hold, frozen)) = freezing(catalog, board, target, me) {
             return CommandVerdict::Frozen {
                 slot: spec.name.clone(),
                 holder: hold.member,
                 purpose: hold.purpose.clone(),
                 until: hold.expires_at,
                 target: target.clone(),
+                frozen: frozen.clone(),
             };
         }
     }
@@ -184,21 +183,43 @@ fn pushed_refs(commands: &[&SimpleCommand], repo: &RepoId) -> Vec<RepoRef> {
         .collect()
 }
 
-/// The slot held by another member that freezes `target`, with its hold.
+/// The slot held by another member that freezes `target`, with its hold and the frozen ref that
+/// covers it.
 fn freezing<'a>(
     catalog: &'a SlotCatalog,
     board: &'a SlotBoard,
     target: &RepoRef,
     me: MemberId,
-) -> Option<(&'a SlotSpec, &'a SlotHold)> {
+) -> Option<(&'a SlotSpec, &'a SlotHold, &'a BranchPattern)> {
     board
         .holds
         .iter()
         .filter(|hold| hold.member != me)
         .find_map(|hold| {
             let spec = catalog.get(&hold.slot)?;
-            spec.freezes.contains(target).then_some((spec, hold))
+            spec.freeze_of(target).map(|frozen| (spec, hold, frozen))
         })
+}
+
+/// The slot the commands of a line need by its pattern, as [`command_verdict`] finds it: the first
+/// declared slot whose pattern matches one of them, `dibs slot …` left out. `None` when only the
+/// refs a line pushes to bring slots into question.
+pub fn slot_needed(commands: &[SimpleCommand], catalog: &SlotCatalog) -> Option<SlotName> {
+    let governed: Vec<&SimpleCommand> = commands.iter().filter(|c| !is_slot_wrapper(c)).collect();
+    first_matching(catalog, &governed).map(|spec| spec.name.clone())
+}
+
+/// The first declared slot whose pattern matches one of `commands`; an assignment with no command
+/// after it runs nothing a pattern could match.
+fn first_matching<'c>(
+    catalog: &'c SlotCatalog,
+    commands: &[&SimpleCommand],
+) -> Option<&'c SlotSpec> {
+    catalog.slots().iter().find(|spec| {
+        commands
+            .iter()
+            .any(|command| !command.words.is_empty() && spec.matches(&command.text))
+    })
 }
 
 /// Whether the command is `dibs slot …`, which takes the slot itself.

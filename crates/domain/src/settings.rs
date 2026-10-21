@@ -88,11 +88,24 @@ impl RepoSpec {
         self.hot_rule_for(path).is_some() || self.area_for(path).is_some()
     }
 
-    /// Whether it protects a branch; protected tags alone do not count.
+    /// Whether it protects a branch, by its name or by a pattern; protected tags alone do not
+    /// count.
     pub fn protects_branch(&self) -> bool {
         self.protected_refs
             .iter()
             .any(|rule| rule.target.kind() == RefKind::Branch)
+    }
+
+    /// Whether it protects branches and yet neither `main` nor `master`, the names a repository's
+    /// default branch usually has: a merge then delivers its work only into a protected branch, so
+    /// a pull request merged into the default branch completes no claim.
+    pub fn leaves_main_unprotected(&self) -> bool {
+        let covered = |name: &str| {
+            self.protected_refs
+                .iter()
+                .any(|rule| rule.target.kind() == RefKind::Branch && rule.target.covers(name))
+        };
+        self.protects_branch() && !covered("refs/heads/main") && !covered("refs/heads/master")
     }
 
     /// The branch `name` (`refs/heads/main`, or `main`) of this repository.
@@ -300,7 +313,7 @@ pub enum SettingsError {
         /// The text as written.
         text: String,
     },
-    /// A protected ref names no branch exactly and no tags.
+    /// A protected ref names no branches and no tags as its rules allow.
     #[error("protected ref '{text}' of repository '{repo}': {error}")]
     ProtectedRef {
         /// The repository.
@@ -468,8 +481,9 @@ impl ProjectSettings {
     /// names unique, each slot with `max_hold` between 1 minute and 24 hours, `offer_for` between
     /// 1 minute and 1 hour (default 5 minutes), `max_wait` between 1 minute and 24 hours (default
     /// 2 hours), at most 20 command patterns that compile within their limits, and frozen refs of
-    /// declared repositories; arbiters named by handle, each once; per repository, protected
-    /// branches written `refs/heads/<branch>`, each once, their pushers named by handle, and a
+    /// declared repositories, each a branch or a prefix of branches; arbiters named by handle, each
+    /// once; per repository, protected refs written `refs/heads/<branch>`, `refs/heads/<prefix>*`,
+    /// `refs/tags/<name>` or `refs/tags/<prefix>*`, each once, their pushers named by handle, and a
     /// pull-request status whose context is 1 to 100 characters (off, `dibs` and not describing the
     /// holder by default); per repository, contracts each with at least one valid glob and
     /// consumers that name a listed repository (`repo:*`) or a declared area, and area
@@ -639,6 +653,32 @@ impl ProjectSettings {
             repo.protected_refs
                 .retain(|rule| rule.target.kind() == RefKind::Branch);
         }
+        kept
+    }
+
+    /// The same settings with every branch pattern left out — each protected ref that covers
+    /// branches by a prefix, and each frozen ref of a slot that does — and the branches named
+    /// exactly, the tags and the slots themselves kept: what a reader that knows branches by their
+    /// exact names only can parse.
+    #[must_use]
+    pub fn without_branch_patterns(&self) -> Self {
+        let mut kept = self.clone();
+        for repo in &mut kept.repos {
+            repo.protected_refs.retain(|rule| {
+                rule.target.kind() == RefKind::Tag || rule.target.prefix().is_none()
+            });
+        }
+        let slots = self
+            .slots
+            .slots()
+            .iter()
+            .cloned()
+            .map(|mut spec| {
+                spec.freezes.retain(|frozen| frozen.prefix().is_none());
+                spec
+            })
+            .collect();
+        kept.slots = SlotCatalog::new(slots);
         kept
     }
 

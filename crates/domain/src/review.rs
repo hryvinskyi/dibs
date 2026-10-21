@@ -356,8 +356,8 @@ impl PrEnd {
 
 /// Whether a merge of `pr` into `base` (`main` or `refs/heads/main`) delivers its work: always when
 /// its repository protects no branch, or the project lists none it belongs to; otherwise only into
-/// one of its protected branches. A stacked pull request merged into a feature branch delivers
-/// nothing yet.
+/// one of its protected branches, named exactly or covered by a pattern (`refs/heads/release/*`).
+/// A stacked pull request merged into a feature branch delivers nothing yet.
 pub fn merge_counts(settings: &ProjectSettings, pr: &PrRef, base: &str) -> bool {
     let Some(repo) = settings.repo_of_pr(pr) else {
         return true;
@@ -850,6 +850,72 @@ mod tests {
         assert!(merge_counts(&both, &pr("acme/api#12"), "main"));
         assert!(!merge_counts(&both, &pr("acme/api#12"), "v1"));
         assert!(!merge_counts(&both, &pr("acme/api#12"), "bob/42-base"));
+    }
+
+    #[test]
+    fn a_merge_into_a_branch_a_pattern_protects_delivers_as_one_into_a_branch_named_exactly() {
+        let train = crate::testing::settings(
+            r#"{"repos":[
+                {"id":"api","remote":"example.com/acme/api",
+                 "protected_refs":[{"ref":"refs/heads/main","pushers":["alice"]},
+                                   {"ref":"refs/heads/release/*","pushers":["alice"]}]}]}"#,
+        );
+        let pr = pr("acme/api#12");
+        for base in [
+            "main",
+            "release/2026.10.3",
+            "refs/heads/release/2026.10.3",
+            "release/2026.10/hotfix",
+        ] {
+            assert!(merge_counts(&train, &pr, base), "{base}");
+        }
+        for base in [
+            "release",
+            "release-2026.10.3",
+            "bob/42-base",
+            "refs/tags/release/2026.10.3",
+        ] {
+            assert!(!merge_counts(&train, &pr, base), "{base}");
+        }
+        let patterns_only = crate::testing::settings(
+            r#"{"repos":[
+                {"id":"api","remote":"example.com/acme/api",
+                 "protected_refs":[{"ref":"refs/heads/release/*","pushers":["alice"]}]}]}"#,
+        );
+        assert!(merge_counts(&patterns_only, &pr, "release/2026.10.3"));
+        assert!(
+            !merge_counts(&patterns_only, &pr, "main"),
+            "a repository whose only protection is a branch pattern protects branches, so main delivers nothing"
+        );
+        assert!(patterns_only.repos()[0].leaves_main_unprotected());
+        assert!(!train.repos()[0].leaves_main_unprotected());
+        let on_master = crate::testing::settings(
+            r#"{"protected_refs":[{"ref":"refs/heads/master","pushers":["alice"]},
+                                  {"ref":"refs/heads/release/*","pushers":["alice"]}]}"#,
+        );
+        assert!(!on_master.repos()[0].leaves_main_unprotected());
+        let tags_only = crate::testing::settings(
+            r#"{"protected_refs":[{"ref":"refs/tags/v*","pushers":["alice"]}]}"#,
+        );
+        assert!(
+            !tags_only.repos()[0].leaves_main_unprotected(),
+            "a repository that protects no branch delivers into any"
+        );
+        let settled = decide_pr_end(
+            &[in_review(1, ALICE, &["acme/api#12"], false, 0)],
+            &pr,
+            if merge_counts(&train, &pr, "release/2026.10.3") {
+                PrEnd::Merged
+            } else {
+                PrEnd::MergedElsewhere
+            },
+            at(5),
+        )
+        .unwrap();
+        assert!(
+            matches!(settled, PrSettled::Completed { .. }),
+            "the last pull request merged into a release branch completes the claim: {settled:?}"
+        );
     }
 
     #[test]

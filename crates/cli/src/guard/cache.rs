@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use dibs_agent_host::ports::{
-    Cached, InboxView, KnownSettings, LocalCache, NewerRelease, PortError, StatusView,
+    Cached, InboxView, KnownSettings, LocalCache, NewerRelease, PortError, SlotState, StatusView,
 };
 use dibs_agent_host::upkeep::STATUS_FRESH;
 use dibs_client::state::{StateDir, read_json, write_json};
@@ -83,6 +83,13 @@ impl LocalCache for StateCache {
     fn status(&self) -> Option<Cached<StatusView>> {
         self.state.status().map(|cached| Cached {
             value: views::status(&cached.status),
+            at: cached.fetched_at,
+        })
+    }
+
+    fn slot_states(&self) -> Option<Cached<Vec<SlotState>>> {
+        self.state.status().map(|cached| Cached {
+            value: cached.status.slots.iter().map(views::slot_state).collect(),
             at: cached.fetched_at,
         })
     }

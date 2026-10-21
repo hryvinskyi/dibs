@@ -101,11 +101,12 @@ pub struct PrStatus {
 pub const MAX_DESCRIPTION_CHARS: usize = 140;
 
 /// The status of a pull request into `base`: failure while any member holds a slot that freezes
-/// `base` — the first such hold in the board's order — success otherwise.
+/// `base`, by its name or by a pattern that covers it — the first such hold in the board's order —
+/// success otherwise.
 pub fn pr_status(base: &RepoRef, catalog: &SlotCatalog, board: &SlotBoard) -> PrStatus {
     let freeze = board.holds.iter().find_map(|hold| {
         let spec = catalog.get(&hold.slot)?;
-        spec.freezes.contains(base).then(|| Freeze {
+        spec.freezes_branch(base).then(|| Freeze {
             slot: hold.slot.clone(),
             holder: hold.member,
             purpose: hold.purpose.clone(),
@@ -218,6 +219,54 @@ mod tests {
         let release = RepoRef::parse("api:refs/heads/release").unwrap();
         assert_eq!(
             pr_status(&release, &catalog, &migrating).state,
+            PrState::Success
+        );
+    }
+
+    #[test]
+    fn a_held_slot_that_freezes_branches_by_a_pattern_fails_every_base_it_covers() {
+        let catalog = settings(
+            r#"{"repos":[{"id":"api","remote":"example.com/acme/api"},
+                         {"id":"web","remote":"example.com/acme/web"}],
+                "slots":[{"name":"release:cut","max_hold":"1h",
+                          "freezes":["api:refs/heads/release/*"]}]}"#,
+        )
+        .slots()
+        .clone();
+        let held = SlotBoard {
+            holds: vec![hold("release:cut", "cut 2026.10.3")],
+            ..SlotBoard::default()
+        };
+        let base = |text: &str| RepoRef::parse(text).unwrap();
+        for covered in [
+            "api:refs/heads/release/2026.10.3",
+            "api:refs/heads/release/2026.11.1",
+        ] {
+            let status = pr_status(&base(covered), &catalog, &held);
+            assert_eq!(status.state, PrState::Failure, "{covered}");
+            assert_eq!(
+                status.freeze.map(|freeze| freeze.slot.to_string()),
+                Some("release:cut".to_owned())
+            );
+        }
+        for free in [
+            "api:refs/heads/main",
+            "api:refs/heads/release",
+            "web:refs/heads/release/2026.10.3",
+        ] {
+            assert_eq!(
+                pr_status(&base(free), &catalog, &held).state,
+                PrState::Success,
+                "{free}"
+            );
+        }
+        assert_eq!(
+            pr_status(
+                &base("api:refs/heads/release/2026.10.3"),
+                &catalog,
+                &SlotBoard::default()
+            )
+            .state,
             PrState::Success
         );
     }

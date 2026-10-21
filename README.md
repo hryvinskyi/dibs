@@ -168,9 +168,11 @@ revokes their tokens and releases everything they held at once. With the Claude 
   refused a push there, with the pull request as the way on, and so is a push whose branches dibs cannot read. A push to
   a fork is not judged. The pre-push check judges protection from what the machine remembers, so it holds while the
   server cannot be reached. Where the forge offers no branch protection, this is how the agents keep that rule;
-  `git push --no-verify` breaks it. Tags are protected the same way, by name or by a prefix ending in `*`
-  (`refs/tags/v*`), by the agents' command check and the pre-push check alike; a tag's refusal names no way past it.
-  A tag rule holds only for clients of 0.1.1 or newer: an older one is served the settings without it.
+  `git push --no-verify` breaks it. A rule names a branch exactly (`refs/heads/main`) or by a prefix ending in `*`
+  (`refs/heads/release/*`, every release branch), and a refusal for a pattern names it. Tags are protected the same
+  way, by name or by a prefix ending in `*` (`refs/tags/v*`), by the agents' command check and the pre-push check
+  alike; a tag's refusal names no way past it. A tag rule holds only for clients of 0.1.1 or newer, and a branch
+  pattern only for clients of 0.1.2 or newer: an older one is served the settings without what it cannot read.
 - **Edit policy.** With `require-claim` (the default), a member may edit a governed path only under a live claim that
   covers it; with `advise` they may, and are told who else is in the area. A path no area or rule governs is free.
 - **Hot-file rules.** Policies for files many people touch, matched by glob: `regenerate` (anyone may change it, nobody
@@ -558,10 +560,11 @@ session cookie is `Secure`, so use them over HTTPS (or on `localhost`).
   is its complement: it looks at every path the commits of a range changed (merge commits left out, both sides of a
   rename) and warns about those someone else holds or that need a claim. It always succeeds, so a git `pre-push` hook
   can call it without ever stopping a push.
-- **Pushes during a freeze.** A slot may freeze branches (`freezes`): while another member holds it, nobody else
-  pushes there. The agents' command check refuses such a `git push`, and `dibs check --push`, called from a git
-  `pre-push` hook (`exec dibs check --push` in `.git/hooks/pre-push`), refuses it whoever typed it and whatever the
-  command line said, since git hands it the exact branches. It is silent otherwise; a server that cannot be reached
+- **Pushes during a freeze.** A slot may freeze branches (`freezes`), by name or by a prefix ending in `*`
+  (`api:refs/heads/release/*`): while another member holds it, nobody else pushes there. The agents' command check
+  refuses such a `git push`, and `dibs check --push`, called from a git `pre-push` hook (`exec dibs check --push` in
+  `.git/hooks/pre-push`), refuses it whoever typed it and whatever the command line said, since git hands it the exact
+  branches. It is silent otherwise; a server that cannot be reached
   lets the push go with one warning, and `git push --no-verify` goes past it on purpose.
 - **Raised messages are limited.** A member may send ten `high` or `urgent` messages an hour (`raised_per_hour` in the
   settings); the next is refused with `importance_limited` until the oldest is an hour old. What dibs sends itself is

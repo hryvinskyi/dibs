@@ -10,8 +10,9 @@ use crate::pr_status::{PrStatusSettings, StatusContext};
 use crate::protection::{ProtectedRef, ProtectedTarget};
 use crate::repo::RepoId;
 
-/// Validates the protected refs of `repo`: each a branch `refs/heads/<branch>` or tags
-/// `refs/tags/<name>` or `refs/tags/<prefix>*`, each once, every pusher a handle.
+/// Validates the protected refs of `repo`: each branches `refs/heads/<branch>` or
+/// `refs/heads/<prefix>*`, or tags `refs/tags/<name>` or `refs/tags/<prefix>*`, each once, every
+/// pusher a handle.
 pub(super) fn parse_protected_refs(
     repo: &RepoId,
     documents: &[ProtectedRefDocument],
@@ -240,8 +241,6 @@ mod tests {
         assert!(double.contains("'**' is not accepted"), "{double}");
         let empty = refused("refs/tags/");
         assert!(empty.contains("after 'refs/tags/'"), "{empty}");
-        let branch_glob = refused("refs/heads/release/*");
-        assert!(branch_glob.contains("one branch exactly"), "{branch_glob}");
         assert!(matches!(
             parse_protected_refs(
                 &RepoId::implicit(),
@@ -258,6 +257,136 @@ mod tests {
             ),
             Err(SettingsError::DuplicateProtectedRef { .. })
         ));
+    }
+
+    #[test]
+    fn branches_are_protected_by_a_trailing_star_beside_exact_ones_and_round_trip() {
+        let settings = parse(
+            r#"{"repos":[
+                {"id":"api","remote":"example.com/acme/api",
+                 "protected_refs":[{"ref":"refs/heads/main","pushers":["alice"]},
+                                   {"ref":"refs/heads/release/*","pushers":["alice"]},
+                                   {"ref":"refs/tags/v*","pushers":["alice"]}]}]}"#,
+        )
+        .unwrap();
+        let api = &settings.repos()[0];
+        let releases = &api.protected_refs[1].target;
+        assert_eq!(releases.kind(), RefKind::Branch);
+        assert_eq!(releases.to_string(), "api:refs/heads/release/*");
+        assert!(releases.covers("refs/heads/release/2026.10.3"));
+        assert!(api.protects_branch());
+        let document = settings.to_document();
+        let written = &document.repos[0].protected_refs;
+        assert_eq!(written[1].target, "refs/heads/release/*");
+        assert_eq!(written[1].pushers, ["alice"]);
+        let again = ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap();
+        assert_eq!(again, settings);
+        let patterns_only =
+            parse(r#"{"protected_refs":[{"ref":"refs/heads/release/*","pushers":["alice"]}]}"#)
+                .unwrap();
+        assert!(
+            patterns_only.repos()[0].protects_branch(),
+            "a branch pattern protects branches"
+        );
+    }
+
+    #[test]
+    fn a_branch_pattern_with_a_star_inside_two_stars_or_no_prefix_is_refused_by_name() {
+        let refused = |text: &str| {
+            parse(&format!(r#"{{"protected_refs":[{{"ref":"{text}"}}]}}"#))
+                .map_err(|error| error.to_string())
+                .unwrap_err()
+        };
+        for (text, said) in [
+            ("refs/heads/release/*/x", "'*' at the end only"),
+            ("refs/heads/release/**", "'**' is not accepted"),
+            ("refs/heads/*", "would cover every branch"),
+            ("refs/heads/", "after 'refs/heads/'"),
+            ("refs/heads/.release/*", "not one git accepts"),
+            ("refs/remotes/origin/*", "'refs/heads/<prefix>*'"),
+        ] {
+            let message = refused(text);
+            assert!(
+                message.starts_with(&format!("protected ref '{text}' of repository 'default':"))
+                    && message.contains(said),
+                "{text}: {message}"
+            );
+        }
+        assert!(matches!(
+            parse_protected_refs(
+                &RepoId::implicit(),
+                &[
+                    ProtectedRefDocument {
+                        target: "refs/heads/release/*".to_owned(),
+                        pushers: Vec::new(),
+                    },
+                    ProtectedRefDocument {
+                        target: "refs/heads/release/*".to_owned(),
+                        pushers: vec!["alice".to_owned()],
+                    },
+                ]
+            ),
+            Err(SettingsError::DuplicateProtectedRef { .. })
+        ));
+        assert!(
+            parse_protected_refs(
+                &RepoId::implicit(),
+                &[
+                    ProtectedRefDocument {
+                        target: "refs/heads/release/*".to_owned(),
+                        pushers: Vec::new(),
+                    },
+                    ProtectedRefDocument {
+                        target: "refs/heads/release/2026*".to_owned(),
+                        pushers: Vec::new(),
+                    },
+                ]
+            )
+            .is_ok(),
+            "two patterns that overlap are two rules"
+        );
+    }
+
+    #[test]
+    fn without_branch_patterns_the_exact_branches_tags_and_slots_stay() {
+        let settings = parse(
+            r#"{"stale_after":"2h",
+                "protected_refs":[{"ref":"refs/heads/main","pushers":["alice"]},
+                                  {"ref":"refs/heads/release/*","pushers":["alice"]},
+                                  {"ref":"refs/tags/v*","pushers":["alice"]}],
+                "slots":[{"name":"deploy","max_hold":"1h",
+                          "freezes":["refs/heads/release/*","refs/heads/main"]},
+                         {"name":"cut","max_hold":"1h","freezes":["refs/heads/release/*"]}]}"#,
+        )
+        .unwrap();
+        let older = settings.without_branch_patterns();
+        let rules: Vec<String> = older.repos()[0]
+            .protected_refs
+            .iter()
+            .map(|rule| rule.target.to_string())
+            .collect();
+        assert_eq!(rules, ["default:refs/heads/main", "default:refs/tags/v*"]);
+        let freezes: Vec<Vec<String>> = older
+            .slots()
+            .slots()
+            .iter()
+            .map(|spec| spec.freezes.iter().map(ToString::to_string).collect())
+            .collect();
+        assert_eq!(
+            freezes,
+            [vec!["default:refs/heads/main".to_owned()], Vec::new()],
+            "every slot stays, without the patterns it froze"
+        );
+        assert_eq!(older.stale_after(), settings.stale_after());
+        let mut expected = settings.to_document();
+        expected.protected_refs.remove(1);
+        expected.slots[0].freezes.remove(0);
+        expected.slots[1].freezes.clear();
+        assert_eq!(older.to_document(), expected);
+        let oldest = settings.without_branch_patterns().without_protected_tags();
+        assert_eq!(oldest.repos()[0].protected_refs.len(), 1);
+        let none = parse(r#"{"protected_refs":[{"ref":"refs/heads/main"}]}"#).unwrap();
+        assert_eq!(none.without_branch_patterns(), none);
     }
 
     #[test]

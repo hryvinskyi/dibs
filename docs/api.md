@@ -21,8 +21,12 @@ members `alice` and `bob`.
   `426 client_too_old` on every `/v1` route but `GET /v1/version`, with a sentence saying how to update and
   `details.min_client`. Another agent, a browser or a probe is not judged by its `User-Agent`. The client's hooks treat
   this answer as a server that cannot be reached: no decision, one warning. A `dibs` client older than 0.1.1 cannot
-  read protected tags, so `GET /v1/me` serves it the settings without them (its protected branches stay); every other
-  caller gets them whole.
+  read protected tags, so `GET /v1/me` serves it the settings without them (its protected branches stay). A `dibs`
+  client older than 0.1.2 (a pre-release of 0.1.2 reads them) cannot read branch patterns (`refs/heads/<prefix>*`), so
+  `GET /v1/me` serves it the settings
+  without the protected refs and the frozen refs that are patterns (the branches named exactly stay), and the slots in
+  the answers of `GET /v1/status` and the slot routes without the frozen refs that are patterns. Every other caller
+  gets them whole.
 - **Retries.** The `dibs` command line, run by a person, gives each sending of a request 5 seconds to connect and 20
   seconds in all, so a request sent once more may take up to 40 seconds. It sends once more: a read (`GET`) whose connection timed out opening or was reset; and, only when its connection timed
 out opening so that nothing reached the server, registering a session, applying the settings, acknowledging a message,
@@ -592,7 +596,10 @@ so a worker may send every report again; a match answers
 the branch the pull request was merged from, is optional; the body may be up to 2 MiB). The pull request leaves its claim (`pr_merged`). A merge that delivers also **moves the base** under
 other members' branches: see [Branches and overlaps](#branches-and-overlaps). That happens whether or not a claim
 recorded the pull request, so a merge no claim recorded still answers `matched: false` and changes no claim. A merge **delivers** the work when its repository protects no branch (protected tags do not count), or when
-`base` (`main` or `refs/heads/main`) is one of its protected branches; a merge into any other base — a stacked pull
+`base` (`main` or `refs/heads/main`) is one of its protected branches, named exactly or covered by a pattern
+(`release/2.4` under `refs/heads/release/*`). A repository that protects branches must protect `main` too for a
+merge into `main` to deliver: one that protects only `refs/heads/release/*` delivers nothing into `main`. A merge into
+any other base — a stacked pull
 request merged into the branch of the one below it — delivers nothing yet, and is treated as a close (below).
 After a merge that delivers, with other pull requests recorded, the claim stays in review (`in_review`). With none left,
 it **completes** (`completed`, event `completed_by_merge`: areas free, grants on it ended, the item done, counted in the
@@ -623,7 +630,8 @@ its one repository's id is `default` and it has no remote, so `repo=default`. `b
   "description": "A freezing action is in progress until 14:40 UTC." }
 ```
 
-`state` is `failure` while any member holds a slot that `freezes` the branch, `success` otherwise. `enabled`,
+`state` is `failure` while any member holds a slot that `freezes` the branch, by its name or by a pattern that covers
+it, `success` otherwise. `enabled`,
 `context` and whether `description` names the slot, its holder and their purpose come from the repository's
 `pr_status` setting: a status is visible to everyone who can read the repository, so by default it names neither. The
 description holds at most 140 characters. Reading it applies what time changed about the slots, as every read of them
@@ -1034,8 +1042,11 @@ data: {"id":5,"at":"…","kind":"message_posted","payload":{…},"members":{…}
 ### Settings
 
 `PUT /v1/admin/settings` takes the settings document as JSON (`dibs admin settings apply <file>` reads the same
-document as TOML), makes it the project's settings and answers `{ "settings": document, "changed": true }` with the
-document in its normal form. Applying the settings in force again answers `"changed": false`. A document that breaks a
+document as TOML), makes it the project's settings and answers `{ "settings": document, "changed": true, "warnings":
+[] }` with the document in its normal form. Applying the settings in force again answers `"changed": false`.
+`warnings` holds a sentence for each repository that protects branches but neither `main` nor `master`: a merge
+delivers its work only into a protected branch, so a pull request merged into `main` there completes no claim (the
+command line prints each as a warning). A document that breaks a
 rule is `422 invalid_settings`, naming the setting at fault; a body that is no settings document is `400 invalid_json`.
 
 | Setting | Meaning |
@@ -1077,7 +1088,7 @@ A slot has a `name` (1 to 64 characters: lowercase letters, digits and `:._-`) a
 | `commands` | Up to 20 `{ "matches": "<regex>", "unless": "<regex>" }`, each 1 to 500 characters, matched against one simple command of a command line (below). |
 | `run_only` | Its commands run only inside `dibs slot run`: a hold from a plain take does not let them through. |
 | `group` | Slots of one group exclude each other. |
-| `freezes` | Branch refs nobody but the holder may push while it is held: `api:refs/heads/main`, or `refs/heads/main` in a project with one repository. A tag is refused (`invalid_settings`): a slot freezes branches only. |
+| `freezes` | Branches nobody but the holder may push to while it is held: `api:refs/heads/main`, or `api:refs/heads/<prefix>*` for every branch whose name starts with the prefix (`api:refs/heads/release/*`); `refs/heads/…` alone in a project with one repository. A pattern follows the rules of a protected branch pattern (below). A tag is refused (`invalid_settings`): a slot freezes branches only. |
 | `note` | Shown with the slot, 1 to 500 characters. |
 
 The patterns are regular expressions of the Rust `regex` crate, which match in time linear in the input and have no
@@ -1089,8 +1100,12 @@ shows what a line needs without a server.
 
 The command line itself never leaves the member's machine: the guard splits and judges it there, against the settings
 it keeps, and asks the server only `GET /v1/slots/{name}` for the few slots its verdict reads — the one whose pattern
-matches, and those that freeze a ref a `git push` in the line names. A line no slot governs asks the server nothing.
-`dibs check --push`, run from git's `pre-push` hook, judges the refs git says a push goes to by the same rule.
+matches, and those that freeze a ref a `git push` in the line names, exactly or by a pattern that covers it. A line
+no slot governs asks the server nothing. A line that no slot's pattern matches, in question only for the refs it pushes
+to, is judged against the slots of the status the machine fetched within the last 30 seconds when it has one, since a
+freeze is judged on a best-effort reading; a hold taken since then is seen once the status is fetched again.
+`dibs check --push`, run from git's `pre-push` hook, judges the refs git says a push goes to by the same rule, asking
+the server for the state of the slots that freeze them.
 
 **Protected branches and tags.** `protected_refs: [{ "ref": "refs/heads/main", "pushers": ["alice"] }]` names, per
 repository, the branches and tags only the members listed (by handle) may push to; an empty `pushers` means nobody
@@ -1098,29 +1113,51 @@ pushes there directly. Where the forge offers no branch protection, this is how 
 everyone else's way to the branch is a pull request, and that only the members who cut releases push release tags.
 A `ref` is one of:
 
-- `refs/heads/<branch>`: that branch, exactly; a branch takes no pattern.
+- `refs/heads/<branch>`: that branch, exactly.
+- `refs/heads/<prefix>*`: every branch whose name starts with the prefix (`refs/heads/release/*` covers
+  `release/2.4`, not `release` or `release-notes`). The `*` comes once, at the end, after a prefix:
+  `refs/heads/release/*/x`, `refs/heads/release/**` and `refs/heads/*`, which would cover every branch, are refused
+  (`invalid_settings`, naming the ref and what is wrong with it), as is a prefix git would not accept as the start of a
+  branch name.
 - `refs/tags/<name>`: that tag, exactly.
 - `refs/tags/<prefix>*`: every tag whose name starts with the prefix (`refs/tags/v*` covers `v1.2.0` and `v2/rc1`;
   `refs/tags/*` covers every tag). The `*` comes once, at the end: `refs/tags/v*.0`, `refs/tags/v**` and an empty
   `refs/tags/` are refused (`invalid_settings`, naming the ref and what is wrong with it), as is a name git would not
   accept.
 
-Each `ref` is declared once per repository. A tag that several entries cover is pushed only by a member every one of
-them lists. A pusher of a branch is no pusher of a tag unless the tag's entry lists them too. A `dibs` client older than
-0.1.1 is served the settings without the tag entries (see *Client versions* above) and judges no tag. A push is judged against the repository of the remote it goes to: the listed repository whose
-`remote` is the URL of that remote (its fetch URL, after `url.<base>.insteadOf`); a remote no listed repository has — a
-fork — protects nothing, and in a project that lists no repositories every remote is its one repository. Protection is
-judged before any freeze and **fails closed**:
+Each `ref` is declared once per repository; two patterns that overlap are two entries. A branch or a tag that several
+entries cover is pushed only by a member every one of them lists. A pusher of a branch is no pusher of a tag unless the
+tag's entry lists them too. A `dibs` client older than 0.1.1 is served the settings without the tag entries (see
+*Client versions* above) and judges no tag; one older than 0.1.2 is served them without the branch patterns and judges
+only the branches named exactly. A push is judged against the repository of the remote it goes to: the listed
+repository whose `remote` is the URL of that remote (its fetch URL, after `url.<base>.insteadOf`); a remote no listed
+repository has — a fork — protects nothing, and in a project that lists no repositories every remote is its one
+repository. Protection is judged before any freeze and **fails closed**:
 
 - The agent's command check reads what a `git push` updates from the line and, where the line leaves it to git, from the
   checkout's git settings — the current branch, its push remote and upstream, `push.default`, `push.followTags`,
-  `remote.<name>.push` — read once, only for a line that pushes, in a project that protects a branch or a tag, without
-  asking the server. `HEAD`, a bare
-  `git push`, `--repo`, `-C .`, `--delete`, `+` and `:` refspecs are read as git reads them.
-- A push that may update every branch (`--all`, `--branches`, `--mirror`, `--prune`, `push.default=matching`, a `:`
-  refspec), a wildcard refspec that matches a protected branch, and a push whose branches cannot be read (another
-  directory with `-C`, `--git-dir`, a `remote.<name>.push` setting, `HEAD` pushed from a detached head, or git settings that
-  cannot be read) is refused for anyone who is not a pusher, saying it may update the branch.
+  `remote.<name>.push`, `remote.<name>.mirror`, the remotes' URLs and `url.<base>.insteadOf` — read once, only for a
+  line that pushes, in a project that protects a branch or a tag, without asking the server. The settings a
+  `git -c <key>=<value>` sets for the run count over the checkout's. The current branch comes from the checkout's
+  `HEAD` file, or from git when that file does not name one (a reftable, a `HEAD` that is a symbolic link); a head git
+  cannot name a branch for makes the push unreadable. `HEAD` and `@`, a bare `git push`, `--repo`, `-C .`, `--delete`,
+  `+` and `:` refspecs are read as git reads them. A destination is read as everything git may resolve it to: a full
+  ref as written; a wildcard under `refs/` as every ref it may match (`refs/*:refs/*` and `refs/h*:refs/h*` may update
+  every branch); a short name as `refs/<name>`, the branch of that name and the tag of that name, so `heads/main` and
+  `HEAD:heads/release/x` are the branches `main` and `release/x`.
+- A branch a pattern covers is judged as a protected branch named exactly: a refspec that names it (`release/2.4`,
+  `HEAD:refs/heads/release/2.4`), deletes it (`:release/2.4`, `--delete release/2.4`), or a bare
+  `git push` from it. A refusal for a pattern names the branch pushed and the pattern (`the branch release/2.4 of
+  api, which release/* covers`), or the pattern alone when the push names no branch exactly. A project with one
+  repository is not named in a refusal.
+- A push that may update every branch (`--all`, `--branches`, `--mirror`, a remote with `remote.<name>.mirror` set,
+  `--prune`, `push.default=matching`, a `:` refspec), a wildcard refspec that may match a protected branch (one whose
+  part before the `*` overlaps a protected pattern counts as one that does), and a push whose branches cannot be read
+  (another directory with `-C`, `--git-dir`, `--work-tree`, `--namespace`, settings from elsewhere — `--config-env`,
+  `-c include.path`, or an assignment of `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`,
+  `GIT_CONFIG*`, `HOME` or `XDG_CONFIG_HOME` anywhere on the line —, a `remote.<name>.push` setting, `HEAD` pushed
+  from a detached head, or git settings that cannot be read) is refused for anyone who is not a pusher, saying it may
+  update the branch.
 - Tags are judged the same way. A refspec under `refs/tags/` names its tag, a deletion included (`:refs/tags/v1.0`,
   `--delete refs/tags/v1.0`); a short name (`v1.0`, `--delete v1.0`) is judged both as the branch and as the tag of that
   name, since git may resolve it to either; a wildcard refspec that may match a covered tag counts as one that does. A

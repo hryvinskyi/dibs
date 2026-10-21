@@ -112,6 +112,9 @@ pub async fn run(command: AdminCommand, ctx: &Context) -> Result<(), Failure> {
                     "The settings were already in force; nothing changed.".to_owned()
                 }
             });
+            for warning in &applied.warnings {
+                ctx.printer.warn(warning);
+            }
         }
         AdminCommand::Slot(command) => {
             crate::commands::slot::admin(command, &connection, ctx).await?;

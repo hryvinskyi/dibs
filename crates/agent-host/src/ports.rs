@@ -607,6 +607,9 @@ pub trait LocalCache {
     /// The status as last fetched.
     fn status(&self) -> Option<Cached<StatusView>>;
 
+    /// The state of every declared slot, as the status last fetched holds it.
+    fn slot_states(&self) -> Option<Cached<Vec<SlotState>>>;
+
     /// The inbox as last fetched.
     fn inbox(&self) -> Option<Cached<InboxView>>;
 

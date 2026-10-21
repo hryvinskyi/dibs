@@ -278,3 +278,115 @@ fn a_push_that_names_deletes_or_may_carry_a_protected_tag_is_denied_and_its_push
         );
     }
 }
+
+/// The setup with `api`'s `main` protected for alice and its `release/` branches for alice too.
+fn release_train() -> Setup {
+    let setup = Setup::new();
+    let mut settings = two_repositories();
+    settings["repos"][0]["protected_refs"] = json!([
+        {"ref": "refs/heads/main", "pushers": ["alice"]},
+        {"ref": "refs/heads/release/*", "pushers": ["alice"]}
+    ]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    setup
+}
+
+/// A checkout of `api` at `root/<name>` whose refs git keeps in a reftable, one commit made.
+fn reftable_checkout(setup: &Setup, name: &str) -> std::path::PathBuf {
+    let dir = setup.root.path().join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| crate::support::git(&dir, args);
+    git(&["init", "-q", "--ref-format=reftable", "-b", "main"]);
+    git(&["config", "user.name", "Bob"]);
+    git(&["config", "user.email", "bob@example.com"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["remote", "add", "origin", API_REMOTE]);
+    std::fs::write(
+        dir.join(".dibs.toml"),
+        format!(
+            "server = \"{}\"\nproject = \"acme\"\nrepo = \"api\"\n",
+            setup.server.url()
+        ),
+    )
+    .unwrap();
+    git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    dir
+}
+
+#[test]
+fn the_command_check_judges_every_spelling_git_resolves_to_a_protected_branch() {
+    let setup = release_train();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let warm = before(&setup, "bob", &api, "git status");
+    assert_eq!(warm["decision"], "no_objection", "{warm}");
+    for line in [
+        "git push origin heads/release/x",
+        "git push origin HEAD:heads/release/x",
+        "git push origin --delete heads/release/x",
+        "git push origin feature:heads/main",
+        "git push origin 'refs/*:refs/*'",
+        "git push origin '+refs/*:refs/*'",
+        "git push origin 'refs/h*:refs/h*'",
+        "git -c push.default=matching push",
+        "git -c remote.origin.mirror=true push origin",
+        "GIT_DIR=../elsewhere/.git git push origin bob/1",
+        "export GIT_CONFIG_GLOBAL=/tmp/other; git push origin bob/1",
+    ] {
+        let answer = before(&setup, "bob", &api, line);
+        assert_eq!(answer["decision"], "deny", "{line}: {answer}");
+    }
+    let named = before(&setup, "bob", &api, "git push origin heads/release/x");
+    let reason = named["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with(
+            "This push goes to the branch release/x of api, which release/* covers and only alice may push to."
+        ),
+        "{reason}"
+    );
+    crate::support::git(&api, &["config", "remote.origin.mirror", "true"]);
+    let mirrored = before(&setup, "bob", &api, "git push origin");
+    assert_eq!(
+        mirrored["decision"], "deny",
+        "a mirror remote pushes every ref: {mirrored}"
+    );
+    crate::support::git(&api, &["config", "--unset", "remote.origin.mirror"]);
+    for line in [
+        "git push origin bob/1",
+        "git push origin heads/bob/1",
+        "FOO=1 git push origin bob/1",
+    ] {
+        let answer = before(&setup, "bob", &api, line);
+        assert_eq!(answer["decision"], "no_objection", "{line}: {answer}");
+    }
+}
+
+#[test]
+fn a_bare_push_from_a_release_branch_is_refused_in_a_reftable_checkout_and_behind_a_linked_head() {
+    let setup = release_train();
+    let reftable = reftable_checkout(&setup, "api-reftable");
+    crate::support::git(&reftable, &["checkout", "-q", "-b", "release/2026.10.3"]);
+    let warm = before(&setup, "bob", &reftable, "git status");
+    assert_eq!(warm["decision"], "no_objection", "{warm}");
+    let refused = before(&setup, "bob", &reftable, "git push");
+    assert_eq!(
+        refused["decision"], "deny",
+        "the branch is read from git when HEAD names none: {refused}"
+    );
+    crate::support::git(&reftable, &["checkout", "-q", "-b", "bob/7-rounding"]);
+    let own = before(&setup, "bob", &reftable, "git push");
+    assert_eq!(own["decision"], "no_objection", "{own}");
+
+    #[cfg(unix)]
+    {
+        let linked = setup.checkout("api-linked", Some("api"), API_REMOTE);
+        crate::support::git(&linked, &["branch", "release/2026.10.3"]);
+        let head = linked.join(".git/HEAD");
+        std::fs::remove_file(&head).unwrap();
+        std::os::unix::fs::symlink("refs/heads/release/2026.10.3", &head).unwrap();
+        let refused = before(&setup, "bob", &linked, "git push");
+        assert_eq!(
+            refused["decision"], "deny",
+            "a HEAD linked to the release branch is on it: {refused}"
+        );
+    }
+}

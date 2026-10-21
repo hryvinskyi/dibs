@@ -63,6 +63,7 @@ struct State {
     cached_settings: Option<Cached<KnownSettings>>,
     unreadable_settings: bool,
     status: Option<Cached<StatusView>>,
+    cached_slots: Option<Cached<Vec<crate::ports::SlotState>>>,
     inbox: Option<Cached<InboxView>>,
     noted: Vec<Cached<QualifiedArea>>,
     last_heartbeat: Option<OffsetDateTime>,
@@ -126,6 +127,7 @@ impl State {
             last_repo_warning: None,
             server_settings: Ok(known),
             server_status: Ok(StatusView::default()),
+            cached_slots: None,
             server_inbox: Ok(InboxView::default()),
             answers: Ok(Vec::new()),
             slot_states: Ok(Vec::new()),
@@ -332,6 +334,10 @@ impl LocalCache for World {
 
     fn status(&self) -> Option<Cached<StatusView>> {
         self.0.borrow().status.clone()
+    }
+
+    fn slot_states(&self) -> Option<Cached<Vec<crate::ports::SlotState>>> {
+        self.0.borrow().cached_slots.clone()
     }
 
     fn inbox(&self) -> Option<Cached<InboxView>> {
@@ -2235,6 +2241,251 @@ fn a_push_to_a_protected_branch_is_refused_from_the_settings_alone_and_its_pushe
         json!({"protocol": 1, "decision": "no_objection"})
     );
     assert!(pusher.calls().is_empty());
+}
+
+/// One repository whose `main` only alice may push, and whose `release/` branches alice and carol
+/// may push.
+fn release_settings(member: &str) -> KnownSettings {
+    let document: SettingsDocument = serde_json::from_value(json!({
+        "repos": [{
+            "id": "api",
+            "remote": "https://example.com/acme/api.git",
+            "protected_refs": [
+                {"ref": "refs/heads/main", "pushers": ["alice"]},
+                {"ref": "refs/heads/release/*", "pushers": ["alice", "carol"]}
+            ]
+        }]
+    }))
+    .unwrap();
+    KnownSettings {
+        member: handle(member),
+        settings: ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+    }
+}
+
+#[test]
+fn a_push_to_a_branch_a_pattern_protects_is_refused_from_the_settings_alone_naming_the_pattern() {
+    let world = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: release_settings("bob"),
+            at: at(0),
+        });
+    });
+    for (line, said) in [
+        (
+            "git push origin release/2026.10.3",
+            "the branch release/2026.10.3 of api, which release/* covers and",
+        ),
+        (
+            "git push origin HEAD:refs/heads/release/2026.10.3",
+            "the branch release/2026.10.3 of api, which release/* covers and",
+        ),
+        (
+            "git push origin :release/2026.10.1",
+            "the branch release/2026.10.1 of api, which release/* covers and",
+        ),
+        (
+            "git push origin --delete release/2026.10.1",
+            "the branch release/2026.10.1 of api, which release/* covers and",
+        ),
+        (
+            "git push origin 'refs/heads/rel*:refs/heads/rel*'",
+            "a branch of api that release/* covers, which",
+        ),
+    ] {
+        let reason = denial(&run(&world, "neutral", "before-tool", &shell(line)));
+        assert!(
+            reason.starts_with(&format!(
+                "This push goes to {said} only alice, carol may push to."
+            )) && reason.contains("open a pull request"),
+            "{line}: {reason}"
+        );
+        assert!(!reason.contains("--no-verify"), "{line}: {reason}");
+    }
+    for line in ["git push --all origin", "git push --mirror origin"] {
+        let reason = denial(&run(&world, "neutral", "before-tool", &shell(line)));
+        assert!(
+            reason.contains("only alice may push to"),
+            "the first rule bob may not push, main: {line}: {reason}"
+        );
+    }
+    world.set(|state| {
+        if let Some(git) = &mut state.git {
+            git.branch = Some("release/2026.10.3".to_owned());
+        }
+    });
+    let current = denial(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin HEAD"),
+    ));
+    assert!(current.contains("release/* covers"), "{current}");
+    world.set(|state| {
+        if let Some(git) = &mut state.git {
+            git.branch = Some("bob/42-rounding".to_owned());
+        }
+    });
+    for line in [
+        "git push origin bob/42-rounding",
+        "git push origin HEAD",
+        "git push origin release-notes",
+        "git push fork release/2026.10.3",
+    ] {
+        let answer = run(&world, "neutral", "before-tool", &shell(line));
+        assert_eq!(no_objection(&answer)["notice"], Value::Null, "{line}");
+    }
+    assert!(world.calls().is_empty(), "a branch pattern costs no call");
+
+    let pusher = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: release_settings("carol"),
+            at: at(0),
+        });
+    });
+    for line in [
+        "git push origin release/2026.10.3",
+        "git push origin --delete release/2026.10.1",
+    ] {
+        let answer = run(&pusher, "neutral", "before-tool", &shell(line));
+        assert_eq!(
+            reply(&answer),
+            json!({"protocol": 1, "decision": "no_objection"}),
+            "{line}"
+        );
+    }
+    let main = denial(&run(
+        &pusher,
+        "neutral",
+        "before-tool",
+        &shell("git push origin main"),
+    ));
+    assert!(main.contains("api:refs/heads/main"), "{main}");
+}
+
+#[test]
+fn a_push_to_a_branch_a_held_slot_freezes_by_a_pattern_is_denied() {
+    let document: SettingsDocument = serde_json::from_value(json!({
+        "repos": [{"id": "api", "remote": "https://example.com/acme/api.git"}],
+        "slots": [{"name": "release:cut", "max_hold": "1h",
+                   "freezes": ["api:refs/heads/release/*"]}]
+    }))
+    .unwrap();
+    let world = World::new().with(|state| {
+        state.cached_settings = Some(Cached {
+            value: KnownSettings {
+                member: handle("bob"),
+                settings: ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+            },
+            at: at(0),
+        });
+        state.slot_states = Ok(vec![held(
+            "release:cut",
+            "alice",
+            dibs_domain::slot::Liveness::Session,
+        )]);
+    });
+    let reason = denial(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin release/2026.10.3"),
+    ));
+    for part in [
+        "api:refs/heads/release/2026.10.3",
+        "the slot release:cut freezes with every branch release/* covers, while alice holds it",
+        "taking the slot is not the way on",
+    ] {
+        assert!(reason.contains(part), "{part}: {reason}");
+    }
+    assert_eq!(world.0.borrow().refusals[0].1, [Tally::Frozen]);
+    let calls = world.calls().len();
+    let free = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin bob/42-rounding"),
+    );
+    assert_eq!(no_objection(&free)["notice"], Value::Null);
+    assert_eq!(
+        world.calls().len(),
+        calls,
+        "a branch no pattern covers asks about no slot"
+    );
+
+    world.set(|state| {
+        state.cached_slots = Some(Cached {
+            value: vec![held(
+                "release:cut",
+                "alice",
+                dibs_domain::slot::Liveness::Session,
+            )],
+            at: at(0),
+        });
+        state.slot_states = Err(PortError::Unavailable(
+            "the dibs server could not be reached.".to_owned(),
+        ));
+    });
+    let calls = world.calls().len();
+    let cached = denial(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin release/2026.10.4"),
+    ));
+    assert!(
+        cached.contains("freezes with every branch release/* covers"),
+        "{cached}"
+    );
+    assert_eq!(
+        world.calls().len(),
+        calls,
+        "a fresh cached status answers a line in question only for its freezes"
+    );
+    world.set(|state| {
+        state.cached_slots = Some(Cached {
+            value: vec![crate::ports::SlotState {
+                slot: slot_name("release:cut"),
+                hold: None,
+                queue: Vec::new(),
+                offer: None,
+            }],
+            at: at(0),
+        });
+    });
+    let free = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin release/2026.10.4"),
+    );
+    assert_eq!(
+        no_objection(&free)["notice"],
+        Value::Null,
+        "the cached status says the slot is free"
+    );
+    world.set(|state| {
+        state.cached_slots = Some(Cached {
+            value: vec![held(
+                "release:cut",
+                "alice",
+                dibs_domain::slot::Liveness::Session,
+            )],
+            at: at(-60),
+        });
+        state.slot_states = Ok(Vec::new());
+    });
+    let stale = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &shell("git push origin release/2026.10.4"),
+    );
+    assert_eq!(
+        no_objection(&stale)["notice"],
+        Value::Null,
+        "a stale cached status is not read; the server says the slot is free"
+    );
 }
 
 /// One repository whose release tags `v*` only alice may push, and no protected branch.

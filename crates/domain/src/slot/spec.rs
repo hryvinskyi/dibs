@@ -143,7 +143,8 @@ impl Purpose {
 
 string_value!(Purpose, PurposeError);
 
-/// A branch of one repository, `<repo>:refs/heads/<name>`, that a held slot freezes.
+/// One branch of one repository, `<repo>:refs/heads/<name>`: a branch a push goes to, or the base
+/// of a pull request, which a slot's frozen refs are judged against.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct RepoRef {
@@ -157,17 +158,21 @@ pub struct RepoRef {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RepoRefError {
     /// The text is not `<repo>:refs/heads/<name>`.
-    #[error("a frozen ref is written '<repo>:refs/heads/<branch>'")]
+    #[error("a branch is written '<repo>:refs/heads/<branch>'")]
     Malformed,
-    /// The text names a tag, which no slot freezes.
-    #[error(
-        "a slot freezes branches, not tags; a frozen ref is written '<repo>:refs/heads/<branch>'"
-    )]
+    /// The text names a tag.
+    #[error("a tag is not a branch; a branch is written '<repo>:refs/heads/<branch>'")]
     Tag,
 }
 
 /// The longest full ref name, `refs/…` included.
 pub(crate) const MAX_REF_NAME: usize = 255;
+
+/// Where the branches of a repository are.
+pub(crate) const BRANCHES: &str = "refs/heads/";
+
+/// Where the tags of a repository are.
+pub(crate) const TAGS: &str = "refs/tags/";
 
 /// Whether `part`, a ref name after its `refs/<kind>/`, has nothing git refuses inside a name: no
 /// control character, space or `~^:?*[\`, no leading `/`, no `..`, `//` or `@{`. Whether it may be
@@ -179,6 +184,64 @@ pub(crate) fn ref_part_is_clean(part: &str) -> bool {
         && !part.contains("..")
         && !part.contains("//")
         && !part.contains("@{")
+}
+
+/// Whether `name`, a ref's name after `refs/<kind>/`, or with `pattern` the prefix before a
+/// pattern's `*`, follows git's rules for a ref name: [`ref_part_is_clean`], no part between
+/// slashes that is empty, starts with `.` or ends with `.lock`, and no `.` or `/` at the end. A
+/// prefix may be empty, and its last part is unfinished: it may end with `/`, `.` or `.lock`, or be
+/// empty, since what the `*` adds completes it.
+pub(crate) fn ref_name_is_clean(name: &str, pattern: bool) -> bool {
+    if !ref_part_is_clean(name) {
+        return false;
+    }
+    let mut parts: Vec<&str> = name.split('/').collect();
+    let last = parts.pop().unwrap_or_default();
+    let whole =
+        |part: &&str| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock");
+    if !parts.iter().all(whole) || last.starts_with('.') {
+        return false;
+    }
+    pattern || (!last.is_empty() && !last.ends_with('.') && !last.ends_with(".lock"))
+}
+
+/// How a ref's name after `refs/<kind>/` is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Written<'a> {
+    /// One ref, named exactly.
+    Exact(&'a str),
+    /// Every ref whose name starts with this prefix, written with a `*` after it.
+    Prefix(&'a str),
+}
+
+/// Why a name after `refs/<kind>/` is neither one name nor a prefix followed by one `*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StarFault {
+    /// Nothing is written.
+    Empty,
+    /// `**` is written.
+    Double,
+    /// A `*` is written before the end.
+    NotAtEnd,
+}
+
+/// How `rest`, a ref's name after `refs/<kind>/`, is written: one name, or a prefix followed by a
+/// single `*` at the end. Whether the name or the prefix is one git accepts is the caller's to say.
+pub(crate) fn written(rest: &str) -> Result<Written<'_>, StarFault> {
+    if rest.is_empty() {
+        return Err(StarFault::Empty);
+    }
+    if rest.contains("**") {
+        return Err(StarFault::Double);
+    }
+    let shape = rest
+        .strip_suffix('*')
+        .map_or(Written::Exact(rest), Written::Prefix);
+    let (Written::Exact(literal) | Written::Prefix(literal)) = shape;
+    if literal.contains('*') {
+        return Err(StarFault::NotAtEnd);
+    }
+    Ok(shape)
 }
 
 impl RepoRef {
@@ -199,7 +262,7 @@ impl RepoRef {
     /// [`RepoRefError::Tag`] when `name` is a `refs/tags/` ref, [`RepoRefError::Malformed`] when it
     /// is no `refs/heads/` ref git would accept.
     pub fn named(repo: RepoId, name: &str) -> Result<Self, RepoRefError> {
-        if name.starts_with("refs/tags/") {
+        if name.starts_with(TAGS) {
             return Err(RepoRefError::Tag);
         }
         Self::of(repo, name).ok_or(RepoRefError::Malformed)
@@ -207,7 +270,7 @@ impl RepoRef {
 
     /// The branch ref `name` of `repo`, when `name` is a `refs/heads/` ref git would accept.
     pub fn of(repo: RepoId, name: &str) -> Option<Self> {
-        let branch = name.strip_prefix("refs/heads/")?;
+        let branch = name.strip_prefix(BRANCHES)?;
         let valid = !branch.is_empty()
             && name.len() <= MAX_REF_NAME
             && ref_part_is_clean(branch)
@@ -236,6 +299,148 @@ impl TryFrom<String> for RepoRef {
 
 impl From<RepoRef> for String {
     fn from(value: RepoRef) -> String {
+        value.to_string()
+    }
+}
+
+/// Branches of one repository: `<repo>:refs/heads/<branch>`, that branch exactly, or
+/// `<repo>:refs/heads/<prefix>*`, every branch whose name starts with the prefix
+/// (`api:refs/heads/release/*` covers `release/2026.10.3`). The prefix is never empty, so no
+/// pattern covers every branch.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct BranchPattern {
+    repo: RepoId,
+    name: String,
+}
+
+/// Why a text names no branch and no branches by a prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BranchPatternError {
+    /// The text is not `<repo>:refs/heads/…`.
+    #[error(
+        "a frozen ref is written '<repo>:refs/heads/<branch>' or '<repo>:refs/heads/<prefix>*'"
+    )]
+    Malformed,
+    /// The text names a tag, which no slot freezes.
+    #[error(
+        "a slot freezes branches, not tags; a frozen ref is written '<repo>:refs/heads/<branch>' or '<repo>:refs/heads/<prefix>*'"
+    )]
+    Tag,
+    /// Nothing after `refs/heads/`.
+    #[error("a branch ref names a branch, or a prefix followed by '*', after 'refs/heads/'")]
+    Empty,
+    /// `refs/heads/*`: a pattern with nothing before its `*`.
+    #[error(
+        "a branch pattern names a prefix before its '*', as in 'refs/heads/release/*'; 'refs/heads/*' would cover every branch"
+    )]
+    EmptyPrefix,
+    /// `**` in a branch pattern.
+    #[error("a branch pattern has one '*', at its end; '**' is not accepted")]
+    DoubleStar,
+    /// A `*` before the end of a branch pattern.
+    #[error("a branch pattern has its '*' at the end only, as in 'refs/heads/release/*'")]
+    StarNotAtEnd,
+    /// A branch name, or the prefix of a pattern, git would not accept.
+    #[error(
+        "the branch name is not one git accepts: no space, control character or any of ~^:?[\\, no '..', '@{{' or '//', no part that starts with '.' or ends with '.lock', and no '.' or '/' at its end"
+    )]
+    Name,
+}
+
+impl BranchPattern {
+    /// Parses `<repo>:refs/heads/<branch>` or `<repo>:refs/heads/<prefix>*`.
+    ///
+    /// # Errors
+    /// [`BranchPatternError`] as [`BranchPattern::named`] says, and
+    /// [`BranchPatternError::Malformed`] for a text with no valid repository id before its `:`.
+    pub fn parse(value: &str) -> Result<Self, BranchPatternError> {
+        let (repo, name) = value.split_once(':').ok_or(BranchPatternError::Malformed)?;
+        let repo = RepoId::parse(repo).map_err(|_| BranchPatternError::Malformed)?;
+        Self::named(repo, name)
+    }
+
+    /// The branches `name` (`refs/heads/main`, `refs/heads/release/*`) names in `repo`. A branch
+    /// named exactly follows the rules of [`RepoRef::of`]; the prefix of a pattern is not empty and
+    /// follows git's rules for the start of a ref name.
+    ///
+    /// # Errors
+    /// [`BranchPatternError::Tag`] for a `refs/tags/` ref, [`BranchPatternError::Malformed`] for
+    /// another ref that is no `refs/heads/` ref, and the other variants for a branch ref whose
+    /// `*` or name breaks the rules above.
+    pub fn named(repo: RepoId, name: &str) -> Result<Self, BranchPatternError> {
+        if name.starts_with(TAGS) {
+            return Err(BranchPatternError::Tag);
+        }
+        let rest = name
+            .strip_prefix(BRANCHES)
+            .ok_or(BranchPatternError::Malformed)?;
+        let clean = match written(rest) {
+            Err(StarFault::Empty) => return Err(BranchPatternError::Empty),
+            Err(StarFault::Double) => return Err(BranchPatternError::DoubleStar),
+            Err(StarFault::NotAtEnd) => return Err(BranchPatternError::StarNotAtEnd),
+            Ok(Written::Prefix("")) => return Err(BranchPatternError::EmptyPrefix),
+            Ok(Written::Prefix(prefix)) => {
+                name.len() <= MAX_REF_NAME && ref_name_is_clean(prefix, true)
+            }
+            Ok(Written::Exact(_)) => RepoRef::of(repo.clone(), name).is_some(),
+        };
+        if !clean {
+            return Err(BranchPatternError::Name);
+        }
+        Ok(Self {
+            repo,
+            name: name.to_owned(),
+        })
+    }
+
+    /// The repository.
+    pub fn repo(&self) -> &RepoId {
+        &self.repo
+    }
+
+    /// The branch or the pattern as written: `refs/heads/main`, `refs/heads/release/*`.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// What precedes the `*` of a pattern, the full ref (`refs/heads/release/`); `None` for a branch
+    /// named exactly.
+    pub fn prefix(&self) -> Option<&str> {
+        self.name.strip_suffix('*')
+    }
+
+    /// Whether the full ref `name` of its repository is one it covers: the same branch, or for a
+    /// pattern, a branch that starts with what precedes its `*`.
+    pub fn covers(&self, name: &str) -> bool {
+        match self.prefix() {
+            Some(prefix) => name.starts_with(prefix),
+            None => self.name == name,
+        }
+    }
+
+    /// Whether `branch`, of any repository, is one it covers.
+    pub fn covers_branch(&self, branch: &RepoRef) -> bool {
+        self.repo == branch.repo && self.covers(&branch.name)
+    }
+}
+
+impl fmt::Display for BranchPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.repo, self.name)
+    }
+}
+
+impl TryFrom<String> for BranchPattern {
+    type Error = BranchPatternError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<BranchPattern> for String {
+    fn from(value: BranchPattern) -> String {
         value.to_string()
     }
 }
@@ -336,8 +541,8 @@ pub struct SlotSpec {
     pub run_only: bool,
     /// The group whose slots it excludes, when it has one.
     pub group: Option<SlotGroup>,
-    /// The refs nobody but the holder may push while it is held.
-    pub freezes: Vec<RepoRef>,
+    /// The branches nobody but the holder may push to while it is held.
+    pub freezes: Vec<BranchPattern>,
     /// A note shown with it.
     pub note: Option<Note>,
 }
@@ -349,6 +554,18 @@ impl SlotSpec {
             || GroupKey::Alone(self.name.clone()),
             |group| GroupKey::Group(group.clone()),
         )
+    }
+
+    /// Whether a hold of this slot freezes `branch`: one of its frozen refs covers it.
+    pub fn freezes_branch(&self, branch: &RepoRef) -> bool {
+        self.freeze_of(branch).is_some()
+    }
+
+    /// The first of its frozen refs that covers `branch`.
+    pub fn freeze_of(&self, branch: &RepoRef) -> Option<&BranchPattern> {
+        self.freezes
+            .iter()
+            .find(|frozen| frozen.covers_branch(branch))
     }
 
     /// Whether one simple command needs this slot.
@@ -460,6 +677,46 @@ mod tests {
             "a tag is refused as one"
         );
         assert_eq!(RepoRef::parse("api:main"), Err(RepoRefError::Malformed));
+    }
+
+    #[test]
+    fn a_branch_pattern_is_a_branch_or_a_prefix_of_branches_of_one_repository() {
+        let releases = BranchPattern::parse("api:refs/heads/release/*").unwrap();
+        assert_eq!(releases.repo().as_str(), "api");
+        assert_eq!(releases.name(), "refs/heads/release/*");
+        assert_eq!(releases.prefix(), Some("refs/heads/release/"));
+        assert_eq!(releases.to_string(), "api:refs/heads/release/*");
+        let branch = |text: &str| RepoRef::parse(text).unwrap();
+        assert!(releases.covers_branch(&branch("api:refs/heads/release/2026.10.3")));
+        assert!(!releases.covers_branch(&branch("api:refs/heads/release")));
+        assert!(!releases.covers_branch(&branch("web:refs/heads/release/2026.10.3")));
+        let main = BranchPattern::parse("api:refs/heads/main").unwrap();
+        assert_eq!(main.prefix(), None);
+        assert!(main.covers_branch(&branch("api:refs/heads/main")));
+        assert!(!main.covers_branch(&branch("api:refs/heads/main2")));
+
+        let json = serde_json::to_string(&releases).unwrap();
+        assert_eq!(json, r#""api:refs/heads/release/*""#);
+        assert_eq!(
+            serde_json::from_str::<BranchPattern>(&json).unwrap(),
+            releases
+        );
+        assert!(serde_json::from_str::<BranchPattern>(r#""api:refs/heads/*""#).is_err());
+
+        for (text, error) in [
+            ("refs/heads/release/*", BranchPatternError::Malformed),
+            ("API:refs/heads/release/*", BranchPatternError::Malformed),
+            ("api:release/*", BranchPatternError::Malformed),
+            ("api:refs/tags/v*", BranchPatternError::Tag),
+            ("api:refs/heads/", BranchPatternError::Empty),
+            ("api:refs/heads/*", BranchPatternError::EmptyPrefix),
+            ("api:refs/heads/release**", BranchPatternError::DoubleStar),
+            ("api:refs/heads/*release", BranchPatternError::StarNotAtEnd),
+            ("api:refs/heads/a..b/*", BranchPatternError::Name),
+            ("api:refs/heads/x.lock", BranchPatternError::Name),
+        ] {
+            assert_eq!(BranchPattern::parse(text), Err(error), "{text}");
+        }
     }
 
     #[test]

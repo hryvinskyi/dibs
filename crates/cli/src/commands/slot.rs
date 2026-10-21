@@ -328,7 +328,7 @@ fn test(args: &SlotTestArgs, ctx: &Context) -> Result<(), Failure> {
                 .slots()
                 .slots()
                 .iter()
-                .filter(move |spec| spec.freezes.contains(&target))
+                .filter(move |spec| spec.freezes_branch(&target))
                 .map(|spec| spec.name.clone())
         })
         .collect();

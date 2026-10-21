@@ -160,11 +160,17 @@ fn protected(
         target,
         pushers,
         certain,
+        pushed,
     } = protection.refs_refusal(to.remote, to.url, refs, governing)?
     else {
         return None;
     };
-    Some(wording::push_needs_permission(&target, &pushers, certain))
+    Some(wording::push_needs_permission(
+        &target,
+        &pushers,
+        certain,
+        pushed.as_deref(),
+    ))
 }
 
 /// The branches of `repo` among the refs pushed to.
@@ -174,7 +180,8 @@ fn targets(repo: &RepoId, refs: &[String]) -> Vec<RepoRef> {
         .collect()
 }
 
-/// The refusal of the push, when a ref it goes to is frozen by a slot another member holds.
+/// The refusal of the push, when a ref it goes to is frozen by a slot another member holds, by its
+/// name or by a pattern that covers it.
 async fn frozen(
     connection: &Connection,
     governed: &Governed,
@@ -185,7 +192,7 @@ async fn frozen(
     let freezing: Vec<SlotName> = catalog
         .slots()
         .iter()
-        .filter(|spec| targets.iter().any(|target| spec.freezes.contains(target)))
+        .filter(|spec| targets.iter().any(|target| spec.freezes_branch(target)))
         .map(|spec| spec.name.clone())
         .collect();
     if freezing.is_empty() {
@@ -208,6 +215,7 @@ async fn frozen(
         purpose,
         until,
         target,
+        frozen,
     } = verdict
     else {
         return Ok(None);
@@ -220,7 +228,7 @@ async fn frozen(
     };
     Ok(Some(format!(
         "{} To push anyway, knowing what it would break: git push --no-verify.",
-        wording::frozen(&slot, &hold, &target.to_string())
+        wording::frozen(&slot, &hold, &target, &frozen)
     )))
 }
 

@@ -5,15 +5,24 @@
 //! saying how to update, before anything else reads it. A request that names no `dibs` version —
 //! a browser, a probe, another tool — is not judged. `/v1/version` is never refused, so a client
 //! too old for everything else can still learn what to update to.
+//!
+//! What a client older than a feature cannot read is left out of what it is served: the settings
+//! of `GET /v1/me`, and the frozen refs of the slots in the answers of `GET /v1/status` and of the
+//! slot routes.
 
-use axum::extract::{Request, State};
+use std::borrow::Cow;
+use std::convert::Infallible;
+use std::sync::Arc;
+
+use axum::extract::{FromRequestParts, Request, State};
+use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use semver::Version;
-use std::sync::Arc;
 
 use dibs_domain::settings::{ProjectSettings, SettingsDocument};
+use dibs_domain::slot::BranchPattern;
 
 use crate::error::ApiError;
 
@@ -27,16 +36,68 @@ pub const VERSION_ROUTE: &str = "/v1/version";
 /// hold one, and then judges nothing.
 pub const PROTECTED_TAGS_SINCE: Version = Version::new(0, 1, 1);
 
-/// The settings as the client whose `User-Agent` is `user_agent` can read them: without protected
-/// tags for a `dibs` client older than [`PROTECTED_TAGS_SINCE`], whole for any other caller.
-pub fn settings_for(settings: &ProjectSettings, user_agent: Option<&str>) -> SettingsDocument {
-    let older = user_agent
-        .and_then(client_version)
-        .is_some_and(|client| client < PROTECTED_TAGS_SINCE);
-    if older {
-        settings.without_protected_tags().to_document()
-    } else {
-        settings.to_document()
+/// The first client that reads branch patterns (`refs/heads/<prefix>*`), in protected refs and in
+/// a slot's frozen refs. An older one refuses settings and slots that hold one.
+pub const BRANCH_PATTERNS_SINCE: Version = Version::new(0, 1, 2);
+
+/// What the caller's client can read, from the `dibs/<semver>` of its `User-Agent`: everything for
+/// a current client and for any caller that names no `dibs` version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientReads {
+    protected_tags: bool,
+    branch_patterns: bool,
+}
+
+impl ClientReads {
+    /// What a client whose `User-Agent` is `user_agent` reads: a pre-release reads what its release
+    /// does (`0.1.2-rc.1` as `0.1.2`).
+    pub fn of(user_agent: Option<&str>) -> Self {
+        let release = user_agent
+            .and_then(client_version)
+            .map(|client| Version::new(client.major, client.minor, client.patch));
+        let since = |first: &Version| release.as_ref().is_none_or(|client| client >= first);
+        Self {
+            protected_tags: since(&PROTECTED_TAGS_SINCE),
+            branch_patterns: since(&BRANCH_PATTERNS_SINCE),
+        }
+    }
+
+    /// The settings as this client can read them: for a `dibs` client older than
+    /// [`BRANCH_PATTERNS_SINCE`], without branch patterns, protected or frozen, and older than
+    /// [`PROTECTED_TAGS_SINCE`] also without protected tags; whole for any other caller.
+    pub fn settings(self, settings: &ProjectSettings) -> SettingsDocument {
+        let mut readable = Cow::Borrowed(settings);
+        if !self.branch_patterns {
+            readable = Cow::Owned(readable.without_branch_patterns());
+        }
+        if !self.protected_tags {
+            readable = Cow::Owned(readable.without_protected_tags());
+        }
+        readable.to_document()
+    }
+
+    /// A slot's frozen refs as this client can read them: the branch patterns left out when it
+    /// cannot read them.
+    pub fn freezes(self, freezes: Vec<BranchPattern>) -> Vec<BranchPattern> {
+        if self.branch_patterns {
+            return freezes;
+        }
+        freezes
+            .into_iter()
+            .filter(|frozen| frozen.prefix().is_none())
+            .collect()
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientReads {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Infallible> {
+        let agent = parts
+            .headers
+            .get(header::USER_AGENT)
+            .and_then(|value| value.to_str().ok());
+        Ok(Self::of(agent))
     }
 }
 
@@ -201,6 +262,27 @@ mod tests {
                 .is_none(),
             "without a minimum every client is served"
         );
+    }
+
+    #[test]
+    fn a_client_reads_what_its_release_reads_and_any_other_caller_everything() {
+        let reads = |agent: Option<&str>| {
+            let reads = ClientReads::of(agent);
+            (reads.protected_tags, reads.branch_patterns)
+        };
+        assert_eq!(reads(Some("dibs/0.1.0")), (false, false));
+        assert_eq!(reads(Some("dibs/0.1.1")), (true, false));
+        assert_eq!(reads(Some("dibs/0.1.1-rc.3")), (true, false));
+        assert_eq!(reads(Some("dibs/0.1.2-rc.1")), (true, true));
+        for agent in [
+            Some("dibs/0.1.2"),
+            Some("dibs/0.2.0 (aarch64-apple-darwin)"),
+            Some("curl/8.5.0"),
+            Some("dibs/"),
+            None,
+        ] {
+            assert_eq!(reads(agent), (true, true), "{agent:?}");
+        }
     }
 
     #[test]

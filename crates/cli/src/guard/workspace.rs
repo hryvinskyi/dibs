@@ -13,7 +13,7 @@ use dibs_agent_host::ports::{
     Workspaces,
 };
 use dibs_agent_host::upkeep::is_fresh;
-use dibs_client::branch::current_branch;
+use dibs_client::branch::{current_branch, head};
 use dibs_client::checkout::Checkout;
 use dibs_client::locations::Locations;
 use dibs_client::state::{StateDir, read_json, write_json};
@@ -146,7 +146,7 @@ impl Workspace for ClientWorkspace {
     }
 
     fn git_facts(&self, cwd: &Path) -> Option<GitFacts> {
-        Git::new(cwd).push_facts()
+        Git::new(cwd).push_facts(head(cwd, self.git_dir.as_deref()))
     }
 
     fn contains_dir(&self, cwd: &Path, dir: &str) -> bool {

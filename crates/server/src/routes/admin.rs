@@ -15,7 +15,7 @@ use dibs_app::token::{SecretToken, TokenPrefix};
 use dibs_app::use_cases::{CreateMemberInput, NewMember};
 use dibs_domain::handle::Handle;
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
-use dibs_domain::settings::SettingsDocument;
+use dibs_domain::settings::{ProjectSettings, SettingsDocument};
 
 use crate::auth::Authed;
 use crate::error::ApiError;
@@ -252,10 +252,32 @@ struct SettingsAnswer {
     settings: SettingsDocument,
     /// Whether they differ from the ones before.
     changed: bool,
+    /// What in them works otherwise than the admin may expect, one sentence each.
+    warnings: Vec<String>,
+}
+
+/// The warnings the settings in force call for: a repository that protects branches but not
+/// `main`, into which a merge then completes no claim.
+fn settings_warnings(settings: &ProjectSettings) -> Vec<String> {
+    settings
+        .repos()
+        .iter()
+        .filter(|repo| repo.leaves_main_unprotected())
+        .map(|repo| {
+            let which = if settings.lists_repositories() {
+                format!("Repository '{}'", repo.id)
+            } else {
+                "The repository".to_owned()
+            };
+            format!(
+                "{which} protects branches but not main, so a pull request merged into main completes no claim; protect refs/heads/main too, or the repository's default branch if it is another."
+            )
+        })
+        .collect()
 }
 
 /// Makes the body, a settings document, the project's settings, and answers them in their normal
-/// form. Applying the settings in force again changes nothing.
+/// form with the warnings they call for. Applying the settings in force again changes nothing.
 ///
 /// # Errors
 /// `forbidden` unless the caller is an admin; `invalid_settings` naming the first setting at fault;
@@ -273,6 +295,7 @@ pub async fn apply_settings(
         &SettingsAnswer {
             settings: applied.settings.to_document(),
             changed: applied.changed,
+            warnings: settings_warnings(&applied.settings),
         },
     ))
 }

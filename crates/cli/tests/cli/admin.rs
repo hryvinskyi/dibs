@@ -124,6 +124,23 @@ fn settings_are_applied_from_a_file() {
     std::fs::write(&refused, "stale_after = \"1s\"\n").unwrap();
     let out = apply(&refused);
     assert_eq!(status(&out), 1);
+
+    let releases_only = dir.join("releases.toml");
+    std::fs::write(
+        &releases_only,
+        "[[protected_refs]]\nref = \"refs/heads/release/*\"\npushers = [\"alice\"]\n",
+    )
+    .unwrap();
+    let warned = apply(&releases_only);
+    assert_eq!(status(&warned), 0);
+    assert!(
+        text(&warned.stderr).contains(
+            "warning: The repository protects branches but not main, so a pull request merged into main completes no claim"
+        ),
+        "{}",
+        text(&warned.stderr)
+    );
+    assert_eq!(status(&apply(&file)), 0);
 }
 
 #[test]
