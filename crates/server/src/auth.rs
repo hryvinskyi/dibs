@@ -8,12 +8,13 @@ use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
-use axum::extract::{ConnectInfo, FromRequestParts};
+use axum::extract::{ConnectInfo, FromRequestParts, MatchedPath};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, header};
+use axum::http::{HeaderMap, Method, header};
 
 use dibs_app::token::SecretToken;
 use dibs_app::{Actor, AppError};
+use dibs_domain::integration::CallKind;
 
 use crate::error::ApiError;
 use crate::http::AppState;
@@ -33,7 +34,13 @@ impl FromRequestParts<AppState> for Authed {
             .admit(client, Instant::now())
             .map_err(|wait| ApiError::too_many_attempts(retry_after_secs(wait)))?;
         let outcome = match bearer(&parts.headers) {
-            Some(token) => state.app.authenticate.execute(token.expose()).await,
+            Some(token) => {
+                state
+                    .app
+                    .authenticate
+                    .execute_for(token.expose(), call_kind(parts))
+                    .await
+            }
             None => Err(AppError::Unauthorized),
         };
         match outcome {
@@ -45,6 +52,36 @@ impl FromRequestParts<AppState> for Authed {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// Whether the request is one only an integration's job makes, by the route it matched.
+fn call_kind(parts: &Parts) -> CallKind {
+    let route = parts
+        .extensions
+        .get::<MatchedPath>()
+        .map_or("", MatchedPath::as_str);
+    if integration_route(&parts.method, route) {
+        CallKind::Integration
+    } else {
+        CallKind::Ordinary
+    }
+}
+
+/// The routes an integration's job calls: the tracker's items, merges, closes and pull requests'
+/// states, branches' footprints, the claims in review, the statuses to set, and a run's end.
+fn integration_route(method: &Method, route: &str) -> bool {
+    matches!(
+        (method.as_str(), route),
+        ("PUT", "/v1/items" | "/v1/items/{id}/footprint")
+            | (
+                "POST",
+                "/v1/prs/merged"
+                    | "/v1/prs/closed"
+                    | "/v1/prs/state"
+                    | "/v1/slots/{name}/run-finished"
+            )
+            | ("GET", "/v1/review-claims" | "/v1/pr-status")
+    )
 }
 
 /// The address a request comes from, as the client-address policy tells it.

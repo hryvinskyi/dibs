@@ -5,6 +5,7 @@
 use time::{Duration, OffsetDateTime};
 
 use crate::claim::Claim;
+use crate::member::Role;
 use crate::settings::ProjectSettings;
 
 /// How long an integration may go without a call before it counts as silent.
@@ -13,6 +14,27 @@ pub const SILENT_AFTER: Duration = Duration::minutes(15);
 /// How often an integration's calls are written down: a call within this time of the one written
 /// last is not written again, so a worker that polls does not write on every request.
 pub const CALL_RECORDED_EVERY: Duration = Duration::minutes(1);
+
+/// What a request is, as the integrations' sign of life goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    /// Any other request.
+    Ordinary,
+    /// A request only an integration's job makes: reporting the tracker's items, a merge, a close,
+    /// a pull request's state, a branch's footprint or a run's end, or reading the claims in review
+    /// or the statuses to set.
+    Integration,
+}
+
+/// Whether a call by a member of `role` is a sign that an integration's job runs. Every call of an
+/// integration's own token is; an admin may run that job under their own token, and then only the
+/// calls the job makes are.
+pub const fn signals_integration(role: Role, call: CallKind) -> bool {
+    match call {
+        CallKind::Ordinary => !role.is_person(),
+        CallKind::Integration => !role.is_person() || role.may_import(),
+    }
+}
 
 /// Whether a call at `now` is to be written, the last written being `last`.
 pub fn call_due(last: Option<OffsetDateTime>, now: OffsetDateTime) -> bool {
@@ -55,6 +77,16 @@ pub fn silent_since(signs: &[IntegrationSign], now: OffsetDateTime) -> Option<Of
 mod tests {
     use super::*;
     use crate::testing::at;
+
+    #[test]
+    fn an_integrations_token_signals_on_every_call_and_an_admin_only_on_the_jobs_calls() {
+        assert!(signals_integration(Role::Importer, CallKind::Ordinary));
+        assert!(signals_integration(Role::Importer, CallKind::Integration));
+        assert!(signals_integration(Role::Admin, CallKind::Integration));
+        assert!(!signals_integration(Role::Admin, CallKind::Ordinary));
+        assert!(!signals_integration(Role::Member, CallKind::Integration));
+        assert!(!signals_integration(Role::Member, CallKind::Ordinary));
+    }
 
     #[test]
     fn integrations_are_silent_once_none_called_for_fifteen_minutes() {

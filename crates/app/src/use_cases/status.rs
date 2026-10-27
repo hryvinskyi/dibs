@@ -230,24 +230,32 @@ impl Status {
     }
 }
 
-/// Since when the project's present integrations have not called, when that counts as silent.
+/// Since when the project's integrations have not called, when that counts as silent: its present
+/// integrations' tokens, and the admins who ran an integration's job under their own token, as of
+/// their last such call.
 async fn integration_silence(
     work: &mut Work,
     now: OffsetDateTime,
 ) -> Result<Option<OffsetDateTime>, AppError> {
     let project = work.project_id();
     let calls = work.last_calls(project).await?;
+    let last_call = |member| {
+        calls
+            .iter()
+            .find(|(id, _)| *id == member)
+            .map(|(_, at)| *at)
+    };
     let signs: Vec<IntegrationSign> = work
         .members(project)
         .await?
         .into_iter()
-        .filter(|member| member.is_present() && !member.role.is_person())
-        .map(|member| IntegrationSign {
-            joined: member.created_at,
-            last_call: calls
-                .iter()
-                .find(|(id, _)| *id == member.id)
-                .map(|(_, at)| *at),
+        .filter(|member| member.is_present())
+        .filter_map(|member| {
+            let last_call = last_call(member.id);
+            (!member.role.is_person() || last_call.is_some()).then_some(IntegrationSign {
+                joined: member.created_at,
+                last_call,
+            })
         })
         .collect();
     Ok(silent_since(&signs, now))

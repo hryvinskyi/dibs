@@ -61,8 +61,11 @@ integration holds no claim, receives no message and reads no conversation. Its t
 `GET /v1/items/{id}`, `GET /v1/ready`, `GET /v1/slots` and `GET /v1/slots/{name}`, `POST /v1/slots/{name}/run-finished`,
 `POST /v1/prs/merged`, `POST /v1/prs/closed`, `POST /v1/prs/state`, `GET /v1/review-claims`, `GET /v1/claims`,
 `GET /v1/pr-status` and `PUT /v1/items/{id}/footprint` — and every other route
-answers it `403 forbidden`. An integration's calls are recorded, at most one a minute: `GET /v1/status` says when they
-all went silent, while the project's reviews rely on them. Routes marked *people*,
+answers it `403 forbidden`. An integration's calls are recorded, at most one a minute: every call of an importer's
+token, and an admin's calls to the routes an integration's job makes (`PUT /v1/items`, `PUT /v1/items/{id}/footprint`,
+`POST /v1/prs/merged`, `POST /v1/prs/closed`, `POST /v1/prs/state`, `POST /v1/slots/{name}/run-finished`,
+`GET /v1/review-claims`, `GET /v1/pr-status`), so a job that runs under an admin's own token counts too. `GET /v1/status`
+says when they all went silent, while the project's reviews rely on them. Routes marked *people*,
 *import* and *admin* answer `403 forbidden` to a role they do not name before they read the request.
 
 ## Errors
@@ -550,8 +553,8 @@ A claim carries `state`: `working` while its holder works on it, `in_review` whi
 }
 ```
 
-`integration_silent_since` is the last call of the project's integrations when none has called for 15 minutes (or,
-for one that never called, when it joined), shown only while the project's reviews rely on one — a claim is in review,
+`integration_silent_since` is the last recorded integration call (see [Authentication](#authentication) for what counts) when none has
+come for 15 minutes (or, for an importer that never called, when it joined), shown only while the project's reviews rely on one — a claim is in review,
 or a repository's `pr_status` is enabled — and `null` otherwise, while one calls, or when the project has none: while
 they are silent, merges complete no claims and pull request statuses go stale. A claim in review is always live.
 

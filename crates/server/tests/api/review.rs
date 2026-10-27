@@ -369,6 +369,37 @@ async fn the_status_says_since_when_the_integrations_are_silent_only_while_revie
 }
 
 #[tokio::test]
+async fn an_admin_running_the_integrations_job_under_their_own_token_ends_the_silence_by_its_calls_alone()
+ {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let worker = world.member(&alice, "worker", Role::Importer).await;
+    world.get(&worker, "/v1/me").await;
+    world
+        .settings(&alice, json!({"pr_status": {"enabled": true}}))
+        .await;
+    world.fakes.clock.advance(time::Duration::minutes(16));
+    world.get(&alice, "/v1/me").await;
+    let silent = world.get(&alice, "/v1/status").await;
+    assert_eq!(
+        silent.body["integration_silent_since"], "2026-03-02T09:00:00Z",
+        "an admin's ordinary calls are no sign of the job: {}",
+        silent.body
+    );
+    let claims = world.get(&alice, "/v1/review-claims").await;
+    assert_eq!(claims.status, StatusCode::OK, "{}", claims.body);
+    let heard = world.get(&alice, "/v1/status").await;
+    assert_eq!(heard.body["integration_silent_since"], Value::Null);
+    world.fakes.clock.advance(time::Duration::minutes(16));
+    let quiet_again = world.get(&alice, "/v1/status").await;
+    assert_eq!(
+        quiet_again.body["integration_silent_since"], "2026-03-02T09:16:00Z",
+        "silent since the admin's job last called: {}",
+        quiet_again.body
+    );
+}
+
+#[tokio::test]
 async fn a_close_or_a_stacked_merge_beside_another_pull_request_sets_it_aside() {
     let team = Team::new().await;
     team.review(&team.bob, "acme/api#7", false).await;

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use dibs_domain::integration::call_due;
+use dibs_domain::integration::{CallKind, call_due, signals_integration};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -12,9 +12,10 @@ use crate::records::MemberRecord;
 use crate::token::SecretToken;
 
 /// Finds the member a token authenticates. A malformed, unknown or revoked token, and a token whose
-/// member is gone or was removed from the project, are all refused the same way. An integration's
-/// calls are recorded, at most one a minute, so the project can tell when its integrations fall
-/// silent without a write on every request of a worker that polls.
+/// member is gone or was removed from the project, are all refused the same way. The calls that are
+/// an integration's sign of life — every call of an integration's token, and an admin's calls that
+/// only an integration's job makes — are recorded, at most one a minute, so the project can tell
+/// when its integrations fall silent without a write on every request of a worker that polls.
 pub struct Authenticate {
     store: Arc<dyn Store>,
     hasher: Arc<dyn TokenHasher>,
@@ -37,9 +38,18 @@ impl Authenticate {
     /// [`AppError::Unauthorized`] for every way the token can fail; [`AppError::Store`] when the
     /// store fails.
     pub async fn execute(&self, token: &str) -> Result<Actor, AppError> {
+        self.execute_for(token, CallKind::Ordinary).await
+    }
+
+    /// Authenticates the token's text for a call of this kind.
+    ///
+    /// # Errors
+    /// [`AppError::Unauthorized`] for every way the token can fail; [`AppError::Store`] when the
+    /// store fails.
+    pub async fn execute_for(&self, token: &str, call: CallKind) -> Result<Actor, AppError> {
         let mut tx = self.store.begin().await?;
         let actor = authenticate_in(&mut *tx, &*self.hasher, token).await?;
-        if !actor.role.is_person() {
+        if signals_integration(actor.role, call) {
             let now = self.clock.now();
             let last = tx.last_call(actor.project, actor.member).await?;
             if call_due(last, now) {
@@ -92,6 +102,35 @@ mod tests {
         assert_eq!(env.bob.actor.project, env.project);
         assert_eq!(env.bob.actor.role, Role::Member);
         assert_ne!(env.alice.actor.member, env.bob.actor.member);
+    }
+
+    #[tokio::test]
+    async fn an_admins_call_is_recorded_only_when_it_is_one_an_integrations_job_makes() {
+        let env = Env::new().await;
+        let calls = || async {
+            let mut tx = env.deps.store.begin().await.unwrap();
+            tx.last_calls(env.project).await.unwrap()
+        };
+        let token = CreateMember::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                CreateMemberInput {
+                    member: crate::use_cases::testing::new_member("carol"),
+                    role: Role::Admin,
+                },
+            )
+            .await
+            .unwrap()
+            .token;
+        let authenticate = Authenticate::new(&env.deps);
+        let carol = authenticate.execute(token.expose()).await.unwrap();
+        let made = |calls: Vec<(_, _)>| calls.iter().any(|(member, _)| *member == carol.member);
+        assert!(!made(calls().await), "an ordinary call is not recorded");
+        authenticate
+            .execute_for(token.expose(), CallKind::Integration)
+            .await
+            .unwrap();
+        assert!(made(calls().await), "the job's call is recorded");
     }
 
     #[tokio::test]
