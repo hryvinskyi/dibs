@@ -606,6 +606,11 @@ the branches named exactly (see [Pull requests and the integration](#pull-reques
 server first, then the clients, and add a pattern only once every member runs 0.1.2; the plugin of 0.1.2 names 0.1.2 as
 its `min_binary`.
 
+**0.1.3, asking for a grant and claiming a done item again.** A server of 0.1.3 answers `POST /v1/grant-requests`
+and lets a done item its tracker still has open be claimed again; neither changes the schema. Clients older than 0.1.3
+have no `ask-grant` and simply never call the route. Upgrade the server first, then the clients; the plugin of 0.1.3
+names 0.1.3 as its `min_binary`, since its workflow tells agents to ask with `dibs_ask_grant`.
+
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
