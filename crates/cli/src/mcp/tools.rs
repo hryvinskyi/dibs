@@ -22,9 +22,9 @@ use crate::failure::Failure;
 use crate::guard::ledger::SessionLedgers;
 use crate::mcp::answer;
 use crate::mcp::inputs::{
-    AckInput, CheckInput, ClaimInput, EscalateInput, FeedbackInput, GrantInput, InboxInput,
-    ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, SlotInput, SlotTakeInput,
-    TakeoverInput, ThreadInput,
+    AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, FeedbackInput, GrantInput,
+    InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, SlotInput,
+    SlotTakeInput, TakeoverInput, ThreadInput,
 };
 use crate::mcp::link::{Link, Registration};
 use crate::mcp::push::{self, Pusher};
@@ -229,7 +229,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Ask whether you may edit files, before you edit them. Give the paths, relative to the working directory or absolute. Each path gets a verdict: allowed, allowed_with_note (read the note), needs_claim (claim an item with dibs_claim first), held_by (another member holds its area: its reason says the way on — in_review means it is free when the holder's pull request merges, awaiting_handover means your claim waits for its debt holder to hand it over (escalates_at says when it goes to the arbiters), ask_handover means it is debt work and declaring the area on your claim with dibs_claim asks for it, waiting names another member's claim that already waits for it, otherwise message them with dibs_send or ask for a grant) or granted. Edit only where the verdict permits it. This changes nothing.",
+        description = "Ask whether you may edit files, before you edit them. Give the paths, relative to the working directory or absolute. Each path gets a verdict: allowed, allowed_with_note (read the note), needs_claim (claim an item with dibs_claim first), held_by (another member holds its area: its reason says the way on — in_review means it is free when the holder's pull request merges, awaiting_handover means your claim waits for its debt holder to hand it over (escalates_at says when it goes to the arbiters), ask_handover means it is debt work and declaring the area on your claim with dibs_claim asks for it, waiting names another member's claim that already waits for it, otherwise ask them for a grant with dibs_ask_grant, or message them with dibs_send to agree on the change) or granted. Edit only where the verdict permits it. This changes nothing.",
         annotations(read_only_hint = true)
     )]
     async fn dibs_check(&self, Parameters(input): Parameters<CheckInput>) -> CallToolResult {
@@ -242,6 +242,14 @@ impl Tools {
     )]
     async fn dibs_grant(&self, Parameters(input): Parameters<GrantInput>) -> CallToolResult {
         self.perform(|link| async move { link.grant(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Ask the holder of an area for a grant: edits in that area for your own live claim on an item (key: your item; area: repo:area, or its name). Use this instead of a message when an edit is refused because another member's claim holds the area: dibs finds whose live claim holds it and starts a conversation with them about their item, which reaches the session working under that claim, saying exactly how to give the grant. outcome asked names the holder, their item and the conversation (thread_id): do not edit in the area until dibs_check says granted, and follow their answer with dibs_thread. free means no live claim holds the area, own that your own claim does, granted that their grant is already in force: in those cases nobody is asked. A grant is only ever given by its holder; asking authorises nothing."
+    )]
+    async fn dibs_ask_grant(&self, Parameters(input): Parameters<AskGrantInput>) -> CallToolResult {
+        self.perform(|link| async move { link.ask_grant(input).await })
             .await
     }
 
@@ -410,6 +418,7 @@ mod tests {
             names,
             BTreeSet::from([
                 "dibs_ack",
+                "dibs_ask_grant",
                 "dibs_check",
                 "dibs_claim",
                 "dibs_done",

@@ -242,7 +242,9 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
                     Some(claim) => format!(
                         "debt work; dibs claim {claim} --area {area} asks {who} to hand it over"
                     ),
-                    None => "message them or ask for a grant".to_owned(),
+                    None => format!(
+                        "ask them for a grant with dibs ask-grant <your item> --area {area}, or message them"
+                    ),
                 },
                 HeldReason::AskHolder => match waiting {
                     Some(waiting) => format!(
@@ -250,9 +252,13 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
                         waiting.holder,
                         waiting.item_label()
                     ),
-                    None => "message them or ask for a grant".to_owned(),
+                    None => format!(
+                        "ask them for a grant with dibs ask-grant <your item> --area {area}, or message them"
+                    ),
                 },
-                HeldReason::Other => "message them or ask for a grant".to_owned(),
+                HeldReason::Other => format!(
+                    "ask them for a grant with dibs ask-grant <your item> --area {area}, or message them"
+                ),
             };
             format!("held by {who} (item {item}, area {area}); {way}")
         }

@@ -50,7 +50,13 @@ depends on another, record it (`dibs dep add <item> --blocked-by <other>`), and 
 When dibs refuses an edit, the area belongs to another member's live claim. Do not work around it:
 
 - pick other work, or
-- message the holder (`dibs_send`) to agree on the change, or ask them for a grant (`dibs grant` is theirs to give).
+- ask the holder for a grant: `dibs_ask_grant` with your item and the area, or `dibs ask-grant <your item> --area
+  <area>`. dibs starts a conversation with them about the item their claim holds, so it reaches the session working
+  under that claim, between its tool calls, with the command that grants it. Ask this way, not with `dibs_send`: a
+  message about your own item is kept for no session of theirs. Their answer, a refusal or a question, arrives in that
+  conversation; do not edit there until `dibs_check` says `granted`. The grant is theirs to give, or
+- message the holder (`dibs_send`) to agree on a change in their area that a grant does not settle — one they make
+  themselves, or one you need to talk through first.
 
 A claim that is refused because the item or an area is held names the holder and the item they hold it for. Ask them;
 do not claim around them.

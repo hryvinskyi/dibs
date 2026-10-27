@@ -558,10 +558,10 @@ reads, page by page, so reading them holds up no heartbeat or edit check.
   not reported. A hook never waits for it, and a hook switched off makes no call at all; so after a refusal or a
   switched-off session, the next command of the command line starts a sync that sends it: `login`, `whoami`, `status`,
   `items`, `ready`, `dep`, `new`, `claim`, `takeover`, `release`, `done`, `check` (the pre-push check only while the
-  guard is on), `grant`, `send`, `inbox`, `thread`, `read`, `ack`, `escalate`, `feedback`, `slot` and `admin`. `sync`,
-  `mcp`, `self-update`, `hook` and `doctor` start none. Such a sync that fails for another reason than an unreachable
-  server holds the next one back for ten minutes, until one succeeds; it does not count as the start the hooks space
-  theirs from.
+  guard is on), `grant`, `ask-grant`, `send`, `inbox`, `thread`, `read`, `ack`, `escalate`, `feedback`, `slot` and
+  `admin`. `sync`, `mcp`, `self-update`, `hook` and `doctor` start none. Such a sync that fails for another reason than
+  an unreachable server holds the next one back for ten minutes, until one succeeds; it does not count as the start the
+  hooks space theirs from.
 - **Switching the guard off.** `DIBS_OFF=1` in the environment of an agent's session makes every hook answer with no
   objection and no call, and makes `dibs check --push` let every push go without a word; the command line keeps
   working. The session is counted on the machine, once, and shows in the next report as `switched_off`, so a switch

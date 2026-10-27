@@ -5,9 +5,9 @@
 use std::path::PathBuf;
 
 use dibs_client::api::{
-    Acked, ClaimRequest, Claimed, CreatedItem, DropPrRequest, EditCheck, Ended, Granted, Inbox,
-    InboxRequest, Items, MarkedRead, NarrowRequest, Narrowed, PostMessage, Posted, ReadyList,
-    ReviewRequest, Reviewed, StartThread, Started, Status, TakeOverRequest, TakenOver,
+    Acked, ClaimRequest, Claimed, CreatedItem, DropPrRequest, EditCheck, Ended, GrantAsked,
+    Granted, Inbox, InboxRequest, Items, MarkedRead, NarrowRequest, Narrowed, PostMessage, Posted,
+    ReadyList, ReviewRequest, Reviewed, StartThread, Started, Status, TakeOverRequest, TakenOver,
     ThreadDetail,
 };
 use dibs_client::api::{
@@ -23,9 +23,9 @@ use crate::commands::feedback;
 use crate::context::{Connection, Context};
 use crate::failure::Failure;
 use crate::mcp::inputs::{
-    AckInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget, FeedbackInput, GrantInput,
-    InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, Sending,
-    SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
+    AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget,
+    FeedbackInput, GrantInput, InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput,
+    ReviewInput, SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
 };
 
 /// The kind of agent the sessions of a tool server that pushes nothing report.
@@ -274,6 +274,16 @@ impl Link {
         let item = self.resolve(&input.key.key("key")?).await?;
         let request = input.request(item)?;
         self.call(self.connection.client.grant(&request)).await
+    }
+
+    /// Asks whoever holds an area for a grant there, for the caller's claim on an item.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, or of the call.
+    pub async fn ask_grant(&self, input: AskGrantInput) -> Result<GrantAsked, Failure> {
+        let item = self.resolve(&input.key.key("key")?).await?;
+        self.call(self.connection.client.ask_grant(&input.request(item)))
+            .await
     }
 
     /// Starts a conversation or posts to one.

@@ -4,6 +4,7 @@ mod ack;
 mod acks;
 mod add_dependency;
 mod apply_settings;
+mod ask_grant;
 mod authenticate;
 mod claim_ending;
 mod claim_item;
@@ -69,6 +70,7 @@ pub(crate) mod testing;
 pub use ack::{AckMessage, Acknowledged};
 pub use add_dependency::{AddDependency, DependencyChange, DependencyInput};
 pub use apply_settings::{AppliedSettings, ApplySettings};
+pub use ask_grant::{AskGrant, AskGrantInput, AskGrantResult, GrantAsked};
 pub use authenticate::Authenticate;
 pub use claim_item::{ClaimItem, ClaimItemInput, ClaimMade, PendingNote, WideInput, WideNote};
 pub use close_ui_session::CloseUiSession;
@@ -207,6 +209,8 @@ pub struct UseCases {
     pub grant: Grant,
     /// See [`RevokeGrant`].
     pub revoke_grant: RevokeGrant,
+    /// See [`AskGrant`].
+    pub ask_grant: AskGrant,
     /// See [`StartThread`].
     pub start_thread: StartThread,
     /// See [`PostMessage`].
@@ -316,6 +320,7 @@ impl UseCases {
             read_stats: ReadStats::new(deps),
             grant: Grant::new(deps),
             revoke_grant: RevokeGrant::new(deps),
+            ask_grant: AskGrant::new(deps),
             start_thread: StartThread::new(deps),
             post_message: PostMessage::new(deps),
             inbox: Inbox::new(deps),
@@ -404,6 +409,16 @@ mod integration_refusals {
             app.complete.execute(bot, ItemId(9_999)).await.map(|_| ()),
             app.revoke_grant
                 .execute(bot, GrantId(9_999))
+                .await
+                .map(|_| ()),
+            app.ask_grant
+                .execute(
+                    bot,
+                    AskGrantInput {
+                        item,
+                        area: "billing".to_owned(),
+                    },
+                )
                 .await
                 .map(|_| ()),
             app.add_dependency

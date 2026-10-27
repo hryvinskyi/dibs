@@ -165,6 +165,7 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/edit-check", post(routes::edit_check::check))
         .route("/v1/grants", post(routes::grants::grant))
         .route("/v1/grants/{id}", delete(routes::grants::revoke))
+        .route("/v1/grant-requests", post(routes::grants::ask))
         .route(
             "/v1/threads",
             get(routes::threads::list).post(routes::threads::start),

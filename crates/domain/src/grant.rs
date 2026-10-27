@@ -4,7 +4,7 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 
 use crate::area::QualifiedArea;
-use crate::claim::Claim;
+use crate::claim::{Claim, held_by_other};
 use crate::event::GrantEnd;
 use crate::ids::{ItemId, MemberId};
 use crate::settings::ProjectSettings;
@@ -178,6 +178,105 @@ pub fn decide_revoke_grant(grant: &Grant, by: MemberId) -> Result<(), RevokeRefu
     } else {
         Err(RevokeRefused::NotGrantor)
     }
+}
+
+/// A member asking for a grant: edits in `area` for their own live claim on `item`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantAsk {
+    /// The member asking, who would be the grantee.
+    pub asker: MemberId,
+    /// The asker's work item, the work that needs the edit.
+    pub item: ItemId,
+    /// The area.
+    pub area: QualifiedArea,
+}
+
+/// What asking for a grant comes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskOutcome {
+    /// No live claim holds the area: there is nobody to ask, and the asker can claim it.
+    Free,
+    /// A live claim of the asker's own holds the area.
+    Own,
+    /// The holder already granted the asker edits in the area, and the grant is in force.
+    AlreadyGranted {
+        /// The holder who granted.
+        holder: MemberId,
+        /// The item of the holder's claim that holds the area.
+        holder_item: ItemId,
+    },
+    /// Another member's live claim holds the area: they are the one to ask.
+    Ask {
+        /// The holder.
+        holder: MemberId,
+        /// The item of the holder's claim that holds the area.
+        holder_item: ItemId,
+    },
+}
+
+/// Why asking for a grant is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AskRefused {
+    /// The asker holds no live claim on the item the grant would be for.
+    #[error("you hold no live claim on that work item; claim it before asking for a grant for it")]
+    NoLiveClaim,
+}
+
+/// Decides what asking for a grant comes to.
+///
+/// A grant is given for the grantee's live claim on an item, so the asker must hold one on
+/// `ask.item`. The area is then judged as an edit check judges it: the live claim of another member
+/// that holds it — the lowest item when, against the rules, several do — is the one to ask, unless
+/// that holder's grant to the asker in the area is already in force; a stale claim holds nothing an
+/// edit check or a claim respects, and its holder can no longer grant, so its area is free. With no
+/// other member's live claim on it, the area is the asker's own when one of their live claims holds
+/// it, and free otherwise.
+///
+/// # Errors
+/// [`AskRefused::NoLiveClaim`] when the asker holds no live claim on the item.
+pub fn decide_grant_ask(
+    ask: &GrantAsk,
+    existing: &[Grant],
+    claims: &[Claim],
+    now: OffsetDateTime,
+    settings: &ProjectSettings,
+) -> Result<AskOutcome, AskRefused> {
+    let stale_after = settings.stale_after();
+    let live = |claim: &&Claim| claim.is_live(now, stale_after);
+    if !claims
+        .iter()
+        .filter(live)
+        .any(|claim| claim.member == ask.asker && claim.item == ask.item)
+    {
+        return Err(AskRefused::NoLiveClaim);
+    }
+    if let Some(holder) = held_by_other(&ask.area, ask.asker, claims, now, stale_after) {
+        let granted = existing.iter().any(|grant| {
+            grant.from == holder.member
+                && grant.to == ask.asker
+                && grant.area == ask.area
+                && grant.in_force(claims, now, stale_after)
+        });
+        return Ok(if granted {
+            AskOutcome::AlreadyGranted {
+                holder: holder.member,
+                holder_item: holder.item,
+            }
+        } else {
+            AskOutcome::Ask {
+                holder: holder.member,
+                holder_item: holder.item,
+            }
+        });
+    }
+    if claims
+        .iter()
+        .filter(live)
+        .any(|claim| claim.member == ask.asker && claim.holds(&ask.area))
+    {
+        return Ok(AskOutcome::Own);
+    }
+    Ok(AskOutcome::Free)
 }
 
 #[cfg(test)]
@@ -406,5 +505,167 @@ mod tests {
             .map(|(record, end)| (record.id, end))
             .collect();
         assert_eq!(ended, [(8, GrantEnd::GranteeLeft)]);
+    }
+
+    fn ask(asker: MemberId, item: u64, area_text: &str) -> GrantAsk {
+        GrantAsk {
+            asker,
+            item: ItemId(item),
+            area: area(area_text),
+        }
+    }
+
+    #[test]
+    fn asking_needs_a_live_claim_of_the_askers_own_on_the_item() {
+        let settings = two_repo_settings();
+        let claims = [
+            claim(1, ALICE, &["api:billing"], 0),
+            claim(2, BOB, &[], 0),
+            claim(3, CAROL, &[], 0),
+        ];
+        for (request, at_time) in [
+            (ask(BOB, 4, "api:billing"), at(1)),
+            (ask(BOB, 3, "api:billing"), at(1)),
+            (
+                ask(BOB, 2, "api:billing"),
+                at(0) + settings.stale_after() + Duration::minutes(1),
+            ),
+        ] {
+            assert_eq!(
+                decide_grant_ask(&request, &[], &claims, at_time, &settings),
+                Err(AskRefused::NoLiveClaim),
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_claim_of_another_member_on_the_area_is_the_one_asked() {
+        let settings = two_repo_settings();
+        let claims = [claim(1, ALICE, &["api:billing"], 0), claim(2, BOB, &[], 0)];
+        assert_eq!(
+            decide_grant_ask(&ask(BOB, 2, "api:billing"), &[], &claims, at(1), &settings),
+            Ok(AskOutcome::Ask {
+                holder: ALICE,
+                holder_item: ItemId(1),
+            })
+        );
+    }
+
+    #[test]
+    fn a_grant_to_someone_else_or_in_another_area_does_not_answer_the_ask() {
+        let settings = two_repo_settings();
+        let claims = [
+            claim(1, ALICE, &["api:billing", "api:search"], 0),
+            claim(2, BOB, &[], 0),
+            claim(3, CAROL, &[], 0),
+        ];
+        let others = [
+            grant(3, "api:billing", ALICE, CAROL),
+            grant(2, "api:search", ALICE, BOB),
+        ];
+        assert!(matches!(
+            decide_grant_ask(
+                &ask(BOB, 2, "api:billing"),
+                &others,
+                &claims,
+                at(1),
+                &settings
+            ),
+            Ok(AskOutcome::Ask { holder: ALICE, .. })
+        ));
+    }
+
+    #[test]
+    fn of_several_holders_against_the_rules_the_lowest_item_is_asked() {
+        let settings = two_repo_settings();
+        let claims = [
+            claim(5, CAROL, &["api:billing"], 0),
+            claim(1, ALICE, &["api:billing"], 0),
+            claim(2, BOB, &[], 0),
+        ];
+        assert_eq!(
+            decide_grant_ask(&ask(BOB, 2, "api:billing"), &[], &claims, at(1), &settings),
+            Ok(AskOutcome::Ask {
+                holder: ALICE,
+                holder_item: ItemId(1),
+            })
+        );
+    }
+
+    #[test]
+    fn a_grant_in_force_from_the_holder_answers_the_ask() {
+        let settings = two_repo_settings();
+        let claims = [
+            claim(1, ALICE, &["api:billing"], 0),
+            claim(2, BOB, &[], 0),
+            claim(4, BOB, &[], 0),
+        ];
+        let expected = Ok(AskOutcome::AlreadyGranted {
+            holder: ALICE,
+            holder_item: ItemId(1),
+        });
+        let same = [grant(2, "api:billing", ALICE, BOB)];
+        assert_eq!(
+            decide_grant_ask(
+                &ask(BOB, 2, "api:billing"),
+                &same,
+                &claims,
+                at(1),
+                &settings
+            ),
+            expected
+        );
+        let for_another_item = [grant(4, "api:billing", ALICE, BOB)];
+        assert_eq!(
+            decide_grant_ask(
+                &ask(BOB, 2, "api:billing"),
+                &for_another_item,
+                &claims,
+                at(1),
+                &settings
+            ),
+            expected,
+            "the edit check lets the edit through on any grant of the holder's in force"
+        );
+    }
+
+    #[test]
+    fn an_area_no_live_claim_holds_is_free() {
+        let settings = two_repo_settings();
+        let late = at(0) + settings.stale_after() + Duration::minutes(1);
+        let nobody = [claim(2, BOB, &[], 0)];
+        assert_eq!(
+            decide_grant_ask(&ask(BOB, 2, "api:billing"), &[], &nobody, at(1), &settings),
+            Ok(AskOutcome::Free)
+        );
+        let stale_holder = [
+            claim(1, ALICE, &["api:billing"], 0),
+            claim(2, BOB, &[], 60 * 30),
+        ];
+        assert_eq!(
+            decide_grant_ask(
+                &ask(BOB, 2, "api:billing"),
+                &[],
+                &stale_holder,
+                late,
+                &settings
+            ),
+            Ok(AskOutcome::Free),
+            "a stale holder can no longer grant, and its area can be claimed"
+        );
+    }
+
+    #[test]
+    fn an_area_the_askers_own_live_claim_holds_is_theirs() {
+        let settings = two_repo_settings();
+        let same_item = [claim(2, BOB, &["api:billing"], 0)];
+        let other_item = [claim(2, BOB, &[], 0), claim(6, BOB, &["api:billing"], 0)];
+        for claims in [&same_item[..], &other_item[..]] {
+            assert_eq!(
+                decide_grant_ask(&ask(BOB, 2, "api:billing"), &[], claims, at(1), &settings),
+                Ok(AskOutcome::Own)
+            );
+        }
     }
 }

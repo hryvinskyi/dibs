@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
-use dibs_client::api::{ClaimKind, GrantRequest, ItemFilter, NewItem, Recipients, WideRequest};
+use dibs_client::api::{
+    ClaimKind, GrantAskRequest, GrantRequest, ItemFilter, NewItem, Recipients, WideRequest,
+};
 use dibs_domain::escalation::EscalationReason;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
@@ -326,6 +328,26 @@ impl GrantInput {
             area: self.area.clone(),
             to: handle("to", &self.to)?,
         })
+    }
+}
+
+/// `dibs_ask_grant`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AskGrantInput {
+    /// Your work item, the one that needs the edit: its local id or its reference.
+    pub key: ItemKeyInput,
+    /// The area you need to edit in: repo:area, or its name when one repository declares it.
+    pub area: String,
+}
+
+impl AskGrantInput {
+    /// The request, for the item `key` resolved to.
+    pub fn request(&self, item: ItemId) -> GrantAskRequest {
+        GrantAskRequest {
+            item,
+            area: self.area.clone(),
+        }
     }
 }
 

@@ -1,21 +1,21 @@
-//! Work items and claims: `status`, `items`, `new`, `claim`, `takeover`, `release`, `done` and
-//! `grant`.
+//! Work items and claims: `status`, `items`, `new`, `claim`, `takeover`, `release`, `done`,
+//! `grant` and `ask-grant`.
 
 use std::fmt::Write as _;
 
 use time::OffsetDateTime;
 
 use dibs_client::api::{
-    ClaimKind, ClaimOutcome, ClaimRequest, DropPrRequest, Ended, GrantRequest, HeldItem,
-    ItemFilter, Items, NarrowRequest, NewItem, ReviewRequest, TakeOverRequest, WideAreaState,
-    WideClaim, WideRequest,
+    AskOutcome, ClaimKind, ClaimOutcome, ClaimRequest, DropPrRequest, Ended, GrantAskRequest,
+    GrantAsked, GrantRequest, HeldItem, ItemFilter, Items, NarrowRequest, NewItem, ReviewRequest,
+    TakeOverRequest, WideAreaState, WideClaim, WideRequest,
 };
 use dibs_domain::message::Body;
 use dibs_domain::wide::WideReason;
 
 use crate::cli::{
-    ClaimAction, ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NarrowArgs, NewArgs, ReviewArgs,
-    TakeoverArgs,
+    AskGrantArgs, ClaimAction, ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NarrowArgs, NewArgs,
+    ReviewArgs, TakeoverArgs,
 };
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
@@ -519,4 +519,54 @@ pub async fn grant(args: GrantArgs, ctx: &Context) -> Result<(), Failure> {
         )
     });
     Ok(())
+}
+
+/// Asks whoever holds an area for a grant there, for the caller's claim on an item.
+///
+/// # Errors
+/// The [`Failure`] of the call.
+pub async fn ask_grant(args: AskGrantArgs, ctx: &Context) -> Result<(), Failure> {
+    let connection = ctx.connect().await?;
+    let item = connection.resolve(&args.key).await?;
+    let asked = connection
+        .client
+        .ask_grant(&GrantAskRequest {
+            item,
+            area: args.area,
+        })
+        .await
+        .map_err(|error| connection.failed(error))?;
+    ctx.printer.show(&asked, || asked_text(&asked));
+    Ok(())
+}
+
+/// What asking for a grant came to, as a sentence.
+fn asked_text(asked: &GrantAsked) -> String {
+    let area = &asked.area;
+    let item = asked.item.label();
+    let holder = asked
+        .holder
+        .as_ref()
+        .map_or_else(|| "its holder".to_owned(), ToString::to_string);
+    let holder_item = asked
+        .holder_item
+        .as_ref()
+        .map_or_else(String::new, |named| format!(" on {}", named.label()));
+    match asked.outcome {
+        AskOutcome::Asked => {
+            let thread = asked
+                .thread_id
+                .map_or_else(String::new, |thread| format!(" (conversation {thread})"));
+            format!(
+                "Asked {holder}, whose claim{holder_item} holds {area}, for a grant there for {item}{thread}. Their answer arrives in that conversation; do not edit in {area} until they grant it."
+            )
+        }
+        AskOutcome::Free => {
+            format!("Nobody holds {area} through a live claim: no grant is needed for {item}.")
+        }
+        AskOutcome::Own => format!("Your own claim holds {area}: no grant is needed."),
+        AskOutcome::Granted => {
+            format!("{holder} already granted you edits in {area} for {item}.")
+        }
+    }
 }

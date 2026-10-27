@@ -193,6 +193,12 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
         ),
         (Method::DELETE, "/v1/grants/1".into(), None),
         (Method::DELETE, "/v1/grants/999".into(), None),
+        (
+            Method::POST,
+            "/v1/grant-requests".into(),
+            Some(json!({"item": item, "area": "billing"})),
+        ),
+        (Method::POST, "/v1/grant-requests".into(), Some(json!({}))),
         (Method::POST, "/v1/threads".into(), Some(json!({}))),
         (Method::GET, "/v1/threads".into(), None),
         (Method::GET, "/v1/threads?item=x".into(), None),

@@ -1,4 +1,5 @@
-//! `/v1/edit-check` and `/v1/grants`: verdicts per path, and grants that change them.
+//! `/v1/edit-check`, `/v1/grants` and `/v1/grant-requests`: verdicts per path, grants that change
+//! them, and asking a holder for one.
 
 use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -320,4 +321,141 @@ async fn a_grant_breaking_its_rules_is_refused() {
         let answer = team.world.post(who, "/v1/grants", body).await;
         assert_error(&answer, status, code);
     }
+}
+
+#[tokio::test]
+async fn asking_for_a_grant_reaches_the_holder_about_their_own_item() {
+    let team = Team::new().await;
+    let world = &team.world;
+    let body = json!({"item": team.bob_item, "area": "api:billing"});
+    let asked = world
+        .post(&team.bob, "/v1/grant-requests", body.clone())
+        .await;
+    assert_eq!(asked.status, StatusCode::CREATED, "{}", asked.body);
+    assert_eq!(asked.body["outcome"], "asked");
+    assert_eq!(asked.body["holder"], "alice");
+    assert_eq!(asked.body["holder_item"]["id"], team.alice_item);
+    assert_eq!(asked.body["holder_item"]["title"], "Billing");
+    assert_eq!(asked.body["item"]["id"], team.bob_item);
+    assert_eq!(asked.body["area"], "api:billing");
+    let thread = asked.body["thread_id"].as_u64().unwrap();
+
+    let read = world
+        .get(&team.alice, &format!("/v1/threads/{thread}"))
+        .await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["thread"]["item"], team.alice_item);
+    assert_eq!(read.body["thread"]["to"], json!(["alice"]));
+    assert_eq!(read.body["thread"]["author"], "bob");
+    assert_eq!(read.body["thread"]["system"], false);
+    let message = &read.body["messages"][0];
+    assert_eq!(message["author"], "bob");
+    assert_eq!(message["importance"], "high");
+    assert_eq!(message["ack_required"], false);
+    let text = message["body"].as_str().unwrap();
+    let command = format!("dibs grant {} --area api:billing --to bob", team.bob_item);
+    assert!(text.contains(&command), "{text}");
+    let inbox = world.get(&team.alice, "/v1/inbox?deliverable=1").await;
+    assert_eq!(
+        inbox.body["deliverable"][0]["thread"]["id"], thread,
+        "a high message is shown to the holder's agent while it works: {}",
+        inbox.body
+    );
+
+    let given = world
+        .post(
+            &team.alice,
+            "/v1/grants",
+            json!({"item": team.bob_item, "area": "api:billing", "to": "bob"}),
+        )
+        .await;
+    assert_eq!(given.status, StatusCode::CREATED, "{}", given.body);
+    let granted = world.post(&team.bob, "/v1/grant-requests", body).await;
+    assert_eq!(granted.status, StatusCode::OK, "{}", granted.body);
+    assert_eq!(
+        granted.body,
+        json!({"outcome": "granted", "holder": "alice",
+               "holder_item": {"id": team.alice_item, "ref": null, "title": "Billing", "link": null},
+               "thread_id": null,
+               "item": {"id": team.bob_item, "ref": null, "title": "Search", "link": null},
+               "area": "api:billing"})
+    );
+}
+
+#[tokio::test]
+async fn nobody_is_asked_for_a_free_area_or_ones_own() {
+    let team = Team::new().await;
+    let world = &team.world;
+    let free = world
+        .post(
+            &team.bob,
+            "/v1/grant-requests",
+            json!({"item": team.bob_item, "area": "api:search"}),
+        )
+        .await;
+    assert_eq!(free.status, StatusCode::OK, "{}", free.body);
+    assert_eq!(free.body["outcome"], "free");
+    assert_eq!(free.body["holder"], Value::Null);
+    assert_eq!(free.body["holder_item"], Value::Null);
+    assert_eq!(free.body["thread_id"], Value::Null);
+    let own = world
+        .post(
+            &team.alice,
+            "/v1/grant-requests",
+            json!({"item": team.alice_item, "area": "api:billing"}),
+        )
+        .await;
+    assert_eq!(own.status, StatusCode::OK, "{}", own.body);
+    assert_eq!(own.body["outcome"], "own");
+    let threads = world.get(&team.alice, "/v1/threads").await;
+    assert_eq!(threads.body["threads"], json!([]), "{}", threads.body);
+}
+
+#[tokio::test]
+async fn asking_for_a_grant_breaking_its_rules_is_refused() {
+    let team = Team::new().await;
+    let cases = [
+        (
+            json!({"item": team.alice_item, "area": "api:billing"}),
+            StatusCode::CONFLICT,
+            "grantee_has_no_claim",
+        ),
+        (
+            json!({"item": 4242, "area": "api:billing"}),
+            StatusCode::NOT_FOUND,
+            "not_found",
+        ),
+        (
+            json!({"item": team.bob_item, "area": "api:nothing"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unknown_area",
+        ),
+        (
+            json!({"item": team.bob_item}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+        ),
+        (
+            json!({"area": "api:billing"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+        ),
+    ];
+    for (body, status, code) in cases {
+        let answer = team.world.post(&team.bob, "/v1/grant-requests", body).await;
+        assert_error(&answer, status, code);
+    }
+    let board = team
+        .world
+        .member(&team.alice, "board", Role::Importer)
+        .await;
+    let forbidden = team
+        .world
+        .post(
+            &board,
+            "/v1/grant-requests",
+            json!({"item": team.bob_item, "area": "api:billing"}),
+        )
+        .await;
+    assert_error(&forbidden, StatusCode::FORBIDDEN, "forbidden");
 }

@@ -63,10 +63,10 @@ pub fn held_by(
             )
         }
         (Some(holder), HeldWay::AskHolder) => format!(
-            "{path} is in the area {area}, which {holder} holds for work item {item}. Do not edit it now: message {holder} (dibs_send, or dibs send --to {holder}) to agree on the change or ask for a grant, or pick other work."
+            "{path} is in the area {area}, which {holder} holds for work item {item}. Do not edit it now: ask {holder} for a grant (dibs_ask_grant with your item and the area, or dibs ask-grant <your item> --area {area}), message {holder} (dibs_send, or dibs send --to {holder}) to agree on the change, or pick other work."
         ),
         (None, HeldWay::AskHolder) => format!(
-            "{path} is in the area {area}, which another member holds for work item {item}. Do not edit it now: message the holder to agree on the change or ask for a grant, or pick other work."
+            "{path} is in the area {area}, which another member holds for work item {item}. Do not edit it now: ask the holder for a grant (dibs_ask_grant with your item and the area, or dibs ask-grant <your item> --area {area}), message them to agree on the change, or pick other work."
         ),
         (Some(holder), HeldWay::AwaitingAck) => format!(
             "{path} is in the area {area}, which {holder} holds for work item {item}. Your wide claim names it, and dibs asked {holder} to acknowledge it; their acknowledgement grants the edit. Do not edit it now: go on where the areas are free, or message {holder} (dibs_send, or dibs send --to {holder})."
@@ -988,6 +988,10 @@ mod tests {
         );
         assert!(!text.contains("1739000000123"), "{text}");
         assert!(text.contains("dibs send --to alice"), "{text}");
+        assert!(
+            text.contains("dibs ask-grant <your item> --area api:billing"),
+            "{text}"
+        );
         let local = held_by(
             &path,
             None,
@@ -999,11 +1003,12 @@ mod tests {
             local.contains("another member holds for work item 4"),
             "{local}"
         );
+        assert!(local.contains("dibs_ask_grant"), "{local}");
         for holder in [Some(handle("alice")), None] {
             let waiting = held_by(&path, holder.as_ref(), &named, &area, &HeldWay::AwaitingAck);
             assert!(waiting.contains("Your wide claim names it"), "{waiting}");
             assert!(waiting.contains("Do not edit it now"), "{waiting}");
-            assert!(!waiting.contains("ask for a grant"), "{waiting}");
+            assert!(!waiting.contains("dibs_ask_grant"), "{waiting}");
         }
     }
 
@@ -1060,7 +1065,7 @@ mod tests {
         ] {
             assert!(ask.contains(part), "{part}: {ask}");
         }
-        assert!(!ask.contains("ask for a grant"), "{ask}");
+        assert!(!ask.contains("dibs_ask_grant"), "{ask}");
     }
 
     #[test]
@@ -1083,7 +1088,7 @@ mod tests {
         ] {
             assert!(text.contains(part), "{part}: {text}");
         }
-        assert!(!text.contains("ask for a grant"), "{text}");
+        assert!(!text.contains("dibs_ask_grant"), "{text}");
         let nobody = held_by(&path, None, "4", &area, &way);
         assert!(nobody.contains("another member holds"), "{nobody}");
     }

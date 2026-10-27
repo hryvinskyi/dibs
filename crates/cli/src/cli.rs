@@ -85,6 +85,8 @@ pub enum Command {
     Check(CheckArgs),
     /// Let another member edit inside an area you hold, for their work item.
     Grant(GrantArgs),
+    /// Ask whoever holds an area for a grant there, for your claim on a work item.
+    AskGrant(AskGrantArgs),
     /// Start a conversation with members or with the whole project.
     Send(SendArgs),
     /// List the conversations waiting for you.
@@ -410,6 +412,17 @@ pub struct GrantArgs {
     /// The member who may edit in it.
     #[arg(long, value_parser = Handle::parse)]
     pub to: Handle,
+}
+
+/// `dibs ask-grant`.
+#[derive(Debug, Args)]
+pub struct AskGrantArgs {
+    /// Your work item, the one that needs the edit: its local id or its reference.
+    #[arg(value_parser = ItemKey::parse)]
+    pub key: ItemKey,
+    /// The area you need to edit in.
+    #[arg(long)]
+    pub area: String,
 }
 
 /// `dibs send`.

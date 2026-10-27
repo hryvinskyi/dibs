@@ -19,7 +19,7 @@ use dibs_domain::delivery::DeliveryRefused;
 use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
 use dibs_domain::escalation::EscalationRefused;
-use dibs_domain::grant::{GrantRefused, RevokeRefused};
+use dibs_domain::grant::{AskRefused, GrantRefused, RevokeRefused};
 use dibs_domain::handle::Handle;
 use dibs_domain::import::BatchRefused;
 use dibs_domain::item::CreateRefused;
@@ -342,6 +342,7 @@ fn status_of(error: &AppError) -> StatusCode {
             ..
         })
         | AppError::Grant(GrantRefused::GranteeHasNoClaim)
+        | AppError::AskGrant(AskRefused::NoLiveClaim)
         | AppError::Dependency(DependencyRefused::Cycle)
         | AppError::Ack(AckRefused::NotRequired)
         | AppError::Slot(Refusal {
@@ -713,6 +714,11 @@ mod tests {
                 AppError::Revoke(RevokeRefused::NotGrantor),
                 StatusCode::FORBIDDEN,
                 "not_grantor",
+            ),
+            (
+                AppError::AskGrant(AskRefused::NoLiveClaim),
+                StatusCode::CONFLICT,
+                "grantee_has_no_claim",
             ),
             (
                 AppError::NotFound(Missing::Session(SessionId(3))),

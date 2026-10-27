@@ -4,7 +4,7 @@
 use time::OffsetDateTime;
 
 use dibs_domain::event::{EventKind, MessagePosted, ThreadStarted};
-use dibs_domain::ids::{ItemId, MessageId, ThreadId};
+use dibs_domain::ids::{ItemId, MemberId, MessageId, ThreadId};
 use dibs_domain::message::{
     Author, Body, Importance, RAISED_WINDOW, Recipients, SessionLabel, Subject,
     counts_toward_limit, decide_raised,
@@ -46,6 +46,83 @@ pub(crate) async fn write_message(
         work.insert_raised(project, member, message.id, now).await?;
     }
     Ok(())
+}
+
+/// A conversation a member starts, with its first message in their name: the message is held to
+/// the project's limit on the high and urgent messages a member writes, as [`write_message`] holds
+/// it, and both are recorded.
+pub(crate) struct MemberThread {
+    /// The ids of the thread and its first message, from [`Posted::next`].
+    pub(crate) ids: Posted,
+    /// The subject.
+    pub(crate) subject: Subject,
+    /// The work item it is about.
+    pub(crate) item: Option<ItemId>,
+    /// The member who starts it and writes its first message.
+    pub(crate) author: MemberId,
+    /// Whom it reaches.
+    pub(crate) to: Recipients,
+    /// The label of the session writing.
+    pub(crate) label: SessionLabel,
+    /// The text of the first message.
+    pub(crate) body: Body,
+    /// How much the first message asks for attention.
+    pub(crate) importance: Importance,
+    /// Whether the first message asks each recipient to acknowledge it.
+    pub(crate) ack_required: bool,
+}
+
+impl MemberThread {
+    /// Stores the thread and its first message, under the project's `limit` of raised messages an
+    /// hour, and records both.
+    pub(crate) async fn start(
+        self,
+        work: &mut Work,
+        limit: u32,
+        now: OffsetDateTime,
+    ) -> Result<(ThreadRecord, MessageRecord), AppError> {
+        let project = work.project_id();
+        let author = Author::Member(self.author);
+        let thread = ThreadRecord {
+            id: self.ids.thread,
+            subject: self.subject,
+            item: self.item,
+            author,
+            recipients: self.to,
+            created_at: now,
+        };
+        let message = MessageRecord {
+            id: self.ids.message,
+            thread: thread.id,
+            author,
+            label: self.label,
+            body: self.body,
+            importance: self.importance,
+            ack_required: self.ack_required,
+            created_at: now,
+        };
+        work.insert_thread(project, &thread).await?;
+        write_message(work, &message, limit, now).await?;
+        work.record(
+            now,
+            EventKind::ThreadStarted(ThreadStarted {
+                thread: thread.id,
+                author: Some(self.author),
+                item: thread.item,
+            }),
+        )
+        .await?;
+        work.record(
+            now,
+            EventKind::MessagePosted(MessagePosted {
+                thread: thread.id,
+                message: message.id,
+                author: Some(self.author),
+            }),
+        )
+        .await?;
+        Ok((thread, message))
+    }
 }
 
 /// A message dibs writes when something happens, in a conversation of its own: in the name of the
@@ -185,7 +262,7 @@ impl SystemReply {
 }
 
 /// A subject dibs composed, cut to the characters a subject holds.
-fn fit_subject(text: &str) -> Result<Subject, AppError> {
+pub(crate) fn fit_subject(text: &str) -> Result<Subject, AppError> {
     let shortened: String = text.chars().take(SUBJECT_MAX_CHARS).collect();
     Subject::parse(shortened.trim_end())
         .map_err(|_| unwritable("the subject of a message from dibs"))

@@ -229,6 +229,66 @@ fn a_stale_claim_is_taken_over_with_a_reason_and_a_grant_lets_another_edit() {
 }
 
 #[test]
+fn ask_grant_names_who_was_asked_or_why_nobody_was() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    run(
+        &setup.alice,
+        &["new", "gh:acme/api#1", "--title", "Invoices"],
+    );
+    run(&setup.bob, &["new", "gh:acme/api#2", "--title", "Refunds"]);
+    for (who, item, area) in [
+        (&setup.alice, "gh:acme/api#1", "billing"),
+        (&setup.bob, "gh:acme/api#2", "search"),
+    ] {
+        assert_eq!(
+            status(&run(who, &["claim", item, "--area", area])),
+            0,
+            "{item}"
+        );
+    }
+
+    let asked = run(
+        &setup.bob,
+        &["ask-grant", "gh:acme/api#2", "--area", "billing"],
+    );
+    assert_eq!(status(&asked), 0, "{}", text(&asked.stderr));
+    let said = text(&asked.stdout);
+    for part in [
+        "Asked alice, whose claim on gh:acme/api#1 holds api:billing",
+        "for gh:acme/api#2 (conversation ",
+    ] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+    let inbox = run(&setup.alice, &["inbox"]);
+    assert!(
+        text(&inbox.stdout).contains("A grant on api:billing for gh:acme/api#2"),
+        "{}",
+        text(&inbox.stdout)
+    );
+
+    let own = run(
+        &setup.bob,
+        &["ask-grant", "gh:acme/api#2", "--area", "search"],
+    );
+    assert_eq!(
+        text(&own.stdout).trim(),
+        "Your own claim holds api:search: no grant is needed."
+    );
+    let refused = run(
+        &setup.bob,
+        &["ask-grant", "gh:acme/api#1", "--area", "billing"],
+    );
+    assert_eq!(status(&refused), 1);
+    assert!(
+        text(&refused.stderr).contains("no live claim on that work item"),
+        "{}",
+        text(&refused.stderr)
+    );
+}
+
+#[test]
 fn a_wide_claim_from_the_command_line_waits_for_the_holders_acknowledgement() {
     let setup = Setup::new();
     let api = setup.checkout("api", Some("api"), API_REMOTE);

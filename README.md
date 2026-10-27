@@ -464,6 +464,7 @@ dibs check packages/billing/a.rs                  # may I edit these paths?
 dibs check --git-range origin/main..HEAD [--author me]   # warn about what a range of commits changed
 dibs check --push --remote "$1" --url "$2"       # git's pre-push hook: refuse a push to a protected branch or tag, or one a held slot freezes
 dibs grant 14 --area api:billing --to bob         # let bob edit in an area you hold, for his item 14
+dibs ask-grant 14 --area api:billing             # ask whoever holds api:billing for a grant, for your item 14
 dibs send --to alice --subject "Rounding" "May I touch round.rs?"    # or --project; "-" reads stdin
 dibs send --project --subject "Freeze" --importance urgent --ack "No pushes to main until noon."
 dibs inbox [--unread] [--unacked]                 # conversations waiting for you; what awaits your acknowledgement

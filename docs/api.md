@@ -138,6 +138,7 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/edit-check` | people | May I edit these paths? |
 | `POST /v1/grants` | people | Let another member edit in an area you hold. |
 | `DELETE /v1/grants/{id}` | people | Withdraw a grant you gave. |
+| `POST /v1/grant-requests` | people | Ask whoever holds an area for a grant, for your claim on an item; dibs starts the conversation that reaches them. |
 | `POST /v1/threads` | people | Start a conversation. |
 | `GET /v1/threads` | people | List the conversations you may read. |
 | `GET /v1/threads/{id}` | people | A conversation with its messages. |
@@ -738,7 +739,7 @@ edits are attributed to record it (see [Branches and overlaps](#branches-and-ove
 | `allowed` | The caller may edit. | |
 | `allowed_with_note` | The caller may edit; a hot-file rule has something to say. | `rule`, `note`, `touched_by: [{ holder, item, item_ref }]` |
 | `needs_claim` | The path is governed, the policy requires a claim, and the caller holds none that covers it. | |
-| `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason`, the first that applies: `in_review` (the holder's claim is in review; `prs` lists its pull requests, and the area is free when they merge), `awaiting_ack` (the caller's live wide claim names the area and the holder has not acknowledged its announcement yet), `awaiting_handover` (the caller's live claim waits for the holder's debt claim to hand the area over; `escalates_at` says when the request goes to the arbiters if the area is not handed over by then, absent before the holder was asked and once it was escalated), `ask_holder` with `waiting: { holder, item, item_ref }` (another member's claim already waits for the holder to hand the area over), `ask_handover` (the holder's claim is debt work and the caller's live feature claim did not declare the area: declaring it on the claim `claim` names, `dibs claim <claim> --area <area>`, asks for it), or `ask_holder` (message them or ask for a grant) |
+| `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason`, the first that applies: `in_review` (the holder's claim is in review; `prs` lists its pull requests, and the area is free when they merge), `awaiting_ack` (the caller's live wide claim names the area and the holder has not acknowledged its announcement yet), `awaiting_handover` (the caller's live claim waits for the holder's debt claim to hand the area over; `escalates_at` says when the request goes to the arbiters if the area is not handed over by then, absent before the holder was asked and once it was escalated), `ask_holder` with `waiting: { holder, item, item_ref }` (another member's claim already waits for the holder to hand the area over), `ask_handover` (the holder's claim is debt work and the caller's live feature claim did not declare the area: declaring it on the claim `claim` names, `dibs claim <claim> --area <area>`, asks for it), or `ask_holder` (ask them for a grant with `POST /v1/grant-requests`, or message them) |
 | `granted` | The holder granted the caller edits in the area, by a grant or by acknowledging the caller's wide claim's announcement. | `by`, `area` |
 
 An edit allowed in an area none of the caller's claims holds adds the area to the caller's live claim most recently
@@ -756,6 +757,36 @@ or `200` with `"created": false` when the same grant exists. Refusals: `not_hold
 grantee's claim ends.
 
 `DELETE /v1/grants/{id}` answers `{ "grant": grant }`; only the grantor may (`not_grantor`, `403`).
+
+### Asking for a grant
+
+`POST /v1/grant-requests`, body `{ "item": 14, "area": "billing" }`: the caller asks for edits in `area` (as a person
+writes it: `repo:area`, or a name one repository declares) for their own live claim on `item`. dibs judges the area as
+an edit check does and answers what it comes to:
+
+| `outcome` | When | What happens |
+|---|---|---|
+| `asked` (`201`) | Another member's live claim holds the area; the lowest item when, against the rules, several do. | dibs starts a conversation in the caller's name, about the holder's item and addressed to the holder alone. |
+| `granted` (`200`) | The holder's grant to the caller in the area is already in force, for this item or another of the caller's. | Nothing; the edit is granted. |
+| `own` (`200`) | No other member's live claim holds the area, and one of the caller's does. | Nothing. |
+| `free` (`200`) | No live claim holds the area. A stale claim holds nothing an edit check or a claim respects, and its holder can no longer grant. | Nothing; there is nobody to ask. |
+
+The answer is `{ "outcome": "asked", "holder": "alice", "holder_item": item ref, "thread_id": 31, "item": item ref,
+"area": "api:billing" }`: `item` is the caller's item and `area` the area resolved; `holder` and `holder_item` (the item
+of the claim that holds the area) are `null` unless the outcome is `asked` or `granted`, and `thread_id` is `null`
+unless it is `asked`.
+
+The conversation is routed by its item: a message about an item is kept for the session of the recipient's live claim
+on it (see [Delivery to a running session](#delivery-to-a-running-session)), so it is about the holder's item, not the
+caller's, and reaches the session working under the claim that holds the area. Its subject is `A grant on <area> for <the caller's item>` (its reference, else its title), and its
+first message is `high`, asks for no acknowledgement, and is signed with the label of the session of the caller's claim.
+It names the caller, their item and the area, says which claim of the holder holds it, and gives the command that
+grants it, `dibs grant <the caller's item> --area <area> --to <caller>` (MCP: `dibs_grant`); answering in the
+conversation refuses or asks a question. The message counts toward the caller's `raised_per_hour` like any `high`
+message they write: past it, nothing is asked and the answer is `importance_limited` (`429`).
+
+Refusals: `grantee_has_no_claim` (`409`) when the caller holds no live claim on `item`, `unknown_area`, `invalid_area`,
+`ambiguous_area`, `not_found` for an unknown item, `importance_limited` (`429`), `invalid_request` for a missing field.
 
 ### Conversations
 

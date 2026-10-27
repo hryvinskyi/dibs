@@ -15,8 +15,9 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 23] = [
+const TOOLS: [&str; 24] = [
     "dibs_ack",
+    "dibs_ask_grant",
     "dibs_check",
     "dibs_claim",
     "dibs_done",
@@ -699,6 +700,85 @@ fn an_urgent_message_is_acked_through_the_tools_once() {
     assert!(loud.is_error);
     let left = bob.tool("dibs_inbox", json!({"unacked": true}));
     assert_eq!(left.ok()["unacked"], json!([]));
+}
+
+#[test]
+fn an_edit_refused_by_a_held_area_asks_its_holder_for_a_grant_through_the_tools() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    let mut bob = Mcp::start(&setup, "bob", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#1", "title": "Invoices"}),
+    );
+    bob.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#2", "title": "Refunds"}),
+    );
+    alice
+        .tool(
+            "dibs_claim",
+            json!({"key": "gh:acme/api#1", "areas": ["billing"]}),
+        )
+        .ok();
+    bob.tool("dibs_claim", json!({"key": "gh:acme/api#2"})).ok();
+    let held = bob.tool("dibs_check", json!({"paths": ["src/billing/a.rs"]}));
+    assert_eq!(held.ok()["verdicts"][0]["verdict"], "held_by");
+
+    let asked = bob.tool(
+        "dibs_ask_grant",
+        json!({"key": "gh:acme/api#2", "area": "billing"}),
+    );
+    let answer = asked.ok();
+    assert_eq!(answer["outcome"], "asked");
+    assert_eq!(answer["holder"], "alice");
+    assert_eq!(answer["holder_item"]["ref"], "gh:acme/api#1");
+    assert_eq!(answer["item"]["ref"], "gh:acme/api#2");
+    assert_eq!(answer["area"], "api:billing");
+    let thread = answer["thread_id"].as_u64().unwrap();
+
+    let read = alice.tool("dibs_thread", json!({"thread": thread}));
+    let detail = read.ok();
+    assert_eq!(detail["thread"]["author"], "bob");
+    assert_eq!(detail["thread"]["to"], json!(["alice"]));
+    let message = &detail["messages"][0];
+    assert_eq!(message["importance"], "high");
+    let body = message["body"].as_str().unwrap();
+    assert!(
+        body.contains("dibs grant gh:acme/api#2 --area api:billing --to bob"),
+        "{body}"
+    );
+    alice
+        .tool(
+            "dibs_grant",
+            json!({"key": "gh:acme/api#2", "area": "api:billing", "to": "bob"}),
+        )
+        .ok();
+    let again = bob.tool(
+        "dibs_ask_grant",
+        json!({"key": "gh:acme/api#2", "area": "billing"}),
+    );
+    assert_eq!(again.ok()["outcome"], "granted");
+    assert_eq!(again.ok()["thread_id"], serde_json::Value::Null);
+    let granted = bob.tool("dibs_check", json!({"paths": ["src/billing/a.rs"]}));
+    assert_eq!(granted.ok()["verdicts"][0]["verdict"], "granted");
+
+    let not_mine = bob.tool(
+        "dibs_ask_grant",
+        json!({"key": "gh:acme/api#1", "area": "billing"}),
+    );
+    assert!(
+        not_mine.error().contains("no live claim"),
+        "{}",
+        not_mine.text
+    );
+    assert_eq!(not_mine.structured["error"]["code"], "grantee_has_no_claim");
+    let bad_key = bob.tool(
+        "dibs_ask_grant",
+        json!({"key": "not a key", "area": "billing"}),
+    );
+    assert!(bad_key.error().starts_with("`key`: "), "{}", bad_key.text);
 }
 
 #[test]

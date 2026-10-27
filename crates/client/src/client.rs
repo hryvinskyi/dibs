@@ -29,12 +29,12 @@ use dibs_domain::settings::SettingsDocument;
 
 use crate::api::{
     Acked, AddDependency, ClaimRequest, Claimed, CreatedItem, Delivered, DependencyChange,
-    DropPrRequest, EditCheck, EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantRequest,
-    Granted, Heartbeat, Inbox, InboxRequest, Item, ItemDetail, ItemFilter, Items, MarkedRead, Me,
-    Member, MessageStatus, NarrowRequest, Narrowed, NewItem, NewMember, OnBranch, PostMessage,
-    Posted, ReadyList, RegisterSession, ReviewRequest, Reviewed, Revoked, Session, SettingsApplied,
-    StartThread, StartThreadBody, Started, Status, TakeOverRequest, TakenOver, ThreadDetail,
-    Threads, TokenRevoked, Versions,
+    DropPrRequest, EditCheck, EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantAskRequest,
+    GrantAsked, GrantRequest, Granted, Heartbeat, Inbox, InboxRequest, Item, ItemDetail,
+    ItemFilter, Items, MarkedRead, Me, Member, MessageStatus, NarrowRequest, Narrowed, NewItem,
+    NewMember, OnBranch, PostMessage, Posted, ReadyList, RegisterSession, ReviewRequest, Reviewed,
+    Revoked, Session, SettingsApplied, StartThread, StartThreadBody, Started, Status,
+    TakeOverRequest, TakenOver, ThreadDetail, Threads, TokenRevoked, Versions,
 };
 use crate::api::{
     Escalated, EscalationRequest, FeedbackGiven, FeedbackRequest, ForceReleaseSlotRequest,
@@ -504,6 +504,16 @@ impl Client {
     /// [`ClientError`].
     pub async fn revoke_grant(&self, id: GrantId) -> Result<Revoked, ClientError> {
         self.send(self.request(Method::DELETE, &format!("/v1/grants/{id}")))
+            .await
+    }
+
+    /// `POST /v1/grant-requests`: asks whoever holds an area for a grant there, for the caller's
+    /// live claim on an item.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn ask_grant(&self, ask: &GrantAskRequest) -> Result<GrantAsked, ClientError> {
+        self.send(self.request(Method::POST, "/v1/grant-requests").json(ask))
             .await
     }
 

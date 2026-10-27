@@ -7,7 +7,7 @@ use dibs_domain::delivery::DeliveryRefused;
 use dibs_domain::dependency::DependencyRefused;
 use dibs_domain::edit::EditCheckRefused;
 use dibs_domain::escalation::EscalationRefused;
-use dibs_domain::grant::{GrantRefused, RevokeRefused};
+use dibs_domain::grant::{AskRefused, GrantRefused, RevokeRefused};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::import::BatchRefused;
@@ -143,6 +143,9 @@ pub enum AppError {
     /// The revocation was refused.
     #[error(transparent)]
     Revoke(#[from] RevokeRefused),
+    /// Asking for a grant was refused.
+    #[error(transparent)]
+    AskGrant(#[from] AskRefused),
     /// The item may not be created.
     #[error(transparent)]
     Create(#[from] CreateRefused),
@@ -282,6 +285,7 @@ impl AppError {
                 GrantRefused::GranteeHasNoClaim => "grantee_has_no_claim",
             },
             Self::Revoke(RevokeRefused::NotGrantor) => "not_grantor",
+            Self::AskGrant(AskRefused::NoLiveClaim) => "grantee_has_no_claim",
             Self::Create(CreateRefused::UnlistedRepository { .. }) => "unlisted_repository",
             Self::Dependency(refused) => match refused {
                 DependencyRefused::SelfDependency => "self_dependency",

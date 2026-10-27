@@ -36,6 +36,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Release(args) => work::release(args, ctx).await,
         Command::Done(args) => work::done(args, ctx).await,
         Command::Grant(args) => work::grant(args, ctx).await,
+        Command::AskGrant(args) => work::ask_grant(args, ctx).await,
         Command::Check(args) => check::check(args, ctx).await,
         Command::Send(args) => messages::send(args, ctx).await,
         Command::Inbox(args) => messages::inbox(args, ctx).await,

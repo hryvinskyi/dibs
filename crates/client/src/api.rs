@@ -1118,6 +1118,46 @@ pub struct Granted {
     pub item: Option<ItemName>,
 }
 
+/// `POST /v1/grant-requests`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GrantAskRequest {
+    /// The caller's work item, the work that needs the edit.
+    pub item: ItemId,
+    /// The area, as a person names it.
+    pub area: String,
+}
+
+/// What asking for a grant came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskOutcome {
+    /// The holder was asked, in a conversation about the item of their claim.
+    Asked,
+    /// No live claim holds the area; the caller can claim it.
+    Free,
+    /// A live claim of the caller's own holds the area.
+    Own,
+    /// The holder's grant to the caller is already in force.
+    Granted,
+}
+
+/// `POST /v1/grant-requests`'s answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantAsked {
+    /// What asking came to.
+    pub outcome: AskOutcome,
+    /// The holder asked, or who granted; `None` for an area that is free or the caller's own.
+    pub holder: Option<Handle>,
+    /// The item of the holder's claim that holds the area.
+    pub holder_item: Option<ItemName>,
+    /// The conversation that asks the holder.
+    pub thread_id: Option<ThreadId>,
+    /// The caller's item.
+    pub item: ItemName,
+    /// The area.
+    pub area: QualifiedArea,
+}
+
 /// `DELETE /v1/grants/{id}`'s answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revoked {

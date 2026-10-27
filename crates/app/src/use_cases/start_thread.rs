@@ -3,20 +3,18 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use dibs_domain::event::{EventKind, MessagePosted, ThreadStarted};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::{ItemId, MessageId, ThreadId};
-use dibs_domain::message::{Author, Body, Importance, Recipients, SessionLabel, Subject};
+use dibs_domain::ids::ItemId;
+use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{NamedMessage, NamedThread, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
-use crate::records::{MessageRecord, ThreadRecord};
 use crate::use_cases::common::{existing_item, present_member_by_handle};
-use crate::use_cases::writing::write_message;
+use crate::use_cases::writing::{MemberThread, Posted};
 use crate::work::Work;
 
 /// Whom a new thread is addressed to, as the caller names them.
@@ -92,7 +90,6 @@ impl StartThread {
     ) -> Result<StartedThread, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
-        let project = actor.project;
         let mut work = Work::begin_for(&*self.store, actor).await?;
         let recipients = match input.to {
             Addressees::Project => Recipients::Project,
@@ -111,47 +108,22 @@ impl StartThread {
         if let Some(item) = input.item {
             existing_item(&mut work, item).await?;
         }
-        let thread = ThreadRecord {
-            id: ThreadId(self.ids.next()),
-            subject: input.subject,
-            item: input.item,
-            author: Author::Member(actor.member),
-            recipients,
-            created_at: now,
-        };
-        let message = MessageRecord {
-            id: MessageId(self.ids.next()),
-            thread: thread.id,
-            author: Author::Member(actor.member),
-            label: input.label,
-            body: input.body,
-            importance: input.importance,
-            ack_required: input.ack_required,
-            created_at: now,
-        };
         let limit = work
             .project_settings(&self.hot_rules)
             .await?
             .raised_per_hour();
-        work.insert_thread(project, &thread).await?;
-        write_message(&mut work, &message, limit, now).await?;
-        work.record(
-            now,
-            EventKind::ThreadStarted(ThreadStarted {
-                thread: thread.id,
-                author: Some(actor.member),
-                item: thread.item,
-            }),
-        )
-        .await?;
-        work.record(
-            now,
-            EventKind::MessagePosted(MessagePosted {
-                thread: thread.id,
-                message: message.id,
-                author: Some(actor.member),
-            }),
-        )
+        let (thread, message) = MemberThread {
+            ids: Posted::next(&*self.ids),
+            subject: input.subject,
+            item: input.item,
+            author: actor.member,
+            to: recipients,
+            label: input.label,
+            body: input.body,
+            importance: input.importance,
+            ack_required: input.ack_required,
+        }
+        .start(&mut work, limit, now)
         .await?;
         let names = Names::load(&mut work).await?;
         let started = StartedThread {
@@ -165,6 +137,8 @@ impl StartThread {
 
 #[cfg(test)]
 mod tests {
+    use dibs_domain::event::{EventKind, MessagePosted, ThreadStarted};
+
     use super::*;
     use crate::use_cases::testing::Env;
 
