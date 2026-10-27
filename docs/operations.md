@@ -611,6 +611,10 @@ and lets a done item its tracker still has open be claimed again; neither change
 have no `ask-grant` and simply never call the route. Upgrade the server first, then the clients; the plugin of 0.1.3
 names 0.1.3 as its `min_binary`, since its workflow tells agents to ask with `dibs_ask_grant`.
 
+**0.1.4, a fix in the runtime.** Tokio 1.54.0, which 0.1.2 and 0.1.3 run on, could free a timer while the runtime
+fired it (RUSTSEC-2026-0384); the server's event stream ticks on such a timer. 0.1.4 runs on 1.54.1 and changes nothing
+else: upgrade the server, and the clients when convenient.
+
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
