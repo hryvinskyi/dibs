@@ -53,6 +53,9 @@ pub enum EventKind {
     Released(Released),
     /// The holder completed their claim.
     Completed(Completed),
+    /// A completed item was claimed again, because the tracker it is imported from still had it
+    /// open.
+    ItemReopened(ItemReopened),
     /// An admin ended a claim.
     ForceReleased(ForceReleased),
     /// A claim gained areas or shared paths through an edit check. Appended only when something
@@ -169,6 +172,7 @@ impl EventKind {
             Self::TakenOver(_) => "taken_over",
             Self::Released(_) => "released",
             Self::Completed(_) => "completed",
+            Self::ItemReopened(_) => "item_reopened",
             Self::ForceReleased(_) => "force_released",
             Self::Reserved(_) => "reserved",
             Self::Granted(_) => "granted",
@@ -240,6 +244,7 @@ impl EventKind {
             Self::TakenOver(e) => vec![Some(e.member), Some(e.previous)],
             Self::Released(e) => vec![Some(e.member)],
             Self::Completed(e) => vec![Some(e.member)],
+            Self::ItemReopened(e) => vec![Some(e.by)],
             Self::ForceReleased(e) => vec![Some(e.member), e.by],
             Self::Reserved(e) => vec![Some(e.member)],
             Self::Granted(e) => vec![Some(e.from), Some(e.to)],
@@ -298,6 +303,7 @@ impl EventKind {
             | Self::TakenOver(_)
             | Self::Released(_)
             | Self::Completed(_)
+            | Self::ItemReopened(_)
             | Self::ForceReleased(_)
             | Self::Reserved(_)
             | Self::Granted(_)
@@ -368,6 +374,7 @@ impl EventKind {
             | Self::TakenOver(_)
             | Self::Released(_)
             | Self::Completed(_)
+            | Self::ItemReopened(_)
             | Self::ForceReleased(_)
             | Self::Reserved(_)
             | Self::Granted(_)
@@ -441,6 +448,7 @@ impl EventKind {
             | Self::TakenOver(_)
             | Self::Released(_)
             | Self::Completed(_)
+            | Self::ItemReopened(_)
             | Self::ForceReleased(_)
             | Self::Reserved(_)
             | Self::Granted(_)
@@ -565,6 +573,15 @@ pub struct Completed {
     pub item: ItemId,
     /// The member who held it.
     pub member: MemberId,
+}
+
+/// A completed item was claimed again, because the tracker it is imported from still had it open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemReopened {
+    /// The item.
+    pub item: ItemId,
+    /// The member whose claim brought it back.
+    pub by: MemberId,
 }
 
 /// An admin ended a claim.
@@ -1166,6 +1183,7 @@ mod tests {
                 author: None,
                 item: None,
             }),
+            EventKind::ItemReopened(ItemReopened { item, by: ALICE }),
         ]
     }
 
@@ -1689,7 +1707,7 @@ mod tests {
             .collect();
         let messages: Vec<Option<MessageId>> =
             every_kind().iter().map(EventKind::message).collect();
-        let mut expected = vec![None; 25];
+        let mut expected = vec![None; 26];
         expected[11] = Some(MessageId(6));
         assert_eq!(messages, expected);
         let alice = BTreeSet::from([ALICE]);
@@ -1723,6 +1741,7 @@ mod tests {
                 (BTreeSet::new(), None),
                 (BTreeSet::new(), None),
                 (BTreeSet::new(), Some(ThreadId(8))),
+                (BTreeSet::from([ALICE]), None),
             ]
         );
     }

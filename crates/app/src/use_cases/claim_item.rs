@@ -6,12 +6,12 @@ use std::sync::Arc;
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::{Claim, ClaimOutcome, ClaimRequest, decide_claim};
 use dibs_domain::dependency::blockers;
-use dibs_domain::event::{Claimed, EventKind, Renewed, WideClaimed};
+use dibs_domain::event::{Claimed, EventKind, ItemReopened, Renewed, WideClaimed};
 use dibs_domain::handle::Handle;
 use dibs_domain::handover::ClaimKind;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MessageId, SessionId};
-use dibs_domain::item::ItemStatus;
+use dibs_domain::item::{ClaimOpening, ItemStatus};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::wide::{WideReason, WideScope, inside_wide};
@@ -107,7 +107,9 @@ pub struct ClaimMade {
 ///
 /// The item's claim and the project's other claims are loaded and decided on inside one exclusive
 /// transaction, so of two members racing for one item, or for one area, exactly one wins and the
-/// other learns who holds it. A closed item cannot be claimed. A renewal that loses areas to another
+/// other learns who holds it. A dropped item cannot be claimed, nor a completed one unless the
+/// tracker it is imported from still has it open: then the claim brings it back, and the log says
+/// so. A renewal that loses areas to another
 /// member ends the grants the caller gave in them. A blocked item is claimed, and the answer names
 /// what blocks it.
 ///
@@ -145,7 +147,8 @@ impl ClaimItem {
     ///
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for an unknown item or a
-    /// session not the caller's; [`AppError::ItemClosed`] for a done or dropped item;
+    /// session not the caller's; [`AppError::ItemClosed`] for a dropped item, or a done one no
+    /// tracker has open;
     /// [`AppError::Area`] for an area that does not resolve; [`AppError::Wide`] for a wide scope
     /// naming no area; [`AppError::Claim`] when another member holds the item or a declared area,
     /// or another wide claim names an area of the scope, naming that member; [`AppError::Store`]
@@ -161,11 +164,9 @@ impl ClaimItem {
         let mut work = Work::begin_for(&*self.store, actor).await?;
         let session = own_session(&mut work, actor, input.session).await?;
         let item = existing_item(&mut work, input.item).await?;
-        if item.is_closed() {
-            return Err(AppError::ItemClosed {
-                status: item.status,
-            });
-        }
+        let opening = item.claim_opening().map_err(|shut| AppError::ItemClosed {
+            status: shut.status,
+        })?;
         let settings = work.project_settings(&self.hot_rules).await?;
         let request = ClaimRequest {
             item: item.id,
@@ -188,6 +189,16 @@ impl ClaimItem {
             ClaimOutcome::New { claim } => {
                 work.set_item_status(project, item.id, ItemStatus::Claimed)
                     .await?;
+                if opening == ClaimOpening::Reopens {
+                    work.record(
+                        now,
+                        EventKind::ItemReopened(ItemReopened {
+                            item: item.id,
+                            by: claim.member,
+                        }),
+                    )
+                    .await?;
+                }
                 EventKind::Claimed(Claimed {
                     item: claim.item,
                     member: claim.member,
@@ -376,12 +387,42 @@ mod tests {
     use dibs_domain::event::{GrantEnd, GrantRevoked};
     use dibs_domain::handle::Handle;
 
+    use dibs_domain::import::{ImportBatch, Listing, ReportedItem};
+    use dibs_domain::item::{ExternalRef, Priority, SourceId, Title};
+
     use super::*;
     use crate::named::Refusal;
     use crate::use_cases::testing::Env;
     use crate::use_cases::{
         Complete, CreateItem, CreateItemInput, Grant, GrantInput, InitProject, InitProjectInput,
+        UpsertItems,
     };
+
+    /// Reports the item to the project as the board's importer lists it, open or closed there.
+    async fn import(env: &Env, reference: &str, closed: bool) -> ItemId {
+        let reported = ReportedItem {
+            reference: ExternalRef::parse(reference).unwrap(),
+            title: Title::parse("Refund rounding").unwrap(),
+            closed,
+            listing: Some(Listing {
+                areas_hint: Vec::new(),
+                priority: Priority::default(),
+                source_status: None,
+                blocked_by: Vec::new(),
+            }),
+        };
+        let batch = ImportBatch::new(
+            Some(SourceId::parse("board").unwrap()),
+            false,
+            vec![reported],
+        )
+        .unwrap();
+        UpsertItems::new(&env.deps)
+            .execute(&env.importer, batch)
+            .await
+            .unwrap();
+        env.item(reference).await
+    }
 
     fn area(text: &str) -> QualifiedArea {
         QualifiedArea::parse(text).unwrap()
@@ -563,6 +604,78 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), "item_closed");
+        assert!(matches!(
+            error,
+            AppError::ItemClosed {
+                status: ItemStatus::Done
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_completed_item_its_tracker_still_has_open_is_claimed_again_and_the_log_says_so() {
+        let env = Env::new().await;
+        let item = import(&env, "gh:acme/widgets#1", false).await;
+        let claim = ClaimItem::new(&env.deps);
+        claim
+            .execute(&env.bob.actor, input(item, env.bob.session, &[]))
+            .await
+            .unwrap();
+        Complete::new(&env.deps)
+            .execute(&env.bob.actor, item)
+            .await
+            .unwrap();
+        let before = env.events().await.len();
+
+        let made = claim
+            .execute(
+                &env.alice.actor,
+                input(item, env.alice.session, &["billing"]),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(made.outcome, ClaimOutcome::New { .. }));
+        assert_eq!(made.holder.as_str(), "alice");
+        let stored = {
+            let mut tx = env.deps.store.begin().await.unwrap();
+            tx.item(env.project, item).await.unwrap().unwrap()
+        };
+        assert_eq!(stored.status, ItemStatus::Claimed);
+        let appended: Vec<EventKind> = env.events().await[before..]
+            .iter()
+            .map(|event| event.kind.clone())
+            .collect();
+        assert_eq!(
+            appended[0],
+            EventKind::ItemReopened(ItemReopened {
+                item,
+                by: env.alice.actor.member,
+            })
+        );
+        assert_eq!(appended[1].name(), "claimed");
+    }
+
+    #[tokio::test]
+    async fn a_completed_item_its_tracker_closed_stays_shut() {
+        let env = Env::new().await;
+        let item = import(&env, "gh:acme/widgets#1", false).await;
+        let claim = ClaimItem::new(&env.deps);
+        claim
+            .execute(&env.bob.actor, input(item, env.bob.session, &[]))
+            .await
+            .unwrap();
+        Complete::new(&env.deps)
+            .execute(&env.bob.actor, item)
+            .await
+            .unwrap();
+        import(&env, "gh:acme/widgets#1", true).await;
+
+        let error = claim
+            .execute(&env.bob.actor, input(item, env.bob.session, &[]))
+            .await
+            .unwrap_err();
+
         assert!(matches!(
             error,
             AppError::ItemClosed {

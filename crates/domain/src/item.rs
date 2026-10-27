@@ -198,6 +198,45 @@ pub enum ItemStatus {
     Dropped,
 }
 
+/// How a claim may be made on an item in its present state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimOpening {
+    /// The item is open or claimed: the claim is decided as any other.
+    AsItStands,
+    /// The item was completed, but the tracker it is imported from still has it open: the work
+    /// came back, and the claim brings the item back with it.
+    Reopens,
+}
+
+/// Why an item cannot be claimed: it is done for good, or it was given up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("the item is done or dropped, and nothing has it open")]
+pub struct ItemShut {
+    /// Where the item stands.
+    pub status: ItemStatus,
+}
+
+/// Whether an item may be claimed, given where it stands, whether an importer lists it, and
+/// whether its tracker closed it.
+///
+/// A completed item stays completed unless the tracker it is imported from still has it open:
+/// work that went on to be checked and came back is claimed again on the same item. A local item
+/// has no tracker to say so, and a dropped item was given up, so neither comes back.
+///
+/// # Errors
+/// [`ItemShut`] when the item is done or dropped and no tracker has it open.
+pub const fn claim_opening(
+    status: ItemStatus,
+    imported: bool,
+    closed_in_tracker: bool,
+) -> Result<ClaimOpening, ItemShut> {
+    match status {
+        ItemStatus::Open | ItemStatus::Claimed => Ok(ClaimOpening::AsItStands),
+        ItemStatus::Done if imported && !closed_in_tracker => Ok(ClaimOpening::Reopens),
+        ItemStatus::Done | ItemStatus::Dropped => Err(ItemShut { status }),
+    }
+}
+
 /// How soon an item should be picked up: 0 to 4, lower is sooner; 2 when nothing says otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
@@ -704,6 +743,47 @@ mod tests {
             &github_repos(),
             &RefSchemeRegistry::standard(),
         )
+    }
+
+    #[test]
+    fn an_open_or_claimed_item_is_claimed_as_it_stands() {
+        for status in [ItemStatus::Open, ItemStatus::Claimed] {
+            assert_eq!(
+                claim_opening(status, true, true),
+                Ok(ClaimOpening::AsItStands)
+            );
+        }
+    }
+
+    #[test]
+    fn a_completed_item_its_tracker_still_has_open_is_claimed_again() {
+        assert_eq!(
+            claim_opening(ItemStatus::Done, true, false),
+            Ok(ClaimOpening::Reopens)
+        );
+    }
+
+    #[test]
+    fn a_completed_item_stays_shut_once_its_tracker_closed_it_or_when_it_has_none() {
+        for (imported, closed) in [(true, true), (false, false), (false, true)] {
+            assert_eq!(
+                claim_opening(ItemStatus::Done, imported, closed),
+                Err(ItemShut {
+                    status: ItemStatus::Done
+                }),
+                "imported {imported}, closed {closed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dropped_item_stays_shut_whatever_its_tracker_says() {
+        assert_eq!(
+            claim_opening(ItemStatus::Dropped, true, false),
+            Err(ItemShut {
+                status: ItemStatus::Dropped
+            })
+        );
     }
 
     #[test]

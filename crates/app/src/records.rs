@@ -14,7 +14,8 @@ use dibs_domain::ids::{
 };
 use dibs_domain::import::KnownItem;
 use dibs_domain::item::{
-    ExternalRef, ItemMeta, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
+    ClaimOpening, ExternalRef, ItemMeta, ItemRepository, ItemShut, ItemStatus, Priority, SourceId,
+    SourceStatus, Title, claim_opening,
 };
 use dibs_domain::member::Role;
 use dibs_domain::message::{Author, Body, Importance, Recipients, SessionLabel, Subject};
@@ -177,9 +178,17 @@ impl ItemRecord {
         }
     }
 
-    /// Whether the item is done or dropped, so nobody may claim it any more.
+    /// Whether the item is done or dropped.
     pub fn is_closed(&self) -> bool {
         matches!(self.status, ItemStatus::Done | ItemStatus::Dropped)
+    }
+
+    /// How a claim may be made on the item, given where it stands and what its tracker says.
+    ///
+    /// # Errors
+    /// [`ItemShut`] when the item is done or dropped and no tracker has it open.
+    pub const fn claim_opening(&self) -> Result<ClaimOpening, ItemShut> {
+        claim_opening(self.status, self.source.is_some(), self.closed)
     }
 
     /// The facts an importer supplies about the item.

@@ -412,8 +412,11 @@ included); a renewal adds the requested areas to those held and lists in `droppe
 because another member holds them now, another live wide claim names them now, or the settings dropped them. Refusals:
 `held` (another member's live claim holds the item), `stale` (their claim is stale: only a takeover may take it),
 `area_held` (another member's live claim holds an area, or another claim already waits for it to be handed over; see
-below), `kind_fixed`, `unknown_area`, `invalid_area`, `ambiguous_area`, `item_closed`, `invalid_request` for a `kind`
-that is neither `feature` nor `debt`. An area belongs to one member at a time. A claim on a blocked item is made all the same — dependent work
+below), `kind_fixed`, `unknown_area`, `invalid_area`, `ambiguous_area`, `item_closed` (a dropped item, or a done one
+no tracker has open), `invalid_request` for a `kind` that is neither `feature` nor `debt`. A done item an importer lists
+and its tracker has not closed (`closed: false`) is claimed again: the work went on to be checked and came back, so the
+claim is made as a new one, the item is `claimed` again, and the log appends `item_reopened` before `claimed`. A local
+item has no tracker to say so and stays done; a dropped item stays dropped. An area belongs to one member at a time. A claim on a blocked item is made all the same — dependent work
 is often started in parallel — and `blocked_by` lists, as item refs, the items it waits for that are neither done nor
 closed, for the client to warn about. `item` is the claimed item as an item ref, so a client names it by its reference.
 
@@ -972,6 +975,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `claimed`, `renewed` | `item`, `member`, `session`, `host`, `areas` |
 | `taken_over` | `item`, `member`, `previous`, `session`, `host`, `areas` |
 | `released`, `completed` | `item`, `member` |
+| `item_reopened` | `item`, `by` (the member whose claim brought the done item back) |
 | `force_released` | `item`, `member`, `by` (the admin; `null` for the operator) |
 | `reserved` | `item`, `member`, `areas`, `paths` |
 | `granted` | `grant`, `item`, `area`, `from`, `to` |

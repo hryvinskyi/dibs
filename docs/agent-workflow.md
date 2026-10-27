@@ -175,6 +175,9 @@ that still stand. Your own claims never overlap each other.
 - `dibs_release` when you stop working on an item without finishing it, so the item and its areas are free again.
 - `dibs_done` when the work shipped without a pull request; a merge of the pull request you recorded completes the claim
   for you.
+- Work handed on to be checked is not done yet: give its areas up (`dibs_narrow`) and keep the claim, so the files are
+  free and the work is still yours when it comes back. A done item whose tracker still has it open can be claimed
+  again, and the claim brings it back; one the tracker closed, or a local item, stays done.
 
 A claim stays live while your sessions send heartbeats; dibs sends them in the background. One that goes without a
 heartbeat for the project's `stale_after` becomes stale; a claim in review never does.

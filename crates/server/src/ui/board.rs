@@ -153,7 +153,8 @@ const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependen
      settings_changed slot_taken slot_renewed slot_queued slot_left slot_offered \
      slot_offer_lapsed slot_released slot_expired slot_force_released slot_stalled slot_resumed \
      slot_stall_taken_over escalated acked thread_started member_removed overlap_found \
-     footprint_changed yield_requested area_handed_over wait_withdrawn claim_narrowed";
+     footprint_changed yield_requested area_handed_over wait_withdrawn claim_narrowed \
+     item_reopened";
 
 /// An escalation waiting for an arbiter, as the board's banner shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
