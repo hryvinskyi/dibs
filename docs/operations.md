@@ -615,6 +615,10 @@ names 0.1.3 as its `min_binary`, since its workflow tells agents to ask with `di
 fired it (RUSTSEC-2026-0384); the server's event stream ticks on such a timer. 0.1.4 runs on 1.54.1 and changes nothing
 else: upgrade the server, and the clients when convenient.
 
+**0.1.5, an admin's token running an integration's job.** A server of 0.1.5 counts an admin's calls to the routes an
+integration's job makes as integration calls, so a forge job run under an admin's own token no longer leaves the
+project reported silent. Only the server changes: upgrade it; the clients may stay.
+
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
