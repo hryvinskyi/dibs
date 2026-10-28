@@ -238,7 +238,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Let another member edit inside an area you hold, for the work item they are doing. Use it when you agreed that someone else may change code in your area."
+        description = "Let another member edit inside an area you hold, for the work item they are doing. Use it when you agreed that someone else may change code in your area. dibs tells them in a message about their item, which reaches the session working on it; you need not write to them."
     )]
     async fn dibs_grant(&self, Parameters(input): Parameters<GrantInput>) -> CallToolResult {
         self.perform(|link| async move { link.grant(input).await })

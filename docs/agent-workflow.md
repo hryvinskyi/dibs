@@ -47,13 +47,15 @@ When dibs refuses an edit, the area belongs to another member's live claim. Do n
 - ask the holder for a grant: `dibs_ask_grant` with your item and the area, or `dibs ask-grant <your item> --area
   <area>`. dibs starts a conversation with them about the item their claim holds, so it reaches the session working
   under that claim, between its tool calls, with the command that grants it. Ask this way, not with `dibs_send`: a
-  message about your own item is kept for no session of theirs. Their answer, a refusal or a question, arrives in that
-  conversation; do not edit there until `dibs_check` says `granted`. The grant is theirs to give, or
+  message about your own item is kept for no session of theirs. A refusal or a question arrives in that conversation;
+  a grant arrives as a message from dibs about your item, between your tool calls. Do not edit there until
+  `dibs_check` says `granted`. The grant is theirs to give, or
 - message the holder (`dibs_send`) to agree on a change in their area that a grant does not settle — one they make
   themselves, or one you need to talk through first.
 
 A grant asked of you is listed in your session brief, with the command that gives it, until you grant it, answer in its
-conversation, or it lapses; it is your person's decision, so tell them and never grant on your own.
+conversation, or it lapses; it is your person's decision, so tell them and never grant on your own. Giving it tells the
+member who asked, so there is nothing to answer in the conversation unless you want to add something.
 
 A claim that is refused because the item or an area is held names the holder and the item they hold it for. When the
 item is held, ask them; do not claim around them. When an area is held, the claim is refused whole: claim your item

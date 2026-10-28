@@ -288,6 +288,29 @@ mod scenario {
             [Verdict::Granted { .. }]
         ));
 
+        // dibs tells Bob about the grant; he reads it.
+        let told = app
+            .inbox
+            .execute(&team.bob, unread_only(true))
+            .await
+            .unwrap()
+            .threads;
+        assert_eq!(told.len(), 1);
+        assert!(
+            told[0]
+                .thread
+                .record
+                .subject
+                .as_str()
+                .starts_with("Granted: default:billing for "),
+            "{:?}",
+            told[0].thread.record.subject
+        );
+        app.mark_read
+            .execute(&team.bob, told[0].thread.record.id)
+            .await
+            .unwrap();
+
         // Bob tells Alice; she reads and answers.
         let started = app
             .start_thread
@@ -437,6 +460,8 @@ mod scenario {
                 "claimed",
                 "claimed",
                 "granted",
+                "thread_started",
+                "message_posted",
                 "thread_started",
                 "message_posted",
                 "message_posted",

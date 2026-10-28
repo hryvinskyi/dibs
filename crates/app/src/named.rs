@@ -93,6 +93,13 @@ impl ItemName {
                 .and_then(|reference| schemes.link(reference)),
         }
     }
+
+    /// How a command names the item: by its reference when it has one, else by its local id.
+    pub(crate) fn key(&self) -> String {
+        self.external_ref
+            .as_ref()
+            .map_or_else(|| self.id.to_string(), ToString::to_string)
+    }
 }
 
 /// One path's verdict with the handles of the members it names.

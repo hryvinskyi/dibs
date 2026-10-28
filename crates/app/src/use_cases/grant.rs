@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 
+use dibs_domain::area::QualifiedArea;
 use dibs_domain::event::{EventKind, Granted};
 use dibs_domain::grant::{self, GrantOutcome, decide_grant};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{GrantId, ItemId};
+use dibs_domain::message::{Author, Importance, Recipients};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -17,6 +19,7 @@ use crate::named::{ItemName, NamedGrant, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::GrantRecord;
 use crate::use_cases::common::{existing_item, member_by_handle};
+use crate::use_cases::writing::{Posted, SystemPost, titled_body};
 use crate::work::Work;
 
 /// The grant to give.
@@ -42,7 +45,9 @@ pub struct GrantResult {
 }
 
 /// Records the caller's consent that another member may edit inside an area the caller holds, for
-/// the grantee's live claim on an item. Giving a grant that exists changes nothing.
+/// the grantee's live claim on an item, and tells the grantee in a conversation about that item,
+/// so that it reaches the session working under their claim whether they asked for it or not.
+/// Giving a grant that exists changes nothing and tells nobody.
 pub struct Grant {
     ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
@@ -121,25 +126,76 @@ impl Grant {
                     }),
                 )
                 .await?;
+                let item = ItemName::of(&item, &self.ref_schemes);
                 let grant = Names::load(&mut work).await?.grant(record)?;
+                let text = GrantedText {
+                    granter: &grant.from,
+                    item: &item,
+                    area: &grant.record.grant.area,
+                };
+                SystemPost {
+                    ids: Posted::next(&*self.ids),
+                    subject: text.subject(),
+                    item: Some(item.id),
+                    on_behalf_of: Author::Member(actor.member),
+                    to: Recipients::members([grantee.id].into())?,
+                    body: titled_body(&text.lead(), None)?,
+                    importance: Importance::High,
+                    ack_required: false,
+                }
+                .send(&mut work, now)
+                .await?;
                 work.commit(&*self.notifier).await?;
                 Ok(GrantResult {
                     grant,
                     created: true,
-                    item: ItemName::of(&item, &self.ref_schemes),
+                    item,
                 })
             }
         }
     }
 }
 
+/// What the grantee is told when a grant is given.
+struct GrantedText<'a> {
+    /// The holder who granted.
+    granter: &'a Handle,
+    /// The grantee's item, the grant's item.
+    item: &'a ItemName,
+    /// The area.
+    area: &'a QualifiedArea,
+}
+
+impl GrantedText<'_> {
+    /// The conversation's subject: the area, and the grantee's item by its reference, else its
+    /// title.
+    fn subject(&self) -> String {
+        let item = self
+            .item
+            .external_ref
+            .as_ref()
+            .map_or_else(|| self.item.title.to_string(), ToString::to_string);
+        format!("Granted: {} for {item}", self.area)
+    }
+
+    /// The message: who granted what, for which item, that the edit may go ahead now, and how
+    /// long the grant lasts.
+    fn lead(&self) -> String {
+        format!(
+            "{granter} granted you {area} for your work item {key} (\"{title}\"). You may edit there now; dibs_check says granted. It lasts while both claims do, unless {granter} revokes it.",
+            granter = self.granter,
+            area = self.area,
+            key = self.item.key(),
+            title = self.item.title,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use dibs_domain::area::QualifiedArea;
-
     use super::*;
     use crate::use_cases::testing::{Env, Person};
-    use crate::use_cases::{ClaimItem, ClaimItemInput};
+    use crate::use_cases::{ClaimItem, ClaimItemInput, DeliverableMessage, Inbox, InboxQuery};
 
     async fn claim(env: &Env, who: &Person, item: ItemId, areas: &[&str]) {
         ClaimItem::new(&env.deps)
@@ -179,15 +235,24 @@ mod tests {
             .await
             .unwrap();
         assert!(given.created);
+        let kinds = env.kinds_after(before).await;
         assert_eq!(
-            env.kinds_after(before).await,
-            [EventKind::Granted(Granted {
+            kinds[0],
+            EventKind::Granted(Granted {
                 grant: given.grant.record.id,
                 item: bobs,
                 area: QualifiedArea::parse("default:billing").unwrap(),
                 from: env.alice.actor.member,
                 to: env.bob.actor.member,
-            })]
+            })
+        );
+        assert!(
+            matches!(
+                &kinds[1..],
+                [EventKind::ThreadStarted(started), EventKind::MessagePosted(_)]
+                    if started.item == Some(bobs) && started.author == Some(env.alice.actor.member)
+            ),
+            "{kinds:?}"
         );
         let after = env.events().await.len();
         let again = grant
@@ -197,6 +262,51 @@ mod tests {
         assert!(!again.created);
         assert_eq!(again.grant, given.grant);
         assert_eq!(env.events().await.len(), after);
+    }
+
+    async fn deliverable(env: &Env, actor: &crate::actor::Actor) -> Vec<DeliverableMessage> {
+        Inbox::new(&env.deps)
+            .execute(
+                actor,
+                InboxQuery {
+                    unread_only: false,
+                    unacked: false,
+                    deliverable: true,
+                },
+            )
+            .await
+            .unwrap()
+            .deliverable
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_grantee_is_told_between_their_tool_calls_and_the_granter_is_not() {
+        let env = Env::new().await;
+        let alices = env.item("gh:acme/widgets#1").await;
+        let bobs = env.item("gh:acme/widgets#2").await;
+        claim(&env, &env.alice, alices, &["billing"]).await;
+        claim(&env, &env.bob, bobs, &[]).await;
+        Grant::new(&env.deps)
+            .execute(&env.alice.actor, to_bob(bobs, "billing"))
+            .await
+            .unwrap();
+        let told = deliverable(&env, &env.bob.actor).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].thread.record.item, Some(bobs));
+        assert_eq!(
+            told[0].thread.record.subject.as_str(),
+            "Granted: default:billing for gh:acme/widgets#2"
+        );
+        let body = told[0].message.record.body.as_str();
+        assert!(
+            body.starts_with(
+                "alice granted you default:billing for your work item gh:acme/widgets#2"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("You may edit there now"), "{body}");
+        assert!(deliverable(&env, &env.alice.actor).await.is_empty());
     }
 
     #[tokio::test]

@@ -227,22 +227,15 @@ impl AskingText<'_> {
     fn lead(&self) -> String {
         let asker = self.asker;
         let area = self.area;
-        let key = key_of(self.item);
-        let holder_item = key_of(self.holder_item);
+        let key = self.item.key();
+        let holder_item = self.holder_item.key();
         format!(
             "{asker} asks you for a grant: their work item {key} (\"{title}\") needs edits in {area}, which your claim on work item {holder_item} holds.\n\
-             To give it: dibs grant {key} --area {area} --to {asker} (MCP: dibs_grant with key {key}, area {area}, to {asker}). It lasts while both claims do; you can revoke it.\n\
+             To give it: dibs grant {key} --area {area} --to {asker} (MCP: dibs_grant with key {key}, area {area}, to {asker}). It lasts while both claims do; you can revoke it. dibs tells {asker} when it is given.\n\
              To refuse it or ask a question, answer in this conversation. Nothing is granted until you give it.",
             title = self.item.title,
         )
     }
-}
-
-/// How a command names an item: by its reference when it has one, else by its local id.
-fn key_of(item: &ItemName) -> String {
-    item.external_ref
-        .as_ref()
-        .map_or_else(|| item.id.to_string(), ToString::to_string)
 }
 
 fn corrupt(what: &str) -> AppError {

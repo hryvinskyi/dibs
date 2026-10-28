@@ -755,7 +755,9 @@ field or a path that is not a relative path, `not_found` for a session that is n
 
 `POST /v1/grants`, body `{ "item": 14, "area": "default:billing", "to": "bob" }`: the caller, who holds the area, lets
 `to` edit in it, for `to`'s live claim on `item`. Answers `201 { "grant": grant, "created": true, "item": item ref }`,
-or `200` with `"created": false` when the same grant exists. Refusals: `not_holder` (`403`), `self_grant`, `grantee_has_no_claim`,
+or `200` with `"created": false` when the same grant exists. A grant given tells the grantee: dibs starts a conversation
+in the grantor's name, addressed to the grantee and about `item`, whose `high` message says what was granted; a grant
+that exists tells nobody. Refusals: `not_holder` (`403`), `self_grant`, `grantee_has_no_claim`,
 `unknown_area`, `not_found`. A grant ends when it is revoked, when its grantor no longer holds the area, or when the
 grantee's claim ends.
 
