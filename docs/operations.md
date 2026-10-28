@@ -629,6 +629,11 @@ brief and at the end of a claim refused because an area is held, how to ask the 
 without that area, then `dibs ask-grant`. Only the client and the plugin's workflow text change: set
 `DIBS_LATEST_CLIENT` to 0.1.7; the server may stay.
 
+**0.1.8, a grant tells its grantee.** A server of 0.1.8 starts a conversation in the grantor's name when a grant is
+given, addressed to the grantee and about their item, so that it reaches the session working under their claim; a
+request for a grant says that giving it tells the asker. No migration. The client's `dibs_grant` describes it. Upgrade
+the server, then set `DIBS_LATEST_CLIENT` to 0.1.8.
+
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
