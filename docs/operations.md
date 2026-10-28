@@ -619,6 +619,11 @@ else: upgrade the server, and the clients when convenient.
 integration's job makes as integration calls, so a forge job run under an admin's own token no longer leaves the
 project reported silent. Only the server changes: upgrade it; the clients may stay.
 
+**0.1.6, grant requests in the brief.** A server of 0.1.6 records each grant request (migration 12, a new table) and
+answers the requests waiting for the caller's decision under `grant_asks` in `GET /v1/inbox`; a client of 0.1.6 lists
+them in the session brief with the command that gives each. Older clients ignore the field, and a 0.1.6 client reads no
+requests from an older server. Upgrade the server first, then the clients.
+
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
