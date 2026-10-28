@@ -6,7 +6,7 @@ use time::{Duration, OffsetDateTime};
 use crate::area::QualifiedArea;
 use crate::claim::{Claim, held_by_other};
 use crate::event::GrantEnd;
-use crate::ids::{ItemId, MemberId};
+use crate::ids::{ItemId, MemberId, MessageId};
 use crate::settings::ProjectSettings;
 
 /// A holder's consent that `to` may edit inside `area` for the work item `item` — the grantee's
@@ -277,6 +277,48 @@ pub fn decide_grant_ask(
         return Ok(AskOutcome::Own);
     }
     Ok(AskOutcome::Free)
+}
+
+/// A grant asked of the holder of its area, in the conversation the message `message` started.
+///
+/// It is the holder's person's decision, so it is put in front of them until it is decided —
+/// granted, answered in its conversation — or lapses: see [`AskedGrant::waits_on`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskedGrant {
+    /// The message that asked.
+    pub message: MessageId,
+    /// What was asked: by whom, for which of their items, in which area.
+    pub ask: GrantAsk,
+    /// The holder asked.
+    pub holder: MemberId,
+}
+
+impl AskedGrant {
+    /// The item of the holder's claim that holds the area while the request still waits for the
+    /// holder's decision, or `None` once it no longer does.
+    ///
+    /// The request is decided again as [`decide_grant_ask`] decides one, so it waits exactly while
+    /// asking now would ask the same holder: the asker holds a live claim on the item, the holder
+    /// holds the area through a live claim, and no grant of the holder's to the asker in the area
+    /// is in force. A grant in force for another of the asker's items counts, as it lets their
+    /// edit through. A stale claim on either side, a holder who no longer holds the area, or
+    /// another member who now holds it, lapses the request; a claim that is live again brings it
+    /// back. Whether the holder answered in the conversation is not judged here.
+    pub fn waits_on(
+        &self,
+        existing: &[Grant],
+        claims: &[Claim],
+        now: OffsetDateTime,
+        settings: &ProjectSettings,
+    ) -> Option<ItemId> {
+        match decide_grant_ask(&self.ask, existing, claims, now, settings) {
+            Ok(AskOutcome::Ask {
+                holder,
+                holder_item,
+            }) if holder == self.holder => Some(holder_item),
+            Ok(_) | Err(_) => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -667,5 +709,113 @@ mod tests {
                 Ok(AskOutcome::Own)
             );
         }
+    }
+
+    fn asked(asker: MemberId, item: u64, area_text: &str, holder: MemberId) -> AskedGrant {
+        AskedGrant {
+            message: MessageId(91),
+            ask: ask(asker, item, area_text),
+            holder,
+        }
+    }
+
+    #[test]
+    fn an_asked_grant_waits_on_the_holders_item_while_asking_would_ask_them_again() {
+        let settings = two_repo_settings();
+        let claims = [
+            claim(3, ALICE, &["api:search"], 0),
+            claim(1, ALICE, &["api:billing"], 0),
+            claim(2, BOB, &[], 0),
+        ];
+        let request = asked(BOB, 2, "api:billing", ALICE);
+        assert_eq!(
+            request.waits_on(&[], &claims, at(1), &settings),
+            Some(ItemId(1))
+        );
+        let grants = [grant(3, "api:search", ALICE, BOB)];
+        assert_eq!(
+            request.waits_on(&grants, &claims, at(1), &settings),
+            Some(ItemId(1)),
+            "a grant in another area decides nothing"
+        );
+    }
+
+    #[test]
+    fn an_asked_grant_no_longer_waits_once_granted() {
+        let settings = two_repo_settings();
+        let claims = [
+            claim(1, ALICE, &["api:billing"], 0),
+            claim(2, BOB, &[], 0),
+            claim(4, BOB, &[], 0),
+        ];
+        let request = asked(BOB, 2, "api:billing", ALICE);
+        for grants in [
+            [grant(2, "api:billing", ALICE, BOB)],
+            [grant(4, "api:billing", ALICE, BOB)],
+        ] {
+            assert_eq!(
+                request.waits_on(&grants, &claims, at(1), &settings),
+                None,
+                "{grants:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_asked_grant_lapses_with_either_claim() {
+        let settings = two_repo_settings();
+        let request = asked(BOB, 2, "api:billing", ALICE);
+        let late = at(0) + settings.stale_after() + Duration::minutes(1);
+        let cases: [(&str, Vec<Claim>, OffsetDateTime); 6] = [
+            (
+                "the asker's claim ended",
+                vec![claim(1, ALICE, &["api:billing"], 0)],
+                at(1),
+            ),
+            (
+                "the holder's claim ended",
+                vec![claim(2, BOB, &[], 0)],
+                at(1),
+            ),
+            (
+                "the holder no longer declares the area",
+                vec![claim(1, ALICE, &["api:search"], 0), claim(2, BOB, &[], 0)],
+                at(1),
+            ),
+            (
+                "the asker's claim went stale",
+                vec![
+                    claim(1, ALICE, &["api:billing"], 60 * 30),
+                    claim(2, BOB, &[], 0),
+                ],
+                late,
+            ),
+            (
+                "the holder's claim went stale",
+                vec![
+                    claim(1, ALICE, &["api:billing"], 0),
+                    claim(2, BOB, &[], 60 * 30),
+                ],
+                late,
+            ),
+            (
+                "another member holds the area now",
+                vec![claim(1, CAROL, &["api:billing"], 0), claim(2, BOB, &[], 0)],
+                at(1),
+            ),
+        ];
+        for (case, claims, now) in cases {
+            assert_eq!(
+                request.waits_on(&[], &claims, now, &settings),
+                None,
+                "{case}"
+            );
+        }
+        let own = [claim(2, BOB, &["api:billing"], 0)];
+        assert_eq!(
+            request.waits_on(&[], &own, at(1), &settings),
+            None,
+            "the asker holds the area themselves now"
+        );
     }
 }

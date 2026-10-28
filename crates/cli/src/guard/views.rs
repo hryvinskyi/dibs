@@ -2,10 +2,10 @@
 
 use dibs_agent_host::SessionKey;
 use dibs_agent_host::ports::{
-    ClaimLine, ClaimedDelivery as GuardClaim, HeldWay, HoldLine, InboxView, OfferLine, PathAnswer,
-    Pending, PendingMessage, PortError, ReadyLine, SlotHoldLine, SlotHoldState, SlotLine,
-    SlotOfferState, SlotState, SlotWaiterState, StatusView, TouchedBy, UnackedLine, WideAreaLine,
-    WideLine,
+    ClaimLine, ClaimedDelivery as GuardClaim, GrantAskLine, HeldWay, HoldLine, InboxView,
+    OfferLine, PathAnswer, Pending, PendingMessage, PortError, ReadyLine, SlotHoldLine,
+    SlotHoldState, SlotLine, SlotOfferState, SlotState, SlotWaiterState, StatusView, TouchedBy,
+    UnackedLine, WideAreaLine, WideLine,
 };
 use dibs_client::ClientError;
 use dibs_client::api::{
@@ -138,8 +138,8 @@ pub const GUARD_INBOX: InboxRequest = InboxRequest {
 };
 
 /// The conversations with unread messages, the messages awaiting an acknowledgement or still to be
-/// delivered, and the deliveries this machine claimed, as the guard reads them. A claim this dibs
-/// cannot read back is left out.
+/// delivered, the grants asked of the member that wait for their decision, and the deliveries this
+/// machine claimed, as the guard reads them. A claim this dibs cannot read back is left out.
 pub fn inbox(inbox: &Inbox, claims: &[ClaimedDelivery]) -> InboxView {
     let unread: Vec<_> = inbox
         .threads
@@ -172,6 +172,20 @@ pub fn inbox(inbox: &Inbox, claims: &[ClaimedDelivery]) -> InboxView {
             .collect(),
         deliverable: inbox.deliverable.iter().map(pending_message).collect(),
         claims: claims.iter().filter_map(claimed).collect(),
+        grant_asks: inbox
+            .grant_asks
+            .iter()
+            .map(|ask| GrantAskLine {
+                thread: ask.thread_id,
+                asker: ask.asker.clone(),
+                item: ask.item.id,
+                reference: ask.item.external_ref.clone(),
+                title: ask.item.title.clone(),
+                area: ask.area.clone(),
+                holder_item: ask.holder_item.id,
+                holder_reference: ask.holder_item.external_ref.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -462,5 +476,42 @@ mod tests {
                 .to_string()
                 .ends_with("Sign in again with dibs login.")
         );
+    }
+
+    #[test]
+    fn a_grant_asked_of_the_member_reaches_the_brief_and_an_older_server_lists_none() {
+        let answer: Inbox = serde_json::from_value(serde_json::json!({
+            "threads": [],
+            "offers": [],
+            "grant_asks": [{
+                "thread_id": 31,
+                "message_id": 41,
+                "asker": "bob",
+                "item": {"id": 2, "ref": "gh:acme/widgets#2", "title": "Refunds", "link": null},
+                "area": "api:billing",
+                "holder_item": {"id": 1, "ref": null, "title": "Billing", "link": null},
+                "asked_at": "2026-03-02T10:00:00Z"
+            }]
+        }))
+        .unwrap();
+        let view = inbox(&answer, &[]);
+        assert_eq!(
+            view.grant_asks,
+            [GrantAskLine {
+                thread: dibs_domain::ids::ThreadId(31),
+                asker: "bob".parse().unwrap(),
+                item: dibs_domain::ids::ItemId(2),
+                reference: Some(
+                    dibs_domain::item::ExternalRef::parse("gh:acme/widgets#2").unwrap()
+                ),
+                title: "Refunds".parse().unwrap(),
+                area: dibs_domain::area::QualifiedArea::parse("api:billing").unwrap(),
+                holder_item: dibs_domain::ids::ItemId(1),
+                holder_reference: None,
+            }]
+        );
+        let older: Inbox =
+            serde_json::from_value(serde_json::json!({"threads": [], "offers": []})).unwrap();
+        assert!(inbox(&older, &[]).grant_asks.is_empty());
     }
 }

@@ -16,8 +16,8 @@ use dibs_app::named::{
 use dibs_app::records::{MemberRecord, SessionRecord};
 use dibs_app::use_cases::{
     Acknowledged, DeliverableMessage, ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady,
-    NamedOverlap, ReadyEntry, ReadyView as ReadyList, RecipientAck, RecipientStatus,
-    UnackedMessage,
+    NamedOverlap, PendingGrantAsk, ReadyEntry, ReadyView as ReadyList, RecipientAck,
+    RecipientStatus, UnackedMessage,
 };
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::delivery::Delivery;
@@ -892,6 +892,41 @@ impl DeliverableView {
             message: MessageView::of(entry.message),
             awaiting_ack: entry.awaiting_ack,
             ack_grants: entry.ack_grants,
+        }
+    }
+}
+
+/// A grant asked of the caller that waits for their decision.
+#[derive(Debug, Serialize)]
+pub struct GrantAskView {
+    /// The conversation that asks.
+    pub thread_id: ThreadId,
+    /// The message that asked.
+    pub message_id: MessageId,
+    /// Who asks, and would be the grantee.
+    pub asker: Handle,
+    /// The asker's item, the grant's item.
+    pub item: ItemNameView,
+    /// The area.
+    pub area: QualifiedArea,
+    /// The item of the caller's claim that holds the area.
+    pub holder_item: ItemNameView,
+    /// When it was asked.
+    #[serde(serialize_with = "time::serde::rfc3339::serialize")]
+    pub asked_at: OffsetDateTime,
+}
+
+impl GrantAskView {
+    /// The view of a grant request waiting for the caller.
+    pub fn of(ask: PendingGrantAsk) -> Self {
+        Self {
+            thread_id: ask.thread,
+            message_id: ask.message,
+            asker: ask.asker,
+            item: ItemNameView::of(ask.item),
+            area: ask.area,
+            holder_item: ItemNameView::of(ask.holder_item),
+            asked_at: ask.asked_at,
         }
     }
 }

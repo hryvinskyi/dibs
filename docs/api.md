@@ -147,7 +147,7 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/threads/{id}` | people | A conversation with its messages. |
 | `POST /v1/threads/{id}/messages` | people | Post a message. |
 | `POST /v1/threads/{id}/read` | people | Mark a conversation read. |
-| `GET /v1/inbox` | people | Conversations waiting for you, the messages awaiting your acknowledgement or still to be delivered to you, and the slots offered to you. |
+| `GET /v1/inbox` | people | Conversations waiting for you, the messages awaiting your acknowledgement or still to be delivered to you, the slots offered to you, and the grants asked of you that wait for your decision. |
 | `POST /v1/messages/{id}/ack` | people | Acknowledge a message you were sent. |
 | `POST /v1/escalations` | people | Ask the project's arbiters to settle a dispute about an item, a slot or a conversation. |
 | `POST /v1/feedback` | people | Tell the admins a refusal was wrong, or that a rebase conflict was resolved by hand. |
@@ -788,6 +788,12 @@ grants it, `dibs grant <the caller's item> --area <area> --to <caller>` (MCP: `d
 conversation refuses or asks a question. The message counts toward the caller's `raised_per_hour` like any `high`
 message they write: past it, nothing is asked and the answer is `importance_limited` (`429`).
 
+The request is recorded with its message, and the holder's `GET /v1/inbox` lists it under `grant_asks` while it waits
+for their decision: until the holder writes in its conversation (a refusal or a question answers it as a grant does),
+or until asking again would no longer ask them — a grant of theirs to the caller in the area is in force, the caller's
+claim on the item or the holder's claim on the area is no longer live, or the area is held by someone else. Deleting
+the conversation removes the request with it.
+
 Refusals: `grantee_has_no_claim` (`409`) when the caller holds no live claim on `item`, `unknown_area`, `invalid_area`,
 `ambiguous_area`, `not_found` for an unknown item, `importance_limited` (`429`), `invalid_request` for a missing field.
 
@@ -845,7 +851,10 @@ acknowledgement grants edits, so a client never asks an agent to acknowledge it 
 by someone else within the last day, reaching the caller, `high` or `urgent` and unread or awaiting the caller's
 acknowledgement, and not yet delivered to any of the caller's sessions. A wide claim's announcement whose wide claim has
 ended is in neither `unacked` nor `deliverable`, and is not counted as awaiting an acknowledgement: it asks for nothing
-any more.
+any more. Every inbox answer also carries `"grant_asks": [{ "thread_id": 31, "message_id": 41, "asker": "bob", "item":
+item ref, "area": "api:billing", "holder_item": item ref, "asked_at": "…" }, …]`, newest first, at most 10: the grants
+asked of the caller (see [Asking for a grant](#asking-for-a-grant)) that still wait for their decision. `item` is the
+asker's item, the one a grant is for, and `holder_item` the item of the caller's claim that holds the area.
 
 `GET /v1/threads/{id}` answers `{ "thread": thread, "messages": [message, …] }`, oldest first; a message that asks to be
 acknowledged carries `acks`, each recipient ordered by handle with when they acknowledged it (`null` while they have

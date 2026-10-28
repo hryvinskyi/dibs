@@ -721,6 +721,7 @@ mod tests {
             unacked: Vec::new(),
             offers: Vec::new(),
             deliverable: Vec::new(),
+            grant_asks: Vec::new(),
         };
         state.remember_inbox(&inbox, at).unwrap();
         assert_eq!(state.inbox().unwrap().fetched_at, at);
@@ -731,6 +732,10 @@ mod tests {
         assert!(
             written_before_acks.inbox.unacked.is_empty(),
             "a cache written before acknowledgements reads as awaiting none"
+        );
+        assert!(
+            written_before_acks.inbox.grant_asks.is_empty(),
+            "a cache written before grant requests were listed reads as none waiting"
         );
         assert_eq!(state.heartbeat_at(), None);
         state.remember_heartbeat(at).unwrap();
@@ -819,6 +824,7 @@ mod tests {
             unacked: Vec::new(),
             offers: Vec::new(),
             deliverable: Vec::new(),
+            grant_asks: Vec::new(),
         };
         let claim = ClaimedDelivery {
             subject: "42".to_owned(),

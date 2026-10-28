@@ -230,6 +230,29 @@ pub struct InboxView {
     pub deliverable: Vec<PendingMessage>,
     /// The deliveries this machine claimed, for any of its sessions, won or lost.
     pub claims: Vec<ClaimedDelivery>,
+    /// The grants asked of the member that wait for their person's decision, newest first.
+    pub grant_asks: Vec<GrantAskLine>,
+}
+
+/// A grant asked of the member that waits for their decision, as the brief shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantAskLine {
+    /// The conversation that asks.
+    pub thread: ThreadId,
+    /// Who asks, and would be the grantee.
+    pub asker: Handle,
+    /// The asker's item, the grant's item.
+    pub item: ItemId,
+    /// Its reference in an outside tracker, when it has one.
+    pub reference: Option<ExternalRef>,
+    /// Its title.
+    pub title: Title,
+    /// The area.
+    pub area: QualifiedArea,
+    /// The item of the member's claim that holds the area.
+    pub holder_item: ItemId,
+    /// That item's reference in an outside tracker, when it has one.
+    pub holder_reference: Option<ExternalRef>,
 }
 
 /// A message that should reach the member's agent while it works.

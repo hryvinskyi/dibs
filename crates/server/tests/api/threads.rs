@@ -119,7 +119,10 @@ async fn a_thread_starts_and_its_people_read_and_answer() {
     assert_eq!(authors, ["alice", "bob"]);
 
     let waiting = world.get(&team.bob, "/v1/inbox?unread=1").await;
-    assert_eq!(waiting.body, json!({"threads": [], "offers": []}));
+    assert_eq!(
+        waiting.body,
+        json!({"threads": [], "offers": [], "grant_asks": []})
+    );
     let everything = world.get(&team.bob, "/v1/inbox").await;
     assert_eq!(everything.body["threads"][0]["unread"], 0);
     let alices = world.get(&team.alice, "/v1/inbox?unread=true").await;
@@ -196,7 +199,7 @@ async fn a_thread_the_caller_may_not_read_is_missing() {
     );
     assert_eq!(
         world.get(&team.carol, "/v1/inbox").await.body,
-        json!({"threads": [], "offers": []})
+        json!({"threads": [], "offers": [], "grant_asks": []})
     );
 }
 

@@ -16,6 +16,7 @@ use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
 use dibs_domain::escalation::settled_by;
 use dibs_domain::event::{Event, EventKind};
+use dibs_domain::grant::AskedGrant;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
@@ -34,8 +35,8 @@ use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
 
 use crate::ports::{
-    AckRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows, GrantRows,
-    ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
+    AckRows, AskedGrantRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows,
+    GrantRows, ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
     SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
     UiSessionRows, WideAskRows,
 };
@@ -66,6 +67,7 @@ struct State {
     reads: BTreeMap<(ProjectId, MemberId, MessageId), OffsetDateTime>,
     acks: BTreeMap<(ProjectId, MessageId, MemberId), Ack>,
     wide_asks: BTreeMap<(ProjectId, MessageId), WideAsk>,
+    asked_grants: BTreeMap<(ProjectId, MessageId), AskedGrant>,
     escalations: BTreeMap<(ProjectId, MessageId), EscalationRecord>,
     slots: BTreeMap<ProjectId, SlotBoard>,
     deliveries: BTreeMap<(ProjectId, MemberId, DeliverySubject), Delivery>,
@@ -148,7 +150,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 26] = [
+        let checks: [(&'static str, bool); 27] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -240,6 +242,15 @@ impl State {
                         && item(*p, ask.item)
                         && member(*p, ask.from)
                         && member(*p, ask.to)
+                }),
+            ),
+            (
+                "a request for a grant",
+                self.asked_grants.iter().all(|((p, message), asked)| {
+                    self.messages.contains_key(&(*p, *message))
+                        && item(*p, asked.ask.item)
+                        && member(*p, asked.ask.asker)
+                        && member(*p, asked.holder)
                 }),
             ),
             (
@@ -1092,6 +1103,8 @@ impl ThreadRows for MemoryTx {
             .retain(|(p, id, _), _| !(*p == project && gone.contains(id)));
         work.wide_asks
             .retain(|(p, id), _| !(*p == project && gone.contains(id)));
+        work.asked_grants
+            .retain(|(p, id), _| !(*p == project && gone.contains(id)));
         work.escalations
             .retain(|(p, id), _| !(*p == project && gone.contains(id)));
         work.raised
@@ -1252,6 +1265,44 @@ impl WideAskRows for MemoryTx {
                 *p == project && !self.work.acks.contains_key(&(project, *message, ask.to))
             })
             .map(|(_, ask)| ask.clone())
+            .collect())
+    }
+}
+
+#[async_trait]
+impl AskedGrantRows for MemoryTx {
+    async fn insert_asked_grant(
+        &mut self,
+        project: ProjectId,
+        asked: &AskedGrant,
+    ) -> StoreResult<()> {
+        let key = (project, asked.message);
+        if self.work.asked_grants.contains_key(&key) {
+            return Err(StoreError::Duplicate);
+        }
+        self.work.asked_grants.insert(key, asked.clone());
+        Ok(())
+    }
+
+    async fn unanswered_asked_grants(
+        &mut self,
+        project: ProjectId,
+        holder: MemberId,
+    ) -> StoreResult<Vec<AskedGrant>> {
+        let unanswered = |asked: &AskedGrant| {
+            let Some(asking) = self.work.messages.get(&(project, asked.message)) else {
+                return false;
+            };
+            !self.work.messages.iter().any(|((p, _), message)| {
+                *p == project && message.thread == asking.thread && message.author.is(asked.holder)
+            })
+        };
+        Ok(self
+            .work
+            .asked_grants
+            .iter()
+            .filter(|((p, _), asked)| *p == project && asked.holder == holder && unanswered(asked))
+            .map(|(_, asked)| asked.clone())
             .collect())
     }
 }

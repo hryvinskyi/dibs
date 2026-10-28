@@ -1420,6 +1420,30 @@ pub struct Inbox {
     /// for.
     #[serde(default)]
     pub deliverable: Vec<Deliverable>,
+    /// The grants asked of the caller that wait for their decision, newest first; empty from a
+    /// server that does not list them.
+    #[serde(default)]
+    pub grant_asks: Vec<GrantAsk>,
+}
+
+/// A grant asked of the caller that waits for their decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantAsk {
+    /// The conversation that asks.
+    pub thread_id: ThreadId,
+    /// The message that asked.
+    pub message_id: MessageId,
+    /// Who asks, and would be the grantee.
+    pub asker: Handle,
+    /// The asker's item, the grant's item.
+    pub item: ItemName,
+    /// The area.
+    pub area: QualifiedArea,
+    /// The item of the caller's claim that holds the area.
+    pub holder_item: ItemName,
+    /// When it was asked.
+    #[serde(with = "time::serde::rfc3339")]
+    pub asked_at: OffsetDateTime,
 }
 
 /// An acknowledgement recorded.

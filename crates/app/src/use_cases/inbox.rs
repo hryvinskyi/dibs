@@ -5,9 +5,14 @@ use std::sync::Arc;
 
 use time::{Duration, OffsetDateTime};
 
+use dibs_domain::area::QualifiedArea;
 use dibs_domain::delivery::DeliverySubject;
-use dibs_domain::ids::MessageId;
+use dibs_domain::grant::AskedGrant;
+use dibs_domain::handle::Handle;
+use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::message::speaks_for;
+use dibs_domain::ref_scheme::RefSchemeRegistry;
+use dibs_domain::settings::ProjectSettings;
 use dibs_domain::wide::ask_stands;
 
 use dibs_domain::hot_rule::HotRuleRegistry;
@@ -16,10 +21,11 @@ use dibs_domain::slot::SlotName;
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
-use crate::named::{NamedMessage, NamedSummary, NamedThread, Names};
-use crate::ports::{Clock, EventNotifier, IdGen, Store};
+use crate::named::{ItemName, NamedMessage, NamedSummary, NamedThread, Names};
+use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::{MessageRecord, ThreadRecord, ThreadSummary};
 use crate::use_cases::acks::{awaiting, awaiting_per_thread, people, reached};
+use crate::use_cases::common::existing_item;
 use crate::use_cases::readable::readable_summaries;
 use crate::use_cases::slots::Scene;
 use crate::use_cases::unacked::{UnackedMessage, unacked};
@@ -48,7 +54,33 @@ pub struct InboxView {
     /// The messages that may still be delivered to the caller's agent, newest first, when they
     /// were asked for.
     pub deliverable: Option<Vec<DeliverableMessage>>,
+    /// The grants asked of the caller that wait for their decision, newest first, at most
+    /// [`MAX_GRANT_ASKS`].
+    pub grant_asks: Vec<PendingGrantAsk>,
 }
+
+/// A grant asked of the caller that waits for their decision: asked in a conversation they have not
+/// answered, and still asking them, as [`AskedGrant::waits_on`] decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingGrantAsk {
+    /// The conversation that asks.
+    pub thread: ThreadId,
+    /// The message that asked.
+    pub message: MessageId,
+    /// Who asks, and would be the grantee.
+    pub asker: Handle,
+    /// The asker's item, the grant's item.
+    pub item: ItemName,
+    /// The area.
+    pub area: QualifiedArea,
+    /// The item of the caller's claim that holds the area.
+    pub holder_item: ItemName,
+    /// When it was asked.
+    pub asked_at: OffsetDateTime,
+}
+
+/// The most grant requests one inbox answer lists.
+pub const MAX_GRANT_ASKS: usize = 10;
 
 /// A message that should reach the caller's agent while it works and has not reached any of their
 /// sessions yet.
@@ -84,9 +116,11 @@ pub struct PendingOffer {
 /// Lists the threads the caller may read, newest activity first, with what they have not read and
 /// how many messages await their acknowledgement; only the ones with unread messages when asked;
 /// when asked, the messages awaiting their acknowledgement and the messages still to be delivered
-/// to their agent; and the slots on offer to them, after applying and recording what time changed
-/// about the slots — all in one transaction.
+/// to their agent; the slots on offer to them, after applying and recording what time changed
+/// about the slots; and the grants asked of them that wait for their decision — all in one
+/// transaction.
 pub struct Inbox {
+    ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGen>,
@@ -98,6 +132,7 @@ impl Inbox {
     /// Builds the use case.
     pub fn new(deps: &Dependencies) -> Self {
         Self {
+            ref_schemes: deps.ref_schemes.clone(),
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             ids: deps.ids.clone(),
@@ -151,13 +186,76 @@ impl Inbox {
         } else {
             None
         };
+        let grant_asks = self
+            .grant_asks(&mut work, actor, &scene.settings, &names, now)
+            .await?;
         work.commit(&*self.notifier).await?;
         Ok(InboxView {
             threads,
             unacked,
             offers,
             deliverable,
+            grant_asks,
         })
+    }
+
+    /// The grants asked of the actor that wait for their decision, newest first, at most
+    /// [`MAX_GRANT_ASKS`]: asked in a conversation they wrote nothing in, and still waiting by the
+    /// claims and grants of now.
+    async fn grant_asks(
+        &self,
+        work: &mut Work,
+        actor: &Actor,
+        settings: &ProjectSettings,
+        names: &Names,
+        now: OffsetDateTime,
+    ) -> Result<Vec<PendingGrantAsk>, AppError> {
+        let project = work.project_id();
+        let asked = work.unanswered_asked_grants(project, actor.member).await?;
+        if asked.is_empty() {
+            return Ok(Vec::new());
+        }
+        let claims = work.claims(project).await?;
+        let grants: Vec<_> = work
+            .grants(project)
+            .await?
+            .into_iter()
+            .map(|record| record.grant)
+            .collect();
+        let mut waiting: Vec<(MessageRecord, AskedGrant, ItemId)> = Vec::new();
+        for request in asked {
+            let Some(holder_item) = request.waits_on(&grants, &claims, now, settings) else {
+                continue;
+            };
+            let message = work
+                .message(project, request.message)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Store(StoreError::Corrupt {
+                        what: format!(
+                            "a grant request names message {}, which does not exist",
+                            request.message
+                        ),
+                    })
+                })?;
+            waiting.push((message, request, holder_item));
+        }
+        waiting.sort_by_key(|(message, _, _)| std::cmp::Reverse((message.created_at, message.id)));
+        let mut listed = Vec::new();
+        for (message, request, holder_item) in waiting.into_iter().take(MAX_GRANT_ASKS) {
+            let item = existing_item(work, request.ask.item).await?;
+            let holder_item = existing_item(work, holder_item).await?;
+            listed.push(PendingGrantAsk {
+                thread: message.thread,
+                message: message.id,
+                asker: names.handle(request.ask.asker)?,
+                item: ItemName::of(&item, &self.ref_schemes),
+                area: request.ask.area,
+                holder_item: ItemName::of(&holder_item, &self.ref_schemes),
+                asked_at: message.created_at,
+            });
+        }
+        Ok(listed)
     }
 }
 
@@ -600,5 +698,188 @@ mod tests {
             .unwrap();
         assert!(acked.granted.is_empty());
         assert!(acked.announcement_ended);
+    }
+
+    /// alice holds billing on `#1` and search on `#3`; bob claims `#2` and `#4` and asks alice for
+    /// billing for `#2`. Answers the conversation that asks, and the four items in that order.
+    async fn asked_of_alice() -> (Env, ThreadId, [ItemId; 4]) {
+        use crate::use_cases::{AskGrant, AskGrantInput, ClaimItem, ClaimItemInput, GrantAsked};
+
+        let env = Env::new().await;
+        let claim =
+            |who: &crate::use_cases::testing::Person, item, areas: &[&str]| ClaimItemInput {
+                wide: None,
+                item,
+                session: who.session,
+                areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+                kind: None,
+            };
+        let claim_item = ClaimItem::new(&env.deps);
+        let mut items = [ItemId(0); 4];
+        for (n, (who, areas)) in [
+            (&env.alice, &["billing"][..]),
+            (&env.bob, &[][..]),
+            (&env.alice, &["search"][..]),
+            (&env.bob, &[][..]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            items[n] = env.item(&format!("gh:acme/widgets#{}", n + 1)).await;
+            claim_item
+                .execute(&who.actor, claim(who, items[n], areas))
+                .await
+                .unwrap();
+        }
+        let asked = AskGrant::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                AskGrantInput {
+                    item: items[1],
+                    area: "billing".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        let GrantAsked::Asked { thread, .. } = asked.outcome else {
+            panic!("not asked: {asked:?}");
+        };
+        (env, thread, items)
+    }
+
+    async fn grant_asks(env: &Env, actor: &Actor) -> Vec<PendingGrantAsk> {
+        Inbox::new(&env.deps)
+            .execute(actor, InboxQuery::default())
+            .await
+            .unwrap()
+            .grant_asks
+    }
+
+    #[tokio::test]
+    async fn a_grant_asked_of_the_caller_is_listed_with_what_answering_it_needs() {
+        let (env, thread, items) = asked_of_alice().await;
+        let [listed] = &grant_asks(&env, &env.alice.actor).await[..] else {
+            panic!("one request");
+        };
+        assert_eq!(listed.thread, thread);
+        assert_eq!(listed.asker.as_str(), "bob");
+        assert_eq!(
+            listed.item.external_ref.as_ref().map(ToString::to_string),
+            Some("gh:acme/widgets#2".to_owned())
+        );
+        assert_eq!(listed.item.title.as_str(), "Work on gh:acme/widgets#2");
+        assert_eq!(listed.area.to_string(), "default:billing");
+        assert_eq!(listed.item.id, items[1]);
+        assert_eq!(
+            listed.holder_item.id, items[0],
+            "the claim of the caller's that holds the area"
+        );
+        assert_eq!(listed.asked_at, env.now());
+        assert!(
+            grant_asks(&env, &env.bob.actor).await.is_empty(),
+            "the asker's inbox lists nothing"
+        );
+        MarkRead::new(&env.deps)
+            .execute(&env.alice.actor, thread)
+            .await
+            .unwrap();
+        assert_eq!(
+            grant_asks(&env, &env.alice.actor).await.len(),
+            1,
+            "reading it decides nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn grant_requests_are_listed_newest_first() {
+        use crate::use_cases::{AskGrant, AskGrantInput};
+
+        let (env, first, items) = asked_of_alice().await;
+        env.advance(time::Duration::minutes(1));
+        AskGrant::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                AskGrantInput {
+                    item: items[3],
+                    area: "search".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        let listed = grant_asks(&env, &env.alice.actor).await;
+        let areas: Vec<String> = listed.iter().map(|ask| ask.area.to_string()).collect();
+        assert_eq!(areas, ["default:search", "default:billing"]);
+        assert_eq!(listed[0].holder_item.id, items[2]);
+        assert_eq!(listed[1].thread, first);
+    }
+
+    #[tokio::test]
+    async fn a_granted_request_is_no_longer_listed() {
+        use crate::use_cases::{Grant, GrantInput};
+
+        let (env, _, items) = asked_of_alice().await;
+        Grant::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                GrantInput {
+                    item: items[1],
+                    area: "billing".to_owned(),
+                    to: Handle::parse("bob").unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(grant_asks(&env, &env.alice.actor).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_answered_in_its_conversation_is_no_longer_listed() {
+        use crate::use_cases::{PostMessage, PostMessageInput};
+
+        let (env, thread, _) = asked_of_alice().await;
+        PostMessage::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                PostMessageInput {
+                    thread,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("It is a one-line change.").unwrap(),
+                    importance: Importance::Normal,
+                    ack_required: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            grant_asks(&env, &env.alice.actor).await.len(),
+            1,
+            "the asker writing again answers nothing"
+        );
+        PostMessage::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                PostMessageInput {
+                    thread,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("Not today, billing is mid-migration.").unwrap(),
+                    importance: Importance::Normal,
+                    ack_required: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(grant_asks(&env, &env.alice.actor).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_lapses_with_the_askers_claim() {
+        use crate::use_cases::Release;
+
+        let (env, _, items) = asked_of_alice().await;
+        Release::new(&env.deps)
+            .execute(&env.bob.actor, items[1])
+            .await
+            .unwrap();
+        assert!(grant_asks(&env, &env.alice.actor).await.is_empty());
     }
 }

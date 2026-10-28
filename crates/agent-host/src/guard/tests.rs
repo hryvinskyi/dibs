@@ -8,7 +8,7 @@ use time::{Duration, OffsetDateTime};
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::{ItemId, MessageId};
+use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::item::ExternalRef;
 use dibs_domain::message::Importance;
 use dibs_domain::paths::RelPath;
@@ -21,8 +21,8 @@ use super::*;
 use crate::adapter::{HostAdapter, HostId, ParseError};
 use crate::neutral::Neutral;
 use crate::ports::{
-    CoordinationGateway, HeldWay, HoldLine, InboxView, LocalCache, StatusView, TouchedBy,
-    UnackedLine, Upkeep,
+    CoordinationGateway, GrantAskLine, HeldWay, HoldLine, InboxView, LocalCache, StatusView,
+    TouchedBy, UnackedLine, Upkeep,
 };
 
 const START: OffsetDateTime = OffsetDateTime::UNIX_EPOCH;
@@ -1428,6 +1428,16 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
                 importance: Importance::Urgent,
             }],
             offers: Vec::new(),
+            grant_asks: vec![GrantAskLine {
+                thread: ThreadId(31),
+                asker: handle("alice"),
+                item: ItemId(4),
+                reference: None,
+                title: "Refunds".parse().unwrap(),
+                area: area("api:billing"),
+                holder_item: ItemId(3),
+                holder_reference: None,
+            }],
             ..InboxView::default()
         });
     });
@@ -1437,6 +1447,10 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
         .unwrap()
         .to_owned();
     assert!(context.contains("Unread conversations: 1"), "{context}");
+    assert!(
+        context.contains("Grant requests waiting for your person's decision (1):\n- alice asks for api:billing for 4 \"Refunds\""),
+        "{context}"
+    );
     assert!(
         context.contains("- urgent from alice: \"Freeze main\" (message 9)"),
         "{context}"

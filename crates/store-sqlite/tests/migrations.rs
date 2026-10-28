@@ -928,4 +928,62 @@ mod migrations {
             );
         }
     }
+
+    #[tokio::test]
+    async fn grant_asks_start_empty_on_a_database_of_before_and_refuse_a_dangling_row() {
+        use dibs_domain::grant::{AskedGrant, GrantAsk};
+
+        let (_dir, path) = database_at(11, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let project = ProjectId(1);
+        let alice = MemberId(11);
+        assert!(
+            tx.unanswered_asked_grants(project, alice)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let asked = AskedGrant {
+            message: MessageId(93),
+            ask: GrantAsk {
+                asker: MemberId(12),
+                item: ItemId(52),
+                area: QualifiedArea::parse("default:billing").unwrap(),
+            },
+            holder: alice,
+        };
+        tx.insert_asked_grant(project, &asked).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.unanswered_asked_grants(project, alice).await.unwrap(),
+            [asked]
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for update in [
+            "UPDATE grant_asks SET holder_id = 99",
+            "UPDATE grant_asks SET item_id = 99",
+            "UPDATE grant_asks SET message_id = 99",
+            "UPDATE grant_asks SET asker_id = 'bob'",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{update}"
+            );
+        }
+    }
 }

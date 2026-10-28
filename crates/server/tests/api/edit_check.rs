@@ -383,6 +383,50 @@ async fn asking_for_a_grant_reaches_the_holder_about_their_own_item() {
 }
 
 #[tokio::test]
+async fn a_grant_asked_waits_in_the_holders_inbox_until_they_answer() {
+    let team = Team::new().await;
+    let world = &team.world;
+    let asked = world
+        .post(
+            &team.bob,
+            "/v1/grant-requests",
+            json!({"item": team.bob_item, "area": "api:billing"}),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::CREATED, "{}", asked.body);
+    let thread = asked.body["thread_id"].as_u64().unwrap();
+    let read = world
+        .get(&team.alice, &format!("/v1/threads/{thread}"))
+        .await;
+    let message = read.body["messages"][0]["id"].clone();
+    let asked_at = read.body["messages"][0]["created_at"].clone();
+
+    let inbox = world.get(&team.alice, "/v1/inbox").await;
+    assert_eq!(inbox.status, StatusCode::OK, "{}", inbox.body);
+    assert_eq!(
+        inbox.body["grant_asks"],
+        json!([{"thread_id": thread, "message_id": message, "asker": "bob",
+                "item": {"id": team.bob_item, "ref": null, "title": "Search", "link": null},
+                "area": "api:billing",
+                "holder_item": {"id": team.alice_item, "ref": null, "title": "Billing", "link": null},
+                "asked_at": asked_at}])
+    );
+    let bobs = world.get(&team.bob, "/v1/inbox").await;
+    assert_eq!(bobs.body["grant_asks"], json!([]), "only the holder's");
+
+    let answered = world
+        .post(
+            &team.alice,
+            &format!("/v1/threads/{thread}/messages"),
+            json!({"label": "laptop/cli", "body": "Not today: billing is mid-migration."}),
+        )
+        .await;
+    assert_eq!(answered.status, StatusCode::CREATED, "{}", answered.body);
+    let after = world.get(&team.alice, "/v1/inbox").await;
+    assert_eq!(after.body["grant_asks"], json!([]), "a refusal answers it");
+}
+
+#[tokio::test]
 async fn nobody_is_asked_for_a_free_area_or_ones_own() {
     let team = Team::new().await;
     let world = &team.world;

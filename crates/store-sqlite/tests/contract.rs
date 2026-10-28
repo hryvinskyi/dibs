@@ -26,7 +26,7 @@ mod contract {
         Claimed, Completed, Event, EventKind, GrantEnd, GrantRevoked, ItemCreated, MessagePosted,
         Reserved, SettingsChanged,
     };
-    use dibs_domain::grant::Grant;
+    use dibs_domain::grant::{AskedGrant, Grant, GrantAsk};
     use dibs_domain::handle::Handle;
     use dibs_domain::handover::{ClaimKind, PendingArea};
     use dibs_domain::ids::{
@@ -134,6 +134,7 @@ mod contract {
         ack_requests_leave_out_my_own_and_the_acknowledged,
         wide_claims_keep_their_scope_and_reason,
         wide_asks_are_one_per_message_and_open_until_their_holder_acks,
+        asked_grants_are_one_per_message_and_wait_until_their_holder_writes_in_the_conversation,
         read_times_are_kept_per_member,
         events_only_increase_and_page_by_cursor,
         events_keep_every_field,
@@ -2175,6 +2176,90 @@ mod contract {
         );
     }
 
+    fn asked_grant(
+        message: u64,
+        asker: MemberId,
+        item: ItemId,
+        area: &str,
+        holder: MemberId,
+    ) -> AskedGrant {
+        AskedGrant {
+            message: MessageId(message),
+            ask: GrantAsk {
+                asker,
+                item,
+                area: QualifiedArea::parse(area).unwrap(),
+            },
+            holder,
+        }
+    }
+
+    async fn asked_grants_are_one_per_message_and_wait_until_their_holder_writes_in_the_conversation(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        for id in [81, 82, 83] {
+            tx.insert_thread(A, &thread(ThreadId(id), BOB, Some(FIRST), 60))
+                .await
+                .unwrap();
+        }
+        tx.insert_message(A, &message(91, ThreadId(81), BOB, 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(92, ThreadId(82), BOB, 62))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(93, ThreadId(83), ALICE, 63))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(94, ThreadId(81), BOB, 64))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(95, ThreadId(81), 65))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(96, ThreadId(82), ALICE, 66))
+            .await
+            .unwrap();
+        let waiting = asked_grant(91, BOB, SECOND, "api:billing", ALICE);
+        let answered = asked_grant(92, BOB, THIRD, "api:search", ALICE);
+        let to_bob = asked_grant(93, ALICE, FIRST, "web:checkout", BOB);
+        for asked in [&waiting, &answered, &to_bob] {
+            tx.insert_asked_grant(A, asked).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.unanswered_asked_grants(A, ALICE).await.unwrap(),
+            std::slice::from_ref(&waiting),
+            "the asker's own and dibs' messages answer nothing; the holder's answers"
+        );
+        assert_eq!(
+            tx.unanswered_asked_grants(A, BOB).await.unwrap(),
+            std::slice::from_ref(&to_bob),
+            "a message of its holder's in another conversation answers nothing"
+        );
+        assert!(
+            tx.unanswered_asked_grants(B, ALICE)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(is_duplicate(tx.insert_asked_grant(A, &waiting).await));
+        drop(tx);
+
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_asked_grant(A, &asked_grant(99, BOB, SECOND, "api:billing", ALICE))
+            .await
+            .unwrap();
+        assert!(
+            matches!(tx.commit().await, Err(StoreError::Backend(_))),
+            "a request no message carries"
+        );
+    }
+
     fn delivery(
         member: MemberId,
         subject: &DeliverySubject,
@@ -2777,6 +2862,12 @@ mod contract {
         tx.insert_wide_ask(A, &wide_ask(91, FIRST, ALICE, BOB, &["default:billing"]))
             .await
             .unwrap();
+        tx.insert_asked_grant(A, &asked_grant(91, ALICE, FIRST, "default:billing", BOB))
+            .await
+            .unwrap();
+        tx.insert_asked_grant(A, &asked_grant(93, ALICE, FIRST, "default:search", BOB))
+            .await
+            .unwrap();
         tx.insert_raised(A, ALICE, MessageId(91), at(61))
             .await
             .unwrap();
@@ -2809,6 +2900,14 @@ mod contract {
         assert!(tx.acks(A, MessageId(91)).await.unwrap().is_empty());
         assert!(tx.reads_of(A, MessageId(91)).await.unwrap().is_empty());
         assert_eq!(tx.wide_ask(A, MessageId(91)).await.unwrap(), None);
+        let left: Vec<MessageId> = tx
+            .unanswered_asked_grants(A, BOB)
+            .await
+            .unwrap()
+            .iter()
+            .map(|asked| asked.message)
+            .collect();
+        assert_eq!(left, [MessageId(93)], "the other thread's request stays");
         assert!(tx.raised_since(A, ALICE, at(0)).await.unwrap().is_empty());
         assert_eq!(tx.delivery(A, BOB, &delivered).await.unwrap(), None);
         assert!(tx.open_escalations(A).await.unwrap().is_empty());

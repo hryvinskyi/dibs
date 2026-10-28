@@ -21,8 +21,8 @@ use dibs_domain::settings::EditPolicy;
 use dibs_domain::slot::{BranchPattern, Purpose, RepoRef, SlotName};
 
 use crate::ports::{
-    ClaimLine, HeldWay, InboxView, NewerRelease, OfferLine, Pending, ReadyLine, SlotLine,
-    StatusView, TouchedBy, UnackedLine, WideLine,
+    ClaimLine, GrantAskLine, HeldWay, InboxView, NewerRelease, OfferLine, Pending, ReadyLine,
+    SlotLine, StatusView, TouchedBy, UnackedLine, WideLine,
 };
 use crate::text::Text;
 
@@ -646,6 +646,7 @@ impl Brief<'_> {
         }
         if let Some(inbox) = self.inbox {
             offer_lines(&inbox.offers, &mut text);
+            grant_ask_lines(&inbox.grant_asks, &mut text);
             inbox_lines(inbox, &mut text);
             unacked_lines(&inbox.unacked, &mut text);
         }
@@ -885,6 +886,34 @@ fn ready_line(line: &ReadyLine, text: &mut String) {
     }
 }
 
+/// The grants asked of the member that wait for their person's decision, each with the command
+/// that gives it and the conversation that refuses it or asks about it.
+fn grant_ask_lines(asks: &[GrantAskLine], text: &mut String) {
+    if asks.is_empty() {
+        return;
+    }
+    let _ = write!(
+        text,
+        "\nGrant requests waiting for your person's decision ({}):",
+        asks.len()
+    );
+    for ask in asks {
+        let key = item_name(ask.item, ask.reference.as_ref());
+        let _ = write!(
+            text,
+            "\n- {asker} asks for {area} for {key} \"{title}\", which your claim on {holder} holds: dibs grant {key} --area {area} --to {asker} (MCP: dibs_grant); to refuse or ask, answer in conversation {thread} (dibs_thread {thread}).",
+            asker = ask.asker,
+            area = ask.area,
+            title = quoted(ask.title.as_str()),
+            holder = item_name(ask.holder_item, ask.holder_reference.as_ref()),
+            thread = ask.thread,
+        );
+    }
+    text.push_str(
+        "\nA grant is your person's decision, not yours: tell them about each request and do what they decide; never grant on your own.",
+    );
+}
+
 fn inbox_lines(inbox: &InboxView, text: &mut String) {
     if inbox.unread == 0 {
         text.push_str("\nNo unread conversations.");
@@ -945,7 +974,7 @@ fn sentence(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use dibs_domain::ids::MessageId;
+    use dibs_domain::ids::{MessageId, ThreadId};
     use dibs_domain::item::Title;
     use dibs_domain::message::Importance;
 
@@ -1431,6 +1460,74 @@ mod tests {
         assert!(!text.contains("Oldest"), "{text}");
         assert!(text.contains("dibs_ack"), "{text}");
         assert!(text.contains("it authorises nothing"), "{text}");
+    }
+
+    #[test]
+    fn the_brief_puts_each_grant_request_to_the_person_with_its_command() {
+        let me = handle("alice");
+        let inbox = InboxView {
+            unread: 1,
+            subjects: vec![
+                "A grant on api:billing for gh:acme/widgets#2"
+                    .parse()
+                    .unwrap(),
+            ],
+            grant_asks: vec![
+                GrantAskLine {
+                    thread: ThreadId(31),
+                    asker: handle("bob"),
+                    item: ItemId(2),
+                    reference: Some(ExternalRef::parse("gh:acme/widgets#2").unwrap()),
+                    title: Title::parse("Refund \"rounding\"").unwrap(),
+                    area: QualifiedArea::parse("api:billing").unwrap(),
+                    holder_item: ItemId(1),
+                    holder_reference: Some(ExternalRef::parse("gh:acme/widgets#1").unwrap()),
+                },
+                GrantAskLine {
+                    thread: ThreadId(32),
+                    asker: handle("carol"),
+                    item: ItemId(7),
+                    reference: None,
+                    title: Title::parse("Search").unwrap(),
+                    area: QualifiedArea::parse("api:search").unwrap(),
+                    holder_item: ItemId(3),
+                    holder_reference: None,
+                },
+            ],
+            ..InboxView::default()
+        };
+        let text = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: None,
+            inbox: Some(&inbox),
+            status_age: None,
+            newer: None,
+            now: OffsetDateTime::UNIX_EPOCH,
+        }
+        .text();
+        assert!(
+            text.contains(
+                "\nGrant requests waiting for your person's decision (2):\n\
+                 - bob asks for api:billing for gh:acme/widgets#2 \"Refund 'rounding'\", which your claim on gh:acme/widgets#1 holds: dibs grant gh:acme/widgets#2 --area api:billing --to bob (MCP: dibs_grant); to refuse or ask, answer in conversation 31 (dibs_thread 31).\n\
+                 - carol asks for api:search for 7 \"Search\", which your claim on 3 holds: dibs grant 7 --area api:search --to carol (MCP: dibs_grant); to refuse or ask, answer in conversation 32 (dibs_thread 32).\n\
+                 A grant is your person's decision, not yours: tell them about each request and do what they decide; never grant on your own.\n\
+                 Unread conversations: 1"
+            ),
+            "{text}"
+        );
+        let none = InboxView::default();
+        let quiet = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: None,
+            inbox: Some(&none),
+            status_age: None,
+            newer: None,
+            now: OffsetDateTime::UNIX_EPOCH,
+        }
+        .text();
+        assert!(!quiet.contains("Grant requests"), "{quiet}");
     }
 
     #[test]

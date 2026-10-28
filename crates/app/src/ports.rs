@@ -4,8 +4,8 @@
 mod store;
 
 pub use store::{
-    AckRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows, GrantRows,
-    ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
+    AckRows, AskedGrantRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows,
+    GrantRows, ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
     SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
     UiSessionRows, WideAskRows,
 };

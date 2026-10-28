@@ -23,6 +23,7 @@ use dibs_domain::claim::Claim;
 use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
 use dibs_domain::event::{Event, EventKind};
+use dibs_domain::grant::AskedGrant;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
@@ -100,6 +101,7 @@ pub trait Tx:
     + ThreadRows
     + AckRows
     + WideAskRows
+    + AskedGrantRows
     + EscalationRows
     + SlotRows
     + DeliveryRows
@@ -428,9 +430,9 @@ pub trait ThreadRows: Send {
         before: OffsetDateTime,
     ) -> StoreResult<Vec<ThreadActivity>>;
     /// Removes a thread with its recipients and its messages, and with each message what refers to
-    /// it: read marks, acknowledgements, a wide claim's announcement, the record that it counted
-    /// toward its author's limit, its deliveries and its escalation. Answers how many messages
-    /// went; a thread that does not exist removes nothing.
+    /// it: read marks, acknowledgements, a wide claim's announcement, a request for a grant, the
+    /// record that it counted toward its author's limit, its deliveries and its escalation.
+    /// Answers how many messages went; a thread that does not exist removes nothing.
     async fn delete_thread(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<u64>;
     /// Records every message of the thread that does not speak for `reader` as read by them;
     /// answers how many were not before. A member's own messages, and what dibs wrote on their
@@ -484,6 +486,25 @@ pub trait WideAskRows: Send {
     ) -> StoreResult<Option<WideAsk>>;
     /// Every announcement its holder has not acknowledged yet, ordered by message.
     async fn open_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>>;
+}
+
+/// The grants members asked of the holders of areas.
+#[async_trait]
+pub trait AskedGrantRows: Send {
+    /// Stores a request. A second one for the same message fails with [`StoreError::Duplicate`].
+    async fn insert_asked_grant(
+        &mut self,
+        project: ProjectId,
+        asked: &AskedGrant,
+    ) -> StoreResult<()>;
+    /// Every request put to `holder` that they have not answered — they wrote no message in the
+    /// conversation it started — ordered by message. Whether one still waits for their decision is
+    /// decided by the caller.
+    async fn unanswered_asked_grants(
+        &mut self,
+        project: ProjectId,
+        holder: MemberId,
+    ) -> StoreResult<Vec<AskedGrant>>;
 }
 
 /// The escalations members sent to the arbiters.

@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::grant::{AskOutcome, GrantAsk, decide_grant_ask};
+use dibs_domain::grant::{AskOutcome, AskedGrant, GrantAsk, decide_grant_ask};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, ThreadId};
@@ -68,7 +68,8 @@ pub struct AskGrantResult {
 /// Asks the member whose live claim holds an area for a grant there, for the caller's live claim
 /// on an item. The conversation is about the holder's item and addressed to the holder alone, so
 /// it reaches the session working under the claim that holds the area; its first message is high,
-/// asks for no acknowledgement, and says how to give the grant.
+/// asks for no acknowledgement, and says how to give the grant. The request is recorded with it, so
+/// the holder's inbox lists it until it is decided.
 pub struct AskGrant {
     ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
@@ -162,7 +163,7 @@ impl AskGrant {
                     area: &ask.area,
                     holder_item: &holder_name,
                 };
-                let (thread, _) = MemberThread {
+                let (thread, message) = MemberThread {
                     ids: Posted::next(&*self.ids),
                     subject: fit_subject(&text.subject())?,
                     item: Some(holder_item),
@@ -175,6 +176,12 @@ impl AskGrant {
                 }
                 .start(&mut work, settings.raised_per_hour(), now)
                 .await?;
+                let asked = AskedGrant {
+                    message: message.id,
+                    ask: ask.clone(),
+                    holder,
+                };
+                work.insert_asked_grant(project, &asked).await?;
                 GrantAsked::Asked {
                     holder: names.handle(holder)?,
                     holder_item: holder_name,
@@ -279,6 +286,18 @@ mod tests {
         }
     }
 
+    /// The requests recorded as put to `holder` and not answered.
+    async fn recorded(env: &Env, holder: &Person) -> Vec<AskedGrant> {
+        env.deps
+            .store
+            .begin()
+            .await
+            .unwrap()
+            .unanswered_asked_grants(env.project, holder.actor.member)
+            .await
+            .unwrap()
+    }
+
     /// alice holds billing on `#1`; bob claims `#2` with no area.
     async fn held() -> (Env, ItemId, ItemId) {
         let env = Env::new().await;
@@ -328,6 +347,19 @@ mod tests {
             panic!("one message: {:?}", view.messages);
         };
         let message = &first.record;
+        assert_eq!(
+            recorded(&env, &env.alice).await,
+            [AskedGrant {
+                message: message.id,
+                ask: GrantAsk {
+                    asker: env.bob.actor.member,
+                    item: bobs,
+                    area: asked.area.clone(),
+                },
+                holder: env.alice.actor.member,
+            }],
+            "the request is recorded with its message"
+        );
         assert_eq!(message.author, Author::Member(env.bob.actor.member));
         assert_eq!(message.importance, Importance::High);
         assert!(!message.ack_required);
@@ -420,6 +452,7 @@ mod tests {
         assert_eq!(own.outcome, GrantAsked::Own);
         assert_eq!(env.events().await.len(), after_claim);
         assert!(after_claim > before);
+        assert!(recorded(&env, &env.alice).await.is_empty());
     }
 
     #[tokio::test]
@@ -451,6 +484,7 @@ mod tests {
         assert_eq!(holder.as_str(), "alice");
         assert_eq!(holder_item.id, alices);
         assert_eq!(env.events().await.len(), before);
+        assert!(recorded(&env, &env.alice).await.is_empty());
     }
 
     #[tokio::test]
@@ -526,6 +560,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(limited.code(), "importance_limited");
         assert_eq!(env.events().await.len(), before, "nothing is written");
+        assert!(recorded(&env, &env.alice).await.is_empty());
     }
 
     #[test]

@@ -24,7 +24,7 @@ use crate::fields::{item_in_body, parse, parse_required, record_id_text, switch,
 use crate::http::AppState;
 use crate::views::slots::PendingOfferView;
 use crate::views::{
-    DeliverableView, MessageView, ThreadSummaryView, ThreadView, UnackedView, reply,
+    DeliverableView, GrantAskView, MessageView, ThreadSummaryView, ThreadView, UnackedView, reply,
 };
 
 /// The body of `POST /v1/threads`.
@@ -200,6 +200,7 @@ struct InboxAnswer {
     offers: Vec<PendingOfferView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deliverable: Option<Vec<DeliverableView>>,
+    grant_asks: Vec<GrantAskView>,
 }
 
 /// Lists the threads waiting for the caller, newest activity first, each with how many of its
@@ -210,7 +211,9 @@ struct InboxAnswer {
 /// caller's agent while it works, newest first: written by someone else within the last day, high
 /// or urgent and unread, or awaiting the caller's acknowledgement, and not yet delivered to any of
 /// the caller's sessions. `offers` lists every slot on offer to the caller, with when the offer
-/// lapses.
+/// lapses. `grant_asks` lists the grants asked of the caller that wait for their decision, newest
+/// first: asked in a conversation the caller wrote nothing in, while the asker's claim on the item
+/// and the caller's claim on the area are live and no grant of the caller's answers it.
 ///
 /// # Errors
 /// `forbidden` for an integration; `invalid_request` for an `unread`, `unacked` or `deliverable`
@@ -246,6 +249,7 @@ pub async fn inbox(
         deliverable: inbox
             .deliverable
             .map(|messages| messages.into_iter().map(DeliverableView::of).collect()),
+        grant_asks: inbox.grant_asks.into_iter().map(GrantAskView::of).collect(),
     };
     Ok(reply(StatusCode::OK, &answer))
 }

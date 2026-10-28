@@ -58,6 +58,9 @@ When dibs refuses an edit, the area belongs to another member's live claim. Do n
 - message the holder (`dibs_send`) to agree on a change in their area that a grant does not settle — one they make
   themselves, or one you need to talk through first.
 
+A grant asked of you is listed in your session brief, with the command that gives it, until you grant it, answer in its
+conversation, or it lapses; it is your person's decision, so tell them and never grant on your own.
+
 A claim that is refused because the item or an area is held names the holder and the item they hold it for. Ask them;
 do not claim around them.
 

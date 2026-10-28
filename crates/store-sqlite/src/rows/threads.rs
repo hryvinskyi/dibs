@@ -297,6 +297,7 @@ impl ThreadRows for SqliteTx {
             of_thread_messages!("reads"),
             of_thread_messages!("acks"),
             of_thread_messages!("wide_asks"),
+            of_thread_messages!("grant_asks"),
             of_thread_messages!("raised_messages"),
             of_thread_messages!("escalations"),
         ] {
