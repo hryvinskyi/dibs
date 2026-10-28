@@ -624,6 +624,11 @@ answers the requests waiting for the caller's decision under `grant_asks` in `GE
 them in the session brief with the command that gives each. Older clients ignore the field, and a 0.1.6 client reads no
 requests from an older server. Upgrade the server first, then the clients.
 
+**0.1.7, the way to a held area.** A client of 0.1.7 says, under other members' claims that hold areas in the session
+brief and at the end of a claim refused because an area is held, how to ask the holder for a grant: claim the item
+without that area, then `dibs ask-grant`. Only the client and the plugin's workflow text change: set
+`DIBS_LATEST_CLIENT` to 0.1.7; the server may stay.
+
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
