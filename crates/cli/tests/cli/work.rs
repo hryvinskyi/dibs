@@ -103,7 +103,9 @@ fn a_claim_in_the_way_is_refused_naming_the_holder() {
         refusal["error"]["message"]
             .as_str()
             .unwrap()
-            .ends_with("It is held by alice on item gh:acme/api#1."),
+            .ends_with(
+                "It is held by alice on item gh:acme/api#1. Leave api:billing out of your claim and ask alice for a grant there: dibs ask-grant <your item> --area api:billing (MCP: dibs_ask_grant)."
+            ),
         "{refusal}"
     );
 

@@ -55,8 +55,10 @@ When dibs refuses an edit, the area belongs to another member's live claim. Do n
 A grant asked of you is listed in your session brief, with the command that gives it, until you grant it, answer in its
 conversation, or it lapses; it is your person's decision, so tell them and never grant on your own.
 
-A claim that is refused because the item or an area is held names the holder and the item they hold it for. Ask them;
-do not claim around them.
+A claim that is refused because the item or an area is held names the holder and the item they hold it for. When the
+item is held, ask them; do not claim around them. When an area is held, the claim is refused whole: claim your item
+without that area, then ask its holder for a grant there as above. The same goes for an area the brief lists under
+another member's claim: it does not stop your work, and you need not wait for a refusal to ask for it.
 
 Every refusal of the guard ends with its id (`refusal r-7f3a51`). When dibs refused something it should not have — the
 area was free, your claim was there — say so, once, with that id: `dibs_feedback` with `kind: "false_refusal"`, the
@@ -81,7 +83,7 @@ when it is yours ("Handed over: <area>", "<area> is yours now"). Rebase onto the
   already waits for <area> to be handed over." means your own claim already asked for it. An edit there says
   "<member>'s claim on work item <item> already waits for it to be handed over".
 - A claim over an area another member's feature claim holds is refused whole, as is any debt claim over a held area:
-  message the holder.
+  claim without that area and ask the holder for a grant (`dibs_ask_grant`), or message them.
 - A claim keeps the kind it was made with. Renewing it as another kind is refused: "The claim was made as debt; release
   it and claim again to change it." A takeover may name the new claim's kind (`--debt`, `--feature`, or `kind` in
   `dibs_takeover`).

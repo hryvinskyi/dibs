@@ -121,6 +121,15 @@ impl From<ClientError> for Failure {
             }
             message.push('.');
         }
+        if code == "area_held"
+            && let Some(details) = details
+            && !details.waiting
+            && let (Some(holder), Some(area)) = (&details.holder, &details.area)
+        {
+            message.push_str(&format!(
+                " Leave {area} out of your claim and ask {holder} for a grant there: dibs ask-grant <your item> --area {area} (MCP: dibs_ask_grant)."
+            ));
+        }
         if kind == Kind::Config {
             message.push_str(" Sign in again with dibs login.");
         }
@@ -271,6 +280,24 @@ mod tests {
             "The area api:billing is held by another member. It is held by alice on item gh:acme/web#12."
         );
         assert!(Failure::config("x", "Y.").details.is_none());
+    }
+
+    #[test]
+    fn a_held_area_says_how_to_ask_its_holder_for_a_grant() {
+        let failure = Failure::from(ClientError::Conflict {
+            code: "area_held".to_owned(),
+            message: "The area api:billing is held by another member.".to_owned(),
+            details: Box::new(ErrorDetails {
+                holder: Some("alice".parse().unwrap()),
+                item: Some(dibs_domain::ids::ItemId(12)),
+                area: Some(dibs_domain::area::QualifiedArea::parse("api:billing").unwrap()),
+                ..ErrorDetails::default()
+            }),
+        });
+        assert_eq!(
+            failure.message,
+            "The area api:billing is held by another member. It is held by alice on item 12. Leave api:billing out of your claim and ask alice for a grant there: dibs ask-grant <your item> --area api:billing (MCP: dibs_ask_grant)."
+        );
     }
 
     #[test]
