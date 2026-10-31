@@ -31,6 +31,7 @@ use dibs_domain::settings::{CheckoutRefused, ProjectSettings, RepoSpec};
 
 use crate::api::Me;
 use crate::git_dirs::GitDirs;
+use crate::paths::{canonical, resolve_existing};
 use crate::server_url::ServerUrl;
 use crate::worktree_pool::{MARKER_FILE, SETTINGS_FILE};
 
@@ -419,7 +420,7 @@ impl Checkout {
         let shown = path.display().to_string();
         let absolute = lexical(&cwd.join(path));
         let inside = strip_root(&lexical(&self.root), &absolute).or_else(|| {
-            let root = fs::canonicalize(&self.root).ok()?;
+            let root = canonical(&self.root).ok()?;
             strip_root(&root, &resolve_existing(&absolute)?)
         });
         let Some(segments) = inside else {
@@ -462,21 +463,6 @@ pub(crate) fn lexical(path: &Path) -> PathBuf {
         }
     }
     out
-}
-
-/// The path resolved by the file system as far as it exists, with the rest appended as written.
-pub(crate) fn resolve_existing(path: &Path) -> Option<PathBuf> {
-    let mut rest = Vec::new();
-    let mut existing = path;
-    loop {
-        if let Ok(resolved) = fs::canonicalize(existing) {
-            let mut out = resolved;
-            out.extend(rest.iter().rev());
-            return Some(out);
-        }
-        rest.push(existing.file_name()?.to_owned());
-        existing = existing.parent()?;
-    }
 }
 
 /// The components of `path` below `root`, as text, when `path` lies under it.

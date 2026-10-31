@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::checkout::lexical;
+use crate::paths::same_dir;
 
 /// The most bytes read from a `.git` file, a `commondir` file or a repository's `config`.
 const MAX_READ: u64 = 64 * 1024;
@@ -115,14 +116,6 @@ impl GitDirs {
     /// directory.
     pub fn same_repository(&self, other: &Self) -> bool {
         same_dir(&self.common_dir, &other.common_dir)
-    }
-}
-
-/// Whether two paths name one directory as the file system resolves them.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
     }
 }
 

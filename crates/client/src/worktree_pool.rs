@@ -22,8 +22,9 @@ use time::Duration;
 use dibs_domain::settings::parse_duration;
 use dibs_domain::worktree::{PoolId, PoolIdError, WorktreeName};
 
-use crate::checkout::{CheckoutError, lexical, resolve_existing};
+use crate::checkout::{CheckoutError, lexical};
 use crate::git_dirs::GitDirs;
+use crate::paths::{plain, resolved};
 
 /// Where a repository's pool settings live, from its common directory.
 pub const SETTINGS_FILE: &str = "dibs/worktrees.toml";
@@ -36,8 +37,8 @@ pub const MARKER_FILE: &str = "dibs/pool-worktree.toml";
 /// one left idle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeSettings {
-    /// The directory the worktrees live in, absolute: by default beside the checkout,
-    /// `<checkout>-worktrees`.
+    /// The directory the worktrees live in, absolute and in its ordinary spelling
+    /// ([`plain`]): by default beside the checkout, `<checkout>-worktrees`.
     pub root: PathBuf,
     /// How many worktrees there are, 1 to [`WorktreeSettings::MAX_COUNT`].
     pub count: u8,
@@ -113,9 +114,10 @@ struct MarkerTable {
     name: String,
 }
 
-/// The file of the pool settings of the repository `dirs` is a work tree of.
+/// The file of the pool settings of the repository `dirs` is a work tree of, in its ordinary
+/// spelling.
 pub fn settings_file(dirs: &GitDirs) -> PathBuf {
-    dirs.common_dir().join(SETTINGS_FILE)
+    plain(&dirs.common_dir().join(SETTINGS_FILE))
 }
 
 /// The pool settings of the repository `dirs` is a work tree of, for the checkout whose main work
@@ -181,7 +183,8 @@ fn worktree_settings(directory: &Path, table: WorktreesTable) -> Result<Worktree
         Some(root) => lexical(&directory.join(root)),
         None => default_root(directory)?,
     };
-    if root.starts_with(lexical(directory)) {
+    let root = plain(&root);
+    if root.starts_with(plain(&lexical(directory))) {
         return Err(format!(
             "worktrees: root {} is the checkout or lies inside it; the worktrees live outside it",
             root.display()
@@ -256,8 +259,9 @@ pub fn read_marker(dirs: &GitDirs) -> Option<PoolWorktree> {
     Some(PoolWorktree { checkout, name })
 }
 
-/// Marks the work tree `dirs` describes as the prepared worktree `mark` names. Written beside the
-/// file into one made afresh, whatever lay at that name removed first, then renamed over it.
+/// Marks the work tree `dirs` describes as the prepared worktree `mark` names, the checkout written
+/// in its ordinary spelling. Written beside the file into one made afresh, whatever lay at that
+/// name removed first, then renamed over it.
 ///
 /// # Errors
 /// The file system's failure.
@@ -269,7 +273,7 @@ pub fn write_marker(dirs: &GitDirs, mark: &PoolWorktree) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let file = MarkerFile {
         pool_worktree: MarkerTable {
-            checkout: mark.checkout.to_string_lossy().into_owned(),
+            checkout: plain(&mark.checkout).to_string_lossy().into_owned(),
             name: mark.name.to_string(),
         },
     };
@@ -287,8 +291,7 @@ pub fn write_marker(dirs: &GitDirs, mark: &PoolWorktree) -> io::Result<()> {
 /// # Errors
 /// None in practice: the digest is always written as a valid id.
 pub fn pool_id(root: &Path) -> Result<PoolId, PoolIdError> {
-    let lexical_root = lexical(root);
-    let resolved = resolve_existing(&lexical_root).unwrap_or(lexical_root);
+    let resolved = resolved(&lexical(root));
     let digest = Sha256::digest(resolved.to_string_lossy().as_bytes());
     let hex: String = digest[..16]
         .iter()

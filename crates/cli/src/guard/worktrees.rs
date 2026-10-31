@@ -3,7 +3,9 @@
 //!
 //! A worktree the host would make itself is a linked worktree of the checkout, so the checkout's
 //! `.dibs.toml` governs it without anything written into it. A worktree whose git directory marks it
-//! as a pool's is never removed.
+//! as a pool's is never removed, and git removes a worktree from the repository's main work tree,
+//! never from inside the directory it deletes, which Windows refuses to delete while a process works
+//! in it. Every path handed to git is in its ordinary spelling.
 //!
 //! A take for a host waits as long as the host's deadline allows and talks to the server with the
 //! client's ordinary limits, as it may wait for a worktree to be freed and reset; every other call
@@ -12,7 +14,6 @@
 //! worktree routes has nothing to release or end: what this machine recorded is forgotten.
 
 use std::cell::{OnceCell, RefCell};
-use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -31,6 +32,7 @@ use dibs_client::api::{
 };
 use dibs_client::checkout::Checkout;
 use dibs_client::git_dirs::GitDirs;
+use dibs_client::paths::{plain, resolved};
 use dibs_client::state::WorktreeHoldRecord;
 use dibs_client::worktree_pool::read_marker;
 use dibs_client::{Client, ClientError, ClientOptions};
@@ -385,38 +387,16 @@ impl WorktreePool for ClientWorktreePool {
     }
 }
 
-/// `path` as the file system resolves it: its longest part that exists made canonical, the rest
-/// added back as written, so a file not made yet resolves like the directory it goes into.
-fn resolved(path: &Path) -> PathBuf {
-    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut existing = path;
-    loop {
-        if let Ok(canonical) = fs::canonicalize(existing) {
-            let mut resolved = canonical;
-            for part in rest.iter().rev() {
-                resolved.push(part);
-            }
-            return resolved;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(name);
-                existing = parent;
-            }
-            _ => return path.to_path_buf(),
-        }
-    }
-}
-
 /// Git, making and removing the worktrees a host would make and remove itself.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OwnWorktreeGit;
 
 impl OwnWorktreeGit {
+    /// Git run in `dir`: its output, or the first line of what it said when it failed.
     fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         let output = Command::new("git")
             .arg("-C")
-            .arg(dir)
+            .arg(plain(dir))
             .args(args)
             .output()
             .map_err(|_| "git could not be started".to_owned())?;
@@ -442,8 +422,8 @@ impl HostGit for OwnWorktreeGit {
     ) -> Result<PathBuf, String> {
         let top = Self::git(cwd, &["rev-parse", "--show-toplevel"])
             .map_err(|_| format!("{} lies in no git repository", cwd.display()))?;
-        let top = PathBuf::from(top);
-        let path = top.join(own.dir).join(label.as_str());
+        let top = plain(Path::new(&top));
+        let path = plain(&top.join(own.dir).join(label.as_str()));
         if !path.join(".git").exists() {
             let branch = format!("{}{label}", own.branch_prefix);
             let at = path.to_string_lossy().into_owned();
@@ -457,32 +437,31 @@ impl HostGit for OwnWorktreeGit {
         if !path.exists() {
             return Removal::Absent;
         }
-        if !path.join(".git").is_file() {
+        let Some(dirs) = GitDirs::at(path).filter(GitDirs::is_linked) else {
             return Removal::Kept("it is no linked git worktree".to_owned());
-        }
-        if lent_by_a_pool(path) {
+        };
+        if read_marker(&dirs).is_some() {
             return Removal::Pooled;
         }
-        let at = path.to_string_lossy().into_owned();
-        match Self::git(path, &["worktree", "remove", &at]) {
+        let home = dirs
+            .main_work_tree()
+            .unwrap_or_else(|| dirs.common_dir().to_path_buf());
+        let at = plain(path).to_string_lossy().into_owned();
+        match Self::git(&home, &["worktree", "remove", &at]) {
             Ok(_) => Removal::Removed,
             Err(said) => Removal::Kept(said),
         }
     }
 }
 
-/// Whether the worktree at `path` is marked, in its git directory, as a pool's worktree.
-fn lent_by_a_pool(path: &Path) -> bool {
-    GitDirs::at(path)
-        .and_then(|dirs| read_marker(&dirs))
-        .is_some()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use dibs_domain::worktree::AgentKey;
 
     use dibs_client::checkout::FILE_NAME;
+    use dibs_client::paths::canonical;
 
     use super::*;
     use crate::commands::worktree::take::TakenWorktree;
@@ -547,20 +526,9 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_path_not_made_yet_resolves_like_the_directory_it_goes_into() {
-        let dir = tempfile::tempdir().unwrap();
-        let canonical = fs::canonicalize(dir.path()).unwrap();
-        assert_eq!(
-            resolved(&dir.path().join("worktree1/src/new.rs")),
-            canonical.join("worktree1/src/new.rs")
-        );
-        assert_eq!(resolved(dir.path()), canonical);
-    }
-
     fn repository() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let repo = fs::canonicalize(dir.path()).unwrap().join("widgets");
+        let repo = canonical(dir.path()).unwrap().join("widgets");
         fs::create_dir_all(&repo).unwrap();
         for args in [
             &["init", "-q"][..],
@@ -711,5 +679,36 @@ mod tests {
             OwnWorktreeGit.remove_worktree(&repo),
             Removal::Kept(_)
         ));
+    }
+
+    #[test]
+    fn a_worktree_of_a_repository_without_a_main_work_tree_is_removed_from_its_git_directory() {
+        let (dir, repo) = repository();
+        let home = canonical(dir.path()).unwrap();
+        let bare = home.join("widgets.git");
+        OwnWorktreeGit::git(
+            &repo,
+            &["clone", "-q", "--bare", ".", &bare.to_string_lossy()],
+        )
+        .unwrap();
+        let linked = home.join("linked");
+        OwnWorktreeGit::git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &linked.to_string_lossy(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        assert_eq!(OwnWorktreeGit.remove_worktree(&linked), Removal::Removed);
+        assert!(!linked.exists());
+        assert_eq!(
+            OwnWorktreeGit.remove_worktree(&bare),
+            Removal::Kept("it is no linked git worktree".to_owned())
+        );
     }
 }

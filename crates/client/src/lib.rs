@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod error;
 pub mod git_dirs;
 pub mod locations;
+pub mod paths;
 pub mod private_file;
 pub mod server_url;
 pub mod state;

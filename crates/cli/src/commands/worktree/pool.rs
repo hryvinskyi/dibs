@@ -20,6 +20,7 @@ use time::OffsetDateTime;
 use dibs_client::checkout::Checkout;
 use dibs_client::credentials::CredentialKey;
 use dibs_client::git_dirs::GitDirs;
+use dibs_client::paths::{canonical, plain, same_dir};
 use dibs_client::state::{StateDir, WorktreeState};
 use dibs_client::worktree_pool::{
     PoolWorktree, WorktreeSettings, pool_id, read_marker, read_settings, settings_file,
@@ -105,7 +106,7 @@ impl Pool {
             return Ok(None);
         };
         let unusable = |text: String| Failure::config("no_worktree_pool", text);
-        let Some(main) = dirs.main_work_tree() else {
+        let Some(main) = dirs.main_work_tree().map(|main| plain(&main)) else {
             return match fs::symlink_metadata(settings_file(&dirs)) {
                 Ok(_) => Err(unusable(format!(
                     "{} declares a pool, but its repository has no main work tree to lend it from.",
@@ -156,10 +157,10 @@ impl Pool {
 
     /// The worktree of the pool whose top is `work_tree`, when it is one.
     fn worktree_of(&self, work_tree: &Path) -> Option<WorktreeName> {
-        let here = fs::canonicalize(work_tree).ok()?;
+        let here = canonical(work_tree).ok()?;
         self.names()
             .into_iter()
-            .find(|name| fs::canonicalize(self.path(name)).is_ok_and(|path| path == here))
+            .find(|name| canonical(&self.path(name)).is_ok_and(|path| path == here))
     }
 
     /// The pool's id.
@@ -301,8 +302,8 @@ impl Pool {
                 self.checkout.root().display()
             ))
         })?;
-        let checkout = fs::canonicalize(self.checkout.root())
-            .unwrap_or_else(|_| self.checkout.root().to_path_buf());
+        let checkout =
+            canonical(self.checkout.root()).unwrap_or_else(|_| plain(self.checkout.root()));
         write_marker(
             &dirs,
             &PoolWorktree {
@@ -378,14 +379,6 @@ fn no_pool(here: &Checkout) -> Failure {
     Failure::config("no_worktree_pool", text)
 }
 
-/// Whether two paths name one directory as the file system resolves them.
-fn same_dir(a: &Path, b: &Path) -> bool {
-    match (fs::canonicalize(a), fs::canonicalize(b)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -410,7 +403,7 @@ mod tests {
 
     /// A repository `widgets` with a committed `.dibs.toml`, one commit made.
     fn repository(dir: &Path) -> PathBuf {
-        let main = fs::canonicalize(dir).unwrap().join("widgets");
+        let main = canonical(dir).unwrap().join("widgets");
         fs::create_dir_all(&main).unwrap();
         git(&main, &["init", "-q", "-b", "main"]);
         fs::write(
@@ -447,9 +440,11 @@ mod tests {
         let refused = Pool::locate(&here, &state).unwrap_err();
         assert_eq!(refused.code, "no_worktree_pool");
         assert!(
-            refused
-                .message
-                .contains(&main.join(".git/dibs/worktrees.toml").display().to_string()),
+            refused.message.contains(
+                &plain(&main.join(".git/dibs/worktrees.toml"))
+                    .display()
+                    .to_string()
+            ),
             "{}",
             refused.message
         );

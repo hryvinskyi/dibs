@@ -15,6 +15,7 @@ use std::process::Command;
 use time::{OffsetDateTime, UtcOffset};
 
 use dibs_client::api::Member;
+use dibs_client::paths::plain;
 use dibs_domain::worktree::WorktreeName;
 
 /// The prefix of every rescue branch.
@@ -112,11 +113,10 @@ const IN_PROGRESS: [(&str, &str); 6] = [
 ];
 
 impl WorktreeGit {
-    /// Git run in the worktree at `dir`.
+    /// Git run in the worktree at `dir`, which git and every failure name in its ordinary
+    /// spelling.
     pub fn new(dir: &Path) -> Self {
-        Self {
-            dir: dir.to_path_buf(),
-        }
+        Self { dir: plain(dir) }
     }
 
     /// The operation under way in the worktree that keeps it from being committed whole, when
