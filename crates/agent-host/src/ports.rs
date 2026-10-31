@@ -600,8 +600,16 @@ pub trait Git {
     ) -> Result<PathBuf, String>;
 
     /// Removes the worktree at `path` as git removes one: never by force, so a worktree that holds
-    /// changes is kept, and never a worktree of a pool.
+    /// changes is kept, and never a worktree of a pool. The host may start the guard inside the
+    /// worktree it gives back, so the guard's process leaves it before it is removed: a directory
+    /// a process works in cannot be deleted on every system.
     fn remove_worktree(&self, path: &Path) -> Removal;
+
+    /// `path` in its ordinary spelling, the one a person and git read alike: where the system
+    /// answers a resolved path with a prefix most programs do not read, written without it
+    /// whenever the plain spelling names the same file. Every worktree path the guard prints or
+    /// hands on is spelled so.
+    fn plain(&self, path: &Path) -> PathBuf;
 }
 
 /// The holder of a pool worktree: a session of a host, or one agent of it.

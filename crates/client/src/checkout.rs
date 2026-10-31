@@ -33,7 +33,7 @@ use crate::api::Me;
 use crate::git_dirs::GitDirs;
 use crate::paths::{canonical, resolve_existing};
 use crate::server_url::ServerUrl;
-use crate::worktree_pool::{MARKER_FILE, SETTINGS_FILE};
+use crate::worktree_pool::{MARKER_FILE, SETTINGS_FILE, settings_file};
 
 /// The name of a checkout's configuration file.
 pub const FILE_NAME: &str = ".dibs.toml";
@@ -333,7 +333,7 @@ impl Checkout {
         if self.config.ignored.contains(&IgnoredTable::Worktrees) {
             let home = dirs.as_ref().map_or_else(
                 || format!(".git/{SETTINGS_FILE}"),
-                |dirs| dirs.common_dir().join(SETTINGS_FILE).display().to_string(),
+                |dirs| settings_file(dirs).display().to_string(),
             );
             sentence.push_str(&format!(
                 " Move the [worktrees] table to {home}, a file in the repository's git directory that no branch carries."
@@ -507,6 +507,7 @@ mod tests {
 
     use super::*;
     use crate::api::{Member, ProjectRef};
+    use crate::paths::plain;
 
     fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -755,7 +756,7 @@ mod tests {
             "every member who checks it out",
             &format!(
                 "Move the [worktrees] table to {}",
-                root.join(".git/dibs/worktrees.toml").display()
+                plain(&root.join(".git").join("dibs").join("worktrees.toml")).display()
             ),
             "Delete the [pool_worktree] table",
             "The rest of the file applies as before.",

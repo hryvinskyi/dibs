@@ -467,6 +467,37 @@ fn without_dibs_a_worktree_given_back_is_removed_only_when_it_is_claude_codes_ow
 }
 
 #[test]
+fn a_worktree_given_back_reaches_dibs_whole_from_the_top_of_its_repository() {
+    let repo = repository();
+    let own = last_line(&output(create(&path_with(&[]), repo.path(), "agent-x")));
+    let dibs = fake_dibs(
+        "[ \"$1\" = --version ] && { echo 'dibs 999.0.0'; exit 0; }\ncat > given-back-here\n",
+    );
+    let given_back = hook_input(
+        "WorktreeRemove",
+        &own,
+        serde_json::json!({"worktree_path": own.to_string_lossy()}),
+    );
+    let removed = output(run_wrapper(
+        &path_with(&[dibs.path()]),
+        &own,
+        "worktree-remove",
+        &given_back,
+    ));
+    assert_eq!(removed.status.code(), Some(0), "{}", text(&removed.stderr));
+    assert!(
+        !own.join("given-back-here").exists(),
+        "dibs is not started inside the worktree it is to remove"
+    );
+    let handed = fs::read_to_string(repo.path().join("given-back-here")).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&handed).unwrap(),
+        serde_json::from_str::<Value>(&given_back).unwrap(),
+        "the hook's input, as Claude Code wrote it"
+    );
+}
+
+#[test]
 fn the_end_of_a_subagent_or_a_session_reaches_only_a_dibs_that_knows_it() {
     let cwd = tempfile::tempdir().unwrap();
     let ends = [

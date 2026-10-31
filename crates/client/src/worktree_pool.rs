@@ -117,7 +117,16 @@ struct MarkerTable {
 /// The file of the pool settings of the repository `dirs` is a work tree of, in its ordinary
 /// spelling.
 pub fn settings_file(dirs: &GitDirs) -> PathBuf {
-    plain(&dirs.common_dir().join(SETTINGS_FILE))
+    within(&plain(dirs.common_dir()), SETTINGS_FILE)
+}
+
+/// The file `relative`, written with `/`, under `dir`: each of its parts added on its own, so that
+/// it is written with the system's own separator, and a verbatim `dir`, which reads no `/` as one,
+/// still names the file.
+fn within(dir: &Path, relative: &str) -> PathBuf {
+    let mut path = dir.to_path_buf();
+    path.extend(relative.split('/'));
+    path
 }
 
 /// The pool settings of the repository `dirs` is a work tree of, for the checkout whose main work
@@ -243,7 +252,7 @@ fn default_root(directory: &Path) -> Result<PathBuf, String> {
 
 /// The file of the mark of the work tree `dirs` describes.
 pub fn marker_file(dirs: &GitDirs) -> PathBuf {
-    dirs.git_dir().join(MARKER_FILE)
+    within(dirs.git_dir(), MARKER_FILE)
 }
 
 /// The mark of the work tree `dirs` describes; `None` when it has none, or one that cannot be read
@@ -405,7 +414,7 @@ mod tests {
         let dirs = git_dirs(&worktree);
         assert_eq!(read_marker(&dirs), None);
         let mark = PoolWorktree {
-            checkout: PathBuf::from("/home/alice/widgets"),
+            checkout: dir.path().join("widgets"),
             name: WorktreeName::parse("worktree2").unwrap(),
         };
         write_marker(&dirs, &mark).unwrap();
@@ -424,6 +433,38 @@ mod tests {
             None,
             "a relative checkout marks nothing"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_files_of_a_repository_reached_by_its_verbatim_spelling_are_named_in_the_ordinary_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let verbatim = fs::canonicalize(dir.path()).unwrap();
+        assert!(verbatim.to_string_lossy().starts_with(r"\\?\"));
+        let ordinary = plain(&verbatim);
+
+        let dirs = git_dirs(&verbatim.join("widgets"));
+        assert_eq!(
+            settings_file(&dirs).to_string_lossy(),
+            ordinary
+                .join(r"widgets\.git\dibs\worktrees.toml")
+                .to_string_lossy()
+        );
+
+        let worktree = verbatim.join("worktree2");
+        let dirs = git_dirs(&worktree);
+        let mark = PoolWorktree {
+            checkout: ordinary.join("widgets"),
+            name: WorktreeName::parse("worktree2").unwrap(),
+        };
+        write_marker(&dirs, &mark).unwrap();
+        assert!(
+            ordinary
+                .join(r"worktree2\.git\dibs\pool-worktree.toml")
+                .is_file(),
+            "the mark lies in the git directory's dibs directory"
+        );
+        assert_eq!(read_marker(&dirs), Some(mark));
     }
 
     #[cfg(unix)]

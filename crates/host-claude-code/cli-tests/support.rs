@@ -155,8 +155,8 @@ impl Setup {
         }
         let table = format!(
             "[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\n",
-            kit.join("prepare.sh").display(),
-            kit.join("reset.sh").display(),
+            in_toml_string(&kit.join("prepare.sh")),
+            in_toml_string(&kit.join("reset.sh")),
         );
         fs::create_dir_all(checkout.join(".git/dibs")).unwrap();
         fs::write(checkout.join(".git/dibs/worktrees.toml"), table).unwrap();
@@ -278,4 +278,12 @@ pub fn reply(output: &Output) -> Value {
     }
     serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|_| panic!("not one JSON object: {}", text(&output.stdout)))
+}
+
+/// A path as it stands inside a TOML basic string: a Windows path's backslashes escaped.
+pub fn in_toml_string(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }

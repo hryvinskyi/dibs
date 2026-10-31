@@ -3,9 +3,10 @@
 //!
 //! A worktree the host would make itself is a linked worktree of the checkout, so the checkout's
 //! `.dibs.toml` governs it without anything written into it. A worktree whose git directory marks it
-//! as a pool's is never removed, and git removes a worktree from the repository's main work tree,
-//! never from inside the directory it deletes, which Windows refuses to delete while a process works
-//! in it. Every path handed to git is in its ordinary spelling.
+//! as a pool's is never removed. Windows refuses to delete a directory any process works in, and a
+//! host starts the guard inside the worktree it gives back: before git removes one, this process
+//! moves to the repository's main work tree, and git runs from there. Every path handed to git or
+//! printed is in its ordinary spelling.
 //!
 //! A take for a host waits as long as the host's deadline allows and talks to the server with the
 //! client's ordinary limits, as it may wait for a worktree to be freed and reset; every other call
@@ -14,6 +15,7 @@
 //! worktree routes has nothing to release or end: what this machine recorded is forgotten.
 
 use std::cell::{OnceCell, RefCell};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -387,48 +389,76 @@ impl WorktreePool for ClientWorktreePool {
     }
 }
 
-/// Git, making and removing the worktrees a host would make and remove itself.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OwnWorktreeGit;
+/// The working directory of this process.
+pub trait WorkingDirectory {
+    /// Makes `dir` this process's working directory.
+    ///
+    /// # Errors
+    /// The system's failure, as when `dir` does not exist.
+    fn enter(&self, dir: &Path) -> io::Result<()>;
+}
 
-impl OwnWorktreeGit {
-    /// Git run in `dir`: its output, or the first line of what it said when it failed.
-    fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(plain(dir))
-            .args(args)
-            .output()
-            .map_err(|_| "git could not be started".to_owned())?;
-        if output.status.success() {
-            return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
-        }
-        let said = String::from_utf8_lossy(&output.stderr);
-        let first = said
-            .lines()
-            .map(|line| line.trim().trim_start_matches("fatal: "))
-            .find(|line| !line.is_empty())
-            .unwrap_or("git failed");
-        Err(first.to_owned())
+/// This process's own working directory, as the system keeps it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessDirectory;
+
+impl WorkingDirectory for ProcessDirectory {
+    fn enter(&self, dir: &Path) -> io::Result<()> {
+        std::env::set_current_dir(dir)
     }
 }
 
-impl HostGit for OwnWorktreeGit {
+/// Git, making and removing the worktrees a host would make and remove itself. Before git removes
+/// a worktree, this process moves its working directory to the repository's main work tree, so
+/// that it never stands in the directory being deleted.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OwnWorktreeGit<D = ProcessDirectory> {
+    directory: D,
+}
+
+impl<D> OwnWorktreeGit<D> {
+    /// Git, moving this process's working directory through `directory`.
+    pub const fn new(directory: D) -> Self {
+        Self { directory }
+    }
+}
+
+/// Git run in `dir`: its output, or the first line of what it said when it failed.
+fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(plain(dir))
+        .args(args)
+        .output()
+        .map_err(|_| "git could not be started".to_owned())?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+    }
+    let said = String::from_utf8_lossy(&output.stderr);
+    let first = said
+        .lines()
+        .map(|line| line.trim().trim_start_matches("fatal: "))
+        .find(|line| !line.is_empty())
+        .unwrap_or("git failed");
+    Err(first.to_owned())
+}
+
+impl<D: WorkingDirectory> HostGit for OwnWorktreeGit<D> {
     fn make_worktree(
         &self,
         cwd: &Path,
         own: &OwnWorktrees,
         label: &WorktreeLabel,
     ) -> Result<PathBuf, String> {
-        let top = Self::git(cwd, &["rev-parse", "--show-toplevel"])
-            .map_err(|_| format!("{} lies in no git repository", cwd.display()))?;
+        let top = run_git(cwd, &["rev-parse", "--show-toplevel"])
+            .map_err(|_| format!("{} lies in no git repository", plain(cwd).display()))?;
         let top = plain(Path::new(&top));
         let path = plain(&top.join(own.dir).join(label.as_str()));
         if !path.join(".git").exists() {
             let branch = format!("{}{label}", own.branch_prefix);
             let at = path.to_string_lossy().into_owned();
-            Self::git(&top, &["worktree", "add", "-b", &branch, &at, "HEAD"])
-                .or_else(|_| Self::git(&top, &["worktree", "add", &at, &branch]))?;
+            run_git(&top, &["worktree", "add", "-b", &branch, &at, "HEAD"])
+                .or_else(|_| run_git(&top, &["worktree", "add", &at, &branch]))?;
         }
         Ok(path)
     }
@@ -446,11 +476,18 @@ impl HostGit for OwnWorktreeGit {
         let home = dirs
             .main_work_tree()
             .unwrap_or_else(|| dirs.common_dir().to_path_buf());
+        if let Err(error) = self.directory.enter(&plain(&home)) {
+            tracing::debug!(error = %error, "the process could not leave the worktree it removes");
+        }
         let at = plain(path).to_string_lossy().into_owned();
-        match Self::git(&home, &["worktree", "remove", &at]) {
+        match run_git(&home, &["worktree", "remove", &at]) {
             Ok(_) => Removal::Removed,
             Err(said) => Removal::Kept(said),
         }
+    }
+
+    fn plain(&self, path: &Path) -> PathBuf {
+        plain(path)
     }
 }
 
@@ -544,7 +581,7 @@ mod tests {
                 "first",
             ],
         ] {
-            OwnWorktreeGit::git(&repo, args).unwrap();
+            run_git(&repo, args).unwrap();
         }
         (dir, repo)
     }
@@ -554,29 +591,92 @@ mod tests {
         branch_prefix: "worktree-",
     };
 
+    /// A working directory that only records where it was sent, and whether the directory it
+    /// watches still stood at that moment.
+    #[derive(Default)]
+    struct Entered {
+        watched: Option<PathBuf>,
+        refused: bool,
+        entered: RefCell<Vec<(PathBuf, bool)>>,
+    }
+
+    impl Entered {
+        /// Records whether `dir` still stands each time it is sent somewhere.
+        fn watching(dir: &Path) -> Self {
+            Self {
+                watched: Some(dir.to_path_buf()),
+                ..Self::default()
+            }
+        }
+
+        /// Where it was sent, each made canonical, and whether the watched directory stood then.
+        fn entered(&self) -> Vec<(PathBuf, bool)> {
+            self.entered
+                .borrow()
+                .iter()
+                .map(|(dir, stood)| (canonical(dir).unwrap_or_else(|_| dir.clone()), *stood))
+                .collect()
+        }
+    }
+
+    impl WorkingDirectory for Entered {
+        fn enter(&self, dir: &Path) -> io::Result<()> {
+            let stood = self.watched.as_deref().is_some_and(Path::exists);
+            self.entered.borrow_mut().push((dir.to_path_buf(), stood));
+            if self.refused {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            Ok(())
+        }
+    }
+
+    /// Git whose moves of the working directory are only recorded: a test never moves the
+    /// working directory of the process every test shares.
+    fn own() -> OwnWorktreeGit<Entered> {
+        OwnWorktreeGit::new(Entered::default())
+    }
+
     #[test]
     fn the_hosts_own_worktree_is_made_on_a_new_branch_and_made_once() {
         let (_dir, repo) = repository();
         fs::create_dir_all(repo.join("src")).unwrap();
         let label = WorktreeLabel::parse("agent-a1").unwrap();
-        let path = OwnWorktreeGit
+        let path = own()
             .make_worktree(&repo.join("src"), &OWN, &label)
             .unwrap();
         assert_eq!(path, repo.join("tool/worktrees/agent-a1"));
         assert_eq!(
-            OwnWorktreeGit::git(&path, &["branch", "--show-current"]).unwrap(),
+            run_git(&path, &["branch", "--show-current"]).unwrap(),
             "worktree-agent-a1"
         );
         assert_eq!(
-            OwnWorktreeGit.make_worktree(&repo, &OWN, &label).unwrap(),
+            own().make_worktree(&repo, &OWN, &label).unwrap(),
             path,
             "made once, answered again"
         );
         let outside = tempfile::tempdir().unwrap();
-        let refused = OwnWorktreeGit
+        let refused = own()
             .make_worktree(outside.path(), &OWN, &label)
             .unwrap_err();
         assert!(refused.contains("lies in no git repository"), "{refused}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_directory_given_in_its_resolved_spelling_is_named_in_its_ordinary_one() {
+        let outside = tempfile::tempdir().unwrap();
+        let resolved = fs::canonicalize(outside.path()).unwrap();
+        assert!(resolved.to_string_lossy().starts_with(r"\\?\"));
+        let label = WorktreeLabel::parse("agent-a1").unwrap();
+        let refused = own().make_worktree(&resolved, &OWN, &label).unwrap_err();
+        assert!(
+            refused.contains(&plain(&resolved).display().to_string()) && !refused.contains(r"\\?\"),
+            "{refused}"
+        );
+        assert_eq!(
+            own().plain(&resolved.join("api")),
+            plain(&resolved).join("api")
+        );
     }
 
     /// A `.dibs.toml` naming the project `acme` and its repository `api`.
@@ -590,7 +690,7 @@ mod tests {
         fs::write(repo.join(".git/info/exclude"), "/.dibs.toml\n/tool/\n").unwrap();
         let exclude = fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
         let label = WorktreeLabel::parse("agent-a1").unwrap();
-        let path = OwnWorktreeGit.make_worktree(&repo, &OWN, &label).unwrap();
+        let path = own().make_worktree(&repo, &OWN, &label).unwrap();
         fs::create_dir_all(path.join("src")).unwrap();
         assert!(!path.join(FILE_NAME).exists(), "nothing is written into it");
         assert_eq!(
@@ -599,7 +699,7 @@ mod tests {
             "nor into the repository's exclusions"
         );
         assert_eq!(
-            OwnWorktreeGit::git(&path, &["status", "--porcelain", "--ignored"]).unwrap(),
+            run_git(&path, &["status", "--porcelain", "--ignored"]).unwrap(),
             ""
         );
         let governed = Checkout::discover(&path.join("src")).unwrap().unwrap();
@@ -615,7 +715,7 @@ mod tests {
     fn a_worktree_marked_as_a_pools_is_never_removed() {
         let (dir, repo) = repository();
         let pooled = dir.path().join("pool/worktree1");
-        OwnWorktreeGit::git(
+        run_git(
             &repo,
             &[
                 "worktree",
@@ -628,11 +728,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            OwnWorktreeGit.remove_worktree(&pooled),
+            own().remove_worktree(&pooled),
             Removal::Removed,
             "an unmarked worktree is removed as git removes one"
         );
-        OwnWorktreeGit::git(
+        run_git(
             &repo,
             &[
                 "worktree",
@@ -653,32 +753,88 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(OwnWorktreeGit.remove_worktree(&pooled), Removal::Pooled);
+        assert_eq!(own().remove_worktree(&pooled), Removal::Pooled);
         assert!(pooled.join(".git").exists(), "kept");
     }
 
     #[test]
     fn a_worktree_is_removed_unless_it_holds_changes_and_never_the_repository_itself() {
         let (_dir, repo) = repository();
-        let clean = OwnWorktreeGit
+        let clean = own()
             .make_worktree(&repo, &OWN, &WorktreeLabel::parse("clean").unwrap())
             .unwrap();
-        assert_eq!(OwnWorktreeGit.remove_worktree(&clean), Removal::Removed);
+        assert_eq!(own().remove_worktree(&clean), Removal::Removed);
         assert!(!clean.exists());
-        assert_eq!(OwnWorktreeGit.remove_worktree(&clean), Removal::Absent);
-        let dirty = OwnWorktreeGit
+        assert_eq!(own().remove_worktree(&clean), Removal::Absent);
+        let dirty = own()
             .make_worktree(&repo, &OWN, &WorktreeLabel::parse("dirty").unwrap())
             .unwrap();
         fs::write(dirty.join("notes.txt"), "keep me").unwrap();
         assert!(matches!(
-            OwnWorktreeGit.remove_worktree(&dirty),
+            own().remove_worktree(&dirty),
             Removal::Kept(said) if said.contains("modified or untracked")
         ));
         assert!(dirty.join("notes.txt").exists());
-        assert!(matches!(
-            OwnWorktreeGit.remove_worktree(&repo),
-            Removal::Kept(_)
-        ));
+        assert!(matches!(own().remove_worktree(&repo), Removal::Kept(_)));
+    }
+
+    #[test]
+    fn the_process_moves_to_the_main_work_tree_before_git_removes_a_worktree() {
+        let (dir, repo) = repository();
+        let label = WorktreeLabel::parse("clean").unwrap();
+        let clean = own().make_worktree(&repo, &OWN, &label).unwrap();
+        let git = OwnWorktreeGit::new(Entered::watching(&clean));
+        assert_eq!(git.remove_worktree(&clean), Removal::Removed);
+        assert_eq!(
+            git.directory.entered(),
+            [(repo.clone(), true)],
+            "moved to the main work tree while the worktree still stood"
+        );
+
+        assert_eq!(git.remove_worktree(&clean), Removal::Absent);
+        assert_eq!(
+            git.remove_worktree(&repo),
+            Removal::Kept("it is no linked git worktree".to_owned())
+        );
+        let pooled = dir.path().join("pool/worktree1");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &pooled.to_string_lossy(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        dibs_client::worktree_pool::write_marker(
+            &GitDirs::at(&pooled).unwrap(),
+            &dibs_client::worktree_pool::PoolWorktree {
+                checkout: repo.clone(),
+                name: name("worktree1"),
+            },
+        )
+        .unwrap();
+        assert_eq!(git.remove_worktree(&pooled), Removal::Pooled);
+        assert_eq!(
+            git.directory.entered().len(),
+            1,
+            "nothing removed, nowhere moved"
+        );
+
+        let stuck = OwnWorktreeGit::new(Entered {
+            refused: true,
+            ..Entered::default()
+        });
+        let again = own().make_worktree(&repo, &OWN, &label).unwrap();
+        assert_eq!(
+            stuck.remove_worktree(&again),
+            Removal::Removed,
+            "a process that cannot move still has git try"
+        );
+        assert_eq!(stuck.directory.entered(), [(repo, false)]);
     }
 
     #[test]
@@ -686,13 +842,13 @@ mod tests {
         let (dir, repo) = repository();
         let home = canonical(dir.path()).unwrap();
         let bare = home.join("widgets.git");
-        OwnWorktreeGit::git(
+        run_git(
             &repo,
             &["clone", "-q", "--bare", ".", &bare.to_string_lossy()],
         )
         .unwrap();
         let linked = home.join("linked");
-        OwnWorktreeGit::git(
+        run_git(
             &bare,
             &[
                 "worktree",
@@ -704,10 +860,16 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(OwnWorktreeGit.remove_worktree(&linked), Removal::Removed);
+        let git = own();
+        assert_eq!(git.remove_worktree(&linked), Removal::Removed);
         assert!(!linked.exists());
         assert_eq!(
-            OwnWorktreeGit.remove_worktree(&bare),
+            git.directory.entered(),
+            [(canonical(&bare).unwrap(), false)],
+            "moved to the repository's git directory"
+        );
+        assert_eq!(
+            own().remove_worktree(&bare),
             Removal::Kept("it is no linked git worktree".to_owned())
         );
     }

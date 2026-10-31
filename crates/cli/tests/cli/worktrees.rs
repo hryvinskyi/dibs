@@ -335,11 +335,19 @@ impl Pool {
 fn pool_table(kit: &Path, count: u8) -> String {
     format!(
         "[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\nidle = \"sh '{}'\"\nidle_after = \"{}s\"\n",
-        kit.join("prepare.sh").display(),
-        kit.join("reset.sh").display(),
-        kit.join("idle.sh").display(),
+        in_toml_string(&kit.join("prepare.sh")),
+        in_toml_string(&kit.join("reset.sh")),
+        in_toml_string(&kit.join("idle.sh")),
         IDLE_AFTER.as_secs()
     )
+}
+
+/// A path as it stands inside a TOML basic string: a Windows path's backslashes escaped.
+fn in_toml_string(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -757,6 +765,7 @@ fn a_pool_table_in_a_committed_dibs_toml_runs_nothing_and_the_file_still_governs
     config.push_str("size = 4\n\n[pool_worktree]\ncheckout = \"/elsewhere\"\n");
     fs::write(api.join(".dibs.toml"), config).unwrap();
     git(&api, &["commit", "-q", "-am", "share a pool"]);
+    let settings_named = Path::new(".git").join("dibs").join("worktrees.toml");
     for args in [
         &["worktree", "take", "--agent", "agent-1"][..],
         &[
@@ -784,7 +793,7 @@ fn a_pool_table_in_a_committed_dibs_toml_runs_nothing_and_the_file_still_governs
             "{args:?}: {said}"
         );
         assert!(
-            said.contains(".git/dibs/worktrees.toml"),
+            said.contains(&settings_named.display().to_string()),
             "{args:?}: {said}"
         );
     }

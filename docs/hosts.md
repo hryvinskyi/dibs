@@ -285,6 +285,10 @@ Without a usable dibs, `WorktreeRemove` removes only a worktree under `<reposito
 one, and `SubagentStop` and `SessionEnd` do nothing; the plugin runs those three only when dibs is at least
 `min_binary`, as an older dibs would print a notice on every subagent stop.
 
+Claude Code starts the `WorktreeRemove` hook inside the worktree it gives back, and Windows deletes no directory a
+process works in. So the script moves to the top of the repository before it hands the event to dibs or removes the
+worktree itself, and dibs moves its own working directory to the repository's main work tree before git removes one.
+
 **What Claude Code does, observed on 2.1.316** (`claude -p`, with hooks that logged their input and handed out
 worktrees beside the repository), which the events above rest on:
 

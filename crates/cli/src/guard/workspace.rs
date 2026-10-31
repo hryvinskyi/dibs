@@ -33,7 +33,7 @@ use crate::guard::ledger::SessionLedgers;
 use crate::guard::remote::{Remote, RemoteError, checkout_of};
 use crate::guard::report::StateTallies;
 use crate::guard::upkeep::DetachedSync;
-use crate::guard::worktrees::{ClientWorktreePool, OwnWorktreeGit};
+use crate::guard::worktrees::{ClientWorktreePool, OwnWorktreeGit, ProcessDirectory};
 
 /// The variable that names a git directory other than the checkout's own.
 pub const GIT_DIR: &str = "GIT_DIR";
@@ -52,7 +52,7 @@ impl ClientWorkspaces {
     pub fn new(env: HashMap<String, String>) -> Self {
         Self {
             env,
-            git: OwnWorktreeGit,
+            git: OwnWorktreeGit::new(ProcessDirectory),
         }
     }
 }

@@ -22,8 +22,9 @@
 #     of the repository on a new branch `worktree-<name>` from the commit checked out, prints its
 #     directory and says why on standard error. Making a worktree never fails because of dibs: it
 #     exits 1 only for dibs's refusal and when git cannot make that worktree either.
-#   - `worktree-remove` without a usable dibs removes a worktree under `.claude/worktrees/` of its
-#     repository as git removes one, never by force, and leaves any other directory alone.
+#   - `worktree-remove` for a worktree under `.claude/worktrees/` runs from the top of its
+#     repository, never from inside the directory to be removed. Without a usable dibs it removes
+#     such a worktree as git removes one, never by force, and leaves any other directory alone.
 #   - `subagent-stop` and `session-end` without a usable dibs are skipped without a word.
 # dibs runs as a child of this script, never in its place, so the script sees how it ended.
 
@@ -180,17 +181,21 @@ fi
 
 case $event in
   worktree-remove)
+    input=$(cat)
+    path=$(field worktree_path)
+    top=
+    case $path in
+      */.claude/worktrees/?*)
+        top=${path%%/.claude/worktrees/*}
+        # Claude Code starts this hook inside the worktree it gives back, and Windows deletes no
+        # directory a process works in: this script, and whatever it starts, work from the top.
+        cd -- "$top" 2>/dev/null || :
+        ;;
+    esac
     if ! usable; then
-      input=$(cat)
-      path=$(field worktree_path)
-      case $path in
-        */.claude/worktrees/?*)
-          top=${path%%/.claude/worktrees/*}
-          if [ -e "$path" ] && ! said=$(git -C "$top" worktree remove "$path" 2>&1); then
-            printf 'dibs: the worktree %s was kept: %s\n' "$path" "$said" >&2
-          fi
-          ;;
-      esac
+      if [ -n "$top" ] && [ -e "$path" ] && ! said=$(git -C "$top" worktree remove "$path" 2>&1); then
+        printf 'dibs: the worktree %s was kept: %s\n' "$path" "$said" >&2
+      fi
       exit 0
     fi
     ;;
@@ -217,7 +222,11 @@ if [ "$event" = check-binary ]; then
   exit 0
 fi
 
-reply=$(dibs hook claude-code "$event")
+if [ "$event" = worktree-remove ]; then
+  reply=$(printf '%s\n' "$input" | dibs hook claude-code "$event")
+else
+  reply=$(dibs hook claude-code "$event")
+fi
 status=$?
 if [ "$status" -ne 0 ]; then
   message "dibs: the hook failed (dibs ended with status $status), so this call was not coordinated. Run dibs doctor to see why."

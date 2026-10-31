@@ -8,7 +8,8 @@
 //! why; only a pool whose every worktree stayed held for as long as the host's deadline leaves
 //! before a reset refuses. A worktree given back is released when it is a pool worktree its session
 //! holds, and never deleted; any other worktree given back is removed as git removes one, never by
-//! force.
+//! force. A worktree given back is named, in every notice and to every port, in its ordinary
+//! spelling, whatever spelling the host gave.
 //!
 //! An agent's end releases its hold on the server but leaves its worktree in use on this machine
 //! for as long as an agent's silence: a host may continue an agent after it ended, in the same
@@ -152,7 +153,7 @@ impl Guard<'_> {
         if served(adapter).is_none() {
             return GuardOutcome::silent();
         }
-        let path = cwd.join(path);
+        let path = self.workspaces.git().plain(&cwd.join(path));
         for place in [path.as_path(), cwd] {
             let Ok(Some(workspace)) = self.workspaces.open(place) else {
                 continue;

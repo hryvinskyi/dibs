@@ -277,7 +277,17 @@ impl crate::ports::Git for World {
         self.call(&format!("remove {}", path.display()));
         self.0.borrow().removal.clone()
     }
+
+    /// Drops a leading `/verbatim`, standing in for the prefix a system's resolved paths carry.
+    fn plain(&self, path: &Path) -> std::path::PathBuf {
+        path.to_str()
+            .and_then(|text| text.strip_prefix(VERBATIM))
+            .map_or_else(|| path.to_path_buf(), std::path::PathBuf::from)
+    }
 }
+
+/// The prefix the fake's ordinary spelling drops.
+const VERBATIM: &str = "/verbatim";
 
 /// The agent of a holder as the fakes' calls name it: its key, or `-` for a session.
 fn agent_named(agent: Option<&AgentKey>) -> String {
@@ -3360,6 +3370,39 @@ fn a_pool_worktree_whose_pool_cannot_be_found_is_kept_with_a_line_saying_why() {
         notice.contains("the worktree at /elsewhere/worktree1 was kept")
             && notice.contains("dibs never removes one")
             && !notice.contains("git worktree remove"),
+        "{notice}"
+    );
+}
+
+#[test]
+fn a_worktree_given_back_in_a_resolved_spelling_is_named_and_removed_in_its_ordinary_one() {
+    let world = World::new().with(|state| {
+        state.removal = Removal::Kept("it contains modified or untracked files".to_owned());
+    });
+    let resolved = worktree_input(json!({
+        "cwd": "/verbatim/work",
+        "path": "/verbatim/work/tool/worktrees/agent-a1b2",
+    }));
+    let kept = run(&world, "lending", "worktree-returned", &resolved);
+    let notice = no_objection(&kept)["notice"].as_str().unwrap().to_owned();
+    assert!(
+        notice.contains("the worktree at /work/tool/worktrees/agent-a1b2 was kept")
+            && !notice.contains(VERBATIM),
+        "{notice}"
+    );
+    assert_eq!(
+        world.calls(),
+        ["remove /work/tool/worktrees/agent-a1b2"],
+        "handed on in the spelling it is named in"
+    );
+
+    let pooled = World::new().with(|state| state.removal = Removal::Pooled);
+    let kept = run(&pooled, "lending", "worktree-returned", &resolved);
+    let notice = no_objection(&kept)["notice"].as_str().unwrap().to_owned();
+    assert!(
+        notice.contains("the worktree at /work/tool/worktrees/agent-a1b2 was kept")
+            && notice.contains("dibs never removes one")
+            && !notice.contains(VERBATIM),
         "{notice}"
     );
 }

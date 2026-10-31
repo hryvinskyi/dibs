@@ -510,7 +510,7 @@ pub fn pool_checkout(
     for (step, script) in pool_commands(&log) {
         let file = kit.join(format!("{step}.sh"));
         fs::write(&file, script).unwrap();
-        table.push_str(&format!("{step} = \"sh '{}'\"\n", file.display()));
+        table.push_str(&format!("{step} = \"sh '{}'\"\n", in_toml_string(&file)));
     }
     fs::create_dir_all(dir.join(".git/dibs")).unwrap();
     fs::write(dir.join(".git/dibs/worktrees.toml"), table).unwrap();
@@ -523,6 +523,14 @@ pub fn pool_checkout(
         root,
         log,
     }
+}
+
+/// A path as it stands inside a TOML basic string: a Windows path's backslashes escaped.
+fn in_toml_string(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 /// Starts the branch `name` in the checkout at `dir` and moves the checkout onto it.
