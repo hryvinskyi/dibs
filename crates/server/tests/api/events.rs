@@ -16,7 +16,11 @@ use crate::support::{Person, World, assert_error};
 
 const WAIT: Duration = Duration::from_secs(5);
 
-fn stream_request(who: &Person, path: &str, last_event_id: Option<&str>) -> Request<Body> {
+pub(crate) fn stream_request(
+    who: &Person,
+    path: &str,
+    last_event_id: Option<&str>,
+) -> Request<Body> {
     let mut builder = Request::builder()
         .method(Method::GET)
         .uri(path)
@@ -28,7 +32,7 @@ fn stream_request(who: &Person, path: &str, last_event_id: Option<&str>) -> Requ
 }
 
 /// A stream's body, read frame by frame.
-struct Frames(Body);
+pub(crate) struct Frames(Body);
 
 impl Frames {
     /// The next piece of text the stream sends, or `None` once it ended.
@@ -45,7 +49,7 @@ impl Frames {
     }
 
     /// The next `count` events: their ids and data.
-    async fn events(&mut self, count: usize) -> Vec<(u64, Value)> {
+    pub(crate) async fn events(&mut self, count: usize) -> Vec<(u64, Value)> {
         let mut events = Vec::new();
         while events.len() < count {
             let text = self.next().await.expect("the stream ended");
@@ -64,7 +68,7 @@ impl Frames {
     }
 }
 
-async fn open(world: &World, request: Request<Body>) -> (StatusCode, Frames) {
+pub(crate) async fn open(world: &World, request: Request<Body>) -> (StatusCode, Frames) {
     let response = world.open(request).await;
     (response.status(), Frames(response.into_body()))
 }

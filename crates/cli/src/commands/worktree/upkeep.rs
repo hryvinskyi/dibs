@@ -6,8 +6,10 @@
 //! of the pool it holds: the server ends holds on its own (a holder silent too long, a session that
 //! ended) without telling this machine. A record of a holder the server no longer holds, written
 //! before the server was asked, is forgotten. A worktree neither the server nor a record of this
-//! machine holds is free, and the time it was first seen free is written down; without the server,
-//! only a worktree released on this machine counts as free.
+//! machine holds is free, and the time it was first seen free is written down — unless its last
+//! sign of life is younger than an agent's silence: an agent the host may still continue left it,
+//! and writing it free would hand that agent's tree to the next take. Without the server, only a
+//! worktree released on this machine counts as free.
 //!
 //! A free, prepared worktree free for `idle_after` or longer, with no sign of life since it was
 //! freed and not stopped since, has its environment stopped by the project's `idle` command, under
@@ -215,6 +217,7 @@ impl<P: ProjectCommands> Keeper<'_, P> {
             }
             let free_since = match (files.free_since(&name), holds) {
                 (Some(since), _) => since,
+                (None, Some(_)) if self.pool.in_use(&name, self.clock.now()) => continue,
                 (None, Some(_)) => {
                     let now = self.clock.now();
                     if let Err(error) = files.mark_free(&name, now) {

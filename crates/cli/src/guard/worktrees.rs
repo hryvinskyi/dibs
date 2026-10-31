@@ -1,6 +1,11 @@
 //! The pool of worktrees as the guard reaches it, over the command line's own take, and git as the
 //! guard uses it to make and remove the worktrees a host would make and remove itself.
 //!
+//! A worktree the host would make itself is made a governed checkout of the project its checkout
+//! governs: it gets a `.dibs.toml` of its own, holding only the checkout's server, project and
+//! repository, written only where it has none and never through a link, and kept out of git's
+//! view. A worktree whose own `.dibs.toml` says it belongs to a pool is never removed.
+//!
 //! A take for a host waits as long as the host's deadline allows and talks to the server with the
 //! client's ordinary limits, as it may wait for a worktree to be freed and reset; every other call
 //! is bounded like a hook's. What this machine records of the pool's holds is read without the
@@ -9,6 +14,7 @@
 
 use std::cell::{OnceCell, RefCell};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -19,13 +25,13 @@ use tokio::runtime::Runtime;
 use dibs_agent_host::adapter::OwnWorktrees;
 use dibs_agent_host::event::WorktreeLabel;
 use dibs_agent_host::ports::{
-    Clock, Git as HostGit, PortError, Removal, Retaken, SessionRef, WorktreeHolder, WorktreePool,
-    WorktreeRecord, WorktreeTake,
+    Afterwards, Clock, Git as HostGit, PortError, Removal, Retaken, SessionRef, WorktreeHolder,
+    WorktreePool, WorktreeRecord, WorktreeTake,
 };
 use dibs_client::api::{
     ReleaseWorktreeRequest, TakeWorktreeRequest, WorktreeOutcome, WorktreeRelease,
 };
-use dibs_client::checkout::Checkout;
+use dibs_client::checkout::{Checkout, FILE_NAME};
 use dibs_client::state::WorktreeHoldRecord;
 use dibs_client::{Client, ClientError, ClientOptions};
 use dibs_domain::ids::SessionId;
@@ -58,11 +64,22 @@ pub struct ClientWorktreePool {
 }
 
 impl ClientWorktreePool {
-    /// The pool `checkout` lends or belongs to, with this machine's state under `state_base`;
-    /// `None` when it has none.
-    pub fn of(checkout: &Checkout, remote: &Remote, state_base: &Path) -> Option<Self> {
-        let (pool, _) = Pool::locate(checkout, state_base).ok()?;
-        Some(Self {
+    /// The pool `checkout` lends or belongs to, with this machine's state under `state_base`.
+    ///
+    /// # Errors
+    /// `None` when its `.dibs.toml` declares no pool; the sentence saying why when it declares one
+    /// that cannot be used.
+    pub fn of(
+        checkout: &Checkout,
+        remote: &Remote,
+        state_base: &Path,
+    ) -> Result<Self, Option<String>> {
+        let (pool, _) = Pool::locate(checkout, state_base).map_err(|failure| {
+            let config = checkout.config();
+            (config.worktrees.is_some() || config.pool_worktree.is_some())
+                .then_some(failure.message)
+        })?;
+        Ok(Self {
             pool,
             remote: remote.clone(),
             state_base: state_base.to_path_buf(),
@@ -166,11 +183,16 @@ impl ClientWorktreePool {
         })
     }
 
-    /// Forgets this machine's record of `name` and remembers it free since now.
-    fn forget(&self, name: &WorktreeName) {
+    /// Forgets this machine's record of `name`; when it is free `afterwards`, remembers it free
+    /// since now. A worktree left in use is not written free: its last sign of life, newer than any
+    /// release written here, keeps it from other takes for an agent's silence.
+    fn forget(&self, name: &WorktreeName, afterwards: Afterwards) {
         let files = self.pool.files();
         if let Err(error) = files.forget_hold(name) {
             tracing::debug!(error = %error, "a worktree's holder could not be forgotten");
+        }
+        if afterwards == Afterwards::InUse {
+            return;
         }
         if let Err(error) = files.mark_free(name, SystemClock.now()) {
             tracing::debug!(error = %error, "a worktree's release could not be recorded");
@@ -236,6 +258,13 @@ impl WorktreePool for ClientWorktreePool {
                 Ok::<_, RemoteError>((session, took))
             })
             .map_err(|error| remote_error(&error))?;
+        if took.outcome == WorktreeOutcome::Took
+            && let Some(held) = took.worktree.as_ref().filter(|held| *held != name)
+        {
+            return Ok(Retaken::HoldsAnother {
+                worktree: held.clone(),
+            });
+        }
         if took.outcome == WorktreeOutcome::Took && took.worktree.as_ref() == Some(name) {
             let record = WorktreeHoldRecord {
                 session_id: session,
@@ -261,7 +290,7 @@ impl WorktreePool for ClientWorktreePool {
         })
     }
 
-    fn release(&self, name: &WorktreeName) -> Result<(), PortError> {
+    fn release(&self, name: &WorktreeName, afterwards: Afterwards) -> Result<(), PortError> {
         let Some(record) = self.pool.files().hold(name) else {
             return Ok(());
         };
@@ -280,7 +309,7 @@ impl WorktreePool for ClientWorktreePool {
             Err(error) if nothing_to_let_go(&error) => {}
             Err(error) => return Err(views::port_error(&error)),
         }
-        self.forget(name);
+        self.forget(name, afterwards);
         Ok(())
     }
 
@@ -296,7 +325,7 @@ impl WorktreePool for ClientWorktreePool {
         }
         for (name, record) in self.pool.files().holds() {
             if record.session_id == id {
-                self.forget(&name);
+                self.forget(&name, Afterwards::Free);
             }
         }
         Ok(())
@@ -401,14 +430,16 @@ impl HostGit for OwnWorktreeGit {
             .map_err(|_| format!("{} lies in no git repository", cwd.display()))?;
         let top = PathBuf::from(top);
         let path = top.join(own.dir).join(label.as_str());
-        if path.join(".git").exists() {
-            return Ok(path);
+        if !path.join(".git").exists() {
+            let branch = format!("{}{label}", own.branch_prefix);
+            let at = path.to_string_lossy().into_owned();
+            Self::git(&top, &["worktree", "add", "-b", &branch, &at, "HEAD"])
+                .or_else(|_| Self::git(&top, &["worktree", "add", &at, &branch]))?;
         }
-        let branch = format!("{}{label}", own.branch_prefix);
-        let at = path.to_string_lossy().into_owned();
-        Self::git(&top, &["worktree", "add", "-b", &branch, &at, "HEAD"])
-            .or_else(|_| Self::git(&top, &["worktree", "add", &at, &branch]))
-            .map(|_| path)
+        if let Err(why) = govern(cwd, &path) {
+            tracing::debug!(why = %why, "the host's own worktree could not be made a governed checkout");
+        }
+        Ok(path)
     }
 
     fn remove_worktree(&self, path: &Path) -> Removal {
@@ -418,12 +449,99 @@ impl HostGit for OwnWorktreeGit {
         if !path.join(".git").is_file() {
             return Removal::Kept("it is no linked git worktree".to_owned());
         }
+        if lent_by_a_pool(path) {
+            return Removal::Pooled;
+        }
         let at = path.to_string_lossy().into_owned();
         match Self::git(path, &["worktree", "remove", &at]) {
             Ok(_) => Removal::Removed,
             Err(said) => Removal::Kept(said),
         }
     }
+}
+
+/// The `.dibs.toml` of a worktree the host would make itself: the checkout's server, project and
+/// repository, and nothing that lends or names a pool.
+#[derive(serde::Serialize)]
+struct GovernedFile<'a> {
+    server: &'a str,
+    project: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repo: Option<&'a str>,
+}
+
+/// Makes the worktree at `worktree` a governed checkout of the project whatever checkout governs
+/// `cwd` belongs to: writes its `.dibs.toml` when it has none, after making sure git ignores that
+/// file there, so the worktree stays clean. Nothing is written where no checkout governs `cwd`, or
+/// where anything, a link included, stands at the file's place.
+///
+/// # Errors
+/// Why the file was not written, for the log.
+fn govern(cwd: &Path, worktree: &Path) -> Result<(), String> {
+    let file = worktree.join(FILE_NAME);
+    if fs::symlink_metadata(&file).is_ok() {
+        return Ok(());
+    }
+    let Some(checkout) = Checkout::discover(cwd).map_err(|error| error.to_string())? else {
+        return Ok(());
+    };
+    let config = checkout.config();
+    let text = toml::to_string(&GovernedFile {
+        server: config.server.as_str(),
+        project: config.project.as_str(),
+        repo: config.repo.as_ref().map(|repo| repo.as_str()),
+    })
+    .map_err(|error| error.to_string())?;
+    ignore_file(worktree)?;
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+        .map_err(|error| error.to_string())?;
+    out.write_all(text.as_bytes())
+        .map_err(|error| error.to_string())
+}
+
+/// Makes git ignore the `.dibs.toml` at the top of `worktree`, unless it does already: the
+/// exclusions of a repository's `info/exclude` are shared by every worktree of it.
+///
+/// # Errors
+/// Why it could not be told or made ignored.
+fn ignore_file(worktree: &Path) -> Result<(), String> {
+    let checked = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["check-ignore", "-q", FILE_NAME])
+        .output()
+        .map_err(|_| "git could not be started".to_owned())?;
+    match checked.status.code() {
+        Some(0) => return Ok(()),
+        Some(1) => {}
+        _ => return Err("git could not tell whether the file is ignored".to_owned()),
+    }
+    let exclude = worktree.join(OwnWorktreeGit::git(
+        worktree,
+        &["rev-parse", "--git-path", "info/exclude"],
+    )?);
+    if let Some(dir) = exclude.parent() {
+        fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+    let mut text = fs::read_to_string(&exclude).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push('/');
+    text.push_str(FILE_NAME);
+    text.push('\n');
+    fs::write(&exclude, text).map_err(|error| error.to_string())
+}
+
+/// Whether the worktree at `path` says, in its own `.dibs.toml`, that it belongs to a pool.
+fn lent_by_a_pool(path: &Path) -> bool {
+    fs::read_to_string(path.join(FILE_NAME))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|table| table.contains_key("pool_worktree"))
 }
 
 #[cfg(test)]
@@ -555,6 +673,137 @@ mod tests {
             .make_worktree(outside.path(), &OWN, &label)
             .unwrap_err();
         assert!(refused.contains("lies in no git repository"), "{refused}");
+    }
+
+    /// A `.dibs.toml` naming the project `acme` and its repository `api`.
+    const CONFIG: &str =
+        "server = \"https://dibs.example.com\"\nproject = \"acme\"\nrepo = \"api\"\n";
+
+    #[test]
+    fn the_hosts_own_worktree_of_a_governed_checkout_is_governed_and_stays_clean() {
+        let (_dir, repo) = repository();
+        fs::write(repo.join(FILE_NAME), CONFIG).unwrap();
+        let label = WorktreeLabel::parse("agent-a1").unwrap();
+        let path = OwnWorktreeGit.make_worktree(&repo, &OWN, &label).unwrap();
+        let written = fs::read_to_string(path.join(FILE_NAME)).unwrap();
+        let config = Checkout::parse(&path.join(FILE_NAME), &written).unwrap();
+        assert_eq!(config.project.as_str(), "acme");
+        assert_eq!(
+            config.repo.map(|repo| repo.as_str().to_owned()).as_deref(),
+            Some("api")
+        );
+        assert!(config.worktrees.is_none() && config.pool_worktree.is_none());
+        assert_eq!(
+            OwnWorktreeGit::git(&path, &["status", "--porcelain"]).unwrap(),
+            "",
+            "the file is ignored, so the worktree stays clean"
+        );
+        let governed = Checkout::discover(&path.join("src")).unwrap().unwrap();
+        assert_eq!(
+            governed.root(),
+            path,
+            "the worktree is a checkout of its own"
+        );
+
+        fs::remove_file(path.join(FILE_NAME)).unwrap();
+        OwnWorktreeGit.make_worktree(&repo, &OWN, &label).unwrap();
+        assert_eq!(
+            fs::read_to_string(path.join(FILE_NAME)).unwrap(),
+            written,
+            "a worktree made before is governed when it is reused"
+        );
+        let exclude = fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(
+            exclude.matches("/.dibs.toml").count(),
+            1,
+            "excluded once: {exclude}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_written_through_a_link_over_a_file_or_where_no_checkout_governs() {
+        let (_dir, repo) = repository();
+        let ungoverned = OwnWorktreeGit
+            .make_worktree(&repo, &OWN, &WorktreeLabel::parse("plain").unwrap())
+            .unwrap();
+        assert!(!ungoverned.join(FILE_NAME).exists());
+
+        fs::write(repo.join(FILE_NAME), CONFIG).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let target = elsewhere.path().join("target.toml");
+        let linked = repo.join(OWN.dir).join("linked");
+        OwnWorktreeGit::git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "linked",
+                &linked.to_string_lossy(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&target, linked.join(FILE_NAME)).unwrap();
+        OwnWorktreeGit
+            .make_worktree(&repo, &OWN, &WorktreeLabel::parse("linked").unwrap())
+            .unwrap();
+        assert!(!target.exists(), "never written through a link");
+
+        let own = repo.join(OWN.dir).join("own");
+        OwnWorktreeGit::git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "own",
+                &own.to_string_lossy(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        fs::write(
+            own.join(FILE_NAME),
+            "server = \"https://other.example.com\"\n",
+        )
+        .unwrap();
+        OwnWorktreeGit
+            .make_worktree(&repo, &OWN, &WorktreeLabel::parse("own").unwrap())
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(own.join(FILE_NAME)).unwrap(),
+            "server = \"https://other.example.com\"\n",
+            "a worktree's own file is left as it is"
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_says_it_belongs_to_a_pool_is_never_removed() {
+        let (dir, repo) = repository();
+        let pooled = dir.path().join("pool/worktree1");
+        OwnWorktreeGit::git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &pooled.to_string_lossy(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        fs::write(repo.join(".git/info/exclude"), "/.dibs.toml\n").unwrap();
+        fs::write(
+            pooled.join(FILE_NAME),
+            format!("{CONFIG}\n[pool_worktree]\ncheckout = \"/nowhere\"\nname = \"worktree1\"\n"),
+        )
+        .unwrap();
+        assert_eq!(OwnWorktreeGit.remove_worktree(&pooled), Removal::Pooled);
+        assert!(pooled.join(".git").exists(), "kept");
     }
 
     #[test]

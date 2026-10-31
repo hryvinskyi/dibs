@@ -360,7 +360,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Release a worktree you took, as soon as you are done with it: give its name (worktree2), or the agent key dibs_worktree_take answered. Commit and push what you want to keep first: work that no branch keeps (changes in the tree, commits on no branch) is saved on a rescue branch the next time the worktree is taken, and the worktree is reset."
+        description = "Release a worktree you took, as soon as you are done with it: give its name (worktree2), or the agent key dibs_worktree_take answered. Only a worktree this session took is released; one another session or its agents hold is refused, as they may be working in it. Commit and push what you want to keep first: work that no branch keeps (changes in the tree, commits on no branch) is saved on a rescue branch the next time the worktree is taken, and the worktree is reset."
     )]
     async fn dibs_worktree_release(
         &self,

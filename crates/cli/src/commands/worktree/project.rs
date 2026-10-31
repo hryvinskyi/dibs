@@ -3,20 +3,26 @@
 //! knows git and its server; whatever else a worktree needs is the project's.
 //!
 //! A command is run by the system's shell (`sh -c` on Unix, `cmd /C` on Windows) with the checkout
-//! as its working directory, standard input closed, and its output on dibs's standard error, out of
-//! the way of the path dibs prints. It learns which worktree from the environment:
+//! as its working directory and standard input closed. Its output goes where the caller says: on
+//! dibs's standard error, out of the way of the path dibs prints, for a person at a terminal; or
+//! into a log file, emptied as the step starts, for a caller that must answer in time — a host
+//! waits for the pipes it handed dibs to close, and a process the command leaves running in the
+//! background would hold them open. It learns which worktree from the environment:
 //! `DIBS_WORKTREE_NAME` (`worktree2`), `DIBS_WORKTREE_PATH` (its absolute directory, which may not
 //! exist yet for `prepare`), `DIBS_WORKTREE_BASE` (the ref it is reset to) and `DIBS_CHECKOUT`
 //! (the checkout's absolute directory), beside everything dibs's own environment holds. Exit `0` is
 //! success; any other status, or no end within the step's time, is a failure, and a command still
 //! running then is killed with whatever it started in its process group.
 
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use dibs_domain::worktree::WorktreeName;
+
+use crate::commands::worktree::BACKGROUND_PREPARE;
 
 /// A step of a worktree's life that runs a command of the project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,9 +109,33 @@ impl StepFailed {
     }
 }
 
+/// Where a command's output goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Output<'a> {
+    /// dibs's standard error.
+    Stderr,
+    /// This file, emptied first.
+    Log(&'a Path),
+}
+
 /// Runs the project's commands.
 pub trait ProjectCommands {
-    /// Runs `command` for the worktree at `site` as `step`, within `limit`.
+    /// Runs `command` for the worktree at `site` as `step`, within `limit`, its output going to
+    /// `output`.
+    ///
+    /// # Errors
+    /// [`StepFailed`] when it cannot start, fails, or outlasts `limit`.
+    fn run_to(
+        &self,
+        step: Step,
+        command: &str,
+        site: &Site<'_>,
+        limit: Duration,
+        output: Output<'_>,
+    ) -> Result<(), StepFailed>;
+
+    /// Runs `command` for the worktree at `site` as `step`, within `limit`, its output on dibs's
+    /// standard error.
     ///
     /// # Errors
     /// [`StepFailed`] when it cannot start, fails, or outlasts `limit`.
@@ -115,7 +145,9 @@ pub trait ProjectCommands {
         command: &str,
         site: &Site<'_>,
         limit: Duration,
-    ) -> Result<(), StepFailed>;
+    ) -> Result<(), StepFailed> {
+        self.run_to(step, command, site, limit, Output::Stderr)
+    }
 }
 
 /// The project's commands, run by the system's shell.
@@ -125,14 +157,19 @@ pub struct ShellCommands;
 const POLL: Duration = Duration::from_millis(50);
 
 impl ProjectCommands for ShellCommands {
-    fn run(
+    fn run_to(
         &self,
         step: Step,
         command: &str,
         site: &Site<'_>,
         limit: Duration,
+        output: Output<'_>,
     ) -> Result<(), StepFailed> {
         let word = step.word();
+        let (stdout, stderr) = streams(output).map_err(|error| {
+            tracing::debug!(error = %error, step = word, "a project command's log could not be opened");
+            StepFailed::NotStarted { step: word }
+        })?;
         let mut shell = shell(command);
         shell
             .current_dir(site.checkout)
@@ -140,9 +177,10 @@ impl ProjectCommands for ShellCommands {
             .env("DIBS_WORKTREE_PATH", site.path)
             .env("DIBS_WORKTREE_BASE", site.base)
             .env("DIBS_CHECKOUT", site.checkout)
+            .env_remove(BACKGROUND_PREPARE)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(io::stderr()))
-            .stderr(Stdio::inherit());
+            .stdout(stdout)
+            .stderr(stderr);
         own_group(&mut shell);
         let mut child = shell.spawn().map_err(|error| {
             tracing::debug!(error = %error, step = word, "a project command could not be started");
@@ -168,6 +206,22 @@ impl ProjectCommands for ShellCommands {
                     seconds: limit.as_secs(),
                 })
             }
+        }
+    }
+}
+
+/// The command's standard output and standard error for `output`: dibs's standard error for both,
+/// or the log file, emptied, for both.
+fn streams(output: Output<'_>) -> io::Result<(Stdio, Stdio)> {
+    match output {
+        Output::Stderr => Ok((Stdio::from(io::stderr()), Stdio::inherit())),
+        Output::Log(path) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let log = File::create(path)?;
+            let errors = log.try_clone()?;
+            Ok((Stdio::from(log), Stdio::from(errors)))
         }
     }
 }
@@ -285,5 +339,31 @@ mod tests {
             Err(StepFailed::TimedOut { step: "reset", .. })
         ));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_logged_command_writes_its_output_and_errors_afresh_at_every_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = WorktreeName::parse("worktree1").unwrap();
+        let site = site(&name, dir.path());
+        let log = dir.path().join("state/worktree1.log");
+        let long = Duration::from_secs(10);
+        let logged = |command: &str| {
+            ShellCommands.run_to(Step::Reset, command, &site, long, Output::Log(&log))
+        };
+        assert_eq!(logged("echo first; echo oops >&2"), Ok(()));
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "first\noops\n");
+        assert_eq!(
+            logged("echo second; exit 3"),
+            Err(StepFailed::Failed {
+                step: "reset",
+                status: Some(3)
+            })
+        );
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "second\n",
+            "each step starts the log afresh"
+        );
     }
 }

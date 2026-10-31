@@ -16,10 +16,12 @@ use dibs_client::api::{
     SlotReleased, Slots, TakeSlotRequest, Took, WorktreeRelease, WorktreeReleased,
 };
 use dibs_client::locations::Locations;
+use dibs_client::state::WorktreeHoldRecord;
 use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::message::SessionLabel;
 use dibs_domain::report::MachineId;
+use dibs_domain::worktree::WorktreeName;
 
 use crate::commands::check::Governed;
 use crate::commands::feedback;
@@ -536,10 +538,14 @@ impl Link {
         Ok(WorktreeTaken { taken, notes })
     }
 
-    /// Releases a worktree the caller holds, by its name or by the agent key its take answered.
+    /// Releases a worktree the caller holds, by its name or by the agent key its take answered. By
+    /// name, only a worktree this machine records as taken for this session or one of its agents
+    /// is let go of: whoever else holds it may be working in it, and the next take would rescue
+    /// and reset the tree under them.
     ///
     /// # Errors
-    /// A [`Failure`] for an invalid input, a worktree the pool does not have, or of the call.
+    /// A [`Failure`] for an invalid input, a worktree the pool does not have, one this session did
+    /// not take, or of the call.
     pub async fn worktree_release(
         &self,
         input: WorktreeReleaseInput,
@@ -547,9 +553,14 @@ impl Link {
         let releasing = input.releasing()?;
         let pool = self.pool()?;
         let release = match releasing {
-            Releasing::Worktree(name) => WorktreeRelease::Worktree {
-                worktree: pool.known(&name)?,
-            },
+            Releasing::Worktree(name) => {
+                let worktree = pool.known(&name)?;
+                let record = pool.files().hold(&worktree);
+                if let Some(refused) = not_this_sessions(&worktree, record.as_ref(), self.session) {
+                    return Err(Failure::refused("worktree_not_yours", refused));
+                }
+                WorktreeRelease::Worktree { worktree }
+            }
             Releasing::Agent(agent) => WorktreeRelease::Holder {
                 holder_session: self.session,
                 agent: Some(agent),
@@ -599,6 +610,26 @@ impl Link {
     }
 }
 
+/// Why the tools of `session` may not release `worktree`, which this machine records as taken for
+/// `record`; `None` when the record names that session or one of its agents.
+fn not_this_sessions(
+    worktree: &WorktreeName,
+    record: Option<&WorktreeHoldRecord>,
+    session: SessionId,
+) -> Option<String> {
+    let held = match record {
+        Some(record) if record.session_id == session => return None,
+        Some(record) if record.agent.is_some() => {
+            format!("{worktree} is held by an agent of another session")
+        }
+        Some(_) => format!("{worktree} is held by another session"),
+        None => format!("This machine records no take of {worktree}"),
+    };
+    Some(format!(
+        "{held}, and these tools release only the worktrees this session took; a person releases any with dibs worktree release {worktree}."
+    ))
+}
+
 /// Runs a take to its end on the calling thread, which may block for as long as the project's
 /// commands run, with the notes it made.
 fn take_on_a_thread(
@@ -625,4 +656,49 @@ fn take_on_a_thread(
     };
     let taken = runtime.block_on(taker.take(ask));
     Ok((taken, notes.into_inner()))
+}
+
+#[cfg(test)]
+mod tests {
+    use time::OffsetDateTime;
+
+    use dibs_domain::worktree::AgentKey;
+
+    use super::*;
+
+    fn record(session: u64, agent: Option<&str>) -> WorktreeHoldRecord {
+        WorktreeHoldRecord {
+            session_id: SessionId(session),
+            agent: agent.map(|agent| AgentKey::parse(agent).unwrap()),
+            purpose: None,
+            item: None,
+            taken_at: OffsetDateTime::UNIX_EPOCH,
+            reset_done: true,
+        }
+    }
+
+    #[test]
+    fn the_tools_release_by_name_only_what_their_session_took() {
+        let name = WorktreeName::parse("worktree2").unwrap();
+        let mine = SessionId(4);
+        assert_eq!(
+            not_this_sessions(&name, Some(&record(4, Some("cli-1"))), mine),
+            None
+        );
+        assert_eq!(not_this_sessions(&name, Some(&record(4, None)), mine), None);
+        assert_eq!(
+            not_this_sessions(&name, Some(&record(5, Some("a1"))), mine).unwrap(),
+            "worktree2 is held by an agent of another session, and these tools release only the worktrees this session took; a person releases any with dibs worktree release worktree2."
+        );
+        assert!(
+            not_this_sessions(&name, Some(&record(5, None)), mine)
+                .unwrap()
+                .starts_with("worktree2 is held by another session,")
+        );
+        assert!(
+            not_this_sessions(&name, None, mine)
+                .unwrap()
+                .starts_with("This machine records no take of worktree2,")
+        );
+    }
 }

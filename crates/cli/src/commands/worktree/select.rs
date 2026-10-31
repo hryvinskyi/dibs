@@ -5,6 +5,9 @@
 //! whatever the server says of it, nor one being prepared right now. Of the rest, a prepared one
 //! whose environment runs comes first, then a prepared one whose environment was stopped, then,
 //! where the take may prepare one, one not prepared yet; within each, the pool's own order.
+//!
+//! A preparation in the background builds a whole environment, so one runs at a time: none is
+//! started while any worktree of the pool is being prepared, reset or stopped.
 
 use dibs_domain::worktree::WorktreeName;
 
@@ -53,8 +56,11 @@ pub fn candidates(facts: &[Facts], may_prepare: bool) -> Vec<WorktreeName> {
 }
 
 /// The first worktree a take under a deadline may have prepared in the background: not prepared,
-/// not broken, not in use and not being prepared already.
+/// not broken and not in use; none while any worktree of `facts` is locked.
 pub fn to_prepare(facts: &[Facts]) -> Option<WorktreeName> {
+    if facts.iter().any(|facts| facts.locked) {
+        return None;
+    }
     facts
         .iter()
         .find(|facts| !facts.prepared && !facts.broken && !facts.in_use && !facts.locked)
@@ -153,12 +159,12 @@ mod tests {
     }
 
     #[test]
-    fn the_worktree_to_prepare_is_the_first_unprepared_one_nobody_prepares() {
+    fn the_worktree_to_prepare_is_the_first_unprepared_one_that_is_neither_broken_nor_in_use() {
         let facts = [
             worktree("worktree1"),
             Facts {
                 prepared: false,
-                locked: true,
+                in_use: true,
                 ..worktree("worktree2")
             },
             Facts {
@@ -176,6 +182,33 @@ mod tests {
             Some("worktree4")
         );
         assert_eq!(to_prepare(&facts[..3]), None);
+    }
+
+    #[test]
+    fn no_preparation_starts_while_any_worktree_of_the_pool_is_locked() {
+        let preparing = [
+            Facts {
+                prepared: false,
+                locked: true,
+                ..worktree("worktree1")
+            },
+            Facts {
+                prepared: false,
+                ..worktree("worktree2")
+            },
+        ];
+        assert_eq!(to_prepare(&preparing), None, "one preparation at a time");
+        let resetting = [
+            Facts {
+                locked: true,
+                ..worktree("worktree1")
+            },
+            Facts {
+                prepared: false,
+                ..worktree("worktree2")
+            },
+        ];
+        assert_eq!(to_prepare(&resetting), None);
     }
 
     #[test]

@@ -161,10 +161,10 @@ pub enum EventKind {
     FeedbackGiven(FeedbackGiven),
     /// An integration reported that a pull request stopped, or started again, merging cleanly.
     PrStateReported(PrStateReported),
-    /// A session or one of its agents took a worktree of its member's pool. Seen by admins and by
-    /// that member only.
+    /// A session or one of its agents took a worktree of its member's pool. Seen by every member,
+    /// as every member's board shows the hold.
     WorktreeTaken(WorktreeTaken),
-    /// A worktree hold ended. Seen by admins and by the pool's member only.
+    /// A worktree hold ended. Seen by every member, as every member's board shows the hold.
     WorktreeReleased(WorktreeReleased),
 }
 
@@ -456,9 +456,9 @@ impl EventKind {
         match self {
             Self::HookReported(e) => Some(e.member),
             Self::FeedbackGiven(e) => Some(e.member),
-            Self::WorktreeTaken(e) => Some(e.member),
-            Self::WorktreeReleased(e) => Some(e.member),
-            Self::ItemCreated(_)
+            Self::WorktreeTaken(_)
+            | Self::WorktreeReleased(_)
+            | Self::ItemCreated(_)
             | Self::Claimed(_)
             | Self::Renewed(_)
             | Self::TakenOver(_)
@@ -1057,8 +1057,9 @@ pub struct PrStateReported {
     pub mergeable: bool,
 }
 
-/// A worktree of a member's pool was taken. Carries what the board shows of the hold — never the
-/// machine, the pool or the agent, which stay on the member's machine.
+/// A worktree of a member's pool was taken. Every member of the project sees it, as every member's
+/// board shows the hold; so it carries only what the board shows of the hold — never the machine,
+/// the pool, the session or the agent, which stay on the member's machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorktreeTaken {
     /// The member whose pool it is.
@@ -1630,14 +1631,12 @@ mod tests {
             .into_iter()
             .chain(slot_kinds())
             .chain(review_kinds())
+            .chain(worktree_kinds())
             .all(|kind| kind.private_to().is_none());
         assert!(
             public,
-            "only reports, feedback and worktree holds are kept private"
+            "only reports and feedback are kept private; worktree holds are on every member's board"
         );
-        let private: Vec<Option<MemberId>> =
-            worktree_kinds().iter().map(EventKind::private_to).collect();
-        assert_eq!(private, [Some(ALICE), Some(ALICE), Some(ALICE)]);
     }
 
     fn worktree_kinds() -> Vec<EventKind> {

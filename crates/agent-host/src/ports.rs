@@ -577,13 +577,18 @@ pub enum Removal {
     Absent,
     /// It was left in place; the sentence says why (it holds changes, it is no worktree).
     Kept(String),
+    /// It was left in place because it is a worktree of a pool, as its own `.dibs.toml` says:
+    /// whatever lends it, a pool worktree is never removed.
+    Pooled,
 }
 
 /// Git, as the guard uses it to stand in for a host's own worktrees.
 pub trait Git {
     /// Makes the worktree the host would make for `label` in the repository `cwd` lies in, as
     /// `own` lays it out, on a new branch from the commit checked out there; answers its
-    /// directory. A worktree already made there for the label is answered as it is.
+    /// directory. A worktree already made there for the label is answered as it is. When a
+    /// checkout governs `cwd`, the worktree is made a governed checkout of the same project, so
+    /// that the work done in it is checked as the work done in the checkout is.
     ///
     /// # Errors
     /// The sentence saying why no worktree could be made.
@@ -595,7 +600,7 @@ pub trait Git {
     ) -> Result<PathBuf, String>;
 
     /// Removes the worktree at `path` as git removes one: never by force, so a worktree that holds
-    /// changes is kept.
+    /// changes is kept, and never a worktree of a pool.
     fn remove_worktree(&self, path: &Path) -> Removal;
 }
 
@@ -659,6 +664,22 @@ pub enum Retaken {
         /// Why they took it.
         purpose: Option<Purpose>,
     },
+    /// The holder holds another worktree of the pool already, and a holder holds one at a time.
+    HoldsAnother {
+        /// The worktree it holds.
+        worktree: WorktreeName,
+    },
+}
+
+/// What a worktree whose hold was released is to this machine afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Afterwards {
+    /// Free from now on: the next take may rescue and reset it.
+    Free,
+    /// Still in use while its last sign of life is younger than an agent's silence: the holder
+    /// that let go of it may come back to it as it left it, so no take hands it to another holder
+    /// meanwhile.
+    InUse,
 }
 
 /// The pool of worktrees the checkout of a workspace lends, or belongs to.
@@ -675,11 +696,12 @@ pub trait WorktreePool {
     fn retake(&self, name: &WorktreeName, holder: &WorktreeHolder) -> Result<Retaken, PortError>;
 
     /// Releases the hold of `name` this machine's record names, for that holder only, and forgets
-    /// the record. Nothing is released when no record is kept.
+    /// the record; the worktree is then what `afterwards` says. Nothing is released when no record
+    /// is kept.
     ///
     /// # Errors
     /// [`PortError`] when the server gave no decision.
-    fn release(&self, name: &WorktreeName) -> Result<(), PortError>;
+    fn release(&self, name: &WorktreeName, afterwards: Afterwards) -> Result<(), PortError>;
 
     /// Ends `session` on the server, which frees every hold of it and of its agents, and forgets
     /// this machine's records of them.
@@ -746,6 +768,10 @@ pub trait Workspace {
     /// The pool of worktrees the checkout lends, or, when it is one of a pool's worktrees, the
     /// pool it belongs to; `None` when it has none.
     fn worktree_pool(&self) -> Option<&dyn WorktreePool>;
+
+    /// Why the pool of worktrees the checkout's `.dibs.toml` declares cannot be used, a sentence;
+    /// `None` when it declares none, or when its pool can be used.
+    fn worktree_pool_refused(&self) -> Option<String>;
 }
 
 /// What this machine counts for the project's reports: kinds and counts only, never a path, a

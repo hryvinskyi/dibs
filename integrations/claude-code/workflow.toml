@@ -9,3 +9,12 @@ name: dibs
 description: How to work in a checkout that dibs coordinates with the rest of the team. Use it when the dibs brief appears at the start of a session, before the first edit of a governed path, when dibs refuses an edit or a shell command or adds a note to one, when a slot is offered to you, when you need a worktree or dibs refuses work in one another agent holds, and when a teammate's message arrives.
 ---
 """
+
+# The values of the plugin's files that dibs's code decides, written there by
+# `cargo xtask integrations`: how long Claude Code waits for the hook that answers a wanted
+# worktree, which the guard's deadline is reckoned from.
+
+[[stamp]]
+path = "hooks/hooks.json"
+pointer = "/hooks/WorktreeCreate/0/hooks/0/timeout"
+value = "worktree_hook_timeout"

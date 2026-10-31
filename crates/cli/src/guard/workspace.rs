@@ -95,7 +95,7 @@ pub struct ClientWorkspace {
     tallies: StateTallies,
     remote: Remote,
     state_base: PathBuf,
-    pool: OnceCell<Option<ClientWorktreePool>>,
+    pool: OnceCell<Result<ClientWorktreePool, Option<String>>>,
 }
 
 impl ClientWorkspace {
@@ -119,6 +119,13 @@ impl ClientWorkspace {
             git_dir,
             state,
         }
+    }
+
+    /// The pool the checkout lends or belongs to, located once: `None` as the error when it
+    /// declares none, the sentence saying why when it declares one that cannot be used.
+    fn located(&self) -> &Result<ClientWorktreePool, Option<String>> {
+        self.pool
+            .get_or_init(|| ClientWorktreePool::of(&self.checkout, &self.remote, &self.state_base))
     }
 
     /// The checkout's `origin`: as remembered when read from git within [`ORIGIN_FRESH`], read
@@ -208,9 +215,13 @@ impl Workspace for ClientWorkspace {
     }
 
     fn worktree_pool(&self) -> Option<&dyn WorktreePool> {
-        self.pool
-            .get_or_init(|| ClientWorktreePool::of(&self.checkout, &self.remote, &self.state_base))
+        self.located()
             .as_ref()
+            .ok()
             .map(|pool| pool as &dyn WorktreePool)
+    }
+
+    fn worktree_pool_refused(&self) -> Option<String> {
+        self.located().as_ref().err().cloned().flatten()
     }
 }

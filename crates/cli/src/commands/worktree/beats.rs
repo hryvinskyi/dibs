@@ -12,17 +12,19 @@
 //! holder and touches nothing else.
 //!
 //! A server without the worktree routes is older than this client: the signs of life are dropped
-//! without a word, and that server is not asked again for a day. Every sending that ends, with
-//! beats or without, is remembered as the last one, so the same signs of life are not sent twice.
+//! without a word, and that server is not asked again for a day — unless a take, a release or a
+//! listing of worktrees is answered after it was found so, which shows the server serves them now.
+//! Every sending that ends, with beats or without, is remembered as the last one, so the same signs
+//! of life are not sent twice.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
 use dibs_agent_host::upkeep::is_fresh;
 use dibs_client::api::{
     BeatWorktreesRequest, BeatenWorktree, TakeWorktreeRequest, WorktreeBeat, WorktreeOutcome,
 };
-use dibs_client::state::{StateDir, WorktreeHoldRecord, WorktreeState};
+use dibs_client::state::{StateDir, WorktreeHoldRecord, WorktreeState, read_json, write_json};
 use dibs_client::{Client, ClientError};
 use dibs_domain::ids::SessionId;
 use dibs_domain::report::MachineId;
@@ -33,6 +35,43 @@ use crate::commands::worktree::DEFAULT_PURPOSE;
 
 /// How long a server found to serve no worktree pools is not asked again.
 pub const UNSERVED_FOR: Duration = Duration::days(1);
+
+/// The file of the project's cache that says when the server last answered a worktree route.
+const SERVED: &str = "worktrees-served";
+
+#[derive(Serialize, Deserialize)]
+struct Served {
+    #[serde(with = "time::serde::rfc3339")]
+    at: OffsetDateTime,
+}
+
+/// Remembers that the server answered a worktree route at `at`, when it had been found before then
+/// to serve no worktree pools: from now on the signs of life are sent again.
+pub fn served(state: &StateDir, at: OffsetDateTime) {
+    let Some(unserved) = state.worktrees_unserved_at() else {
+        return;
+    };
+    if served_at(state).is_some_and(|served| served >= unserved) {
+        return;
+    }
+    if let Err(error) = write_json(&state.json_file(SERVED), &Served { at }) {
+        tracing::debug!(error = %error, "a server serving worktree pools could not be remembered");
+    }
+}
+
+/// When the server last answered a worktree route, as far as this machine remembers.
+fn served_at(state: &StateDir) -> Option<OffsetDateTime> {
+    read_json::<Served>(&state.json_file(SERVED)).map(|served| served.at)
+}
+
+/// Whether the server was found, within a day of `now` and since it last answered a worktree
+/// route, to serve no worktree pools.
+pub fn unserved(state: &StateDir, now: OffsetDateTime) -> bool {
+    let Some(unserved) = state.worktrees_unserved_at() else {
+        return false;
+    };
+    is_fresh(unserved, now, UNSERVED_FOR) && served_at(state).is_none_or(|served| served < unserved)
+}
 
 /// What a sending did.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
@@ -67,11 +106,7 @@ impl Beats<'_> {
     /// the next sending. A refusal of one pool's beats is logged and the other pools are sent.
     pub async fn send(&self, now: OffsetDateTime) -> Result<Sent, ClientError> {
         let mut sent = Sent::default();
-        if self
-            .state
-            .worktrees_unserved_at()
-            .is_some_and(|at| is_fresh(at, now, UNSERVED_FOR))
-        {
+        if unserved(self.state, now) {
             sent.unserved = true;
             self.remember_sent(now);
             return Ok(sent);

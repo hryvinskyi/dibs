@@ -1085,8 +1085,8 @@ Refusals: `worktree_not_held` (`409`) when the member holds that worktree on tha
 the project does not have.
 
 The worktree events, `worktree_taken` and `worktree_released`, carry what the board shows of a hold and never the
-machine, the pool, the session or the agent. They are the member's own: only they and the project's admins see them, so
-another member's board shows a change at its next refresh, not at once.
+machine, the pool, the session or the agent. Every member of the project sees them, so every board follows a hold as it
+is taken and released.
 
 ### Events
 
@@ -1158,7 +1158,7 @@ does not see it, and so is `escalated` of a conversation. A deleted conversation
 `thread_deleted` names its id alone. Removing a member appends a `force_released` for each claim of theirs and a
 `slot_force_released` (cause `member_removed`) for each hold, place and offer, a `worktree_released` (cause
 `member_removed`) for each worktree hold, then `member_removed`.
-`hook_reported`, `feedback_given`, `worktree_taken` and `worktree_released` are seen only by the member they name and by
+`hook_reported` and `feedback_given` are seen only by the member they name and by
 admins, on the log and on the stream alike; every other reader's cursor moves past them.
 
 ### The event stream

@@ -6,8 +6,11 @@
 //! included, ignored ones not) or its `HEAD` is a commit no branch and no remote ref contains, a
 //! new branch `dibs/rescue/<name>-<UTC time>` is made at `HEAD` — so a branch the worktree is on is
 //! never moved — and the changes are committed on it whole, without the repository's hooks, as the
-//! member. Its own `.dibs.toml`, which dibs writes, is never part of what is saved. dibs never
-//! pushes and never deletes a rescue branch.
+//! member. Its own `.dibs.toml`, which dibs writes, is never part of what is saved. A rescue
+//! answers the untracked files it committed, so that a stray dump or a credential is seen before
+//! the branch is pushed. dibs never pushes and never deletes a rescue branch.
+//!
+//! The same git also says whether a file of the worktree is tracked, and whether it is ignored.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -61,6 +64,45 @@ impl Author {
 #[derive(Debug, Clone)]
 pub struct WorktreeGit {
     dir: PathBuf,
+}
+
+/// What a rescue saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rescue {
+    /// The rescue branch.
+    pub branch: String,
+    /// The untracked files committed onto it, as paths of the worktree, in git's order.
+    pub untracked: Vec<String>,
+}
+
+impl Rescue {
+    /// How many untracked files a rescue's notice names before it only counts the rest.
+    pub const NAMED: usize = 5;
+
+    /// What a notice says of the untracked files committed, when there were any: `It committed 7
+    /// untracked files: a.sql, b.env, c, d, e and 2 more; look at them before you push the
+    /// branch.`
+    pub fn untracked_sentence(&self) -> Option<String> {
+        let count = self.untracked.len();
+        if count == 0 {
+            return None;
+        }
+        let named = self.untracked[..count.min(Self::NAMED)].join(", ");
+        let more = count.saturating_sub(Self::NAMED);
+        let rest = if more == 0 {
+            String::new()
+        } else {
+            format!(" and {more} more")
+        };
+        let (files, them) = if count == 1 {
+            ("file", "it")
+        } else {
+            ("files", "them")
+        };
+        Some(format!(
+            "It committed {count} untracked {files}: {named}{rest}; look at {them} before you push the branch."
+        ))
+    }
 }
 
 /// The files of a git directory that say an operation is under way, and its name.
@@ -123,7 +165,7 @@ impl WorktreeGit {
     }
 
     /// Saves the worktree's work on a new rescue branch made at `HEAD`, its changes committed as
-    /// `author`, and answers the branch's name.
+    /// `author`, and answers the branch and the untracked files committed.
     ///
     /// # Errors
     /// [`GitFailed`] when the branch or the commit cannot be made.
@@ -132,8 +174,9 @@ impl WorktreeGit {
         name: &WorktreeName,
         at: OffsetDateTime,
         author: &Author,
-    ) -> Result<String, GitFailed> {
+    ) -> Result<Rescue, GitFailed> {
         let dirty = self.is_dirty()?;
+        let untracked = if dirty { self.untracked()? } else { Vec::new() };
         let branch = self.free_branch(&rescue_branch(name, at))?;
         self.text(&["switch", "-q", "-c", &branch], "make a rescue branch")?;
         if dirty {
@@ -160,7 +203,47 @@ impl WorktreeGit {
                 "commit the work to rescue",
             )?;
         }
-        Ok(branch)
+        Ok(Rescue { branch, untracked })
+    }
+
+    /// Whether git tracks the file at `path`, relative to the worktree: whether its index holds it.
+    ///
+    /// # Errors
+    /// [`GitFailed`] when git cannot tell.
+    pub fn tracks(&self, path: &str) -> Result<bool, GitFailed> {
+        let listed = self.text(
+            &["ls-files", "-z", "--", &format!(":(literal){path}")],
+            "tell whether it tracks a file",
+        )?;
+        Ok(!listed.is_empty())
+    }
+
+    /// Whether git ignores the path `path`, relative to the worktree, by the repository's ignore
+    /// rules; a tracked file is never ignored. The path need not exist.
+    ///
+    /// # Errors
+    /// [`GitFailed`] when git cannot tell.
+    pub fn ignores(&self, path: &str) -> Result<bool, GitFailed> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(["check-ignore", "-q", "--", path])
+            .output()
+            .map_err(|error| {
+                tracing::debug!(error = %error, "git could not be started");
+                self.failed("tell whether it ignores a file")
+            })?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => {
+                tracing::debug!(
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "git refused in a worktree"
+                );
+                Err(self.failed("tell whether it ignores a file"))
+            }
+        }
     }
 
     /// The address git is set up with here, when it has one.
@@ -195,6 +278,27 @@ impl WorktreeGit {
             "read the worktree's status",
         )?;
         Ok(!status.trim().is_empty())
+    }
+
+    /// The untracked files of the tree that git does not ignore, its own `.dibs.toml` left out.
+    fn untracked(&self) -> Result<Vec<String>, GitFailed> {
+        let listed = self.text(
+            &[
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+                "--",
+                ".",
+                &exclude_own_file(),
+            ],
+            "list the untracked files to rescue",
+        )?;
+        Ok(listed
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     /// `wanted`, or `wanted-2`, `wanted-3`, … when a branch of that name exists.
@@ -276,6 +380,28 @@ pub fn rescue_branch(name: &WorktreeName, at: OffsetDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rescue(untracked: &[&str]) -> Rescue {
+        Rescue {
+            branch: "dibs/rescue/worktree1-20260302T090507".to_owned(),
+            untracked: untracked.iter().map(|path| (*path).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_rescue_names_the_first_untracked_files_it_committed_and_counts_the_rest() {
+        assert_eq!(rescue(&[]).untracked_sentence(), None);
+        assert_eq!(
+            rescue(&["dump.sql"]).untracked_sentence().unwrap(),
+            "It committed 1 untracked file: dump.sql; look at it before you push the branch."
+        );
+        assert_eq!(
+            rescue(&["a", "b", "c", "d", "e", "f", "g"])
+                .untracked_sentence()
+                .unwrap(),
+            "It committed 7 untracked files: a, b, c, d, e and 2 more; look at them before you push the branch."
+        );
+    }
 
     #[test]
     fn a_rescue_branch_names_the_worktree_and_the_utc_second() {

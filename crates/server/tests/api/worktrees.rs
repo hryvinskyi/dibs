@@ -239,29 +239,65 @@ async fn the_member_reads_their_pools_whole_and_everyone_else_the_holds_alone() 
         );
     }
 
-    let bobs_log = world.get(&team.bob, "/v1/events").await;
-    let kinds: Vec<&str> = bobs_log.body["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|event| event["kind"].as_str().unwrap())
+    for reader in [&team.bob, &team.alice] {
+        let log = world.get(reader, "/v1/events").await;
+        let taken: Vec<&Value> = log.body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "worktree_taken")
+            .collect();
+        assert_eq!(
+            taken.len(),
+            2,
+            "every member's board shows the holds, so every member reads their events: {}",
+            log.body
+        );
+        for event in taken {
+            let fields: Vec<&str> = event["payload"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                fields,
+                ["holder", "host", "member", "purpose", "worktree"],
+                "no machine, pool, session or agent: {event}"
+            );
+        }
+        let text = log.body.to_string();
+        assert!(
+            !text.contains(MACHINE) && !text.contains(POOL) && !text.contains("agent-1"),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn another_members_event_stream_follows_the_holds() {
+    let team = team().await;
+    let world = &team.world;
+    let [hook, _, _] = team.sessions;
+    let (status, mut bobs) = crate::events::open(
+        world,
+        crate::events::stream_request(&team.bob, "/v1/events/stream?after=0", None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    take(world, &team.alice, hook, json!({"agent": "agent-1"})).await;
+    let released = release(world, &team.alice, hook, json!({"worktree": "worktree1"})).await;
+    assert_eq!(released.status, StatusCode::OK, "{}", released.body);
+    let kinds: Vec<String> = bobs
+        .events(2)
+        .await
+        .into_iter()
+        .map(|(_, event)| event["kind"].as_str().unwrap().to_owned())
         .collect();
-    assert!(
-        !kinds.contains(&"worktree_taken"),
-        "a worktree event is the member's own: {kinds:?}"
-    );
-    let alices_log = world.get(&team.alice, "/v1/events").await;
-    let taken: Vec<&Value> = alices_log.body["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|event| event["kind"] == "worktree_taken")
-        .collect();
-    assert_eq!(taken.len(), 2, "{}", alices_log.body);
-    let text = alices_log.body.to_string();
-    assert!(
-        !text.contains(MACHINE) && !text.contains(POOL) && !text.contains("agent-1"),
-        "{text}"
+    assert_eq!(
+        kinds,
+        ["worktree_taken", "worktree_released"],
+        "bob's board refreshes on alice's holds"
     );
 }
 

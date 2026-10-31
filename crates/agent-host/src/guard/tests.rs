@@ -22,9 +22,9 @@ use crate::adapter::{HostAdapter, HostId, ParseError};
 use crate::event::AgentKey;
 use crate::neutral::Neutral;
 use crate::ports::{
-    CoordinationGateway, GrantAskLine, HeldWay, HoldLine, InboxView, LocalCache, Removal, Retaken,
-    StatusView, TouchedBy, UnackedLine, Upkeep, WorktreeHolder, WorktreePool, WorktreeRecord,
-    WorktreeTake,
+    Afterwards, CoordinationGateway, GrantAskLine, HeldWay, HoldLine, InboxView, LocalCache,
+    Removal, Retaken, StatusView, TouchedBy, UnackedLine, Upkeep, WorktreeHolder, WorktreePool,
+    WorktreeRecord, WorktreeTake,
 };
 use dibs_domain::worktree::WorktreeName;
 
@@ -101,6 +101,8 @@ struct State {
     tallies_unwritable: bool,
     /// Whether the checkout lends a pool of worktrees, all under `/pool/`.
     pool: bool,
+    /// Why the pool the checkout declares cannot be used, when it cannot.
+    pool_refused: Option<String>,
     /// The holds this machine records: the session's key, the worktree, the agent.
     records: Vec<(String, String, Option<String>)>,
     took: WorktreeTake,
@@ -182,6 +184,7 @@ impl State {
             switched_off_sessions: Vec::new(),
             tallies_unwritable: false,
             pool: true,
+            pool_refused: None,
             records: Vec::new(),
             took: WorktreeTake::Took {
                 worktree: WorktreeName::parse("worktree2").unwrap(),
@@ -296,8 +299,12 @@ impl WorktreePool for World {
         self.0.borrow().retaken.clone()
     }
 
-    fn release(&self, name: &WorktreeName) -> Result<(), PortError> {
-        self.call(&format!("release {name}"));
+    fn release(&self, name: &WorktreeName, afterwards: Afterwards) -> Result<(), PortError> {
+        let afterwards = match afterwards {
+            Afterwards::Free => "free",
+            Afterwards::InUse => "in use",
+        };
+        self.call(&format!("release {name}, {afterwards}"));
         self.0.borrow().released.clone()
     }
 
@@ -392,6 +399,10 @@ impl Workspace for World {
         } else {
             None
         }
+    }
+
+    fn worktree_pool_refused(&self) -> Option<String> {
+        self.0.borrow().pool_refused.clone()
     }
 }
 
@@ -3180,6 +3191,26 @@ fn switched_off_outside_every_checkout_or_without_a_pool_the_hosts_own_worktree_
 }
 
 #[test]
+fn a_pool_the_checkout_declares_but_cannot_use_is_named_in_the_notice_of_the_hosts_own_worktree() {
+    let world = World::new().with(|state| {
+        state.pool = false;
+        state.pool_refused = Some(
+            "/work/.dibs.toml holds a [worktrees] table, but git tracks the file, so dibs runs no command of it."
+                .to_owned(),
+        );
+    });
+    let answer = run(&world, "lending", "worktree-wanted", &wanted());
+    let (path, notice) = given(&answer);
+    assert_eq!(path, "/work/tool/worktrees/agent-a1b2");
+    let notice = notice.unwrap();
+    assert!(
+        notice.contains("git tracks the file, so dibs runs no command of it"),
+        "{notice}"
+    );
+    assert!(!notice.contains("no [worktrees] table"), "{notice}");
+}
+
+#[test]
 fn a_worktree_that_cannot_be_made_at_all_is_refused_with_both_reasons() {
     let world = World::new().with(|state| {
         state.pool = false;
@@ -3241,7 +3272,7 @@ fn a_pool_worktree_given_back_is_released_for_its_session_and_never_deleted() {
     );
     assert_eq!(
         world.calls(),
-        ["release worktree2"],
+        ["release worktree2, free"],
         "another session's hold is left alone, and neither directory is removed"
     );
     world.set(|state| {
@@ -3294,6 +3325,23 @@ fn any_other_worktree_given_back_is_removed_as_git_removes_one() {
 }
 
 #[test]
+fn a_pool_worktree_whose_pool_cannot_be_found_is_kept_with_a_line_saying_why() {
+    let world = World::new().with(|state| {
+        state.pool = false;
+        state.removal = Removal::Pooled;
+    });
+    let returned = worktree_input(json!({"path": "/elsewhere/worktree1"}));
+    let kept = run(&world, "lending", "worktree-returned", &returned);
+    let notice = no_objection(&kept)["notice"].as_str().unwrap().to_owned();
+    assert!(
+        notice.contains("the worktree at /elsewhere/worktree1 was kept")
+            && notice.contains("dibs never removes one")
+            && !notice.contains("git worktree remove"),
+        "{notice}"
+    );
+}
+
+#[test]
 fn an_agents_end_releases_its_holds_and_costs_nothing_when_it_held_none() {
     let ended = |agent: &str| worktree_input(json!({"cwd": "/pool/worktree2", "agent": agent}));
     let world = World::new().with(|state| {
@@ -3303,7 +3351,11 @@ fn an_agents_end_releases_its_holds_and_costs_nothing_when_it_held_none() {
         ];
     });
     run(&world, "neutral", "agent-ended", &ended("a1b2"));
-    assert_eq!(world.calls(), ["release worktree2"]);
+    assert_eq!(
+        world.calls(),
+        ["release worktree2, in use"],
+        "the host may continue the agent in its worktree, so nobody else is handed it meanwhile"
+    );
     let none =
         World::new().with(|state| state.records = vec![record("s-2", "worktree3", Some("c3d4"))]);
     for agent in ["a1b2", "c3d4"] {
@@ -3510,4 +3562,101 @@ fn a_worktree_taken_by_another_in_the_meantime_refuses_the_one_who_would_take_it
             .unwrap()
             .starts_with("worktree2 is a pool worktree held by another session;")
     );
+}
+
+#[test]
+fn a_refused_tool_call_leaves_no_sign_of_life() {
+    let world = World::new().with(|state| state.records = vec![record("s-2", "worktree2", None)]);
+    let value = reply(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit_in_worktree(Some("a1b2")),
+    ));
+    assert_eq!(value["decision"], "deny", "{value}");
+    let shell = worktree_input(json!({
+        "cwd": "/pool/worktree2",
+        "tool": {"kind": "shell", "command": "git -C /pool/worktree2 status"}
+    }));
+    assert_eq!(
+        reply(&run(&world, "neutral", "before-tool", &shell))["decision"],
+        "deny"
+    );
+    assert!(
+        world.0.borrow().touched.is_empty(),
+        "a refused call keeps nobody's hold alive: {:?}",
+        world.0.borrow().touched
+    );
+    world.set(|state| state.records = vec![record("s-1", "worktree2", None)]);
+    let allowed = reply(&run(&world, "neutral", "before-tool", &shell));
+    assert_eq!(allowed["decision"], "no_objection", "{allowed}");
+    assert_eq!(world.0.borrow().touched, ["worktree2"]);
+}
+
+#[test]
+fn an_agent_in_a_worktree_another_agent_of_its_session_holds_is_told_and_refused() {
+    let world = World::new().with(|state| {
+        state.records = vec![record("s-1", "worktree2", Some("c3d4"))];
+        state.rescued = Some("dibs/rescue/worktree2-20260302T090500".to_owned());
+    });
+    let value = reply(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit_in_worktree(Some("a1b2")),
+    ));
+    assert_eq!(value["decision"], "deny", "{value}");
+    let reason = value["reason"].as_str().unwrap();
+    for part in [
+        "worktree2 is a pool worktree held by the agent c3d4 of this session for \"review the refunds\"",
+        "not by this agent",
+        "an agent's hold ends when the agent does",
+        "saved on the branch dibs/rescue/worktree2-20260302T090500",
+    ] {
+        assert!(reason.contains(part), "missing '{part}' in: {reason}");
+    }
+    assert!(world.calls().is_empty(), "read from this machine alone");
+    assert!(world.0.borrow().touched.is_empty());
+    let holder = reply(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit_in_worktree(Some("c3d4")),
+    ));
+    assert_eq!(holder["decision"], "no_objection", "{holder}");
+    let session = reply(&run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit_in_worktree(None),
+    ));
+    assert_eq!(
+        session["decision"], "no_objection",
+        "the session itself may work in its agents' trees"
+    );
+}
+
+#[test]
+fn a_worktree_nobody_holds_is_refused_to_a_holder_that_holds_another_naming_it() {
+    for (agent, who) in [(None, "this session"), (Some("a1b2"), "this agent")] {
+        let world = World::new().with(|state| {
+            state.retaken = Ok(Retaken::HoldsAnother {
+                worktree: WorktreeName::parse("worktree1").unwrap(),
+            });
+        });
+        let value = reply(&run(
+            &world,
+            "neutral",
+            "before-tool",
+            &edit_in_worktree(agent),
+        ));
+        assert_eq!(value["decision"], "deny", "{value}");
+        let reason = value["reason"].as_str().unwrap();
+        assert!(
+            reason.contains(&format!("{who} already holds worktree1"))
+                && reason.contains("Work in worktree1, or release it first"),
+            "{reason}"
+        );
+        assert!(!reason.contains("another session"), "{reason}");
+    }
 }

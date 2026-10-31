@@ -82,8 +82,9 @@ impl ClaudeCode {
     pub const ID: HostId = HostId::new("claude-code");
 
     /// How long Claude Code waits for the hook that answers a wanted worktree: the `timeout` the
-    /// plugin's hook configuration gives `WorktreeCreate`.
-    pub const WORKTREE_HOOK_TIMEOUT: Duration = Duration::from_secs(900);
+    /// plugin's hook configuration gives `WorktreeCreate`, which `cargo xtask integrations` writes
+    /// there from the same constant.
+    pub const WORKTREE_HOOK_TIMEOUT: Duration = WorktreeTerms::HOOK_TIMEOUT;
 
     /// Where Claude Code makes a worktree itself: `.claude/worktrees/<name>` at the top of the
     /// repository, on a new branch `worktree-<name>`.

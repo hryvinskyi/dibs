@@ -2,7 +2,8 @@
 //! touches what it changes. For slots — a hold that expires or stalls, an offer that lapses, a
 //! waiter who went silent, the next waiter's offer — so the first waiter is offered a freed slot
 //! and its followers are woken. For worktree pools — a hold whose holder went silent for longer
-//! than its kind of holder may ends, so the board stops showing it. For the areas feature claims
+//! than its kind of holder may ends, and the event that says so reaches every member, whose boards
+//! stop showing it. For the areas feature claims
 //! wait for — an area whose debt claim went stale moves to the claim waiting for it, and a request
 //! to hand one over that nobody answered within the project's `yield_escalates_after` goes to the
 //! project's arbiters.

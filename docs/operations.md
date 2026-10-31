@@ -660,7 +660,10 @@ Worktrees (see [Worktrees](#worktrees)). Older clients never call the routes. On
 1. Take the snapshot, as for every release: migrations only go forward.
 2. Upgrade the server. Nothing is configured on it, and a project whose members declare no pool is unchanged.
 3. Once the 0.1.9 client binaries are published, set `DIBS_LATEST_CLIENT` to 0.1.9 and restart the server. Leave
-   `DIBS_MIN_CLIENT` alone: a client of 0.1.8 has no pool to ask for.
+   `DIBS_MIN_CLIENT` alone: a pool is declared only in a member's own `.dibs.toml`, untracked and excluded from git,
+   which reaches no other member's machine, so a client of 0.1.8 never meets one in a checkout its member did not set up.
+   A client of 0.1.8 refuses a file that holds a `[worktrees]` table, as it knows no such key, and governs nothing in
+   that checkout: a member upgrades their binary before adding the table.
 
 The plugin of 0.1.9 names 0.1.9 as its `min_binary`, because its hooks now ask dibs for a worktree and tell it when an
 agent or a session ends. A plugin that updated ahead of its binary says so once per session; until the binary follows,
@@ -670,7 +673,9 @@ the host's own, its signs of life and session ends are dropped, and the server i
 server before the clients.
 
 What a member sets up, once per checkout that should lend worktrees: a `[worktrees]` table in the checkout's `.dibs.toml`
-(`count`, `prepare` and `reset`, and `idle` and `idle_after` to stop an unused environment; see the README), and a
+(`count`, `prepare` and `reset`, and `idle` and `idle_after` to stop an unused environment; see the README), the file
+kept out of git — untracked, and `/.dibs.toml` in `.git/info/exclude` — since dibs runs no command of a table git tracks
+or would commit, and a
 schedule, such as launchd, systemd or cron, that runs `dibs worktree upkeep` in the checkout every five minutes. A
 scheduled job starts without the person's shell, so it must be given the `PATH` and the container-runtime settings
 (`DOCKER_HOST` or `DOCKER_CONTEXT`) that the `idle` command needs; without them the environment is not stopped, and

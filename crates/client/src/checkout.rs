@@ -14,6 +14,10 @@
 //! many there are and which commands of the project prepare, reset and stop one; `[pool_worktree]`,
 //! in the file dibs writes into each worktree of a pool, names the checkout that lends it and the
 //! worktree's name, so a worktree is a governed checkout of its own and never a pool of its own.
+//! Parsing a file reads either table from it as written; neither may be honoured from a file git
+//! tracks or does not ignore. The `[worktrees]` table names commands that run on the machine of
+//! whoever reads it, and `[pool_worktree]` names the checkout whose commands those are: from a
+//! committed file they would run on every member's machine that checks the branch out.
 
 use std::fs;
 use std::io;

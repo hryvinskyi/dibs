@@ -14,10 +14,16 @@
 //!
 //! A take under a deadline finishes within it, and never prepares a worktree itself, as a first
 //! preparation does not fit. When no prepared worktree is free while the pool still has worktrees
-//! nobody works in that are not prepared yet, it starts the preparation of one in the background
-//! and answers at once that the pool is still being prepared. Only when every worktree it could
-//! hand out is held does it wait, as long as leaves a reset its time, and then answer busy. A reset
-//! the deadline cut short does not set its worktree aside: the worktree is not at fault.
+//! nobody works in that are not prepared yet, it starts the preparation of one in the background —
+//! unless a worktree of the pool is being prepared, reset or stopped already — and answers at once
+//! that the pool is still being prepared. When it has nothing to offer the server at all, every
+//! worktree being set aside as broken or in use on this machine, it answers at once that the pool
+//! cannot serve, naming the broken ones and how to take them back. It answers busy only when the
+//! server named every worktree it offered as held and it waited for one until the deadline less a
+//! reset's time. A reset the deadline cut short does not set its worktree aside: the worktree is
+//! not at fault. Under a deadline the project's commands write their output to the worktree's log
+//! in this machine's state, never to the caller's pipes, which a process they leave running would
+//! hold open past the deadline.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -38,8 +44,10 @@ use dibs_domain::report::MachineId;
 use dibs_domain::slot::Purpose;
 use dibs_domain::worktree::{AgentKey, WorktreeName};
 
+use crate::commands::worktree::BACKGROUND_PREPARE;
+use crate::commands::worktree::beats;
 use crate::commands::worktree::pool::Pool;
-use crate::commands::worktree::project::{ProjectCommands, Site, Step, StepFailed};
+use crate::commands::worktree::project::{Output, ProjectCommands, Site, Step, StepFailed};
 use crate::commands::worktree::rescue::{Author, WorktreeGit};
 use crate::commands::worktree::select::{self, Facts};
 use crate::failure::sentence;
@@ -120,6 +128,20 @@ struct NotReady {
     reason: String,
     /// Whether it is set aside until it is prepared again.
     broken: bool,
+    /// Whether it only waits to be prepared, which the take starts in the background once its
+    /// hold is let go of, so that the preparation never finds it held.
+    prepare: bool,
+}
+
+impl NotReady {
+    /// The worktree failed for `reason`; `broken` sets it aside.
+    fn failed(reason: String, broken: bool) -> Self {
+        Self {
+            reason,
+            broken,
+            prepare: false,
+        }
+    }
 }
 
 /// What a take works with.
@@ -185,12 +207,16 @@ impl<P: ProjectCommands> Taker<'_, P> {
                     .take_worktree(&self.request(ask, names))
                     .await
                     .map_err(TakeError::Server)?;
+                beats::served(self.pool.state(), self.clock.now());
                 match (took.outcome, took.worktree) {
                     (WorktreeOutcome::Took, Some(name)) => {
                         match self.ready(ask, &name, took.again, deadline).await {
                             Ok(taken) => return Ok(Taken::Took(taken)),
                             Err(not_ready) => {
                                 self.set_aside(ask, &name, &not_ready).await;
+                                if not_ready.prepare {
+                                    continue;
+                                }
                                 failures.push(format!("{name}: {}", not_ready.reason));
                                 tried.insert(name);
                                 continue;
@@ -214,6 +240,9 @@ impl<P: ProjectCommands> Taker<'_, P> {
                         sentence: preparing_sentence(&unprepared, preparing.as_ref()),
                         preparing,
                     });
+                }
+                if !offered {
+                    return Err(TakeError::Unusable(self.unservable_sentence(&facts)));
                 }
             }
             let left = wait_until.saturating_duration_since(Instant::now());
@@ -280,6 +309,14 @@ impl<P: ProjectCommands> Taker<'_, P> {
             }
             return Ok(taken(false, None));
         }
+        if deadline.is_some() && !prepared {
+            return Err(NotReady {
+                reason: "it is not prepared yet, and a preparation does not fit in the time left"
+                    .to_owned(),
+                broken: false,
+                prepare: true,
+            });
+        }
         let taken_at = record
             .as_ref()
             .map_or_else(|| self.clock.now(), |record| record.taken_at);
@@ -287,34 +324,21 @@ impl<P: ProjectCommands> Taker<'_, P> {
         if let Err(error) = files.mark_taken(name) {
             tracing::debug!(error = %error, "the free and stopped marks could not be cleared");
         }
-        if deadline.is_some() && !prepared {
-            self.prepare_in_background(&[self.pool.facts(
-                name,
-                ask.session,
-                ask.agent.as_ref(),
-                self.clock.now(),
-            )]);
-            return Err(NotReady {
-                reason: "it is not prepared yet, and a preparation does not fit in the time left"
-                    .to_owned(),
-                broken: false,
-            });
-        }
         let patience = deadline.map_or(LOCK_PATIENCE, |deadline| {
             deadline.saturating_duration_since(Instant::now())
         });
         let lock = self.pool.lock(name, patience).await.map_err(|error| {
             tracing::debug!(error = %error, "a worktree's lock could not be taken");
-            NotReady {
-                reason: "its lock could not be taken on this machine".to_owned(),
-                broken: false,
-            }
+            NotReady::failed(
+                "its lock could not be taken on this machine".to_owned(),
+                false,
+            )
         })?;
         let Some(_lock) = lock else {
-            return Err(NotReady {
-                reason: "another dibs is still preparing, resetting or stopping it".to_owned(),
-                broken: false,
-            });
+            return Err(NotReady::failed(
+                "another dibs is still preparing, resetting or stopping it".to_owned(),
+                false,
+            ));
         };
         let rescued = self.rescue(name)?;
         let step = if prepared { Step::Reset } else { Step::Prepare };
@@ -334,18 +358,28 @@ impl<P: ProjectCommands> Taker<'_, P> {
             base: &settings.base,
             checkout: self.pool.checkout().root(),
         };
+        let log = self.pool.log(name);
+        let output = if deadline.is_some() {
+            Output::Log(&log)
+        } else {
+            Output::Stderr
+        };
         self.commands
-            .run(step, command, &site, limit)
-            .map_err(|failed| NotReady {
-                reason: failed.reason(),
-                broken: !(limit < step.limit() && matches!(failed, StepFailed::TimedOut { .. })),
+            .run_to(step, command, &site, limit, output)
+            .map_err(|failed| {
+                let reason = match output {
+                    Output::Log(log) => {
+                        format!("{}; its output is in {}", failed.reason(), log.display())
+                    }
+                    Output::Stderr => failed.reason(),
+                };
+                let cut_short =
+                    limit < step.limit() && matches!(failed, StepFailed::TimedOut { .. });
+                NotReady::failed(reason, !cut_short)
             })?;
         self.pool.write_config(name).map_err(|error| {
             tracing::debug!(error = %error, "a worktree's .dibs.toml could not be written");
-            NotReady {
-                reason: "its .dibs.toml could not be written".to_owned(),
-                broken: true,
-            }
+            NotReady::failed(error.reason(), true)
         })?;
         self.remember(name, ask, taken_at, true);
         Ok(taken(!prepared, rescued))
@@ -358,10 +392,7 @@ impl<P: ProjectCommands> Taker<'_, P> {
             return Ok(None);
         }
         let git = WorktreeGit::new(&self.pool.path(name));
-        let broken = |reason: String| NotReady {
-            reason,
-            broken: true,
-        };
+        let broken = |reason: String| NotReady::failed(reason, true);
         if let Some(operation) = git.in_progress().map_err(|error| broken(error.reason()))? {
             return Err(broken(format!(
                 "{operation} is in progress in it; finish or abort it, then run dibs worktree prepare {name}"
@@ -374,13 +405,19 @@ impl<P: ProjectCommands> Taker<'_, P> {
             name: self.author.name.clone(),
             email: git.email().unwrap_or_else(|| self.author.email.clone()),
         };
-        let branch = git
+        let rescue = git
             .rescue(name, self.clock.now(), &author)
             .map_err(|error| broken(error.reason()))?;
-        (self.notes)(&format!(
-            "{name} held work nothing else kept; it is saved on the branch {branch} before the worktree is reused."
-        ));
-        Ok(Some(branch))
+        let mut notice = format!(
+            "{name} held work nothing else kept; it is saved on the branch {} before the worktree is reused.",
+            rescue.branch
+        );
+        if let Some(untracked) = rescue.untracked_sentence() {
+            notice.push(' ');
+            notice.push_str(&untracked);
+        }
+        (self.notes)(&notice);
+        Ok(Some(rescue.branch))
     }
 
     fn remember(&self, name: &WorktreeName, ask: &Ask, taken_at: OffsetDateTime, done: bool) {
@@ -443,8 +480,28 @@ impl<P: ProjectCommands> Taker<'_, P> {
         ));
     }
 
-    /// Starts `dibs worktree prepare` in the background for the first worktree that needs it and
-    /// that nobody prepares; answers it when one was started.
+    /// What a take under a deadline says when it had nothing to offer the server: which worktrees
+    /// are set aside as broken, why, and how each is taken back, and which are in use here.
+    fn unservable_sentence(&self, facts: &[Facts]) -> String {
+        let files = self.pool.files();
+        let broken: Vec<(&WorktreeName, Option<String>)> = facts
+            .iter()
+            .filter(|facts| facts.broken)
+            .map(|facts| {
+                let reason = files.broken(&facts.name).map(|broken| broken.reason);
+                (&facts.name, reason)
+            })
+            .collect();
+        let in_use: Vec<&WorktreeName> = facts
+            .iter()
+            .filter(|facts| facts.in_use && !facts.broken)
+            .map(|facts| &facts.name)
+            .collect();
+        unservable(&broken, &in_use)
+    }
+
+    /// Starts `dibs worktree prepare` in the background for the first worktree that needs it,
+    /// unless a worktree of the pool is locked; answers it when one was started.
     fn prepare_in_background(&self, facts: &[Facts]) -> Option<WorktreeName> {
         let name = select::to_prepare(facts)?;
         match spawn_prepare(self.pool.checkout().root(), &name) {
@@ -469,12 +526,52 @@ fn spawn_prepare(checkout: &std::path::Path, name: &WorktreeName) -> std::io::Re
     let mut command = Command::new(exe);
     command
         .args(["worktree", "prepare", name.as_str()])
+        .env(BACKGROUND_PREPARE, "1")
         .current_dir(checkout)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     crate::guard::upkeep::detach(&mut command);
     command.spawn().map(|_| ())
+}
+
+/// What a take that had nothing to offer says: the `broken` worktrees, with why each was set aside
+/// when that is known, and the ones `in_use` on this machine.
+fn unservable(broken: &[(&WorktreeName, Option<String>)], in_use: &[&WorktreeName]) -> String {
+    let mut parts = Vec::new();
+    for (name, reason) in broken {
+        let why = reason
+            .as_deref()
+            .map(|reason| format!(" ({})", clause(reason)))
+            .unwrap_or_default();
+        parts.push(format!(
+            "{name} is set aside as broken{why}, and dibs worktree prepare {name} takes it back"
+        ));
+    }
+    if !in_use.is_empty() {
+        let names: Vec<&str> = in_use.iter().map(|name| name.as_str()).collect();
+        let verb = if names.len() == 1 { "is" } else { "are" };
+        parts.push(format!(
+            "{} {verb} still worked in on this machine",
+            names.join(", ")
+        ));
+    }
+    if parts.is_empty() {
+        return "No worktree of this pool can be handed out now.".to_owned();
+    }
+    format!(
+        "No worktree of this pool can be handed out now: {}.",
+        parts.join("; ")
+    )
+}
+
+/// A sentence as a clause inside another: its first letter in lower case, its full stop dropped.
+fn clause(sentence: &str) -> String {
+    let trimmed = sentence.trim().trim_end_matches('.');
+    let mut chars = trimmed.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_lowercase().chain(chars).collect()
+    })
 }
 
 /// What a busy take says: who holds each worktree offered, and which are set aside.
@@ -547,6 +644,26 @@ mod tests {
             in_use: false,
             locked,
         }
+    }
+
+    #[test]
+    fn a_pool_with_nothing_to_offer_names_the_broken_worktrees_and_their_repair() {
+        let first = WorktreeName::parse("worktree1").unwrap();
+        let second = WorktreeName::parse("worktree2").unwrap();
+        assert_eq!(
+            unservable(
+                &[(
+                    &first,
+                    Some("Its prepare command failed with status 5.".to_owned())
+                )],
+                &[]
+            ),
+            "No worktree of this pool can be handed out now: worktree1 is set aside as broken (its prepare command failed with status 5), and dibs worktree prepare worktree1 takes it back."
+        );
+        assert_eq!(
+            unservable(&[(&second, None)], &[&first]),
+            "No worktree of this pool can be handed out now: worktree2 is set aside as broken, and dibs worktree prepare worktree2 takes it back; worktree1 is still worked in on this machine."
+        );
     }
 
     #[test]

@@ -239,13 +239,17 @@ said; `git push --no-verify` goes past it only as a conscious choice your person
 ## Worktrees: a tree of your own
 
 A checkout whose `.dibs.toml` has a `[worktrees]` table lends the worktrees of a pool, kept on your member's machine, each
-a long-lived checkout with an environment of its own. A worktree is held by one agent (or one session) at a time:
-two agents of the same member never share one. A worktree is not a slot, and holding one has nothing to do with the
-slots above.
+a long-lived checkout with an environment of its own. A worktree is held by one agent, or by one session, at a time,
+and a holder holds one at a time: two agents of the same member never share one. A session's agents work in the
+worktree the session holds, and the session may look into its agents'. A worktree is not a slot, and holding one has
+nothing to do with the slots above.
 
 - Often your host gives you one, and you need to do nothing: a subagent started in a worktree of its own and a session
   that enters one are lent a worktree of the pool, and it is released when that subagent or session ends. The path
-  it gives you is where you work.
+  it gives you is where you work. A pool worktree has no name you can ask for: entering a worktree by a name you
+  chose gives you the one your session holds, or a free one, never a tree of that name.
+- When a subagent ends, its worktree is kept from everyone else for 20 minutes after its last tool call, so that a
+  subagent you continue finds it as it left it.
 - When you need a tree you were not given — a second branch to build and test beside your own, an experiment, a
   review of someone else's change — take one: `dibs_worktree_take` with a purpose every member may read (never a
   credential, a host name or a customer's data), the work item if there is one, and `wait_seconds` (up to 840) to wait
@@ -257,7 +261,9 @@ slots above.
   release.
 - Work only in that path. Do not edit, build or run commands for this work in your own checkout or in a directory you
   made yourself; edits and commands that name the worktree (a path inside it, `cd` into it, `git -C` on it) tell dibs
-  you are still using it. If you must work in it from somewhere else, `dibs worktree beat <name>` says so.
+  you are still using it. If you must work in it from somewhere else, `dibs worktree beat <name>` says so. dibs checks
+  that you hold a worktree only for work whose directory lies inside it, so working in it from elsewhere is your own
+  care. An edit or a command dibs refused does not count as using it.
 - A hold is kept by those signs of life: an agent's ends after 20 minutes without one and a session's after 12 hours,
   and the worktree is then offered to the next take. So do not leave a worktree you hold idle for long; if you will be
   away, release it.
@@ -270,12 +276,16 @@ slots above.
 - If every worktree is held, the refusal names who holds them and why. Wait for one, or work on something else;
   never take over a held worktree by working in it, and never remove one.
 - A refusal of an edit or a shell command that says you work in a pool worktree held by another session or agent is
-  final: you hold no hold on it, so work in a worktree you hold, or take your own. A worktree nobody holds that you were
-  already working in (after `/clear`, or a resumed agent) is taken again for you as it is.
+  final: you hold no hold on it, so work in a worktree you hold, or take your own. If it says another agent of your
+  own session holds it, you were continued after your worktree was handed on: stop, and tell the agent that started
+  you what is left to do. If it says you already hold another worktree, work there, or release that one first. A
+  worktree nobody holds that you were already working in (after `/clear`, or a resumed agent) is taken again for you
+  as it is.
 - If the pool cannot serve the worktree your host asked for — dibs switched off, no pool in this checkout, a server that
   cannot be reached, a pool whose worktrees are still being prepared (a new pool has none ready until its first
   preparation finishes) — dibs says so and your host gets the plain git worktree it would have made itself, without an
-  environment of its own. The work goes on; tell your person if you needed the environment.
+  environment of its own. dibs governs it like the checkout: your edits there are checked against claims as they
+  would be in the checkout. The work goes on; tell your person if you needed the environment.
 
 ## Hot files
 

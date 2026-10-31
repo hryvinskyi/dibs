@@ -775,3 +775,310 @@ fn an_agents_edit_in_its_pool_worktree_is_checked_against_claims_like_one_in_the
     assert!(reason.contains("alice holds for work item"), "{reason}");
     assert_eq!(write("src/search/q.rs"), Value::Null);
 }
+
+/// The input of a tool hook (`PreToolUse`, `PostToolUse`) of the subagent `agent` in `cwd`.
+fn agents_tool(event: &str, cwd: &Path, agent: &str, tool: Value) -> String {
+    let mut fields = tool;
+    fields["agent_id"] = json!(agent);
+    fields["agent_type"] = json!("general-purpose");
+    hook_input(event, cwd, fields)
+}
+
+/// A `Bash` command line run by the subagent `agent` in `cwd`, as `PreToolUse` gives it.
+fn agents_command(cwd: &Path, agent: &str, command: &str) -> String {
+    agents_tool(
+        "PreToolUse",
+        cwd,
+        agent,
+        json!({"tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "toolu_01CMD"}),
+    )
+}
+
+/// A tool the subagent `agent` ran in `cwd`, which leaves its sign of life there.
+fn agent_works(setup: &Setup, cwd: &Path, agent: &str) {
+    let after = setup.hook(
+        "bob",
+        cwd,
+        "post-tool-use",
+        &agents_tool(
+            "PostToolUse",
+            cwd,
+            agent,
+            json!({"tool_name": "Read", "tool_input": {}}),
+        ),
+    );
+    assert_eq!(after.status.code(), Some(0), "{}", text(&after.stderr));
+}
+
+/// The subagent `agent`, whose worktree is `cwd`, stops.
+fn agent_stops(setup: &Setup, cwd: &Path, agent: &str) {
+    let stopped = setup.hook(
+        "bob",
+        cwd,
+        "subagent-stop",
+        &agents_tool(
+            "SubagentStop",
+            cwd,
+            agent,
+            json!({"stop_hook_active": false}),
+        ),
+    );
+    assert_eq!(reply(&stopped), Value::Null);
+}
+
+/// Makes the last sign of life left in the worktree `name` older than an agent's silence.
+fn age_the_beat(setup: &Setup, name: &str) {
+    let beat = setup.worktree_state("bob", name, "beat");
+    let long_ago = std::time::SystemTime::now() - Duration::from_secs(21 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&beat)
+        .unwrap()
+        .set_modified(long_ago)
+        .unwrap();
+}
+
+/// The hold of the worktree `name` the listing shows, `null` when nobody holds it.
+fn held(setup: &Setup, widgets: &Path, name: &str) -> Value {
+    setup
+        .worktrees("bob", widgets)
+        .into_iter()
+        .find(|listed| listed["worktree"] == name)
+        .unwrap_or_else(|| panic!("{name} is not listed"))["held"]
+        .clone()
+}
+
+#[test]
+fn a_worktree_an_agent_left_is_kept_for_it_and_taken_again_when_the_agent_is_continued() {
+    let setup = Setup::new();
+    let widgets = setup.pool(2);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "--all"]);
+    let first = worktree_create(&setup, "bob", &widgets, "agent-a");
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    let worktree = setup.pool_worktree("worktree1");
+    assert_eq!(last_line(&first), worktree);
+    let draft = worktree.join("draft.txt");
+    fs::write(&draft, "half done\n").unwrap();
+    agent_works(&setup, &worktree, "a");
+    agent_stops(&setup, &worktree, "a");
+    assert_eq!(
+        held(&setup, &widgets, "worktree1"),
+        Value::Null,
+        "the server's hold ends with the agent"
+    );
+    assert!(
+        !setup
+            .worktree_state("bob", "worktree1", "free-since")
+            .exists(),
+        "an agent's end does not write its worktree free"
+    );
+
+    let second = worktree_create(&setup, "bob", &widgets, "agent-b");
+    assert_eq!(second.status.code(), Some(0), "{}", text(&second.stderr));
+    assert_eq!(
+        last_line(&second),
+        setup.pool_worktree("worktree2"),
+        "the worktree the first agent left is kept from the next take for an agent's silence"
+    );
+    assert!(
+        draft.exists(),
+        "nothing of the first agent's work was reset"
+    );
+
+    let continued = setup.hook(
+        "bob",
+        &worktree,
+        "pre-tool-use",
+        &agents_command(&worktree, "a", "ls"),
+    );
+    assert_eq!(
+        reply(&continued),
+        Value::Null,
+        "the continued agent goes on"
+    );
+    assert_eq!(
+        held(&setup, &widgets, "worktree1")["agent"],
+        "a",
+        "taken again for it, as it is"
+    );
+    assert!(draft.exists());
+}
+
+#[test]
+fn upkeep_does_not_write_free_a_worktree_an_agent_left_until_its_silence_ran_out() {
+    let setup = Setup::new();
+    let widgets = setup.pool(1);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "worktree1"]);
+    let created = worktree_create(&setup, "bob", &widgets, "agent-a");
+    assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
+    let worktree = setup.pool_worktree("worktree1");
+    agent_works(&setup, &worktree, "a");
+    agent_stops(&setup, &worktree, "a");
+    let free_since = setup.worktree_state("bob", "worktree1", "free-since");
+
+    let upkeep = || -> Value {
+        let out = setup.ok("bob", &widgets, &["worktree", "upkeep", "--json"]);
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let fresh = upkeep();
+    assert_eq!(fresh["server"], true, "{fresh}");
+    assert_eq!(
+        fresh["freed"],
+        json!([]),
+        "a sign of life younger than an agent's silence keeps it in use: {fresh}"
+    );
+    assert!(!free_since.exists());
+
+    age_the_beat(&setup, "worktree1");
+    let aged = upkeep();
+    assert_eq!(aged["freed"], json!(["worktree1"]), "{aged}");
+    assert!(free_since.exists());
+}
+
+#[test]
+fn a_continued_agent_whose_worktree_went_to_another_agent_is_told_so_and_refused() {
+    let setup = Setup::new();
+    let widgets = setup.pool(1);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "worktree1"]);
+    let worktree = setup.pool_worktree("worktree1");
+    let first = worktree_create(&setup, "bob", &widgets, "agent-a");
+    assert_eq!(last_line(&first), worktree, "{}", text(&first.stderr));
+    fs::write(worktree.join("draft.txt"), "half done\n").unwrap();
+    agent_works(&setup, &worktree, "a");
+    agent_stops(&setup, &worktree, "a");
+    age_the_beat(&setup, "worktree1");
+
+    let second = worktree_create(&setup, "bob", &widgets, "agent-b");
+    assert_eq!(last_line(&second), worktree, "{}", text(&second.stderr));
+    assert_eq!(held(&setup, &widgets, "worktree1")["agent"], "b");
+
+    let continued = reply(&setup.hook(
+        "bob",
+        &worktree,
+        "pre-tool-use",
+        &agents_command(&worktree, "a", "ls"),
+    ));
+    assert_eq!(decision(&continued), Some("deny"), "{continued}");
+    let reason = continued["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("worktree1 is a pool worktree held by the agent b of this session")
+            && reason.contains("not by this agent")
+            && reason.contains("saved on the branch dibs/rescue/worktree1-"),
+        "{reason}"
+    );
+    assert_eq!(
+        held(&setup, &widgets, "worktree1")["agent"],
+        "b",
+        "the hold stays with the agent that took it"
+    );
+}
+
+#[test]
+fn a_session_holding_a_worktree_is_told_so_when_it_works_in_another_nobody_holds() {
+    let setup = Setup::new();
+    let widgets = setup.pool(2);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "--all"]);
+    let created = worktree_create(&setup, "bob", &widgets, "fix-totals");
+    assert_eq!(
+        last_line(&created),
+        setup.pool_worktree("worktree1"),
+        "{}",
+        text(&created.stderr)
+    );
+    let elsewhere = setup.pool_worktree("worktree2");
+    let input = hook_input(
+        "PreToolUse",
+        &elsewhere,
+        json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_use_id": "toolu_01CMD"}),
+    );
+    let refused = reply(&setup.hook("bob", &elsewhere, "pre-tool-use", &input));
+    assert_eq!(decision(&refused), Some("deny"), "{refused}");
+    let reason = refused["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("this session already holds worktree1")
+            && reason.contains("release it first"),
+        "{reason}"
+    );
+    assert!(!reason.contains("another session"), "{reason}");
+    assert_eq!(held(&setup, &widgets, "worktree2"), Value::Null);
+}
+
+#[test]
+fn an_edit_in_the_worktree_made_while_the_pool_is_prepared_is_checked_against_claims() {
+    let setup = Setup::new();
+    let api = setup.api();
+    let widgets = setup.pool(1);
+    setup.claim("alice", &api, "gh:acme/api#1", &["billing"]);
+    setup.claim("bob", &widgets, "gh:acme/api#2", &[]);
+
+    let made = worktree_create(&setup, "bob", &widgets, "agent-y");
+    assert_eq!(made.status.code(), Some(0), "{}", text(&made.stderr));
+    let own = canonical(&widgets.join(".claude/worktrees/agent-y"));
+    assert_eq!(last_line(&made), own, "{}", text(&made.stderr));
+    let config = fs::read_to_string(own.join(".dibs.toml")).unwrap();
+    assert!(
+        config.contains("project = \"acme\"") && config.contains("repo = \"api\""),
+        "{config}"
+    );
+    assert!(
+        !config.contains("worktrees") && !config.contains("pool_worktree"),
+        "never a pool's table: {config}"
+    );
+    assert_eq!(
+        git(&own, &["status", "--porcelain"]),
+        "",
+        "the worktree stays clean"
+    );
+
+    let write = |path: &str| {
+        reply(&setup.hook(
+            "bob",
+            &own,
+            "pre-tool-use",
+            &agents_tool(
+                "PreToolUse",
+                &own,
+                "y",
+                json!({
+                    "tool_name": "Write",
+                    "tool_input": {"file_path": own.join(path).to_string_lossy(), "content": "x\n"},
+                    "tool_use_id": "toolu_01ABC123"
+                }),
+            ),
+        ))
+    };
+    let denied = write("src/billing/a.rs");
+    assert_eq!(decision(&denied), Some("deny"), "{denied}");
+    let reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(reason.contains("alice holds for work item"), "{reason}");
+    assert_eq!(write("src/search/q.rs"), Value::Null);
+}
+
+#[test]
+fn a_pool_declared_in_a_tracked_file_makes_claude_codes_own_worktree_and_says_why() {
+    let setup = Setup::new();
+    let widgets = setup.pool(1);
+    git(&widgets, &["add", "-f", ".dibs.toml"]);
+    git(&widgets, &["commit", "-q", "-m", "share the configuration"]);
+
+    let made = worktree_create(&setup, "bob", &widgets, "agent-y");
+    assert_eq!(made.status.code(), Some(0), "{}", text(&made.stderr));
+    let own = canonical(&widgets.join(".claude/worktrees/agent-y"));
+    assert_eq!(last_line(&made), own);
+    let said = text(&made.stderr);
+    assert!(
+        said.contains("pool of worktrees was not used") && said.contains("git tracks the file"),
+        "the notice names why the pool was refused: {said}"
+    );
+    assert!(!said.contains("no [worktrees] table"), "{said}");
+    assert!(
+        !setup.pool_worktree("worktree1").exists(),
+        "nothing of the pool ran"
+    );
+}

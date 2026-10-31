@@ -591,6 +591,10 @@ fn no_event_of_a_pool_names_its_machine_its_pool_or_an_agent() {
             assert!(allowed.contains(&field.as_str()), "{text} carries {field}");
         }
         assert!(event.name().starts_with("worktree_"));
-        assert_eq!(event.private_to(), Some(ALICE));
+        assert_eq!(
+            event.private_to(),
+            None,
+            "every member's board shows the hold"
+        );
     }
 }

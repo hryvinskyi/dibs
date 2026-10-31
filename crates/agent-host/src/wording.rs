@@ -1060,6 +1060,15 @@ pub fn worktree_kept(path: &std::path::Path, why: &str) -> String {
     )
 }
 
+/// The notice of a worktree given back that was kept because it is a worktree of a pool whose
+/// checkout could not be found from it: a pool worktree is never removed.
+pub fn pool_worktree_kept(path: &std::path::Path) -> String {
+    format!(
+        "dibs: the worktree at {} was kept: its .dibs.toml says it is a worktree of a pool, and dibs never removes one. The checkout that lends it could not be read from here, so no hold of it was released; run dibs worktree list in that checkout to see where it stands.",
+        path.display()
+    )
+}
+
 /// Another holder of a pool worktree, as a refusal names it.
 pub struct WorktreeHolderShown<'a> {
     /// The holder's agent; `None` for a session.
@@ -1100,6 +1109,49 @@ pub fn not_the_holder(
         );
     }
     text
+}
+
+/// The refusal of an edit or a command by an agent in the pool worktree `worktree`, which another
+/// agent of its own session, `holder`, holds: the agent asking holds no hold on it, as an agent's
+/// hold ends with the agent and the worktree may be handed out after that. `rescued` names the
+/// branch the work found in it was last saved on.
+pub fn held_by_a_sibling(
+    worktree: &WorktreeName,
+    holder: &WorktreeHolderShown<'_>,
+    rescued: Option<&str>,
+) -> String {
+    let who = holder.agent.map_or_else(
+        || "another agent".to_owned(),
+        |agent| format!("the agent {}", quoted(agent.as_str())),
+    );
+    let why = holder
+        .purpose
+        .map(|purpose| format!(" for \"{}\"", quoted(purpose.as_str())))
+        .unwrap_or_default();
+    let since = holder
+        .since
+        .map(|since| format!(" since {}", clock(since)))
+        .unwrap_or_default();
+    let mut text = format!(
+        "{worktree} is a pool worktree held by {who} of this session{why}{since}, not by this agent: an agent's hold ends when the agent does, and the worktree was handed out after that, so dibs refuses edits and commands in it. Stop here and tell the agent that started you what is left to do, so that it goes on in a worktree of its own."
+    );
+    if let Some(branch) = rescued {
+        let _ = write!(
+            text,
+            " Work found in {worktree} when it was last taken was saved on the branch {branch}."
+        );
+    }
+    text
+}
+
+/// The refusal of an edit or a command in the pool worktree `worktree`, which nobody holds, by a
+/// session (or, when `agent`, an agent of one) that holds the worktree `held` already: a holder
+/// holds one worktree at a time.
+pub fn holds_another(worktree: &WorktreeName, held: &WorktreeName, agent: bool) -> String {
+    let who = if agent { "this agent" } else { "this session" };
+    format!(
+        "{worktree} is a pool worktree {who} does not hold, and {who} already holds {held}, so dibs refuses edits and commands in {worktree}. Work in {held}, or release it first with dibs worktree release {held}."
+    )
 }
 
 /// What the brief says of a session that starts in a pool worktree another holder has.

@@ -26,11 +26,13 @@
 //!   guard answers it whether or not it is switched off and wherever the host asks, and makes the
 //!   host's own worktree whenever the pool cannot serve one. Its take is the one call a hook waits
 //!   minutes for, bounded by the host's timeout, and the one refusal not made by the server's
-//!   verdict on an edit: every worktree of the pool held until that deadline.
-//! - **Nobody works in a pool worktree they do not hold.** A session or agent working in one its
-//!   session holds no hold on takes it again when it is free, and is refused edits and commands
-//!   when another holder has it; this is read from this machine's records, so the common case asks
-//!   the server nothing.
+//!   verdict on an edit: every worktree of the pool held for as long as that deadline leaves before
+//!   a reset.
+//! - **Nobody works in a pool worktree they do not hold.** A session or agent working in one it
+//!   holds no hold on takes it again when it is free, and is refused edits and commands when
+//!   another holder has it, another agent of its own session included; this is read from this
+//!   machine's records, so the common case asks the server nothing. Only a tool call let through is
+//!   a sign of life in a worktree.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -337,7 +339,6 @@ impl Run<'_> {
         call: &ToolCall,
         agent: Option<&AgentKey>,
     ) -> Result<Judged, Problem> {
-        self.leave_beats(cwd, call);
         let deniable = match call {
             ToolCall::Edit { .. } => self.capabilities.deny_edit,
             ToolCall::Shell { .. } => self.capabilities.deny_shell,
@@ -348,13 +349,24 @@ impl Run<'_> {
                 reason: Text::new(refusal),
             }));
         }
-        match call {
+        let judged = match call {
             ToolCall::Edit { paths } if self.capabilities.deny_edit => self.edits(cwd, paths),
             ToolCall::Shell { command } if self.capabilities.deny_shell => self.shell(cwd, command),
             ToolCall::Edit { .. } | ToolCall::Shell { .. } | ToolCall::Other => {
                 Ok(Judged::plain(GuardOutcome::silent()))
             }
+        };
+        let denied = matches!(
+            judged,
+            Ok(Judged {
+                outcome: GuardOutcome::Deny { .. },
+                ..
+            })
+        );
+        if !denied {
+            self.leave_beats(cwd, call);
         }
+        judged
     }
 
     /// The outcome of a judgement, a refusal counted on this machine and ending with the id it is

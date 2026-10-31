@@ -1,45 +1,57 @@
 {
   "description": "dibs: the brief at the start of a session, a check before each file edit and each shell command, heartbeats after tools run, a teammate's pressing message or a slot offered to you between tool calls and with your prompt, a note of when a turn ends, so that a message pushed while the session waits is not pushed while it works, and the worktrees your sessions and subagents ask for, lent from your machine's pool and let go of when a subagent or the session ends.",
   "hooks": {
-    "SessionStart": [
+    "PostToolUse": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" session-start",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" post-tool-use",
+            "onFailure": "continue",
             "timeout": 5,
-            "onFailure": "continue"
-          },
-          {
-            "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" check-binary",
-            "timeout": 5,
-            "onFailure": "continue"
+            "type": "command"
           }
         ]
       }
     ],
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           {
-            "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" pre-tool-use",
+            "onFailure": "continue",
             "timeout": 5,
-            "onFailure": "continue"
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" session-end",
+            "onFailure": "continue",
+            "timeout": 5,
+            "type": "command"
           }
         ]
       }
     ],
-    "PostToolUse": [
+    "SessionStart": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" post-tool-use",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" session-start",
+            "onFailure": "continue",
             "timeout": 5,
-            "onFailure": "continue"
+            "type": "command"
+          },
+          {
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" check-binary",
+            "onFailure": "continue",
+            "timeout": 5,
+            "type": "command"
           }
         ]
       }
@@ -48,45 +60,10 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" stop",
+            "onFailure": "continue",
             "timeout": 5,
-            "onFailure": "continue"
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" user-prompt-submit",
-            "timeout": 5,
-            "onFailure": "continue"
-          }
-        ]
-      }
-    ],
-    "WorktreeCreate": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" worktree-create",
-            "timeout": 900
-          }
-        ]
-      }
-    ],
-    "WorktreeRemove": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" worktree-remove",
-            "timeout": 5,
-            "onFailure": "continue"
+            "type": "command"
           }
         ]
       }
@@ -95,22 +72,45 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" subagent-stop",
+            "onFailure": "continue",
             "timeout": 5,
-            "onFailure": "continue"
+            "type": "command"
           }
         ]
       }
     ],
-    "SessionEnd": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" session-end",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" user-prompt-submit",
+            "onFailure": "continue",
             "timeout": 5,
-            "onFailure": "continue"
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" worktree-create",
+            "timeout": 900,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" worktree-remove",
+            "onFailure": "continue",
+            "timeout": 5,
+            "type": "command"
           }
         ]
       }

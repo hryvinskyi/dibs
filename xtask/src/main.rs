@@ -1,6 +1,7 @@
 //! Repository chores, run as `cargo xtask <task>`:
 //!
-//! - `integrations` renders `docs/agent-workflow.md` into every file the integrations declare;
+//! - `integrations` renders `docs/agent-workflow.md` into every file the integrations declare, and
+//!   writes the values of dibs's code they declare into their JSON files;
 //! - `integrations --check` renders in memory and fails, naming the files, when one differs.
 
 mod integrations;
@@ -48,7 +49,7 @@ fn repository_root() -> PathBuf {
 fn write(root: &Path) -> ExitCode {
     match integrations::write(root) {
         Ok(changed) if changed.is_empty() => {
-            println!("Every integration's workflow text is up to date.");
+            println!("Every integration's workflow text and stamped values are up to date.");
             ExitCode::SUCCESS
         }
         Ok(changed) => {
@@ -68,14 +69,14 @@ fn check(root: &Path) -> ExitCode {
     match integrations::stale(root) {
         Ok(stale) if stale.is_empty() => {
             println!(
-                "Every integration's workflow text matches {}.",
+                "Every integration's workflow text matches {}, and its stamped values dibs's code.",
                 integrations::SOURCE
             );
             ExitCode::SUCCESS
         }
         Ok(stale) => {
             eprintln!(
-                "These files differ from what {} renders; run cargo xtask integrations:",
+                "These files differ from what {} and dibs's code render; run cargo xtask integrations:",
                 integrations::SOURCE
             );
             for path in stale {

@@ -15,7 +15,22 @@
 //! Rendering writes each declared file as its header, a line saying where the text comes from,
 //! and the source. Checking renders in memory and names every file that differs, so a change to
 //! the source that was not rendered, or a hand edit of a rendered file, fails.
+//!
+//! An integration also declares the values its JSON files must repeat from dibs's code, each by
+//! the JSON pointer to a number and the name of the value:
+//!
+//! ```toml
+//! [[stamp]]
+//! path = "hooks/hooks.json"
+//! pointer = "/hooks/WorktreeWanted/0/timeout"
+//! value = "worktree_hook_timeout"
+//! ```
+//!
+//! Rendering writes the value there, the file written back with its keys in order and indented by
+//! two spaces; checking fails when the file differs from that, so the file and the code cannot
+//! drift.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -62,6 +77,27 @@ pub enum RenderError {
 struct Manifest {
     #[serde(default)]
     render: Vec<Target>,
+    #[serde(default)]
+    stamp: Vec<Stamp>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Stamp {
+    path: String,
+    pointer: String,
+    value: String,
+}
+
+/// The value named `name` that an integration's files repeat from dibs's code, as JSON; `None`
+/// for a name dibs does not know.
+fn stamped_value(name: &str) -> Option<serde_json::Value> {
+    match name {
+        "worktree_hook_timeout" => Some(serde_json::Value::from(
+            dibs_agent_host::adapter::WorktreeTerms::HOOK_TIMEOUT.as_secs(),
+        )),
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -126,6 +162,46 @@ pub fn render(root: &Path) -> Result<Vec<Rendered>, RenderError> {
             rendered.push(Rendered {
                 path: relative(root, &dir.join(inside)),
                 text: compose(&target.header, &source),
+            });
+        }
+        let mut stamped: BTreeMap<PathBuf, serde_json::Value> = BTreeMap::new();
+        for stamp in manifest.stamp {
+            let inside = inside(&stamp.path).ok_or_else(|| {
+                invalid(format!(
+                    "'{}' is not a path inside the integration",
+                    stamp.path
+                ))
+            })?;
+            let value = stamped_value(&stamp.value)
+                .ok_or_else(|| invalid(format!("dibs has no value named '{}'", stamp.value)))?;
+            let file = dir.join(inside);
+            let document = match stamped.entry(file.clone()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let text = read(&file)?;
+                    let parsed: serde_json::Value = serde_json::from_str(&text)
+                        .map_err(|error| invalid(format!("{} is not JSON: {error}", stamp.path)))?;
+                    entry.insert(parsed)
+                }
+            };
+            match document.pointer_mut(&stamp.pointer) {
+                Some(slot) if slot.is_number() => *slot = value,
+                _ => {
+                    return Err(invalid(format!(
+                        "{} has no number at {}",
+                        stamp.path, stamp.pointer
+                    )));
+                }
+            }
+        }
+        for (file, document) in stamped {
+            let mut text = serde_json::to_string_pretty(&document).map_err(|error| {
+                invalid(format!("{} could not be written: {error}", file.display()))
+            })?;
+            text.push('\n');
+            rendered.push(Rendered {
+                path: relative(root, &file),
+                text,
             });
         }
     }
@@ -283,6 +359,65 @@ mod tests {
         write(dir.path()).unwrap();
         fs::write(dir.path().join("integrations/beta/AGENTS.md"), "edited").unwrap();
         assert_eq!(stale(dir.path()).unwrap().len(), 1);
+    }
+
+    /// A hook configuration whose `wait` hook has the timeout `timeout`.
+    fn hooks(timeout: u64) -> String {
+        format!(
+            "{{\n  \"hooks\": {{\n    \"Wait\": [\n      {{\n        \"command\": \"sh wait\",\n        \"timeout\": {timeout}\n      }}\n    ]\n  }}\n}}\n"
+        )
+    }
+
+    const STAMPED: &str = "[[render]]\npath = \"AGENTS.md\"\n\n[[stamp]]\npath = \"hooks/hooks.json\"\npointer = \"/hooks/Wait/0/timeout\"\nvalue = \"worktree_hook_timeout\"\n";
+
+    #[test]
+    fn a_stamped_value_is_written_from_the_code_and_a_drift_is_stale() {
+        let dir = repo();
+        integration(dir.path(), "delta", STAMPED);
+        let file = dir.path().join("integrations/delta/hooks/hooks.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, hooks(5)).unwrap();
+        assert!(
+            stale(dir.path())
+                .unwrap()
+                .contains(&PathBuf::from("integrations/delta/hooks/hooks.json")),
+            "a value that is not the code's is stale"
+        );
+        write(dir.path()).unwrap();
+        let timeout = dibs_agent_host::adapter::WorktreeTerms::HOOK_TIMEOUT.as_secs();
+        assert_eq!(fs::read_to_string(&file).unwrap(), hooks(timeout));
+        assert!(stale(dir.path()).unwrap().is_empty());
+        assert!(write(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stamp_names_a_value_dibs_knows_and_a_number_its_file_has() {
+        for (manifest, file) in [
+            (STAMPED.replace("worktree_hook_timeout", "nap"), hooks(5)),
+            (STAMPED.replace("/Wait/0", "/Sleep/0"), hooks(5)),
+            (
+                STAMPED.to_owned(),
+                "{\"hooks\": {\"Wait\": [{\"timeout\": \"5\"}]}}".to_owned(),
+            ),
+            (STAMPED.to_owned(), "not json".to_owned()),
+            (
+                STAMPED.replace("hooks/hooks.json", "../hooks.json"),
+                hooks(5),
+            ),
+        ] {
+            let dir = repo();
+            integration(dir.path(), "delta", &manifest);
+            let path = dir.path().join("integrations/delta/hooks/hooks.json");
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &file).unwrap();
+            let error = render(dir.path()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("integrations/delta/workflow.toml"),
+                "{manifest}: {error}"
+            );
+        }
     }
 
     #[test]

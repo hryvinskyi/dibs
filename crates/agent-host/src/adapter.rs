@@ -105,6 +105,12 @@ pub struct WorktreeTerms {
 }
 
 impl WorktreeTerms {
+    /// The timeout dibs's integrations give the hook that answers a wanted worktree: long enough to
+    /// wait for a worktree to be freed and to reset it. `cargo xtask integrations` writes it into
+    /// the hook configuration of every integration that declares where it goes, so the two cannot
+    /// drift.
+    pub const HOOK_TIMEOUT: Duration = Duration::from_secs(900);
+
     /// How long the guard leaves itself out of the hook's timeout to answer: a minute, so that a
     /// take that runs to its deadline still answers before the host gives up.
     pub const MARGIN: Duration = Duration::from_secs(60);

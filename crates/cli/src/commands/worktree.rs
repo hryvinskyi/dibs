@@ -36,7 +36,7 @@ use crate::cli::{
     WorktreeBeatArgs, WorktreeCommand, WorktreePrepareArgs, WorktreeReleaseArgs, WorktreeTakeArgs,
 };
 use crate::commands::worktree::pool::Pool;
-use crate::commands::worktree::project::{ProjectCommands, ShellCommands, Site, Step};
+use crate::commands::worktree::project::{Output, ProjectCommands, ShellCommands, Site, Step};
 use crate::commands::worktree::rescue::{Author, WorktreeGit};
 use crate::commands::worktree::take::{Ask, TakeError, Taken, TakenWorktree, Taker};
 use crate::context::{Connection, Context};
@@ -46,6 +46,11 @@ use crate::guard::machine::machine_id;
 
 /// The purpose of a take that names none.
 pub const DEFAULT_PURPOSE: &str = "work in a worktree";
+
+/// The variable a take sets, to `1`, on the `dibs worktree prepare` it starts in the background:
+/// such a preparation leaves alone a worktree that was prepared in the meantime, and writes the
+/// project's output to the worktree's log, as nobody reads its standard error.
+pub const BACKGROUND_PREPARE: &str = "DIBS_WORKTREE_PREPARE_IN_BACKGROUND";
 
 /// Makes the key a take mints for a holder that names no agent of its own, so that two takes of
 /// one session are two holders.
@@ -274,6 +279,7 @@ pub async fn release_hold(
     let files = pool.files();
     match connection.client.release_worktree(&request).await {
         Ok(released) => {
+            beats::served(pool.state(), SystemClock.now());
             let name = &released.released.worktree;
             if let Err(error) = files.forget_hold(name) {
                 tracing::debug!(error = %error, "a worktree's holder could not be forgotten");
@@ -330,6 +336,7 @@ pub async fn own_holds(
     machine: &MachineId,
 ) -> Result<Vec<OwnWorktreeHold>, ClientError> {
     let answer = connection.client.worktrees(Some(machine)).await?;
+    beats::served(pool.state(), SystemClock.now());
     Ok(answer
         .pools
         .into_iter()
@@ -457,16 +464,53 @@ fn clock(at: time::OffsetDateTime) -> String {
 /// The longest `dibs worktree prepare` waits for another run to let go of a worktree.
 const PREPARE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(25 * 60);
 
+/// Who asked for a preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asker {
+    /// A person, naming the worktree or the whole pool: a prepared worktree is prepared again,
+    /// which is how one set aside is taken back.
+    Person,
+    /// A take that found no prepared worktree free and started this run in the background: a
+    /// worktree prepared in the meantime is left as it is.
+    Take,
+}
+
+/// What a preparation of one worktree came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Prepared {
+    /// It was prepared.
+    Done,
+    /// It was prepared already and not set aside, so a take's run left it alone.
+    Already,
+    /// This machine records a holder of it, so it was left alone.
+    Held(String),
+}
+
 async fn prepare(args: WorktreePrepareArgs, ctx: &Context) -> Result<(), Failure> {
     let (pool, _, _) = locate(ctx)?;
+    let asker = if ctx
+        .var(BACKGROUND_PREPARE)
+        .is_some_and(|value| value == "1")
+    {
+        Asker::Take
+    } else {
+        Asker::Person
+    };
     let names = match &args.worktree {
         Some(name) => vec![pool.known(name)?],
         None => pool.names(),
     };
     let mut failed = Vec::new();
     for name in &names {
-        match prepare_one(&pool, name, &ShellCommands, &SystemClock, ctx).await {
-            Ok(()) => ctx.printer.note(&format!("{name} is prepared.")),
+        match prepare_one(&pool, name, &ShellCommands, &SystemClock, ctx, asker).await {
+            Ok(Prepared::Done) => ctx.printer.note(&format!("{name} is prepared.")),
+            Ok(Prepared::Already) => ctx.printer.note(&format!(
+                "{name} was prepared already; it was left as it is."
+            )),
+            Ok(Prepared::Held(held)) if args.worktree.is_some() => {
+                return Err(Failure::refused("worktree_held", held));
+            }
+            Ok(Prepared::Held(held)) => ctx.printer.warn(&held),
             Err(reason) => {
                 ctx.printer
                     .warn(&format!("{name} could not be prepared: {reason}."));
@@ -488,14 +532,18 @@ async fn prepare(args: WorktreePrepareArgs, ctx: &Context) -> Result<(), Failure
 }
 
 /// Prepares one worktree under its lock: runs the project's `prepare`, writes the worktree's
-/// `.dibs.toml` and takes it back into the pool; sets it aside when the preparation fails.
+/// `.dibs.toml` and takes it back into the pool; sets it aside when the preparation fails. Once it
+/// holds the lock it leaves alone a worktree this machine records a holder of — the preparation
+/// would run over the holder's work — and, for a take's run in the background, one that was
+/// prepared while it waited.
 async fn prepare_one(
     pool: &Pool,
     name: &WorktreeName,
     commands: &dyn ProjectCommands,
     clock: &dyn Clock,
     ctx: &Context,
-) -> Result<(), String> {
+    asker: Asker,
+) -> Result<Prepared, String> {
     if pool.is_locked(name) {
         ctx.printer.note(&format!(
             "Another dibs is preparing, resetting or stopping {name}; waiting for it."
@@ -508,6 +556,19 @@ async fn prepare_one(
     let Some(_lock) = lock else {
         return Err("another dibs is still preparing, resetting or stopping it".to_owned());
     };
+    let files = pool.files();
+    if let Some(record) = files.hold(name) {
+        let who = record.agent.as_ref().map_or_else(
+            || "a session".to_owned(),
+            |agent| format!("the agent {agent}"),
+        );
+        return Ok(Prepared::Held(format!(
+            "{name} is held for {who} on this machine, so it was not prepared over its work; release it first with dibs worktree release {name}."
+        )));
+    }
+    if asker == Asker::Take && pool.is_prepared(name) && files.broken(name).is_none() {
+        return Ok(Prepared::Already);
+    }
     let path = pool.path(name);
     let settings = pool.settings();
     let site = Site {
@@ -516,18 +577,28 @@ async fn prepare_one(
         base: &settings.base,
         checkout: pool.checkout().root(),
     };
-    let files = pool.files();
+    let log = pool.log(name);
+    let output = match asker {
+        Asker::Person => Output::Stderr,
+        Asker::Take => Output::Log(&log),
+    };
     let outcome = commands
-        .run(
+        .run_to(
             Step::Prepare,
             &settings.prepare,
             &site,
             Step::Prepare.limit(),
+            output,
         )
-        .map_err(|failed| failed.reason())
+        .map_err(|failed| match output {
+            Output::Log(log) => format!("{}; its output is in {}", failed.reason(), log.display()),
+            Output::Stderr => failed.reason(),
+        })
         .and_then(|()| {
-            pool.write_config(name)
-                .map_err(|_| "its .dibs.toml could not be written".to_owned())
+            pool.write_config(name).map_err(|error| {
+                tracing::debug!(error = %error, "a worktree's .dibs.toml could not be written");
+                error.reason()
+            })
         });
     match &outcome {
         Ok(()) => {
@@ -545,7 +616,7 @@ async fn prepare_one(
             }
         }
     }
-    outcome
+    outcome.map(|()| Prepared::Done)
 }
 
 #[cfg(test)]
