@@ -142,14 +142,12 @@ impl Status {
         for pool in &mut pools {
             pool.save(&mut work, now).await?;
         }
-        let worktrees = own_pools(
-            &mut work,
-            pools
-                .iter()
-                .map(|scene| &scene.pool)
-                .filter(|pool| !pool.is_empty()),
-        )
-        .await?;
+        let held: Vec<_> = pools
+            .iter()
+            .map(|scene| &scene.pool)
+            .filter(|pool| !pool.is_empty())
+            .collect();
+        let worktrees = own_pools(&mut work, held).await?;
         let settings = scene.settings.clone();
         let stale_after = settings.stale_after();
         let names = Names::load(&mut work).await?;
