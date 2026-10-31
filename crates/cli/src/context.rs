@@ -290,7 +290,9 @@ fn unnamed_machine() -> Failure {
 }
 
 fn record(state: &StateDir, error: ClientError) -> Failure {
+    let reached = matches!(error, ClientError::ServerTooOld { .. });
     if error.is_unavailable()
+        && !reached
         && let Err(io) = state.mark_unreachable(OffsetDateTime::now_utc())
     {
         tracing::debug!(error = %io, "the unreachable mark could not be written");

@@ -13,6 +13,7 @@ pub mod self_update;
 pub mod slot;
 pub mod sync;
 pub mod work;
+pub mod worktree;
 
 use crate::cli::Command;
 use crate::context::Context;
@@ -46,6 +47,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Thread(args) => messages::thread(args, ctx).await,
         Command::Read(args) => messages::read(args, ctx).await,
         Command::Slot(command) => slot::run(command, ctx).await,
+        Command::Worktree(command) => worktree::run(command, ctx).await,
         Command::Sync(args) => sync::sync(args, ctx).await,
         Command::Mcp(args) => crate::mcp::serve(args, ctx).await,
         Command::SelfUpdate(args) => self_update::self_update(args, ctx).await,

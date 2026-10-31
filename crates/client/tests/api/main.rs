@@ -15,3 +15,5 @@ mod items;
 mod slots;
 #[cfg(test)]
 mod threads;
+#[cfg(test)]
+mod worktrees;

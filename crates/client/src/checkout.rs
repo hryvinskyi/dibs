@@ -8,18 +8,27 @@
 //! never by the outer checkout's. A file names the server, the project and, in a project with
 //! several repositories, which one this checkout is; that repository's remote must be the
 //! checkout's `origin`, so a file copied into another clone governs nothing.
+//!
+//! A file may also hold one of two tables about the pool of worktrees a checkout lends to its
+//! agents, never both: `[worktrees]`, in the checkout that lends them, says where they live, how
+//! many there are and which commands of the project prepare, reset and stop one; `[pool_worktree]`,
+//! in the file dibs writes into each worktree of a pool, names the checkout that lends it and the
+//! worktree's name, so a worktree is a governed checkout of its own and never a pool of its own.
 
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::Duration;
 
 use dibs_domain::paths::RelPath;
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::repo::{RemoteUrl, RepoId};
-use dibs_domain::settings::{CheckoutRefused, ProjectSettings, RepoSpec};
+use dibs_domain::settings::{CheckoutRefused, ProjectSettings, RepoSpec, parse_duration};
+use dibs_domain::worktree::{PoolId, PoolIdError, WorktreeName};
 
 use crate::api::Me;
 use crate::server_url::ServerUrl;
@@ -36,6 +45,60 @@ pub struct CheckoutConfig {
     pub project: ProjectSlug,
     /// Which of the project's repositories this checkout is; absent for a project with one.
     pub repo: Option<RepoId>,
+    /// The pool of worktrees this checkout lends, when its `[worktrees]` table declares one.
+    pub worktrees: Option<WorktreeSettings>,
+    /// The checkout this one is a pool worktree of, when its `[pool_worktree]` table says so.
+    pub pool_worktree: Option<PoolWorktree>,
+}
+
+/// The pool of worktrees a checkout lends: `<prefix>1` to `<prefix><count>` under `root`, and the
+/// project's commands that prepare a missing one, reset a reused one and stop the environment of
+/// one left idle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSettings {
+    /// The directory the worktrees live in, absolute: by default beside the checkout,
+    /// `<checkout>-worktrees`.
+    pub root: PathBuf,
+    /// How many worktrees there are, 1 to [`WorktreeSettings::MAX_COUNT`].
+    pub count: u8,
+    /// What each worktree's name starts with; `worktree` by default.
+    pub prefix: String,
+    /// What a worktree is reset to; `origin/main` by default.
+    pub base: String,
+    /// The command that makes a worktree missing on disk ready to work in.
+    pub prepare: String,
+    /// The command that brings a reused worktree back to the base.
+    pub reset: String,
+    /// The command that stops the environment of a worktree left free, when the project has one.
+    pub idle: Option<String>,
+    /// How long a worktree stays free before its environment is stopped; 30 minutes by default.
+    pub idle_after: Duration,
+}
+
+impl WorktreeSettings {
+    /// The most worktrees one pool has.
+    pub const MAX_COUNT: u8 = 32;
+
+    /// The names of the worktrees, in order: `<prefix>1` to `<prefix><count>`.
+    pub fn names(&self) -> Vec<WorktreeName> {
+        (1..=self.count)
+            .filter_map(|n| WorktreeName::parse(&format!("{}{n}", self.prefix)).ok())
+            .collect()
+    }
+
+    /// The directory of the worktree `name`.
+    pub fn path_of(&self, name: &WorktreeName) -> PathBuf {
+        self.root.join(name.as_str())
+    }
+}
+
+/// What the file of a pool worktree says about it: the checkout that lends it and its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolWorktree {
+    /// The checkout whose pool the worktree belongs to, absolute.
+    pub checkout: PathBuf,
+    /// The worktree's name in that pool.
+    pub name: WorktreeName,
 }
 
 #[derive(Deserialize)]
@@ -44,6 +107,28 @@ struct ConfigFile {
     server: String,
     project: String,
     repo: Option<String>,
+    worktrees: Option<WorktreesTable>,
+    pool_worktree: Option<PoolWorktreeTable>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorktreesTable {
+    root: Option<String>,
+    count: Option<i64>,
+    prefix: Option<String>,
+    base: Option<String>,
+    prepare: Option<String>,
+    reset: Option<String>,
+    idle: Option<String>,
+    idle_after: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PoolWorktreeTable {
+    checkout: String,
+    name: String,
 }
 
 /// A checkout: the directory holding its `.dibs.toml`, and what the file says.
@@ -214,10 +299,29 @@ impl Checkout {
             .map(RepoId::parse)
             .transpose()
             .map_err(|error| invalid(format!("repo: {error}")))?;
+        if file.worktrees.is_some() && file.pool_worktree.is_some() {
+            return Err(invalid(
+                "a file holds either a [worktrees] table or a [pool_worktree] table, never both"
+                    .to_owned(),
+            ));
+        }
+        let directory = path.parent().unwrap_or_else(|| Path::new(""));
+        let worktrees = file
+            .worktrees
+            .map(|table| worktree_settings(directory, table))
+            .transpose()
+            .map_err(invalid)?;
+        let pool_worktree = file
+            .pool_worktree
+            .map(pool_worktree)
+            .transpose()
+            .map_err(invalid)?;
         Ok(CheckoutConfig {
             server,
             project,
             repo,
+            worktrees,
+            pool_worktree,
         })
     }
 
@@ -322,6 +426,114 @@ impl Checkout {
             reason: error.to_string(),
         })
     }
+}
+
+/// The `[worktrees]` table of the file in `directory`, its defaults filled in.
+fn worktree_settings(directory: &Path, table: WorktreesTable) -> Result<WorktreeSettings, String> {
+    let count = table
+        .count
+        .ok_or("worktrees: count is required: how many worktrees the pool has")?;
+    let count = u8::try_from(count)
+        .ok()
+        .filter(|count| (1..=WorktreeSettings::MAX_COUNT).contains(count))
+        .ok_or_else(|| format!("worktrees: count is 1 to {}", WorktreeSettings::MAX_COUNT))?;
+    let prefix = table.prefix.unwrap_or_else(|| "worktree".to_owned());
+    if WorktreeName::parse(&format!("{prefix}{count}")).is_err() {
+        return Err(format!(
+            "worktrees: prefix '{prefix}' does not make worktree names: a name is 1 to 64 lowercase \
+             letters, digits, '.', '_' or '-', starting with a letter or a digit"
+        ));
+    }
+    let root = match table.root {
+        Some(root) if root.trim().is_empty() => {
+            return Err("worktrees: root is a directory".to_owned());
+        }
+        Some(root) => lexical(&directory.join(root)),
+        None => default_root(directory)?,
+    };
+    if root.starts_with(lexical(directory)) {
+        return Err(format!(
+            "worktrees: root {} is the checkout or lies inside it; the worktrees live outside it",
+            root.display()
+        ));
+    }
+    let base = table.base.unwrap_or_else(|| "origin/main".to_owned());
+    if base.is_empty() || base.starts_with('-') || base.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "worktrees: base '{base}' is no ref a worktree can be reset to"
+        ));
+    }
+    let command = |name: &str, text: Option<String>| -> Result<Option<String>, String> {
+        match text {
+            Some(text) if text.trim().is_empty() => {
+                Err(format!("worktrees: {name} is a command, not empty"))
+            }
+            other => Ok(other),
+        }
+    };
+    let prepare = command("prepare", table.prepare)?.ok_or(
+        "worktrees: prepare is required: the command that makes a worktree ready to work in",
+    )?;
+    let reset = command("reset", table.reset)?.ok_or(
+        "worktrees: reset is required: the command that brings a reused worktree back to the base",
+    )?;
+    let idle = command("idle", table.idle)?;
+    let idle_after = match table.idle_after {
+        Some(text) => parse_duration(&text)
+            .ok()
+            .filter(|duration| duration.is_positive())
+            .ok_or_else(|| format!("worktrees: idle_after '{text}' is no duration like '30m'"))?,
+        None => Duration::minutes(30),
+    };
+    Ok(WorktreeSettings {
+        root,
+        count,
+        prefix,
+        base,
+        prepare,
+        reset,
+        idle,
+        idle_after,
+    })
+}
+
+/// `<checkout>-worktrees`, beside the checkout.
+fn default_root(directory: &Path) -> Result<PathBuf, String> {
+    let directory = lexical(directory);
+    let name = directory
+        .file_name()
+        .ok_or("worktrees: the checkout has no directory name to put its pool beside; set root")?;
+    let mut sibling = name.to_os_string();
+    sibling.push("-worktrees");
+    Ok(directory.with_file_name(sibling))
+}
+
+/// The `[pool_worktree]` table.
+fn pool_worktree(table: PoolWorktreeTable) -> Result<PoolWorktree, String> {
+    let checkout = PathBuf::from(&table.checkout);
+    if !checkout.is_absolute() {
+        return Err("pool_worktree: checkout is the absolute path of a checkout".to_owned());
+    }
+    let name = WorktreeName::parse(&table.name)
+        .map_err(|error| format!("pool_worktree: name: {error}"))?;
+    Ok(PoolWorktree { checkout, name })
+}
+
+/// The id of the pool whose worktrees live in `root`: a digest of the directory as the file
+/// system resolves it, as far as it exists, so every spelling of one directory — through a link,
+/// with `..` — names one pool, and two checkouts of one project on one machine name two.
+///
+/// # Errors
+/// None in practice: the digest is always written as a valid id.
+pub fn pool_id(root: &Path) -> Result<PoolId, PoolIdError> {
+    let lexical_root = lexical(root);
+    let resolved = resolve_existing(&lexical_root).unwrap_or(lexical_root);
+    let digest = Sha256::digest(resolved.to_string_lossy().as_bytes());
+    let hex: String = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    PoolId::parse(&hex)
 }
 
 /// Refuses a token of another project than `configured`.
@@ -524,6 +736,115 @@ mod tests {
         }
     }
 
+    const POOL: &str = "server = \"https://dibs.example.com\"\nproject = \"acme\"\n\n[worktrees]\ncount = 3\nprepare = \"/opt/kit/prepare.sh\"\nreset = \"/opt/kit/reset.sh\"\n";
+
+    #[test]
+    fn a_worktrees_table_fills_in_its_defaults_beside_the_checkout() {
+        let path = Path::new("/home/alice/widgets/.dibs.toml");
+        let config = Checkout::parse(path, POOL).unwrap();
+        let pool = config.worktrees.unwrap();
+        assert_eq!(pool.root, PathBuf::from("/home/alice/widgets-worktrees"));
+        assert_eq!(pool.count, 3);
+        assert_eq!(pool.base, "origin/main");
+        assert_eq!(pool.prepare, "/opt/kit/prepare.sh");
+        assert_eq!(pool.reset, "/opt/kit/reset.sh");
+        assert_eq!(pool.idle, None);
+        assert_eq!(pool.idle_after, Duration::minutes(30));
+        let names: Vec<String> = pool.names().iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["worktree1", "worktree2", "worktree3"]);
+        assert_eq!(
+            pool.path_of(&pool.names()[1]),
+            PathBuf::from("/home/alice/widgets-worktrees/worktree2")
+        );
+        assert!(config.pool_worktree.is_none());
+
+        let custom = format!(
+            "{POOL}root = \"../pools/widgets\"\nprefix = \"wt-\"\nbase = \"main\"\nidle = \"stop.sh\"\nidle_after = \"1h\"\n"
+        );
+        let pool = Checkout::parse(path, &custom).unwrap().worktrees.unwrap();
+        assert_eq!(pool.root, PathBuf::from("/home/alice/pools/widgets"));
+        assert_eq!(pool.names()[0].as_str(), "wt-1");
+        assert_eq!(pool.base, "main");
+        assert_eq!(pool.idle.as_deref(), Some("stop.sh"));
+        assert_eq!(pool.idle_after, Duration::hours(1));
+    }
+
+    #[test]
+    fn a_pool_worktree_table_names_its_checkout_and_its_name() {
+        let text = "server = \"https://dibs.example.com\"\nproject = \"acme\"\n\n[pool_worktree]\ncheckout = \"/home/alice/widgets\"\nname = \"worktree2\"\n";
+        let config = Checkout::parse(
+            Path::new("/home/alice/widgets-worktrees/worktree2/.dibs.toml"),
+            text,
+        )
+        .unwrap();
+        assert_eq!(
+            config.pool_worktree,
+            Some(PoolWorktree {
+                checkout: PathBuf::from("/home/alice/widgets"),
+                name: WorktreeName::parse("worktree2").unwrap(),
+            })
+        );
+        assert!(config.worktrees.is_none());
+    }
+
+    #[test]
+    fn both_tables_in_one_file_and_unknown_keys_are_refused_naming_the_file() {
+        let path = Path::new("/home/alice/widgets/.dibs.toml");
+        let both = format!(
+            "{POOL}\n[pool_worktree]\ncheckout = \"/home/alice/widgets\"\nname = \"worktree1\"\n"
+        );
+        for (text, needle) in [
+            (both, "never both"),
+            (format!("{POOL}size = 4\n"), "size"),
+            (
+                "server = \"https://dibs.example.com\"\nproject = \"acme\"\n[pool_worktree]\ncheckout = \"/a\"\nname = \"w1\"\nextra = 1\n".to_owned(),
+                "extra",
+            ),
+            (POOL.replace("count = 3", "count = 0"), "count is 1 to 32"),
+            (POOL.replace("count = 3", "count = 33"), "count is 1 to 32"),
+            (POOL.replace("count = 3\n", ""), "count is required"),
+            (POOL.replace("reset = \"/opt/kit/reset.sh\"\n", ""), "reset is required"),
+            (format!("{POOL}prefix = \"Work Tree\"\n"), "prefix"),
+            (format!("{POOL}root = \"pool\"\n"), "inside it"),
+            (format!("{POOL}base = \"--force\"\n"), "base"),
+            (format!("{POOL}idle_after = \"soon\"\n"), "idle_after"),
+            (
+                "server = \"https://dibs.example.com\"\nproject = \"acme\"\n[pool_worktree]\ncheckout = \"widgets\"\nname = \"w1\"\n".to_owned(),
+                "absolute",
+            ),
+        ] {
+            let error = Checkout::parse(path, &text).unwrap_err().to_string();
+            assert!(error.contains(".dibs.toml"), "{error}");
+            assert!(error.contains(needle), "{text:?}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pool_is_named_by_its_directory_however_it_is_spelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("widgets-worktrees");
+        let before = pool_id(&root).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            pool_id(&root).unwrap(),
+            before,
+            "made or not, one directory"
+        );
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        assert_eq!(pool_id(&link).unwrap(), before);
+        assert_eq!(
+            pool_id(&dir.path().join("other/../widgets-worktrees")).unwrap(),
+            before
+        );
+        assert_ne!(
+            pool_id(&dir.path().join("gadgets-worktrees")).unwrap(),
+            before
+        );
+        assert!(pool_id(&root).unwrap().as_str().len() <= PoolId::MAX_CHARS);
+    }
+
     fn settings(document: serde_json::Value) -> ProjectSettings {
         let document: SettingsDocument = serde_json::from_value(document).unwrap();
         ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap()
@@ -544,6 +865,8 @@ mod tests {
                 server: ServerUrl::parse("https://dibs.example.com").unwrap(),
                 project: ProjectSlug::parse("acme").unwrap(),
                 repo: repo.map(|id| RepoId::parse(id).unwrap()),
+                worktrees: None,
+                pool_worktree: None,
             },
         )
     }

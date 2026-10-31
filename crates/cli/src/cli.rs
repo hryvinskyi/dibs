@@ -18,6 +18,7 @@ use dibs_domain::report::RefusalId;
 use dibs_domain::review::PrRef;
 use dibs_domain::settings::parse_duration;
 use dibs_domain::slot::{Purpose, SlotName};
+use dibs_domain::worktree::{AgentKey, WorktreeName};
 
 /// Claim work, check edits and talk to the people and agents working on the same repositories.
 #[derive(Debug, Parser)]
@@ -108,6 +109,10 @@ pub enum Command {
     /// migration) that one member does at a time.
     #[command(subcommand)]
     Slot(SlotCommand),
+    /// Take, release, list and prepare the worktrees this checkout lends its agents: a fixed pool
+    /// beside it, one holder each, declared by the [worktrees] table of its .dibs.toml.
+    #[command(subcommand)]
+    Worktree(WorktreeCommand),
     /// Send a heartbeat and refresh what this machine remembers about the project, as far as
     /// each is due.
     Sync(SyncArgs),
@@ -598,6 +603,84 @@ pub struct SlotReasonArgs {
 /// The longest `--wait`: under the time an agent's shell tool lets a command run.
 pub const MAX_WAIT: Duration = Duration::from_secs(9 * 60);
 
+/// The longest `dibs worktree take --wait`: under the time an agent host lets a hook run.
+pub const MAX_WORKTREE_WAIT: Duration = Duration::from_secs(14 * 60);
+
+/// `dibs worktree`.
+#[derive(Debug, Subcommand)]
+pub enum WorktreeCommand {
+    /// Take a worktree of the pool for an agent, rescue the work it held onto a branch, reset it
+    /// (or prepare it) and print its path as the last line. Without --agent a fresh agent key is
+    /// made, so every take is a holder of its own. Exits 1 when every worktree is held.
+    Take(WorktreeTakeArgs),
+    /// Release a worktree: by its name, by its agent, or the one the current directory lies in.
+    Release(WorktreeReleaseArgs),
+    /// Show each worktree of the pool: prepared or not, who holds it and since when, whether it is
+    /// set aside as broken, and the rescue branches made from it.
+    List,
+    /// Prepare a worktree, or all of them, with the project's prepare command, and take a worktree
+    /// set aside as broken back into the pool when it succeeds.
+    Prepare(WorktreePrepareArgs),
+}
+
+/// `dibs worktree take`.
+#[derive(Debug, Args)]
+pub struct WorktreeTakeArgs {
+    /// Why you take it, as every member reads it on the board.
+    #[arg(long, value_parser = Purpose::parse)]
+    pub purpose: Option<Purpose>,
+    /// The work item it is for: its local id or its reference.
+    #[arg(long, value_parser = ItemKey::parse)]
+    pub item: Option<ItemKey>,
+    /// The agent the worktree is for, as its host names it; the same agent taking again gets the
+    /// same worktree, untouched.
+    #[arg(long, value_parser = AgentKey::parse)]
+    pub agent: Option<AgentKey>,
+    /// When every worktree is held, wait this long (at most 14m) for one to be released.
+    #[arg(long, value_parser = worktree_wait)]
+    pub wait: Option<Duration>,
+    /// Finish the whole take within this time: wait only as long as leaves a reset its time, and
+    /// never prepare a worktree, starting its preparation in the background instead.
+    #[arg(long, value_parser = interval)]
+    pub deadline: Option<Duration>,
+    /// How often a waiting take asks again.
+    #[arg(long, hide = true, value_parser = interval, default_value = "5s")]
+    pub poll_every: Duration,
+}
+
+/// `dibs worktree release`.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("which").args(["worktree", "agent"])))]
+pub struct WorktreeReleaseArgs {
+    /// The worktree (`worktree2`); the one the current directory lies in when no worktree and no
+    /// agent is named.
+    #[arg(value_parser = WorktreeName::parse)]
+    pub worktree: Option<WorktreeName>,
+    /// The agent whose worktree to release, as its take named or printed it.
+    #[arg(long, value_parser = AgentKey::parse)]
+    pub agent: Option<AgentKey>,
+}
+
+/// `dibs worktree prepare`.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("which").required(true).args(["worktree", "all"])))]
+pub struct WorktreePrepareArgs {
+    /// The worktree (`worktree2`).
+    #[arg(value_parser = WorktreeName::parse)]
+    pub worktree: Option<WorktreeName>,
+    /// Every worktree of the pool.
+    #[arg(long)]
+    pub all: bool,
+}
+
+fn worktree_wait(text: &str) -> Result<Duration, String> {
+    let wait = interval(text)?;
+    if wait > MAX_WORKTREE_WAIT {
+        return Err("wait at most 14m, under the time a hook may run".to_owned());
+    }
+    Ok(wait)
+}
+
 /// `dibs slot`.
 #[derive(Debug, Subcommand)]
 pub enum SlotCommand {
@@ -923,6 +1006,39 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["dibs", "sync", "--update", "--quiet"]).is_ok());
         assert!(Cli::try_parse_from(["dibs", "self-update", "--version", "v1.2.3"]).is_ok());
+    }
+
+    #[test]
+    fn a_worktree_take_waits_at_most_fourteen_minutes_and_a_release_names_one_holder() {
+        assert!(Cli::try_parse_from(["dibs", "worktree", "take"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "dibs",
+                "worktree",
+                "take",
+                "--agent",
+                "a1",
+                "--wait",
+                "14m",
+                "--deadline",
+                "14m"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["dibs", "worktree", "take", "--wait", "15m"]).is_err());
+        assert!(Cli::try_parse_from(["dibs", "worktree", "take", "--agent", "a b"]).is_err());
+        assert!(Cli::try_parse_from(["dibs", "worktree", "release"]).is_ok());
+        assert!(Cli::try_parse_from(["dibs", "worktree", "release", "worktree2"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["dibs", "worktree", "release", "worktree2", "--agent", "a1"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["dibs", "worktree", "release", "Worktree2"]).is_err());
+        assert!(Cli::try_parse_from(["dibs", "worktree", "prepare"]).is_err());
+        assert!(Cli::try_parse_from(["dibs", "worktree", "prepare", "--all"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["dibs", "worktree", "prepare", "worktree1", "--all"]).is_err()
+        );
     }
 
     #[test]

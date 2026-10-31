@@ -68,6 +68,15 @@ pub enum ClientError {
         /// What the refusal names.
         details: Box<ErrorDetails>,
     },
+    /// The server is older than this client and has no route for what was asked: a route newer
+    /// servers added was answered `404` with the sentence a server gives a path it does not serve.
+    #[error(
+        "the dibs server at {server} is older than this client and does not serve this request; its admin can update it"
+    )]
+    ServerTooOld {
+        /// The server.
+        server: String,
+    },
     /// An answer this client does not understand.
     #[error(
         "the dibs server at {server} gave an answer this client does not understand (HTTP {status})"
@@ -89,19 +98,22 @@ impl ClientError {
             Self::Unauthorized { .. } => "unauthorized",
             Self::Unexpected { .. } => "unexpected",
             Self::Outdated { .. } => "client_too_old",
+            Self::ServerTooOld { .. } => "server_too_old",
             Self::Conflict { code, .. } | Self::Refused { code, .. } => code,
         }
     }
 
     /// Whether the server could not give a decision: it was unreachable, too slow, failed itself,
-    /// answered something this client does not understand, or serves only newer clients. A caller
+    /// answered something this client does not understand, serves only newer clients, or is older
+    /// than this client and lacks the route asked for. A caller
     /// that must never block work on the service's account treats such a failure as no decision.
     pub fn is_unavailable(&self) -> bool {
         match self {
             Self::Network { .. }
             | Self::Timeout { .. }
             | Self::Unexpected { .. }
-            | Self::Outdated { .. } => true,
+            | Self::Outdated { .. }
+            | Self::ServerTooOld { .. } => true,
             Self::Refused { status, .. } => *status >= 500,
             Self::Unauthorized { .. } | Self::Conflict { .. } => false,
         }
@@ -112,6 +124,26 @@ impl ClientError {
         match self {
             Self::Conflict { details, .. } | Self::Refused { details, .. } => Some(details),
             _ => None,
+        }
+    }
+
+    /// The same failure, read as an answer to a route newer servers added: a `not_found` that
+    /// says the server has no such route is [`ClientError::ServerTooOld`]. Every other `404` — a
+    /// session, an item or a member the route does not know — stays the refusal it is.
+    #[must_use]
+    pub(crate) fn of_newer_route(self, server: &str) -> Self {
+        match &self {
+            Self::Refused {
+                status: 404,
+                code,
+                message,
+                ..
+            } if code == "not_found" && message.trim_end_matches('.') == NO_ROUTE => {
+                Self::ServerTooOld {
+                    server: server.to_owned(),
+                }
+            }
+            _ => self,
         }
     }
 
@@ -126,6 +158,10 @@ impl ClientError {
         }
     }
 }
+
+/// The sentence every dibs server answers a path it has no route for with, under the code
+/// `not_found`.
+const NO_ROUTE: &str = "there is no such route";
 
 /// What a refusal names that the caller can act on. Every field is optional; the server sends the
 /// ones its refusal concerns.
@@ -384,6 +420,35 @@ mod tests {
 
         let failing = error_body(503, "timeout", json!({}));
         assert!(failing.is_unavailable());
+    }
+
+    #[test]
+    fn a_route_the_server_lacks_is_a_server_too_old_and_any_other_not_found_stays_a_refusal() {
+        let no_route = error_body(404, "not_found", json!({}));
+        let ClientError::Refused { .. } = &no_route else {
+            panic!("{no_route:?}");
+        };
+        let body = json!({"error": {"code": "not_found", "message": "there is no such route"}})
+            .to_string();
+        let too_old = decode::<Heartbeat>(response(404, Some("application/json"), body.as_bytes()))
+            .unwrap_err()
+            .of_newer_route(SERVER);
+        assert_eq!(
+            too_old,
+            ClientError::ServerTooOld {
+                server: SERVER.to_owned()
+            }
+        );
+        assert_eq!(too_old.code(), "server_too_old");
+        assert!(too_old.is_unavailable());
+        assert!(too_old.to_string().contains("older than this client"));
+        let unknown_item = error_body(404, "not_found", json!({})).of_newer_route(SERVER);
+        assert!(
+            matches!(unknown_item, ClientError::Refused { status: 404, .. }),
+            "a work item the server does not know is no sign of its age: {unknown_item:?}"
+        );
+        let conflict = error_body(409, "worktree_not_held", json!({})).of_newer_route(SERVER);
+        assert_eq!(conflict.code(), "worktree_not_held");
     }
 
     #[test]

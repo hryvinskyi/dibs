@@ -29,11 +29,18 @@ use dibs_domain::slot::SlotName;
 use crate::token::Token;
 
 mod slots;
+mod worktrees;
 
 pub use slots::{
     ForceReleaseSlotRequest, HoldMode, PendingOffer, ReleaseSlotRequest, Slot, SlotAnswer,
     SlotForced, SlotHold, SlotOffer, SlotReleased, SlotTakenOver, SlotWaiter, Slots, TakeOutcome,
     TakeOverSlotRequest, TakeSlotRequest, Took,
+};
+pub use worktrees::{
+    BeatWorktreesRequest, BeatenWorktree, BoardWorktreeHold, ForceReleaseWorktreeRequest,
+    OwnWorktreeHold, OwnWorktreePool, ReleaseWorktreeRequest, SessionEnded, TakeWorktreeRequest,
+    TookWorktree, WorktreeBeat, WorktreeForced, WorktreeOutcome, WorktreeRelease, WorktreeReleased,
+    Worktrees, WorktreesBeaten,
 };
 
 /// A member of a project.
@@ -699,6 +706,9 @@ pub struct Status {
     /// The overlaps between live claims and the moved bases under them.
     #[serde(default)]
     pub overlaps: Vec<OverlapInfo>,
+    /// The caller's own worktree pools with a hold; empty from a server that lends none.
+    #[serde(default)]
+    pub worktrees: Vec<OwnWorktreePool>,
 }
 
 /// An overlap the radar found between live claims, or a base a merge moved under one.

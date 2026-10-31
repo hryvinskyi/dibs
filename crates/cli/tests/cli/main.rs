@@ -32,3 +32,6 @@ mod slots;
 mod versions;
 #[cfg(test)]
 mod work;
+#[cfg(test)]
+#[cfg(unix)]
+mod worktrees;

@@ -37,6 +37,11 @@ use crate::api::{
     TakeOverRequest, TakenOver, ThreadDetail, Threads, TokenRevoked, Versions,
 };
 use crate::api::{
+    BeatWorktreesRequest, ForceReleaseWorktreeRequest, ReleaseWorktreeRequest, SessionEnded,
+    TakeWorktreeRequest, TookWorktree, WorktreeForced, WorktreeReleased, Worktrees,
+    WorktreesBeaten,
+};
+use crate::api::{
     Escalated, EscalationRequest, FeedbackGiven, FeedbackRequest, ForceReleaseSlotRequest,
     MemberRemoved, ReleaseSlotRequest, SlotAnswer, SlotForced, SlotReleased, SlotTakenOver, Slots,
     TakeOverSlotRequest, TakeSlotRequest, ThreadDeleted, Took,
@@ -167,6 +172,12 @@ struct DeliverBody {
 #[derive(Serialize)]
 struct RunBody {
     run_id: RunId,
+}
+
+#[derive(Serialize)]
+struct WorktreesQuery<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine: Option<&'a MachineId>,
 }
 
 /// The path of a slot's route, its name kept one segment.
@@ -897,6 +908,94 @@ impl Client {
         );
         self.send(self.request(Method::POST, &path).json(force))
             .await
+    }
+
+    /// `GET /v1/worktrees`: the caller's own worktree pools with a hold — only those on `machine`
+    /// when it is named — and every member's holds as the board shows them.
+    ///
+    /// # Errors
+    /// [`ClientError::ServerTooOld`] from a server that lends no worktrees; [`ClientError`].
+    pub async fn worktrees(&self, machine: Option<&MachineId>) -> Result<Worktrees, ClientError> {
+        let request = self
+            .request(Method::GET, "/v1/worktrees")
+            .query(&WorktreesQuery { machine });
+        self.newer_route(self.send(request).await)
+    }
+
+    /// `POST /v1/worktrees/take`: the holder's worktree again, else the first of the names nobody
+    /// holds, else a busy answer naming each hold. Sent once: a lost answer is asked again by the
+    /// caller, and the same holder asking again gets the same worktree.
+    ///
+    /// # Errors
+    /// [`ClientError::ServerTooOld`] from a server that lends no worktrees; a
+    /// `worktree_names_invalid` refusal; [`ClientError`].
+    pub async fn take_worktree(
+        &self,
+        take: &TakeWorktreeRequest,
+    ) -> Result<TookWorktree, ClientError> {
+        let request = self.request(Method::POST, "/v1/worktrees/take").json(take);
+        self.newer_route(self.send(request).await)
+    }
+
+    /// `POST /v1/worktrees/release`: ends a hold of the caller's pool, by worktree or by holder.
+    ///
+    /// # Errors
+    /// [`ClientError::ServerTooOld`] from a server that lends no worktrees; a `worktree_not_held`
+    /// conflict; [`ClientError`].
+    pub async fn release_worktree(
+        &self,
+        release: &ReleaseWorktreeRequest,
+    ) -> Result<WorktreeReleased, ClientError> {
+        let request = self
+            .request(Method::POST, "/v1/worktrees/release")
+            .json(release);
+        self.newer_route(self.send(request).await)
+    }
+
+    /// `POST /v1/worktrees/beat`: the holders' signs of life. A repeat changes nothing the first
+    /// did not, so a lost connection may send it once more.
+    ///
+    /// # Errors
+    /// [`ClientError::ServerTooOld`] from a server that lends no worktrees; [`ClientError`].
+    pub async fn beat_worktrees(
+        &self,
+        beats: &BeatWorktreesRequest,
+    ) -> Result<WorktreesBeaten, ClientError> {
+        let request = self.request(Method::POST, "/v1/worktrees/beat").json(beats);
+        self.newer_route(self.send_repeatable(request).await)
+    }
+
+    /// `POST /v1/sessions/{id}/end`: the caller's session ended, and every worktree hold of it and
+    /// of its agents with it.
+    ///
+    /// # Errors
+    /// [`ClientError::ServerTooOld`] from a server that lends no worktrees; [`ClientError`].
+    pub async fn end_session(&self, session: SessionId) -> Result<SessionEnded, ClientError> {
+        let request = self
+            .request(Method::POST, &format!("/v1/sessions/{session}/end"))
+            .json(&Empty {});
+        self.newer_route(self.send_repeatable(request).await)
+    }
+
+    /// `POST /v1/admin/worktrees/force-release`: an admin ends a member's hold of a worktree,
+    /// named as the board names it.
+    ///
+    /// # Errors
+    /// [`ClientError::ServerTooOld`] from a server that lends no worktrees; a `worktree_not_held`
+    /// conflict; [`ClientError`].
+    pub async fn force_release_worktree(
+        &self,
+        force: &ForceReleaseWorktreeRequest,
+    ) -> Result<WorktreeForced, ClientError> {
+        let request = self
+            .request(Method::POST, "/v1/admin/worktrees/force-release")
+            .json(force);
+        self.newer_route(self.send(request).await)
+    }
+
+    /// The answer of a route newer servers added, a server without it named too old.
+    fn newer_route<T>(&self, answer: Result<T, ClientError>) -> Result<T, ClientError> {
+        answer.map_err(|error| error.of_newer_route(self.server.as_str()))
     }
 
     fn request(&self, method: Method, path: &str) -> RequestBuilder {

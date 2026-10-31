@@ -19,11 +19,19 @@
 //!   started;
 //! - `cache/<scope>/versions.json` — the client versions the server serves and recommends, and when
 //!   they were last asked for;
-//! - `cache/<scope>/<name>.lock` — the lock files of whoever holds them;
-//! - `cache/<scope>/<name>` — files callers keep for themselves ([`StateDir::file`]).
+//! - `cache/<scope>/<name>.lock` — the lock files of whoever holds them, among them
+//!   `worktree-<pool>-<name>.lock`, held by whatever resets, prepares or stops one worktree of a
+//!   pool;
+//! - `cache/<scope>/<name>` — files callers keep for themselves ([`StateDir::file`]);
+//! - `worktrees/<scope>/<pool>/` — what this machine knows of each worktree of one pool
+//!   ([`WorktreeState`]): `<name>.hold.json`, the holder this machine took it for, when, and
+//!   whether its reset finished, written on a take and removed on a release; `<name>.beat`, whose
+//!   time of last change is the holder's last sign of life in it; `<name>.free-since`, when it was
+//!   last seen free; `<name>.stopped`, when its environment was stopped for being left idle; and
+//!   `<name>.broken`, when and why its preparation, reset or rescue last failed.
 //!
 //! `<scope>` is a digest of the server and the project, so one person in several projects keeps
-//! them apart. Every file is replaced in one step (written beside it, then renamed over it), so a
+//! them apart; `<pool>` is the pool's id. Every file is replaced in one step (written beside it, then renamed over it), so a
 //! reader never sees half of one. A file that is missing or unreadable is simply not remembered.
 
 use std::fs;
@@ -40,6 +48,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::message::{Importance, SessionLabel, Subject};
 use dibs_domain::settings::SettingsDocument;
+use dibs_domain::worktree::{AgentKey, PoolId, WorktreeName};
 
 use crate::api::{Inbox, PendingOffer, Session, Status, Versions};
 use crate::credentials::CredentialKey;
@@ -49,6 +58,46 @@ use crate::credentials::CredentialKey;
 pub struct StateDir {
     sessions: PathBuf,
     cache: PathBuf,
+    worktrees: PathBuf,
+}
+
+/// What this machine knows of the worktrees of one pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeState {
+    dir: PathBuf,
+}
+
+/// The holder this machine took a worktree for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeHoldRecord {
+    /// The holder's session.
+    pub session_id: SessionId,
+    /// The holder's agent; `None` for the session itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentKey>,
+    /// When it was taken.
+    #[serde(with = "time::serde::rfc3339")]
+    pub taken_at: OffsetDateTime,
+    /// Whether the worktree was rescued and reset (or prepared) for this holder to the end; a take
+    /// answered again resumes one that did not finish.
+    pub reset_done: bool,
+}
+
+impl WorktreeHoldRecord {
+    /// Whether it records this holder: the session and, for an agent, its key.
+    pub fn is_of(&self, session: SessionId, agent: Option<&AgentKey>) -> bool {
+        self.session_id == session && self.agent.as_ref() == agent
+    }
+}
+
+/// Why a worktree is set aside until it is prepared again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokenWorktree {
+    /// When.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: OffsetDateTime,
+    /// What failed, as a sentence.
+    pub reason: String,
 }
 
 /// The settings as last fetched.
@@ -187,7 +236,24 @@ impl StateDir {
         Self {
             sessions: base.join("sessions").join(&scope),
             cache: base.join("cache").join(&scope),
+            worktrees: base.join("worktrees").join(&scope),
         }
+    }
+
+    /// What this machine knows of the worktrees of `pool`.
+    pub fn worktrees(&self, pool: &PoolId) -> WorktreeState {
+        WorktreeState {
+            dir: self.worktrees.join(pool.as_str()),
+        }
+    }
+
+    /// The lock file held by whatever resets, prepares or stops the worktree `name` of `pool`:
+    /// `cache/<scope>/worktree-<pool>-<name>.lock`, its directory made.
+    ///
+    /// # Errors
+    /// The file system's failure to make the directory.
+    pub fn worktree_lock(&self, pool: &PoolId, name: &WorktreeName) -> io::Result<PathBuf> {
+        self.lock_file(&format!("worktree-{pool}-{name}"))
     }
 
     /// The session id registered under `label`.
@@ -495,6 +561,123 @@ impl StateDir {
     }
 }
 
+impl WorktreeState {
+    /// The directory of the pool's files.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The holder this machine took `name` for, when it holds a record of one.
+    pub fn hold(&self, name: &WorktreeName) -> Option<WorktreeHoldRecord> {
+        read_json(&self.path(name, "hold.json"))
+    }
+
+    /// Remembers the holder `name` was taken for.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn remember_hold(
+        &self,
+        name: &WorktreeName,
+        record: &WorktreeHoldRecord,
+    ) -> io::Result<()> {
+        write_json(&self.path(name, "hold.json"), record)
+    }
+
+    /// Forgets the holder of `name`.
+    ///
+    /// # Errors
+    /// The file system's failure other than the record being absent.
+    pub fn forget_hold(&self, name: &WorktreeName) -> io::Result<()> {
+        remove(&self.path(name, "hold.json"))
+    }
+
+    /// The file whose time of last change is the holder's last sign of life in `name`.
+    pub fn beat_file(&self, name: &WorktreeName) -> PathBuf {
+        self.path(name, "beat")
+    }
+
+    /// When the holder of `name` was last seen in it, by the beat file's time of last change.
+    pub fn beat_at(&self, name: &WorktreeName) -> Option<OffsetDateTime> {
+        let modified = fs::metadata(self.beat_file(name)).ok()?.modified().ok()?;
+        Some(OffsetDateTime::from(modified))
+    }
+
+    /// When `name` was last seen free: released here, or found free by the server.
+    pub fn free_since(&self, name: &WorktreeName) -> Option<OffsetDateTime> {
+        read_json::<Moment>(&self.path(name, "free-since")).map(|moment| moment.at)
+    }
+
+    /// Remembers that `name` is free since `at`.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn mark_free(&self, name: &WorktreeName, at: OffsetDateTime) -> io::Result<()> {
+        write_json(&self.path(name, "free-since"), &Moment { at })
+    }
+
+    /// When the environment of `name` was stopped for being left idle.
+    pub fn stopped_at(&self, name: &WorktreeName) -> Option<OffsetDateTime> {
+        read_json::<Moment>(&self.path(name, "stopped")).map(|moment| moment.at)
+    }
+
+    /// Remembers that the environment of `name` was stopped at `at`.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn mark_stopped(&self, name: &WorktreeName, at: OffsetDateTime) -> io::Result<()> {
+        write_json(&self.path(name, "stopped"), &Moment { at })
+    }
+
+    /// Forgets that `name` was free and that its environment was stopped: it was just taken.
+    ///
+    /// # Errors
+    /// The file system's failure other than the marks being absent.
+    pub fn mark_taken(&self, name: &WorktreeName) -> io::Result<()> {
+        remove(&self.path(name, "free-since"))?;
+        remove(&self.path(name, "stopped"))
+    }
+
+    /// Why `name` is set aside, when it is.
+    pub fn broken(&self, name: &WorktreeName) -> Option<BrokenWorktree> {
+        let path = self.path(name, "broken");
+        read_json(&path).or_else(|| {
+            path.exists().then(|| BrokenWorktree {
+                at: OffsetDateTime::UNIX_EPOCH,
+                reason: "it was set aside".to_owned(),
+            })
+        })
+    }
+
+    /// Sets `name` aside until it is prepared again.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn mark_broken(&self, name: &WorktreeName, broken: &BrokenWorktree) -> io::Result<()> {
+        write_json(&self.path(name, "broken"), broken)
+    }
+
+    /// Takes `name` back into the pool.
+    ///
+    /// # Errors
+    /// The file system's failure other than the mark being absent.
+    pub fn clear_broken(&self, name: &WorktreeName) -> io::Result<()> {
+        remove(&self.path(name, "broken"))
+    }
+
+    fn path(&self, name: &WorktreeName, what: &str) -> PathBuf {
+        self.dir.join(format!("{name}.{what}"))
+    }
+}
+
+/// Removes a file, its absence being no failure.
+fn remove(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
 /// The digest naming one project on one server.
 fn scope(key: &CredentialKey) -> String {
     let digest = Sha256::digest(format!("{}\n{}", key.server, key.project).as_bytes());
@@ -684,6 +867,7 @@ mod tests {
             escalations: Vec::new(),
             integration_silent_since: None,
             overlaps: Vec::new(),
+            worktrees: Vec::new(),
         };
         let earlier: Status =
             serde_json::from_str(r#"{"live": [], "stale": [], "holds": []}"#).unwrap();
@@ -813,6 +997,73 @@ mod tests {
     fn a_label_is_one_file_name() {
         assert_eq!(file_name("laptop/cli"), "laptop%2Fcli");
         assert_eq!(file_name("a b:c\\d"), "a%20b%3Ac%5Cd");
+    }
+
+    #[test]
+    fn a_pools_worktrees_keep_their_holder_marks_and_lock_apart_from_other_pools() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path(), &key("acme"));
+        let pool = PoolId::parse("c0ffee").unwrap();
+        let other = state.worktrees(&PoolId::parse("beef").unwrap());
+        let worktrees = state.worktrees(&pool);
+        let name = WorktreeName::parse("worktree2").unwrap();
+        let at = OffsetDateTime::UNIX_EPOCH + Duration::hours(5);
+        assert_eq!(worktrees.hold(&name), None);
+        let record = WorktreeHoldRecord {
+            session_id: SessionId(4),
+            agent: Some(AgentKey::parse("a1b2").unwrap()),
+            taken_at: at,
+            reset_done: false,
+        };
+        worktrees.remember_hold(&name, &record).unwrap();
+        assert_eq!(worktrees.hold(&name), Some(record.clone()));
+        assert!(record.is_of(SessionId(4), Some(&AgentKey::parse("a1b2").unwrap())));
+        assert!(!record.is_of(SessionId(4), None));
+        assert_eq!(
+            other.hold(&name),
+            None,
+            "another pool's records are its own"
+        );
+        worktrees.forget_hold(&name).unwrap();
+        worktrees.forget_hold(&name).unwrap();
+        assert_eq!(worktrees.hold(&name), None);
+
+        worktrees.mark_free(&name, at).unwrap();
+        worktrees
+            .mark_stopped(&name, at + Duration::minutes(30))
+            .unwrap();
+        assert_eq!(worktrees.free_since(&name), Some(at));
+        assert_eq!(
+            worktrees.stopped_at(&name),
+            Some(at + Duration::minutes(30))
+        );
+        worktrees.mark_taken(&name).unwrap();
+        assert_eq!(
+            (worktrees.free_since(&name), worktrees.stopped_at(&name)),
+            (None, None)
+        );
+
+        let broken = BrokenWorktree {
+            at,
+            reason: "Its reset failed.".to_owned(),
+        };
+        worktrees.mark_broken(&name, &broken).unwrap();
+        assert_eq!(worktrees.broken(&name), Some(broken));
+        worktrees.clear_broken(&name).unwrap();
+        assert_eq!(worktrees.broken(&name), None);
+
+        assert_eq!(worktrees.beat_at(&name), None);
+        fs::write(worktrees.beat_file(&name), b"").unwrap();
+        assert!(worktrees.beat_at(&name).is_some());
+        assert!(
+            worktrees
+                .beat_file(&name)
+                .starts_with(dir.path().join("worktrees"))
+        );
+
+        let lock = state.worktree_lock(&pool, &name).unwrap();
+        assert_eq!(lock.file_name().unwrap(), "worktree-c0ffee-worktree2.lock");
+        assert!(lock.parent().unwrap().is_dir());
     }
 
     #[test]

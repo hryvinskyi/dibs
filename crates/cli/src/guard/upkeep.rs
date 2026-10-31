@@ -161,7 +161,7 @@ pub fn take_lock(state: &StateDir, patience: StdDuration) -> std::io::Result<Opt
 /// Puts the child in a process group of its own, so the signals that end the hook's group (a
 /// host stopping its hook, a terminal closing) do not reach it.
 #[cfg(unix)]
-fn detach(command: &mut Command) {
+pub fn detach(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
@@ -169,7 +169,7 @@ fn detach(command: &mut Command) {
 /// Starts the child detached from the hook's console, in a process group of its own, so it
 /// neither opens a window nor ends with the hook's console.
 #[cfg(windows)]
-fn detach(command: &mut Command) {
+pub fn detach(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -177,4 +177,4 @@ fn detach(command: &mut Command) {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn detach(_command: &mut Command) {}
+pub fn detach(_command: &mut Command) {}
