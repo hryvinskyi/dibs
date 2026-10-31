@@ -577,7 +577,7 @@ pub enum Removal {
     Absent,
     /// It was left in place; the sentence says why (it holds changes, it is no worktree).
     Kept(String),
-    /// It was left in place because it is a worktree of a pool, as its own `.dibs.toml` says:
+    /// It was left in place because it is a worktree of a pool, as its git directory's mark says:
     /// whatever lends it, a pool worktree is never removed.
     Pooled,
 }
@@ -721,6 +721,11 @@ pub trait WorktreePool {
     /// that cannot be left is lost.
     fn touch(&self, name: &WorktreeName, at: OffsetDateTime);
 
+    /// Lets go, on this machine, of every worktree an agent of `session` ended in and left in use:
+    /// each is free from now on. Read and written on this machine alone; what cannot be written is
+    /// lost.
+    fn free_left(&self, session: &SessionRef);
+
     /// The worktree of the pool `path` (absolute, or relative to `cwd`) lies in, when it lies in
     /// one.
     fn worktree_at(&self, cwd: &Path, path: &Path) -> Option<WorktreeName>;
@@ -769,9 +774,14 @@ pub trait Workspace {
     /// pool it belongs to; `None` when it has none.
     fn worktree_pool(&self) -> Option<&dyn WorktreePool>;
 
-    /// Why the pool of worktrees the checkout's `.dibs.toml` declares cannot be used, a sentence;
+    /// Why the pool of worktrees the checkout's repository declares cannot be used, a sentence;
     /// `None` when it declares none, or when its pool can be used.
     fn worktree_pool_refused(&self) -> Option<String>;
+
+    /// What the person should change in the checkout's configuration file, a sentence: tables it
+    /// holds that dibs never reads from it, and where they belong. `None` when there is nothing to
+    /// change. Read from this machine alone.
+    fn config_advice(&self) -> Option<String>;
 }
 
 /// What this machine counts for the project's reports: kinds and counts only, never a path, a

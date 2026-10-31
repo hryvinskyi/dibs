@@ -198,32 +198,32 @@ What the guard does:
 - **The answer is a directory, a refusal, or the host's own worktree.** The refusal, a sentence for the host to fail the
   creation with, is given only when every worktree of the pool stayed held until the deadline less the reset limit,
   or when the pool cannot serve one and the host's own worktree cannot be made either. In every other case, whether dibs is switched off, no
-  checkout governs the directory, the checkout has no `[worktrees]` table, the server cannot be reached or is older
+  checkout governs the directory, the repository declares no pool (`.git/dibs/worktrees.toml`), the server cannot be reached or is older
   than the client (a `404` on a worktree route), no worktree of the pool could be made ready, or the pool is still
   being prepared, the guard makes the worktree the host would have made, where `worktree_terms().own` says (a
   directory under the top of the repository, a new branch from the commit checked out), and says why in a line for
   the person. For a pool still being prepared, that line says the worktree is a plain one without an environment of
   its own, and which worktrees are being prepared. Making a worktree never fails because of dibs.
-- **The host's own worktree is governed.** When a checkout governs the directory the host asked from, the guard
-  writes the worktree it made (or found made) a `.dibs.toml` of its own with only that checkout's `server`, `project`
-  and `repo` — never a pool's table — unless the worktree has one, and never through a link. A linked worktree has no
-  `.dibs.toml` of its own when the checkout's is untracked, and without one nothing governs the work done there. The
-  file is kept out of git's view: when git does not ignore it there already, `/.dibs.toml` is added to the
-  repository's `info/exclude`, which every worktree of the repository shares.
+- **The host's own worktree is governed.** It is a linked worktree of the checkout, and a linked worktree without a
+  `.dibs.toml` of its own is governed by the file at the top of its main checkout (dibs follows the worktree's `.git`
+  file and its `commondir`, reading files only), so the checkout's file governs it whether git tracks that file or not.
+  Nothing is written into the worktree or into the repository's `info/exclude`.
 - **A worktree returned** that is a pool worktree its session (or one of its agents) holds is released, never
   deleted. Any other worktree is removed as git removes one, without force; a dirty one is kept, with a line saying so.
-  A worktree whose own `.dibs.toml` has a `[pool_worktree]` table is never removed, even when the checkout that
-  lends it cannot be read: it is kept, with a line saying why.
+  A worktree marked as a pool's in its git directory (`.git/worktrees/<id>/dibs/pool-worktree.toml`) is never removed,
+  even when the pool that lends it cannot be found: it is kept, with a line saying why.
 - **An agent ended** releases the holds this machine recorded for that agent, but keeps its worktree from every
   other take for an agent's silence after its last sign of life (20 minutes): a host may continue an agent after it
   ended, in the same worktree, and finds it as it left it. Neither the agent's end nor `dibs worktree upkeep` writes
   that worktree free while its last sign of life is younger than that. **A session ended** ends the session on the
-  server, which frees its holds and its agents', and the worktrees are free at once. Each calls the server only when a
-  local record names that agent or session, so a subagent that held nothing costs no call.
-- **Signs of life** need no network: an `AfterTool` whose directory lies in a pool worktree, an edit of a file in one
-  and a shell command that `cd`s into one or runs `git -C` on one touch that worktree's beat file; the detached sync
-  and `dibs worktree upkeep` send them. Only a call the guard lets through leaves one: a refused edit or command keeps
-  nobody's hold alive.
+  server, which frees its holds and its agents', and the worktrees are free at once, those its ended agents left
+  included: the agent's end records, beside the worktree's beat, which session left it. Each calls the server only when
+  a local record names that agent or session, so a subagent that held nothing costs no call.
+- **Signs of life** need no network: an `AfterTool` whose directory lies in a pool worktree the session or agent may
+  work in (its holder's, or the session's own agent's), an edit of a file in one and a shell command that `cd`s into one
+  or runs `git -C` on one touch that worktree's beat file; the detached sync and `dibs worktree upkeep` send them. Only
+  a call the guard lets through leaves one: a refused edit or command, or a tool run by somebody else in a worktree they
+  do not hold, keeps nobody's hold alive.
 - **Nobody works in a worktree they do not hold.** A hold belongs to a session or to one agent of it, and a session
   and its agents share what the session holds: its agents work in its tree, and the session may look into its
   agents'. An edit or a shell command whose directory lies in a pool worktree held by another session, or by another
@@ -232,7 +232,8 @@ What the guard does:
   agent continued after its worktree went to another agent of its session is told so. A worktree nobody holds is taken
   again, as it is, for the session or agent that works in it: that is a `/clear`, a resumed agent, a session started
   in the worktree; a holder that holds another worktree already is told which, and to work there or release it
-  first. The check reads the directory the tool runs in: an edit of a file inside a pool worktree made from a
+  first. An edit or a command is judged before the worktree is taken again, so a call refused by a claim takes
+  nothing. The check reads the directory the tool runs in: an edit of a file inside a pool worktree made from a
   directory outside every pool worktree leaves a sign of life there but is not checked against its holder.
 
 A host that does not serve worktrees (`neutral`) gets none of this for a wanted or a returned worktree: the first is
@@ -276,8 +277,9 @@ would take as the path) it makes the fallback worktree itself and says why on st
   same;
 - never locked (Claude Code locks the ones it makes itself while its session runs), and never removed by force: a
   dirty fallback worktree is kept and the person is told;
-- not governed: the wrapper writes no `.dibs.toml` into it, so the work done in a worktree the wrapper made (dibs
-  missing, `DIBS_OFF`, too old, a crash) is not checked. Only the fallback the guard makes is governed.
+- governed like the guard's own fallback once a dibs that reads linked worktrees runs again: it is a linked worktree
+  of the checkout, so the checkout's `.dibs.toml` governs it. While dibs is missing, switched off or too old, nothing
+  checks the work done there, as nothing checks the checkout either.
 
 Without a usable dibs, `WorktreeRemove` removes only a worktree under `<repository>/.claude/worktrees/` as git removes
 one, and `SubagentStop` and `SessionEnd` do nothing; the plugin runs those three only when dibs is at least

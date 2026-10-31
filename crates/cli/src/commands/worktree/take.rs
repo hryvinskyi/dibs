@@ -5,7 +5,7 @@
 //! every few seconds while every one is held, as long as the caller waits. Once the server hands one
 //! over, the holder is recorded on this machine before anything touches the tree, and under the
 //! worktree's lock its work is rescued and it is reset — or prepared, when it was never prepared —
-//! then its own `.dibs.toml` is written and the record says the reset finished.
+//! then it is marked prepared in its git directory and the record says the reset finished.
 //!
 //! The same holder asking again (a retried hook, a worktree entered once more) gets its worktree
 //! back untouched; only a reset that the record says never finished is resumed, rescue first. A
@@ -377,8 +377,8 @@ impl<P: ProjectCommands> Taker<'_, P> {
                     limit < step.limit() && matches!(failed, StepFailed::TimedOut { .. });
                 NotReady::failed(reason, !cut_short)
             })?;
-        self.pool.write_config(name).map_err(|error| {
-            tracing::debug!(error = %error, "a worktree's .dibs.toml could not be written");
+        self.pool.mark_prepared(name).map_err(|error| {
+            tracing::debug!(error = %error, "a worktree could not be marked prepared");
             NotReady::failed(error.reason(), true)
         })?;
         self.remember(name, ask, taken_at, true);

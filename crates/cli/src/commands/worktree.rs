@@ -1,10 +1,11 @@
 //! Worktree pools: `worktree take`, `worktree release`, `worktree list`, `worktree prepare`,
 //! `worktree beat` and `worktree upkeep`.
 //!
-//! A checkout whose `.dibs.toml` has a `[worktrees]` table lends a fixed pool of long-lived
-//! worktrees beside it to its member's sessions and agents, one holder each; the server keeps the
-//! holds, this machine keeps the worktrees. Every command run inside one of the pool's worktrees
-//! acts on the pool of the checkout that lends it.
+//! A checkout whose git directory declares a pool, in the `[worktrees]` table of
+//! `dibs/worktrees.toml`, lends a fixed pool of long-lived worktrees beside it to its member's
+//! sessions and agents, one holder each; the server keeps the holds, this machine keeps the
+//! worktrees. Every command run inside one of the pool's worktrees acts on the pool of the checkout
+//! that lends it.
 
 pub mod beats;
 pub mod pool;
@@ -30,7 +31,7 @@ use dibs_client::state::{BrokenWorktree, WorktreeHoldRecord};
 use dibs_domain::ids::SessionId;
 use dibs_domain::report::MachineId;
 use dibs_domain::slot::Purpose;
-use dibs_domain::worktree::{AgentKey, AgentKeyError, WorktreeName};
+use dibs_domain::worktree::{AgentKey, AgentKeyError, Silence, WorktreeName};
 
 use crate::cli::{
     WorktreeBeatArgs, WorktreeCommand, WorktreePrepareArgs, WorktreeReleaseArgs, WorktreeTakeArgs,
@@ -128,11 +129,14 @@ fn locate(ctx: &Context) -> Result<(Pool, Option<WorktreeName>, Locations), Fail
     let here = ctx.checkout()?.ok_or_else(|| {
         Failure::config(
             "no_checkout",
-            "No .dibs.toml was found here or above in this repository; run the command in a checkout whose .dibs.toml has a [worktrees] table, or in one of its worktrees.",
+            "No .dibs.toml governs this directory; run the command in a checkout whose repository declares a pool of worktrees in .git/dibs/worktrees.toml, or in one of its worktrees.",
         )
     })?;
     let locations = ctx.locations()?;
     let (pool, inside) = Pool::locate(&here, locations.state_dir())?;
+    if let Some(ignored) = here.ignored_tables() {
+        ctx.printer.warn(&ignored);
+    }
     Ok((pool, inside, locations))
 }
 
@@ -482,7 +486,8 @@ enum Prepared {
     Done,
     /// It was prepared already and not set aside, so a take's run left it alone.
     Already,
-    /// This machine records a holder of it, so it was left alone.
+    /// This machine records a holder of it, or a sign of life younger than an agent's silence
+    /// since it was last let go of, so it was left alone.
     Held(String),
 }
 
@@ -531,11 +536,12 @@ async fn prepare(args: WorktreePrepareArgs, ctx: &Context) -> Result<(), Failure
     .after_answer())
 }
 
-/// Prepares one worktree under its lock: runs the project's `prepare`, writes the worktree's
-/// `.dibs.toml` and takes it back into the pool; sets it aside when the preparation fails. Once it
-/// holds the lock it leaves alone a worktree this machine records a holder of — the preparation
-/// would run over the holder's work — and, for a take's run in the background, one that was
-/// prepared while it waited.
+/// Prepares one worktree under its lock: runs the project's `prepare`, marks the worktree prepared
+/// and takes it back into the pool; sets it aside when the preparation fails. Once it holds the
+/// lock it leaves alone a worktree somebody may still work in — one this machine records a holder
+/// of, or one with a sign of life younger than an agent's silence since it was last let go of, as
+/// an agent that ended may be continued in it — since the preparation would run over their work;
+/// and, for a take's run in the background, one that was prepared while it waited.
 async fn prepare_one(
     pool: &Pool,
     name: &WorktreeName,
@@ -564,6 +570,12 @@ async fn prepare_one(
         );
         return Ok(Prepared::Held(format!(
             "{name} is held for {who} on this machine, so it was not prepared over its work; release it first with dibs worktree release {name}."
+        )));
+    }
+    if pool.in_use(name, clock.now()) {
+        return Ok(Prepared::Held(format!(
+            "{name} is still worked in on this machine: it shows a sign of life since it was last let go of, so it was not prepared over that work; try again once nobody has worked in it for {} minutes.",
+            Silence::DEFAULT.agent.whole_minutes()
         )));
     }
     if asker == Asker::Take && pool.is_prepared(name) && files.broken(name).is_none() {
@@ -595,8 +607,8 @@ async fn prepare_one(
             Output::Stderr => failed.reason(),
         })
         .and_then(|()| {
-            pool.write_config(name).map_err(|error| {
-                tracing::debug!(error = %error, "a worktree's .dibs.toml could not be written");
+            pool.mark_prepared(name).map_err(|error| {
+                tracing::debug!(error = %error, "a worktree could not be marked prepared");
                 error.reason()
             })
         });

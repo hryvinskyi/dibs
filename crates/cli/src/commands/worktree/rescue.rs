@@ -6,11 +6,8 @@
 //! included, ignored ones not) or its `HEAD` is a commit no branch and no remote ref contains, a
 //! new branch `dibs/rescue/<name>-<UTC time>` is made at `HEAD` — so a branch the worktree is on is
 //! never moved — and the changes are committed on it whole, without the repository's hooks, as the
-//! member. Its own `.dibs.toml`, which dibs writes, is never part of what is saved. A rescue
-//! answers the untracked files it committed, so that a stray dump or a credential is seen before
-//! the branch is pushed. dibs never pushes and never deletes a rescue branch.
-//!
-//! The same git also says whether a file of the worktree is tracked, and whether it is ignored.
+//! member. A rescue answers the untracked files it committed, so that a stray dump or a credential
+//! is seen before the branch is pushed. dibs never pushes and never deletes a rescue branch.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,7 +15,6 @@ use std::process::Command;
 use time::{OffsetDateTime, UtcOffset};
 
 use dibs_client::api::Member;
-use dibs_client::checkout::FILE_NAME;
 use dibs_domain::worktree::WorktreeName;
 
 /// The prefix of every rescue branch.
@@ -181,10 +177,6 @@ impl WorktreeGit {
         self.text(&["switch", "-q", "-c", &branch], "make a rescue branch")?;
         if dirty {
             self.text(&["add", "-A", "--", "."], "stage the work to rescue")?;
-            self.text(
-                &["reset", "-q", "--", &own_file()],
-                "leave its own .dibs.toml out of the rescue",
-            )?;
             let message = format!("dibs: rescued from {name} before reuse");
             self.text(
                 &[
@@ -204,46 +196,6 @@ impl WorktreeGit {
             )?;
         }
         Ok(Rescue { branch, untracked })
-    }
-
-    /// Whether git tracks the file at `path`, relative to the worktree: whether its index holds it.
-    ///
-    /// # Errors
-    /// [`GitFailed`] when git cannot tell.
-    pub fn tracks(&self, path: &str) -> Result<bool, GitFailed> {
-        let listed = self.text(
-            &["ls-files", "-z", "--", &format!(":(literal){path}")],
-            "tell whether it tracks a file",
-        )?;
-        Ok(!listed.is_empty())
-    }
-
-    /// Whether git ignores the path `path`, relative to the worktree, by the repository's ignore
-    /// rules; a tracked file is never ignored. The path need not exist.
-    ///
-    /// # Errors
-    /// [`GitFailed`] when git cannot tell.
-    pub fn ignores(&self, path: &str) -> Result<bool, GitFailed> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["check-ignore", "-q", "--", path])
-            .output()
-            .map_err(|error| {
-                tracing::debug!(error = %error, "git could not be started");
-                self.failed("tell whether it ignores a file")
-            })?;
-        match output.status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => {
-                tracing::debug!(
-                    stderr = %String::from_utf8_lossy(&output.stderr),
-                    "git refused in a worktree"
-                );
-                Err(self.failed("tell whether it ignores a file"))
-            }
-        }
     }
 
     /// The address git is set up with here, when it has one.
@@ -267,31 +219,16 @@ impl WorktreeGit {
 
     fn is_dirty(&self) -> Result<bool, GitFailed> {
         let status = self.text(
-            &[
-                "status",
-                "--porcelain",
-                "--untracked-files=all",
-                "--",
-                ".",
-                &exclude_own_file(),
-            ],
+            &["status", "--porcelain", "--untracked-files=all"],
             "read the worktree's status",
         )?;
         Ok(!status.trim().is_empty())
     }
 
-    /// The untracked files of the tree that git does not ignore, its own `.dibs.toml` left out.
+    /// The untracked files of the tree that git does not ignore.
     fn untracked(&self) -> Result<Vec<String>, GitFailed> {
         let listed = self.text(
-            &[
-                "ls-files",
-                "-z",
-                "--others",
-                "--exclude-standard",
-                "--",
-                ".",
-                &exclude_own_file(),
-            ],
+            &["ls-files", "-z", "--others", "--exclude-standard"],
             "list the untracked files to rescue",
         )?;
         Ok(listed
@@ -349,18 +286,6 @@ impl WorktreeGit {
             dir: self.dir.display().to_string(),
         }
     }
-}
-
-/// The pathspec that leaves the worktree's own `.dibs.toml` out. A status takes it as it is; a
-/// staging that names an ignored file even to leave it out is refused by git, so a rescue stages
-/// everything and then puts the file back as `HEAD` has it ([`own_file`]).
-fn exclude_own_file() -> String {
-    format!(":(exclude,top){FILE_NAME}")
-}
-
-/// The pathspec of the worktree's own `.dibs.toml`.
-fn own_file() -> String {
-    format!(":(top){FILE_NAME}")
 }
 
 /// `dibs/rescue/<name>-<yyyymmddThhmmss>`, the time in UTC.

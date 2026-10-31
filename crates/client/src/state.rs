@@ -30,8 +30,11 @@
 //!   ([`WorktreeState`]): `<name>.hold.json`, the holder this machine took it for, why, when, and
 //!   whether its reset finished, written on a take and removed on a release; `<name>.beat`, whose
 //!   time of last change is the holder's last sign of life in it; `<name>.free-since`, when it was
-//!   last seen free; `<name>.stopped`, when its environment was stopped for being left idle; and
-//!   `<name>.broken`, when and why its preparation, reset or rescue last failed.
+//!   last seen free; `<name>.left`, the session whose agent ended in it and left it in use for a
+//!   while, until it is free or taken again; `<name>.stopped`, when its environment was stopped for
+//!   being left idle; `<name>.broken`, when and why its preparation, reset or rescue last failed;
+//!   and `logs/<name>.log`, private to its user, what the project's commands last printed for it
+//!   when nobody read their output.
 //!
 //! `<scope>` is a digest of the server and the project, so one person in several projects keeps
 //! them apart; `<pool>` is the pool's id. Every file is replaced in one step (written beside it, then renamed over it), so a
@@ -231,6 +234,11 @@ struct MemberFile {
 struct SessionFile {
     session_id: SessionId,
     label: SessionLabel,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LeftBy {
+    session_id: SessionId,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -721,12 +729,44 @@ impl WorktreeState {
         read_json::<Moment>(&self.path(name, "free-since")).map(|moment| moment.at)
     }
 
-    /// Remembers that `name` is free since `at`.
+    /// Remembers that `name` is free since `at`, and forgets which session left it.
     ///
     /// # Errors
     /// The file system's failure.
     pub fn mark_free(&self, name: &WorktreeName, at: OffsetDateTime) -> io::Result<()> {
-        write_json(&self.path(name, "free-since"), &Moment { at })
+        write_json(&self.path(name, "free-since"), &Moment { at })?;
+        remove(&self.path(name, "left"))
+    }
+
+    /// Remembers that an agent of `session` ended in `name` and left it in use for a while.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn mark_left(&self, name: &WorktreeName, session: SessionId) -> io::Result<()> {
+        write_json(
+            &self.path(name, "left"),
+            &LeftBy {
+                session_id: session,
+            },
+        )
+    }
+
+    /// The worktrees an agent of `session` ended in and left in use, in the order of the names.
+    pub fn left_by(&self, session: SessionId) -> Vec<WorktreeName> {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut left: Vec<WorktreeName> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let file = entry.file_name();
+                let name = WorktreeName::parse(file.to_str()?.strip_suffix(".left")?).ok()?;
+                let by: LeftBy = read_json(&entry.path())?;
+                (by.session_id == session).then_some(name)
+            })
+            .collect();
+        left.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        left
     }
 
     /// When the environment of `name` was stopped for being left idle.
@@ -742,12 +782,14 @@ impl WorktreeState {
         write_json(&self.path(name, "stopped"), &Moment { at })
     }
 
-    /// Forgets that `name` was free and that its environment was stopped: it was just taken.
+    /// Forgets that `name` was free, which session left it, and that its environment was stopped:
+    /// it was just taken.
     ///
     /// # Errors
     /// The file system's failure other than the marks being absent.
     pub fn mark_taken(&self, name: &WorktreeName) -> io::Result<()> {
         remove(&self.path(name, "free-since"))?;
+        remove(&self.path(name, "left"))?;
         remove(&self.path(name, "stopped"))
     }
 
@@ -1144,7 +1186,15 @@ mod tests {
         worktrees.forget_hold(&name).unwrap();
         assert_eq!(worktrees.hold(&name), None);
 
+        worktrees.mark_left(&name, SessionId(4)).unwrap();
+        assert_eq!(worktrees.left_by(SessionId(4)), vec![name.clone()]);
+        assert!(worktrees.left_by(SessionId(5)).is_empty());
+        assert!(other.left_by(SessionId(4)).is_empty());
+        worktrees.mark_taken(&name).unwrap();
+        assert!(worktrees.left_by(SessionId(4)).is_empty(), "taken again");
+        worktrees.mark_left(&name, SessionId(4)).unwrap();
         worktrees.mark_free(&name, at).unwrap();
+        assert!(worktrees.left_by(SessionId(4)).is_empty(), "free now");
         worktrees
             .mark_stopped(&name, at + Duration::minutes(30))
             .unwrap();

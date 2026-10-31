@@ -544,7 +544,7 @@ fn through_the_wrapper_the_real_binary_lends_a_pool_worktree_and_makes_claude_co
         canonical(&api.join(".claude/worktrees/agent-y"))
     );
     assert!(
-        text(&own.stderr).contains("no [worktrees] table"),
+        text(&own.stderr).contains("declares no pool in .git/dibs/worktrees.toml"),
         "dibs made it and said why: {}",
         text(&own.stderr)
     );

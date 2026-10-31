@@ -79,6 +79,9 @@ pub fn doctor(env: &HashMap<String, String>, printer: Printer) -> Result<(), Fai
     let locations = Locations::from_env(&lookup).ok();
     let checkout = Checkout::discover(&cwd)
         .map_err(|error| Failure::config("invalid_checkout", sentence(&error.to_string())))?;
+    if let Some(ignored) = checkout.as_ref().and_then(Checkout::ignored_tables) {
+        printer.warn(&ignored);
+    }
     let registry = hosts::registry();
     let today = OffsetDateTime::now_utc().date();
     let report = Report {

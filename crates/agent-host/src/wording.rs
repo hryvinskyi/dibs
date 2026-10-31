@@ -990,7 +990,7 @@ pub const WORKTREE_UNGOVERNED: &str =
 
 /// Why the pool of worktrees did not serve a worktree wanted in a checkout that lends none.
 pub const WORKTREE_NO_POOL: &str =
-    "this checkout lends no worktrees: its .dibs.toml has no [worktrees] table";
+    "this checkout lends no worktrees: its repository declares no pool in .git/dibs/worktrees.toml";
 
 /// Why the pool of worktrees did not serve a wanted worktree while it is still being prepared.
 pub const WORKTREE_PREPARING: &str = "the pool of worktrees is still being prepared";
@@ -1064,7 +1064,7 @@ pub fn worktree_kept(path: &std::path::Path, why: &str) -> String {
 /// checkout could not be found from it: a pool worktree is never removed.
 pub fn pool_worktree_kept(path: &std::path::Path) -> String {
     format!(
-        "dibs: the worktree at {} was kept: its .dibs.toml says it is a worktree of a pool, and dibs never removes one. The checkout that lends it could not be read from here, so no hold of it was released; run dibs worktree list in that checkout to see where it stands.",
+        "dibs: the worktree at {} was kept: its git directory marks it as a worktree of a pool, and dibs never removes one. The checkout that lends it could not be read from here, so no hold of it was released; run dibs worktree list in that checkout to see where it stands.",
         path.display()
     )
 }

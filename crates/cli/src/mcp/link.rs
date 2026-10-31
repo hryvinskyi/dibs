@@ -592,7 +592,7 @@ impl Link {
         let here = self.connection.checkout.as_ref().ok_or_else(|| {
             Failure::config(
                 "no_checkout",
-                "No .dibs.toml was found here or above in this repository; start the tool server in a checkout whose .dibs.toml has a [worktrees] table, or in one of its worktrees.",
+                "No .dibs.toml governs this directory; start the tool server in a checkout whose repository declares a pool of worktrees in .git/dibs/worktrees.toml, or in one of its worktrees.",
             )
         })?;
         Pool::locate(here, self.locations.state_dir()).map(|(pool, _)| pool)

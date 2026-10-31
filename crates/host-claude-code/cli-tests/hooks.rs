@@ -641,7 +641,7 @@ fn where_no_pool_lends_a_worktree_dibs_makes_claude_codes_own_and_says_why() {
         git(&plain, args);
     }
     for (checkout, because) in [
-        (&api, "no [worktrees] table"),
+        (&api, "declares no pool in .git/dibs/worktrees.toml"),
         (&plain, "no .dibs.toml governs this directory"),
     ] {
         let made = worktree_create(&setup, "bob", checkout, "agent-y");
@@ -698,7 +698,7 @@ fn a_pool_with_nothing_prepared_makes_claude_codes_own_worktree_at_once_and_prep
         "{said}"
     );
 
-    let prepared = setup.pool_worktree("worktree1").join(".dibs.toml");
+    let prepared = widgets.join(".git/worktrees/worktree1/dibs/pool-worktree.toml");
     let started = std::time::Instant::now();
     while !prepared.exists() {
         assert!(
@@ -936,6 +936,44 @@ fn upkeep_does_not_write_free_a_worktree_an_agent_left_until_its_silence_ran_out
 }
 
 #[test]
+fn a_sessions_end_frees_at_once_the_worktree_its_ended_agent_left() {
+    let setup = Setup::new();
+    let widgets = setup.pool(1);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "worktree1"]);
+    let worktree = setup.pool_worktree("worktree1");
+    let created = worktree_create(&setup, "bob", &widgets, "agent-a");
+    assert_eq!(last_line(&created), worktree, "{}", text(&created.stderr));
+    agent_works(&setup, &worktree, "a");
+    agent_stops(&setup, &worktree, "a");
+    assert!(
+        !setup
+            .worktree_state("bob", "worktree1", "free-since")
+            .exists(),
+        "kept for the agent while its session lives"
+    );
+
+    let ended = setup.hook(
+        "bob",
+        &widgets,
+        "session-end",
+        &hook_input("SessionEnd", &widgets, json!({"reason": "other"})),
+    );
+    assert_eq!(reply(&ended), Value::Null);
+    assert!(
+        setup
+            .worktree_state("bob", "worktree1", "free-since")
+            .exists(),
+        "the session's end lets go of what its agents left"
+    );
+    let taken = setup.ok("bob", &widgets, &["worktree", "take", "--agent", "later"]);
+    assert_eq!(
+        last_line(&taken),
+        worktree,
+        "offered at once, without waiting out an agent's silence"
+    );
+}
+
+#[test]
 fn a_continued_agent_whose_worktree_went_to_another_agent_is_told_so_and_refused() {
     let setup = Setup::new();
     let widgets = setup.pool(1);
@@ -1012,6 +1050,7 @@ fn an_edit_in_the_worktree_made_while_the_pool_is_prepared_is_checked_against_cl
     let setup = Setup::new();
     let api = setup.api();
     let widgets = setup.pool(1);
+    let exclude = fs::read_to_string(widgets.join(".git/info/exclude")).unwrap();
     setup.claim("alice", &api, "gh:acme/api#1", &["billing"]);
     setup.claim("bob", &widgets, "gh:acme/api#2", &[]);
 
@@ -1019,19 +1058,19 @@ fn an_edit_in_the_worktree_made_while_the_pool_is_prepared_is_checked_against_cl
     assert_eq!(made.status.code(), Some(0), "{}", text(&made.stderr));
     let own = canonical(&widgets.join(".claude/worktrees/agent-y"));
     assert_eq!(last_line(&made), own, "{}", text(&made.stderr));
-    let config = fs::read_to_string(own.join(".dibs.toml")).unwrap();
     assert!(
-        config.contains("project = \"acme\"") && config.contains("repo = \"api\""),
-        "{config}"
-    );
-    assert!(
-        !config.contains("worktrees") && !config.contains("pool_worktree"),
-        "never a pool's table: {config}"
+        !own.join(".dibs.toml").exists(),
+        "governed by the checkout's file, nothing written into it"
     );
     assert_eq!(
-        git(&own, &["status", "--porcelain"]),
+        fs::read_to_string(widgets.join(".git/info/exclude")).unwrap(),
+        exclude,
+        "nor into the repository's exclusions"
+    );
+    assert_eq!(
+        git(&own, &["status", "--porcelain", "--ignored"]),
         "",
-        "the worktree stays clean"
+        "the worktree holds nothing dibs wrote"
     );
 
     let write = |path: &str| {
@@ -1061,9 +1100,15 @@ fn an_edit_in_the_worktree_made_while_the_pool_is_prepared_is_checked_against_cl
 }
 
 #[test]
-fn a_pool_declared_in_a_tracked_file_makes_claude_codes_own_worktree_and_says_why() {
+fn a_pool_table_in_a_committed_dibs_toml_lends_nothing_and_its_worktrees_are_still_governed() {
     let setup = Setup::new();
     let widgets = setup.pool(1);
+    fs::remove_file(widgets.join(".git/dibs/worktrees.toml")).unwrap();
+    let mut config = fs::read_to_string(widgets.join(".dibs.toml")).unwrap();
+    config.push_str(
+        "\n[worktrees]\ncount = 1\nbase = \"main\"\nprepare = \"touch ran\"\nreset = \"touch ran\"\n",
+    );
+    fs::write(widgets.join(".dibs.toml"), config).unwrap();
     git(&widgets, &["add", "-f", ".dibs.toml"]);
     git(&widgets, &["commit", "-q", "-m", "share the configuration"]);
 
@@ -1073,12 +1118,22 @@ fn a_pool_declared_in_a_tracked_file_makes_claude_codes_own_worktree_and_says_wh
     assert_eq!(last_line(&made), own);
     let said = text(&made.stderr);
     assert!(
-        said.contains("pool of worktrees was not used") && said.contains("git tracks the file"),
-        "the notice names why the pool was refused: {said}"
+        said.contains("pool of worktrees was not used"),
+        "the notice says the pool was not used: {said}"
     );
-    assert!(!said.contains("no [worktrees] table"), "{said}");
     assert!(
-        !setup.pool_worktree("worktree1").exists(),
-        "nothing of the pool ran"
+        !setup.pool_worktree("worktree1").exists() && !widgets.join("ran").exists(),
+        "nothing of the table ran"
+    );
+    let started = reply(&setup.hook(
+        "bob",
+        &own,
+        "session-start",
+        &hook_input("SessionStart", &own, json!({"source": "startup"})),
+    ));
+    let notice = started["systemMessage"].as_str().unwrap_or_default();
+    assert!(
+        notice.contains("Move the [worktrees] table to"),
+        "the person is told where the table belongs: {started}"
     );
 }

@@ -481,8 +481,9 @@ fn pool_commands(log: &Path) -> [(&'static str, String); 3] {
 }
 
 /// A git checkout at `dir`, like [`checkout`], that lends `count` worktrees from the directory
-/// beside it and stops a free one after `idle_after`. Its `.dibs.toml` is kept out of git, as a
-/// pool's checkout keeps it, so that a worktree made from it holds only what an agent wrote.
+/// beside it and stops a free one after `idle_after`, the pool declared in its git directory. Its
+/// `.dibs.toml` is kept out of git, so that its worktrees are governed by the checkout's file and
+/// a worktree made from it holds only what an agent wrote.
 pub fn pool_checkout(
     dir: &Path,
     server: &Server,
@@ -504,16 +505,15 @@ pub fn pool_checkout(
     ));
     fs::create_dir_all(&kit).unwrap();
     let log = kit.join("commands.log");
-    let mut config = fs::read_to_string(dir.join(".dibs.toml")).unwrap();
-    config.push_str(&format!(
-        "\n[worktrees]\ncount = {count}\nbase = \"main\"\nidle_after = \"{idle_after}\"\n"
-    ));
+    let mut table =
+        format!("[worktrees]\ncount = {count}\nbase = \"main\"\nidle_after = \"{idle_after}\"\n");
     for (step, script) in pool_commands(&log) {
         let file = kit.join(format!("{step}.sh"));
         fs::write(&file, script).unwrap();
-        config.push_str(&format!("{step} = \"sh '{}'\"\n", file.display()));
+        table.push_str(&format!("{step} = \"sh '{}'\"\n", file.display()));
     }
-    fs::write(dir.join(".dibs.toml"), config).unwrap();
+    fs::create_dir_all(dir.join(".git/dibs")).unwrap();
+    fs::write(dir.join(".git/dibs/worktrees.toml"), table).unwrap();
     let root = dir.with_file_name(format!(
         "{}-worktrees",
         dir.file_name().unwrap().to_string_lossy()

@@ -12,8 +12,11 @@
 //!
 //! An agent's end releases its hold on the server but leaves its worktree in use on this machine
 //! for as long as an agent's silence: a host may continue an agent after it ended, in the same
-//! worktree, and no other holder is handed that worktree meanwhile. Only a tool call that goes
-//! ahead is a sign of life: a refused one keeps nobody's hold alive.
+//! worktree, and no other holder is handed that worktree meanwhile. The end of its session lets go
+//! of every worktree its agents left so, at once. Only a tool call that goes ahead is a sign of
+//! life, and a tool run counts only in a worktree the one who ran it may work in: a refused call,
+//! or a reader in somebody else's worktree, keeps nobody's hold alive. A worktree nobody holds is
+//! taken again for the one working in it only once their call is judged and let through.
 
 use std::path::{Path, PathBuf};
 
@@ -252,6 +255,17 @@ pub(super) fn standing<'a>(
     }
 }
 
+/// Where a session or its agent stands on the pool worktree it works in.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Holding {
+    /// It may go on: it works in no pool worktree, or in one it may work in.
+    Go,
+    /// Another holder has the worktree; the sentence says who.
+    Refused(String),
+    /// Nobody holds the worktree, which it may take again once its call goes ahead.
+    Free(WorktreeName),
+}
+
 /// A recorded holder as a refusal names it.
 fn shown(record: &WorktreeRecord) -> wording::WorktreeHolderShown<'_> {
     wording::WorktreeHolderShown {
@@ -315,9 +329,16 @@ impl Run<'_> {
         Some((pool, name))
     }
 
-    /// Leaves a sign of life in the pool worktree `path` lies in, when it lies in one.
-    pub(super) fn leave_beat(&self, cwd: &Path, path: &Path) {
-        if let Some((pool, name)) = self.pool_worktree(cwd, path) {
+    /// Leaves a sign of life in the pool worktree `cwd` lies in, when the session or its `agent`
+    /// may work in it by this machine's records: its holder, or the session looking into its
+    /// agent's tree. Nothing for anyone else, nor in a worktree nobody holds.
+    pub(super) fn leave_holders_beat(&self, cwd: &Path, agent: Option<&AgentKey>) {
+        let Some((pool, name)) = self.pool_worktree(cwd, cwd) else {
+            return;
+        };
+        let records = pool.records(&self.session);
+        let record = records.iter().find(|record| record.worktree == name);
+        if standing(record, agent) == Standing::Held {
             pool.touch(&name, self.now);
         }
     }
@@ -344,50 +365,68 @@ impl Run<'_> {
         }
     }
 
-    /// The refusal for a session or `agent` of it working in a pool worktree, `cwd`, that they
-    /// hold no hold on and another holder has. A worktree nobody holds is taken again for them, as
-    /// it is: they were at work in it already. `None` when they may go on, also when the server
-    /// could not say.
-    pub(super) fn not_the_holder(&self, cwd: &Path, agent: Option<&AgentKey>) -> Option<String> {
-        let (pool, name) = self.pool_worktree(cwd, cwd)?;
+    /// Where the session or its `agent` stands on the pool worktree `cwd` lies in, by this
+    /// machine's records alone: free to go on, refused because another holder has it, or in a
+    /// worktree nobody holds, which they may take again.
+    pub(super) fn holding(&self, cwd: &Path, agent: Option<&AgentKey>) -> Holding {
+        let Some((pool, name)) = self.pool_worktree(cwd, cwd) else {
+            return Holding::Go;
+        };
         let records = pool.records(&self.session);
         let record = records.iter().find(|record| record.worktree == name);
         match standing(record, agent) {
-            Standing::Held => None,
-            Standing::Sibling(record) => Some(wording::held_by_a_sibling(
+            Standing::Held => Holding::Go,
+            Standing::Sibling(record) => Holding::Refused(wording::held_by_a_sibling(
                 &name,
                 &shown(record),
                 pool.rescued(&name).as_deref(),
             )),
-            Standing::Other(record) => Some(wording::not_the_holder(
+            Standing::Other(record) => Holding::Refused(wording::not_the_holder(
                 &name,
                 &shown(record),
                 pool.rescued(&name).as_deref(),
             )),
-            Standing::Free => {
-                let holder = WorktreeHolder {
-                    session: self.session.clone(),
-                    agent: agent.cloned(),
-                };
-                match pool.retake(&name, &holder) {
-                    Ok(Retaken::Took) | Err(_) => None,
-                    Ok(Retaken::HoldsAnother { worktree }) => {
-                        Some(wording::holds_another(&name, &worktree, agent.is_some()))
-                    }
-                    Ok(Retaken::Held { agent, purpose }) => {
-                        let holder = wording::WorktreeHolderShown {
-                            agent: agent.as_ref(),
-                            purpose: purpose.as_ref(),
-                            since: None,
-                        };
-                        Some(wording::not_the_holder(
-                            &name,
-                            &holder,
-                            pool.rescued(&name).as_deref(),
-                        ))
-                    }
-                }
+            Standing::Free => Holding::Free(name),
+        }
+    }
+
+    /// Takes the worktree `name` nobody holds again for the session or its `agent`, as it is: they
+    /// were at work in it already. The refusal when another holder took it in the meantime, or the
+    /// holder holds another; `None` when they may go on, also when the server could not say.
+    pub(super) fn retake(&self, name: &WorktreeName, agent: Option<&AgentKey>) -> Option<String> {
+        let pool = self.workspace.worktree_pool()?;
+        let holder = WorktreeHolder {
+            session: self.session.clone(),
+            agent: agent.cloned(),
+        };
+        match pool.retake(name, &holder) {
+            Ok(Retaken::Took) | Err(_) => None,
+            Ok(Retaken::HoldsAnother { worktree }) => {
+                Some(wording::holds_another(name, &worktree, agent.is_some()))
             }
+            Ok(Retaken::Held { agent, purpose }) => {
+                let holder = wording::WorktreeHolderShown {
+                    agent: agent.as_ref(),
+                    purpose: purpose.as_ref(),
+                    since: None,
+                };
+                Some(wording::not_the_holder(
+                    name,
+                    &holder,
+                    pool.rescued(name).as_deref(),
+                ))
+            }
+        }
+    }
+
+    /// The refusal for a session or `agent` of it working in a pool worktree, `cwd`, that they
+    /// hold no hold on and another holder has. A worktree nobody holds is taken again for them, as
+    /// it is. `None` when they may go on, also when the server could not say.
+    pub(super) fn not_the_holder(&self, cwd: &Path, agent: Option<&AgentKey>) -> Option<String> {
+        match self.holding(cwd, agent) {
+            Holding::Go => None,
+            Holding::Refused(refusal) => Some(refusal),
+            Holding::Free(name) => self.retake(&name, agent),
         }
     }
 
@@ -412,12 +451,14 @@ impl Run<'_> {
         GuardOutcome::silent()
     }
 
-    /// Ends the session on the server, which frees its holds and its agents', when this machine
-    /// records one of them: a session that held nothing costs no call.
+    /// Lets go of the worktrees the session's ended agents left in use on this machine, and ends
+    /// the session on the server, which frees its holds and its agents', when this machine records
+    /// one of them: a session that held nothing costs no call.
     pub(super) fn session_ended(&self) -> GuardOutcome {
         let Some(pool) = self.workspace.worktree_pool() else {
             return GuardOutcome::silent();
         };
+        pool.free_left(&self.session);
         let held = pool
             .records(&self.session)
             .iter()

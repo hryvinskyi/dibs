@@ -1,5 +1,6 @@
-//! Worktree pools through the command line, in a real git checkout whose `.dibs.toml` declares a
-//! pool and whose prepare and reset commands are scripts that record what they were given: the
+//! Worktree pools through the command line, in a real git checkout whose committed `.dibs.toml`
+//! governs it, whose git directory declares a pool, and whose prepare and reset commands are
+//! scripts that record what they were given: the
 //! first take prepares and the next one resets; the same holder asking again gets its tree back
 //! untouched; two takes are two holders; a worktree is a governed checkout that takes from its
 //! checkout's pool; the work a reused worktree held is rescued onto a branch; a worktree mid-rebase
@@ -9,9 +10,9 @@
 //! output rather than leaving it on the caller's pipes; a preparation leaves a held worktree alone;
 //! a rescue names the untracked files it committed; and a checkout without a pool says so.
 //!
-//! A pool's table runs nothing from a `.dibs.toml` git tracks or does not ignore; a base that
-//! carries a `.dibs.toml` has its worktree set aside, and the worktree's own file is never written
-//! through a link.
+//! A pool's table in a committed `.dibs.toml` runs nothing, and the rest of the file still governs;
+//! a pool worktree is marked prepared in its git directory, nothing dibs writes lies in its tree,
+//! and a base that tracks a `.dibs.toml` lends its worktrees like any other.
 //!
 //! The signs of life left in a worktree keep its holder's hold, and one the server let go of while
 //! they could not reach it is taken again for that holder; the upkeep stops the environment of a
@@ -76,37 +77,16 @@ echo "idle $DIBS_WORKTREE_NAME|$DIBS_WORKTREE_PATH|$DIBS_WORKTREE_BASE|$DIBS_CHE
 /// How long a worktree of the test pools stays free before its environment is stopped.
 const IDLE_AFTER: Duration = Duration::from_secs(1);
 
-/// Where git stands on the checkout's `.dibs.toml` that declares the pool.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kept {
-    /// Committed.
-    Tracked,
-    /// Neither tracked nor ignored.
-    Exposed,
-    /// Untracked and excluded, as a pool's checkout keeps it.
-    Private,
-}
-
 impl Pool {
     fn new(count: u8) -> Self {
-        Self::kept(count, Kept::Private)
-    }
-
-    /// A pool whose checkout keeps its `.dibs.toml` as `kept` says.
-    fn kept(count: u8, kept: Kept) -> Self {
         let setup = Setup::new();
         let server = setup.server.url();
-        Self::on_kept(setup, &server, count, kept)
+        Self::on(setup, &server, count)
     }
 
-    /// A pool whose checkout names the server at `server`, alice signed in to it.
+    /// A pool whose checkout names the server at `server`, alice signed in to it. The checkout
+    /// commits its `.dibs.toml`; the pool is declared in its git directory.
     fn on(setup: Setup, server: &str, count: u8) -> Self {
-        Self::on_kept(setup, server, count, Kept::Private)
-    }
-
-    /// A pool whose checkout names the server at `server` and keeps its `.dibs.toml` as `kept`
-    /// says, alice signed in to it.
-    fn on_kept(setup: Setup, server: &str, count: u8, kept: Kept) -> Self {
         let checkout = setup.root.path().join("widgets");
         make_checkout(&checkout, server, "acme", Some("api"), API_REMOTE);
         if server != setup.server.url() {
@@ -117,19 +97,6 @@ impl Pool {
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{}", text(&out.stderr));
-        }
-        if kept != Kept::Tracked {
-            git(&checkout, &["rm", "-q", "--cached", ".dibs.toml"]);
-            git(
-                &checkout,
-                &["commit", "-q", "-m", "keep the configuration local"],
-            );
-        }
-        if kept == Kept::Private {
-            let exclude = checkout.join(".git/info/exclude");
-            let mut excluded = fs::read_to_string(&exclude).unwrap_or_default();
-            excluded.push_str("\n.dibs.toml\n");
-            fs::write(&exclude, excluded).unwrap();
         }
         let kit = setup.root.path().join("kit");
         for (name, script) in [
@@ -144,18 +111,8 @@ impl Pool {
             );
             write(&kit, name, &body);
         }
-        let mut config = fs::read_to_string(checkout.join(".dibs.toml")).unwrap();
-        config.push_str(&format!(
-            "\n[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\nidle = \"sh '{}'\"\nidle_after = \"{}s\"\n",
-            kit.join("prepare.sh").display(),
-            kit.join("reset.sh").display(),
-            kit.join("idle.sh").display(),
-            IDLE_AFTER.as_secs()
-        ));
-        fs::write(checkout.join(".dibs.toml"), config).unwrap();
-        if kept == Kept::Tracked {
-            git(&checkout, &["commit", "-q", "-am", "share the pool"]);
-        }
+        let table = pool_table(&kit, count);
+        write(&checkout.join(".git/dibs"), "worktrees.toml", &table);
         let log = kit.join("log");
         Self {
             setup,
@@ -163,6 +120,19 @@ impl Pool {
             kit,
             log,
         }
+    }
+
+    /// The file of the pool's settings, in the checkout's git directory.
+    fn settings_file(&self) -> PathBuf {
+        self.checkout.join(".git/dibs/worktrees.toml")
+    }
+
+    /// The mark dibs keeps of the worktree `name` in its git directory.
+    fn marker(&self, name: &str) -> PathBuf {
+        self.checkout
+            .join(".git/worktrees")
+            .join(name)
+            .join("dibs/pool-worktree.toml")
     }
 
     /// The directory of a worktree, as the file system resolves it.
@@ -339,7 +309,7 @@ impl Pool {
 
     /// Makes `base` what the pool's worktrees are reset to.
     fn set_base(&self, base: &str) {
-        let file = self.checkout.join(".dibs.toml");
+        let file = self.settings_file();
         let config = fs::read_to_string(&file).unwrap();
         assert!(config.contains("base = \"main\""));
         fs::write(
@@ -359,6 +329,17 @@ impl Pool {
     fn wait_out_idle_after(&self) {
         std::thread::sleep(IDLE_AFTER + Duration::from_millis(200));
     }
+}
+
+/// The `[worktrees]` table of a pool of `count` worktrees whose commands are the scripts in `kit`.
+fn pool_table(kit: &Path, count: u8) -> String {
+    format!(
+        "[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\nidle = \"sh '{}'\"\nidle_after = \"{}s\"\n",
+        kit.join("prepare.sh").display(),
+        kit.join("reset.sh").display(),
+        kit.join("idle.sh").display(),
+        IDLE_AFTER.as_secs()
+    )
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -399,11 +380,9 @@ fn a_take_prepares_a_new_worktree_and_resets_it_when_it_is_taken_again() {
         "the minted key is told: {said}"
     );
 
-    let own = fs::read_to_string(pool.worktree("worktree1").join(".dibs.toml")).unwrap();
-    assert!(own.contains("[pool_worktree]"), "{own}");
-    assert!(own.contains("name = \"worktree1\""), "{own}");
-    assert!(own.contains("project = \"acme\""), "{own}");
-    assert!(!own.contains("[worktrees]"), "{own}");
+    let mark = fs::read_to_string(pool.marker("worktree1")).unwrap();
+    assert!(mark.contains("[pool_worktree]"), "{mark}");
+    assert!(mark.contains("name = \"worktree1\""), "{mark}");
 
     pool.release("worktree1");
     let again = pool.dibs(&["worktree", "take", "--json"]);
@@ -722,7 +701,7 @@ fn a_take_under_a_deadline_never_prepares_and_starts_a_preparation_instead() {
         "one preparation at a time: {said}"
     );
     let started = Instant::now();
-    while !pool.worktree("worktree1").join(".dibs.toml").exists() {
+    while !pool.marker("worktree1").exists() {
         assert!(
             started.elapsed() < Duration::from_secs(20),
             "the background preparation never finished"
@@ -767,93 +746,124 @@ fn a_checkout_without_a_pool_says_how_to_declare_one() {
 }
 
 #[test]
-fn a_pool_table_in_a_file_git_tracks_or_does_not_ignore_runs_no_command() {
-    for (kept, said) in [
-        (Kept::Tracked, "git tracks the file"),
-        (Kept::Exposed, "git does not ignore the file"),
+fn a_pool_table_in_a_committed_dibs_toml_runs_nothing_and_the_file_still_governs() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let kit = setup.root.path().join("kit");
+    write(&kit, "prepare.sh", "#!/bin/sh\necho ran >> \"$0.log\"\n");
+    write(&kit, "reset.sh", "#!/bin/sh\necho ran >> \"$0.log\"\n");
+    let mut config = fs::read_to_string(api.join(".dibs.toml")).unwrap();
+    config.push_str(&pool_table(&kit, 2));
+    config.push_str("size = 4\n\n[pool_worktree]\ncheckout = \"/elsewhere\"\n");
+    fs::write(api.join(".dibs.toml"), config).unwrap();
+    git(&api, &["commit", "-q", "-am", "share a pool"]);
+    for args in [
+        &["worktree", "take", "--agent", "agent-1"][..],
+        &[
+            "worktree",
+            "take",
+            "--agent",
+            "agent-1",
+            "--deadline",
+            "30s",
+        ],
+        &["worktree", "prepare", "--all"],
+        &["worktree", "upkeep"],
     ] {
-        let pool = Pool::kept(2, kept);
-        for args in [
-            &["worktree", "take", "--agent", "agent-1"][..],
-            &[
-                "worktree",
-                "take",
-                "--agent",
-                "agent-1",
-                "--deadline",
-                "30s",
-            ],
-            &["worktree", "prepare", "--all"],
-            &["worktree", "upkeep"],
-        ] {
-            let out = pool.dibs(args);
-            assert_eq!(status(&out), 2, "{said}: {args:?}");
-            let refused = text(&out.stderr);
-            assert!(refused.contains(said), "{args:?}: {refused}");
-            assert!(
-                refused.contains(".git/info/exclude"),
-                "says how to keep it local: {refused}"
-            );
-        }
-        assert!(
-            pool.steps().is_empty(),
-            "no command of the file ran: {:?}",
-            pool.steps()
+        let out = setup.dibs(&setup.alice, &api).args(args).output().unwrap();
+        let upkeep = args == ["worktree", "upkeep"];
+        assert_eq!(
+            status(&out),
+            if upkeep { 0 } else { 2 },
+            "{args:?}: {}",
+            text(&out.stderr)
         );
-        assert!(!pool.worktree("worktree1").exists());
+        let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+        assert!(
+            said.contains("which dibs does not read from a .dibs.toml"),
+            "{args:?}: {said}"
+        );
+        assert!(
+            said.contains(".git/dibs/worktrees.toml"),
+            "{args:?}: {said}"
+        );
     }
+    assert!(
+        !kit.join("prepare.sh.log").exists() && !kit.join("reset.sh.log").exists(),
+        "no command of the file ran"
+    );
+    assert!(!setup.root.path().join("api-worktrees").exists());
+
+    let status_out = setup
+        .dibs(&setup.alice, &api)
+        .args(["status"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        status(&status_out),
+        0,
+        "the file's server and project still govern: {}",
+        text(&status_out.stderr)
+    );
+    let doctor = setup
+        .dibs(&setup.alice, &api)
+        .args(["doctor"])
+        .output()
+        .unwrap();
+    assert!(
+        text(&doctor.stderr).contains("Move the [worktrees] table to"),
+        "{}",
+        text(&doctor.stderr)
+    );
 }
 
 #[test]
-fn a_base_that_carries_a_dibs_toml_has_the_worktree_set_aside_and_its_file_left_alone() {
-    let pool = Pool::new(1);
-    pool.branch_with("carrier", |tree| {
-        write(
-            tree,
-            ".dibs.toml",
-            "server = \"https://dibs.example.com\"\nproject = \"acme\"\n",
-        );
-    });
-    pool.set_base("carrier");
-    let out = pool.dibs(&["worktree", "take", "--agent", "agent-1"]);
-    assert_eq!(status(&out), 1);
-    let said = text(&out.stderr);
-    assert!(
-        said.contains(".dibs.toml is tracked at carrier"),
-        "the reason is named: {said}"
+fn a_pool_worktree_is_marked_in_its_git_directory_and_its_tree_holds_nothing_dibs_wrote() {
+    let pool = Pool::new(2);
+    let path = pool.take("agent-1");
+    assert!(pool.marker("worktree1").is_file(), "marked prepared");
+    assert_eq!(
+        git(&path, &["status", "--porcelain", "--ignored"]),
+        "",
+        "nothing dibs wrote lies in the tree, ignored or not"
     );
     assert_eq!(
-        fs::read_to_string(pool.worktree("worktree1").join(".dibs.toml")).unwrap(),
-        "server = \"https://dibs.example.com\"\nproject = \"acme\"\n",
-        "the tracked file is not rewritten"
+        fs::read_to_string(path.join(".dibs.toml")).unwrap(),
+        fs::read_to_string(pool.checkout.join(".dibs.toml")).unwrap(),
+        "the committed file is the base's"
     );
+    let governed = pool.dibs_in(&path, &["status"]);
+    assert_eq!(status(&governed), 0, "{}", text(&governed.stderr));
+    pool.release("worktree1");
+    pool.take("agent-2");
+    assert_eq!(pool.steps(), ["prepare worktree1", "reset worktree1"]);
+    assert_eq!(git(&path, &["status", "--porcelain", "--ignored"]), "");
     let listed = pool.listed();
-    let broken = listed["worktrees"][0]["broken"]["reason"].as_str().unwrap();
-    assert!(broken.contains("tracked at carrier"), "{listed}");
+    assert_eq!(listed["worktrees"][0]["prepared"], true, "{listed}");
+    assert_eq!(listed["worktrees"][1]["prepared"], false, "{listed}");
 }
 
-#[cfg(unix)]
 #[test]
-fn a_worktrees_dibs_toml_is_written_into_a_new_file_and_never_through_a_link() {
+fn a_base_that_tracks_a_dibs_toml_of_its_own_lends_its_worktrees_like_any_other() {
     let pool = Pool::new(1);
-    let victim = pool.setup.root.path().join("victim.txt");
-    fs::write(&victim, "untouched\n").unwrap();
-    pool.branch_with("linked", |tree| {
-        std::os::unix::fs::symlink(&victim, tree.join(".dibs.toml.dibs-new")).unwrap();
-    });
-    pool.set_base("linked");
-    let path = pool.take("agent-1");
-    assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched\n");
-    let own = path.join(".dibs.toml");
-    assert!(
-        !fs::symlink_metadata(&own).unwrap().file_type().is_symlink(),
-        "the worktree's own file is a file"
+    let carried = "server = \"https://dibs.example.com\"\nproject = \"acme\"\nrepo = \"web\"\n";
+    pool.branch_with("carrier", |tree| write(tree, ".dibs.toml", carried));
+    pool.set_base("carrier");
+    let out = pool.dibs(&["worktree", "take", "--agent", "agent-1"]);
+    assert_eq!(status(&out), 0, "{}", text(&out.stderr));
+    let path = last_line(&out);
+    assert_eq!(
+        fs::read_to_string(path.join(".dibs.toml")).unwrap(),
+        carried,
+        "the tracked file is the base's, untouched"
     );
-    assert!(
-        fs::read_to_string(&own)
-            .unwrap()
-            .contains("[pool_worktree]")
+    let listed = pool.listed();
+    assert_eq!(
+        listed["worktrees"][0]["broken"],
+        serde_json::Value::Null,
+        "{listed}"
     );
+    assert_eq!(listed["worktrees"][0]["prepared"], true, "{listed}");
 }
 
 #[test]
@@ -936,6 +946,41 @@ fn a_preparation_leaves_a_worktree_held_on_this_machine_alone_and_repairs_a_free
 }
 
 #[test]
+fn a_preparation_leaves_a_worktree_still_worked_in_alone() {
+    let pool = Pool::new(2);
+    pool.take("agent-1");
+    pool.release("worktree1");
+    pool.beat("worktree1");
+    let refused = pool.dibs(&["worktree", "prepare", "worktree1"]);
+    assert_eq!(status(&refused), 1, "{}", text(&refused.stderr));
+    let said = text(&refused.stderr);
+    assert!(
+        said.contains("worktree1 is still worked in on this machine"),
+        "{said}"
+    );
+    let all = pool.dibs(&["worktree", "prepare", "--all"]);
+    assert_eq!(status(&all), 0, "{}", text(&all.stderr));
+    assert!(
+        text(&all.stderr).contains("worktree1 is still worked in on this machine"),
+        "{}",
+        text(&all.stderr)
+    );
+    let background = pool
+        .setup
+        .dibs(&pool.setup.alice, &pool.checkout)
+        .args(["worktree", "prepare", "worktree1"])
+        .env("DIBS_WORKTREE_PREPARE_IN_BACKGROUND", "1")
+        .output()
+        .unwrap();
+    assert_ne!(status(&background), 0, "{}", text(&background.stderr));
+    assert_eq!(
+        pool.steps(),
+        ["prepare worktree1", "prepare worktree2"],
+        "nothing ran over the work in worktree1"
+    );
+}
+
+#[test]
 fn a_take_started_preparation_leaves_a_worktree_prepared_meanwhile_alone() {
     let pool = Pool::new(1);
     let prepared = pool.dibs(&["worktree", "prepare", "worktree1"]);
@@ -969,7 +1014,7 @@ fn one_preparation_runs_in_the_background_at_a_time() {
     assert!(said.contains("worktree1 is being prepared"), "{said}");
 
     pool.wait_for(
-        || pool.worktree("worktree1").join(".dibs.toml").exists(),
+        || pool.marker("worktree1").exists(),
         "the first preparation's end",
     );
     std::thread::sleep(Duration::from_millis(1500));
@@ -1411,9 +1456,21 @@ fn a_tool_an_edit_and_a_git_command_in_a_worktree_leave_its_sign_of_life_from_th
     let pool = Pool::new(3);
     let worktree = pool.take("agent-1");
     let beat = |name: &str| pool.state_file(name, "beat");
+    let reader = Pool::decided(&pool.hook(&worktree, "after-tool", serde_json::json!({})));
+    assert_eq!(reader["decision"], "no_objection", "{reader}");
+    assert!(
+        !beat("worktree1").exists(),
+        "a tool run by another session in a worktree it does not hold keeps nobody's hold alive"
+    );
+    pool.release("worktree1");
+    let command = serde_json::json!({"tool": {"kind": "shell", "command": "ls"}});
+    Pool::decided(&pool.hook(&worktree, "before-tool", command));
     let after = Pool::decided(&pool.hook(&worktree, "after-tool", serde_json::json!({})));
     assert_eq!(after["decision"], "no_objection", "{after}");
-    assert!(beat("worktree1").exists(), "a tool ran in worktree1");
+    assert!(
+        beat("worktree1").exists(),
+        "its holder ran a tool in worktree1"
+    );
 
     let second = pool.worktree("worktree1").with_file_name("worktree2");
     let edit = serde_json::json!({

@@ -5,21 +5,21 @@
 //! A command is run by the system's shell (`sh -c` on Unix, `cmd /C` on Windows) with the checkout
 //! as its working directory and standard input closed. Its output goes where the caller says: on
 //! dibs's standard error, out of the way of the path dibs prints, for a person at a terminal; or
-//! into a log file, emptied as the step starts, for a caller that must answer in time — a host
-//! waits for the pipes it handed dibs to close, and a process the command leaves running in the
-//! background would hold them open. It learns which worktree from the environment:
+//! into a log file private to its user, emptied as the step starts, for a caller that must answer
+//! in time — a host waits for the pipes it handed dibs to close, and a process the command leaves
+//! running in the background would hold them open. It learns which worktree from the environment:
 //! `DIBS_WORKTREE_NAME` (`worktree2`), `DIBS_WORKTREE_PATH` (its absolute directory, which may not
 //! exist yet for `prepare`), `DIBS_WORKTREE_BASE` (the ref it is reset to) and `DIBS_CHECKOUT`
 //! (the checkout's absolute directory), beside everything dibs's own environment holds. Exit `0` is
 //! success; any other status, or no end within the step's time, is a failure, and a command still
 //! running then is killed with whatever it started in its process group.
 
-use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use dibs_client::private_file::{self, Principal};
 use dibs_domain::worktree::WorktreeName;
 
 use crate::commands::worktree::BACKGROUND_PREPARE;
@@ -211,15 +211,14 @@ impl ProjectCommands for ShellCommands {
 }
 
 /// The command's standard output and standard error for `output`: dibs's standard error for both,
-/// or the log file, emptied, for both.
+/// or the log file, emptied and private to its user, for both — a project's output may hold what
+/// nobody else on the machine should read.
 fn streams(output: Output<'_>) -> io::Result<(Stdio, Stdio)> {
     match output {
         Output::Stderr => Ok((Stdio::from(io::stderr()), Stdio::inherit())),
         Output::Log(path) => {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            let log = File::create(path)?;
+            let principal = Principal::from_env(&|var| std::env::var(var).ok());
+            let log = private_file::create(path, &principal).map_err(io::Error::other)?;
             let errors = log.try_clone()?;
             Ok((Stdio::from(log), Stdio::from(errors)))
         }
@@ -365,5 +364,33 @@ mod tests {
             "second\n",
             "each step starts the log afresh"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_log_is_readable_by_its_user_alone_in_a_directory_of_theirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let name = WorktreeName::parse("worktree1").unwrap();
+        let site = site(&name, dir.path());
+        let logs = dir.path().join("state/logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let log = logs.join("worktree1.log");
+        std::fs::write(&log, "an older step\n").unwrap();
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let ran = ShellCommands.run_to(
+            Step::Reset,
+            "echo TOKEN=x",
+            &site,
+            Duration::from_secs(10),
+            Output::Log(&log),
+        );
+        assert_eq!(ran, Ok(()));
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&log), 0o600);
+        assert_eq!(mode(&logs), 0o700);
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "TOKEN=x\n");
     }
 }

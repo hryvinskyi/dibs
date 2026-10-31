@@ -103,6 +103,8 @@ struct State {
     pool: bool,
     /// Why the pool the checkout declares cannot be used, when it cannot.
     pool_refused: Option<String>,
+    /// What the person should change in the checkout's configuration file.
+    config_advice: Option<String>,
     /// The holds this machine records: the session's key, the worktree, the agent.
     records: Vec<(String, String, Option<String>)>,
     took: WorktreeTake,
@@ -111,6 +113,7 @@ struct State {
     ended: Result<(), PortError>,
     rescued: Option<String>,
     touched: Vec<String>,
+    freed_left: Vec<String>,
     made: Result<std::path::PathBuf, String>,
     removal: Removal,
 }
@@ -185,6 +188,7 @@ impl State {
             tallies_unwritable: false,
             pool: true,
             pool_refused: None,
+            config_advice: None,
             records: Vec::new(),
             took: WorktreeTake::Took {
                 worktree: WorktreeName::parse("worktree2").unwrap(),
@@ -196,6 +200,7 @@ impl State {
             ended: Ok(()),
             rescued: None,
             touched: Vec::new(),
+            freed_left: Vec::new(),
             made: Ok(std::path::PathBuf::from("/work/tool/worktrees/agent-a1b2")),
             removal: Removal::Removed,
         }
@@ -338,6 +343,10 @@ impl WorktreePool for World {
         self.0.borrow_mut().touched.push(name.to_string());
     }
 
+    fn free_left(&self, session: &SessionRef) {
+        self.0.borrow_mut().freed_left.push(session.key.to_string());
+    }
+
     fn worktree_at(&self, cwd: &Path, path: &Path) -> Option<WorktreeName> {
         let full = cwd.join(path);
         let inside = full.strip_prefix("/pool").ok()?;
@@ -403,6 +412,10 @@ impl Workspace for World {
 
     fn worktree_pool_refused(&self) -> Option<String> {
         self.0.borrow().pool_refused.clone()
+    }
+
+    fn config_advice(&self) -> Option<String> {
+        self.0.borrow().config_advice.clone()
     }
 }
 
@@ -3181,7 +3194,12 @@ fn switched_off_outside_every_checkout_or_without_a_pool_the_hosts_own_worktree_
     assert!(given(&answer).1.unwrap().contains("no .dibs.toml governs"));
     let poolless = World::new().with(|state| state.pool = false);
     let answer = run(&poolless, "lending", "worktree-wanted", &wanted());
-    assert!(given(&answer).1.unwrap().contains("no [worktrees] table"));
+    assert!(
+        given(&answer)
+            .1
+            .unwrap()
+            .contains("declares no pool in .git/dibs/worktrees.toml")
+    );
     for world in [&ungoverned, &poolless] {
         assert_eq!(
             world.calls(),
@@ -3195,8 +3213,7 @@ fn a_pool_the_checkout_declares_but_cannot_use_is_named_in_the_notice_of_the_hos
     let world = World::new().with(|state| {
         state.pool = false;
         state.pool_refused = Some(
-            "/work/.dibs.toml holds a [worktrees] table, but git tracks the file, so dibs runs no command of it."
-                .to_owned(),
+            "/work/.git/dibs/worktrees.toml is not valid: worktrees: count is required.".to_owned(),
         );
     });
     let answer = run(&world, "lending", "worktree-wanted", &wanted());
@@ -3204,10 +3221,13 @@ fn a_pool_the_checkout_declares_but_cannot_use_is_named_in_the_notice_of_the_hos
     assert_eq!(path, "/work/tool/worktrees/agent-a1b2");
     let notice = notice.unwrap();
     assert!(
-        notice.contains("git tracks the file, so dibs runs no command of it"),
+        notice.contains("worktrees.toml is not valid: worktrees: count is required"),
         "{notice}"
     );
-    assert!(!notice.contains("no [worktrees] table"), "{notice}");
+    assert!(
+        !notice.contains("declares no pool in .git/dibs/worktrees.toml"),
+        "{notice}"
+    );
 }
 
 #[test]
@@ -3219,7 +3239,10 @@ fn a_worktree_that_cannot_be_made_at_all_is_refused_with_both_reasons() {
     let answer = run(&world, "lending", "worktree-wanted", &wanted());
     assert_eq!(answer.reply.exit, 1);
     let reason = String::from_utf8(answer.reply.stderr.clone()).unwrap();
-    assert!(reason.contains("no [worktrees] table"), "{reason}");
+    assert!(
+        reason.contains("declares no pool in .git/dibs/worktrees.toml"),
+        "{reason}"
+    );
     assert!(
         reason.contains("/work lies in no git repository"),
         "{reason}"
@@ -3405,6 +3428,104 @@ fn a_sessions_end_ends_it_on_the_server_only_when_it_held_a_worktree() {
             .contains("the server is away"),
         "a failure is a notice, never a verdict"
     );
+}
+
+#[test]
+fn the_brief_tells_the_person_what_to_change_in_the_configuration_file() {
+    let advice = "/work/.dibs.toml holds [worktrees], which dibs does not read from a .dibs.toml.";
+    let world = World::new().with(|state| state.config_advice = Some(advice.to_owned()));
+    let answer = run(&world, "neutral", "session-started", &input(None));
+    assert_eq!(no_objection(&answer)["notice"], advice);
+    assert!(context(&answer).is_some(), "the brief itself is given");
+    let quiet = World::new();
+    let answer = run(&quiet, "neutral", "session-started", &input(None));
+    assert_eq!(no_objection(&answer)["notice"], Value::Null);
+}
+
+#[test]
+fn a_tool_run_leaves_a_sign_of_life_in_the_worktree_it_ran_in_only_for_its_holder() {
+    let after = |agent: Option<&str>| {
+        let mut fields = json!({"cwd": "/pool/worktree2", "thread": "subagent"});
+        if let Some(agent) = agent {
+            fields["agent"] = json!(agent);
+        }
+        worktree_input(fields)
+    };
+    let others = World::new().with(|state| {
+        state.records = vec![
+            record("s-2", "worktree2", Some("c3d4")),
+            record("s-1", "worktree3", Some("e5f6")),
+        ];
+    });
+    for agent in [None, Some("a1b2")] {
+        run(&others, "neutral", "after-tool", &after(agent));
+    }
+    assert!(
+        others.0.borrow().touched.is_empty(),
+        "a reader in another session's worktree keeps nobody's hold alive: {:?}",
+        others.0.borrow().touched
+    );
+    let sibling =
+        World::new().with(|state| state.records = vec![record("s-1", "worktree2", Some("c3d4"))]);
+    run(&sibling, "neutral", "after-tool", &after(Some("a1b2")));
+    assert!(sibling.0.borrow().touched.is_empty(), "nor a sibling agent");
+    let free = World::new();
+    run(&free, "neutral", "after-tool", &after(Some("a1b2")));
+    assert!(
+        free.0.borrow().touched.is_empty(),
+        "nor anyone in a free one"
+    );
+    assert!(free.calls().is_empty(), "and it asks the server nothing");
+    let holder =
+        World::new().with(|state| state.records = vec![record("s-1", "worktree2", Some("a1b2"))]);
+    run(&holder, "neutral", "after-tool", &after(Some("a1b2")));
+    run(&holder, "neutral", "after-tool", &after(None));
+    assert_eq!(
+        holder.0.borrow().touched,
+        ["worktree2", "worktree2"],
+        "the holder, and its session looking into its tree"
+    );
+}
+
+#[test]
+fn a_refused_call_in_a_worktree_nobody_holds_does_not_take_it() {
+    let world = World::new().with(|state| state.answers = Ok(vec![held_by_alice()]));
+    let refused = worktree_input(json!({
+        "cwd": "/pool/worktree2",
+        "agent": "a1b2",
+        "tool": {"kind": "edit", "paths": ["/work/src/billing/a.rs"]}
+    }));
+    let value = reply(&run(&world, "neutral", "before-tool", &refused));
+    assert_eq!(value["decision"], "deny", "{value}");
+    assert!(
+        !world.calls().iter().any(|call| call.starts_with("retake")),
+        "the worktree stays free: {:?}",
+        world.calls()
+    );
+    assert!(world.0.borrow().touched.is_empty());
+    world.set(|state| state.answers = Ok(vec![PathAnswer::Allowed]));
+    let allowed = reply(&run(&world, "neutral", "before-tool", &refused));
+    assert_eq!(allowed["decision"], "no_objection", "{allowed}");
+    assert!(
+        world
+            .calls()
+            .contains(&"retake worktree2 s-1 a1b2".to_owned()),
+        "an allowed call takes it: {:?}",
+        world.calls()
+    );
+}
+
+#[test]
+fn a_sessions_end_frees_the_worktrees_its_ended_agents_left_even_with_no_hold() {
+    let world = World::new();
+    run(
+        &world,
+        "neutral",
+        "session-ended",
+        &worktree_input(json!({})),
+    );
+    assert_eq!(world.0.borrow().freed_left, ["s-1"]);
+    assert!(world.calls().is_empty(), "no hold, no call");
 }
 
 #[test]

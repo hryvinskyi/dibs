@@ -1,6 +1,7 @@
-//! The governed checkouts the guard works in: the nearest `.dibs.toml` above an event's directory,
-//! the repository it says it is (confirmed against its `origin`), the project's state, server and
-//! upkeep, and the pool of worktrees the checkout lends or belongs to.
+//! The governed checkouts the guard works in: the nearest `.dibs.toml` above an event's directory
+//! (the main work tree's, in a linked worktree without one), the repository it says it is
+//! (confirmed against its `origin`), the project's state, server and upkeep, and the pool of
+//! worktrees the checkout lends or belongs to.
 
 use std::cell::OnceCell;
 use std::collections::HashMap;
@@ -223,5 +224,9 @@ impl Workspace for ClientWorkspace {
 
     fn worktree_pool_refused(&self) -> Option<String> {
         self.located().as_ref().err().cloned().flatten()
+    }
+
+    fn config_advice(&self) -> Option<String> {
+        self.checkout.ignored_tables()
     }
 }

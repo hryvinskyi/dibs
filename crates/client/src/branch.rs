@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 
 use dibs_domain::radar::BranchName;
 
-/// The most bytes read from `HEAD` or from a `.git` file; either is one short line.
+use crate::git_dirs::GitDirs;
+
+/// The most bytes read from `HEAD`; it is one short line.
 const MAX_READ: u64 = 4096;
 
 /// The branch the checkout at or above `dir` is on: the name its `HEAD` file gives after
@@ -77,23 +79,12 @@ pub fn branch_of_head(text: &str) -> Option<BranchName> {
 /// The git directory of the checkout at or above `dir`.
 fn git_dir(dir: &Path) -> Option<PathBuf> {
     for ancestor in dir.ancestors() {
-        let dot_git = ancestor.join(".git");
-        let Ok(meta) = fs::metadata(&dot_git) else {
-            if is_git_dir(ancestor) {
-                return Some(ancestor.to_path_buf());
-            }
-            continue;
-        };
-        if meta.is_dir() {
-            return Some(dot_git);
+        if fs::metadata(ancestor.join(".git")).is_ok() {
+            return GitDirs::at(ancestor).map(|dirs| dirs.git_dir().to_path_buf());
         }
-        let text = read_small(&dot_git)?;
-        let named = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
-        return Some(if named.is_absolute() {
-            named
-        } else {
-            ancestor.join(named)
-        });
+        if is_git_dir(ancestor) {
+            return Some(ancestor.to_path_buf());
+        }
     }
     None
 }

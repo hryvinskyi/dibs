@@ -106,11 +106,33 @@ pub fn write(path: &Path, text: &str, principal: &Principal) -> Result<(), Priva
     Ok(())
 }
 
+/// Creates the file at `path`, or empties it when it exists, private to its user before anything
+/// is written to it, in a directory private to them too, and answers it open for writing.
+///
+/// # Errors
+/// [`PrivateFileError::Io`].
+pub fn create(path: &Path, principal: &Principal) -> Result<fs::File, PrivateFileError> {
+    let io_error = |source: io::Error| PrivateFileError::Io {
+        path: path.to_path_buf(),
+        action: "written",
+        source,
+    };
+    let dir = path
+        .parent()
+        .ok_or_else(|| io_error(io::Error::from(io::ErrorKind::InvalidInput)))?;
+    platform::create_dir(dir, principal).map_err(io_error)?;
+    platform::restrict_dir(dir, principal).map_err(io_error)?;
+    let file = platform::open_private(path).map_err(io_error)?;
+    platform::restrict(path, principal).map_err(io_error)?;
+    file.set_len(0).map_err(io_error)?;
+    Ok(file)
+}
+
 #[cfg(unix)]
 mod platform {
     use std::fs::{self, DirBuilder, Permissions};
     use std::io;
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     use std::path::Path;
 
     use super::{Principal, PrivateFileError};
@@ -142,6 +164,19 @@ mod platform {
 
     pub(super) fn restrict(path: &Path, _principal: &Principal) -> io::Result<()> {
         fs::set_permissions(path, Permissions::from_mode(0o600))
+    }
+
+    pub(super) fn restrict_dir(dir: &Path, _principal: &Principal) -> io::Result<()> {
+        fs::set_permissions(dir, Permissions::from_mode(0o700))
+    }
+
+    pub(super) fn open_private(path: &Path) -> io::Result<fs::File> {
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)
     }
 }
 
@@ -249,6 +284,18 @@ mod platform {
         let descriptor = user_only(principal, false)?;
         apply(path, &descriptor)
     }
+
+    pub(super) fn restrict_dir(_dir: &Path, _principal: &Principal) -> io::Result<()> {
+        Ok(())
+    }
+
+    pub(super) fn open_private(path: &Path) -> io::Result<fs::File> {
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +327,34 @@ mod tests {
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(path.parent().unwrap()), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_created_file_is_0600_in_a_0700_directory_and_starts_empty() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        fs::set_permissions(&logs, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = logs.join("worktree1.log");
+        fs::write(&path, "an older step's output\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut file = create(&path, &principal()).unwrap();
+        file.write_all(b"this step\n").unwrap();
+        drop(file);
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(&logs), 0o700);
+        assert_eq!(
+            read(&path, &principal()).unwrap().as_deref(),
+            Some("this step\n")
+        );
+        let fresh = dir.path().join("new/worktree2.log");
+        drop(create(&fresh, &principal()).unwrap());
+        assert_eq!(mode(&fresh), 0o600);
+        assert_eq!(mode(fresh.parent().unwrap()), 0o700);
     }
 
     #[cfg(unix)]

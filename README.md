@@ -230,10 +230,12 @@ The commands: `dibs-server serve` (the default), `admin init | member add | toke
 
 ## Configuring a client
 
-**`.dibs.toml`** sits at the root of a checkout and is committed. The nearest one wins, and the search stops at the
-first directory that holds a `.git`, so a clone nested in another answers for itself. A checkout that lends a pool of
-worktrees is the exception: its file holds commands dibs runs, so it stays on the member's machine, untracked and
-excluded (see [Worktree pools](#worktree-pools)).
+**`.dibs.toml`** sits at the root of a checkout and is committed (a member may also keep it local, untracked; dibs
+reads it the same way). The nearest one wins, and the search stops at the first directory that holds a `.git`, so a
+clone nested in another answers for itself. A linked worktree of the checkout (`git worktree add`) without a file of
+its own is governed by the file at the top of its main checkout, found by reading git's own files; its paths are its
+own. The file never configures a [pool of worktrees](#worktree-pools): a pool's commands live in the repository's git
+directory, where no branch can carry them.
 
 ```toml
 server = "https://dibs.example.com"   # https, except for a loopback address
@@ -329,12 +331,14 @@ server keeps only who holds which worktree, one holder each: a session, or one a
 same member never share a tree. A hold ends when it is released, when its session ends, or when its holder stays
 silent for 20 minutes (an agent) or 12 hours (a session).
 
-A checkout lends a pool when its `.dibs.toml` has a `[worktrees]` table and git neither tracks the file nor leaves it
-unignored: keep it out of the repository (`git rm --cached .dibs.toml` if it was committed) and add `/.dibs.toml` to
-`.git/info/exclude`. The table names commands dibs runs as you, with your environment; in a committed file they would be
-whatever the branch checked out says, run on every member's machine, and a client older than 0.1.9 refuses a file that
-holds the table at all. A `[worktrees]` table in a tracked or unignored file lends nothing and runs nothing: every
-worktree command refuses it (code `worktrees_not_local`) and says how to keep the file local.
+A checkout lends a pool when its repository's git directory declares one: a `[worktrees]` table in
+`.git/dibs/worktrees.toml` (in the repository's common directory, `git rev-parse --git-common-dir`, which is `.git` of an
+ordinary clone). The table names commands dibs runs as you, with your environment. A file in the git directory is never
+tracked, pulled or part of a branch, so those commands are only ever your own; in a file a branch can carry, such as
+`.dibs.toml`, they would be whatever the branch checked out says, run on the machine of every member who checks it out.
+`.dibs.toml` therefore stays committed, or local, as before: dibs never acts on a `[worktrees]` or `[pool_worktree]` table
+found there. The rest of that file still applies, and the session's brief, `dibs doctor` and every worktree command say
+where the table belongs. Make the file private to you (`chmod 600`): it holds commands.
 
 ```toml
 [worktrees]
@@ -348,16 +352,13 @@ prefix = "worktree"                # names are <prefix>1 … <prefix><count> (de
 root = "/home/alice/pool"          # where they live (default: beside the checkout, <checkout>-worktrees)
 ```
 
-`root` may not be the checkout or lie inside it. A worktree is a git worktree of the checkout, and dibs writes its own
-`.dibs.toml` into it after every preparation and reset: the checkout's `server`, `project` and `repo`, and a
-`[pool_worktree]` table (`checkout`, the absolute path of the checkout that lends it, and `name`). That makes the worktree
-a governed checkout of the same project, with its edit checks, brief and signs of life, and never a pool of its own: a
-worktree command run inside one acts on its checkout's pool. A file holds `[worktrees]` or `[pool_worktree]`, never both,
-and only dibs writes the second, which counts only where git neither tracks nor sees the file, as for the first. The
-checkout's `.git/info/exclude` is shared by its worktrees, so excluding the file there covers both. dibs writes the file
-into a new file beside it, whatever lay at that name removed first, and renames it over: never through a link. A base
-that carries a `.dibs.toml` of its own sets the worktree aside as broken, the reason named, rather than have dibs rewrite
-a tracked file.
+`root` may not be the checkout or lie inside it; a relative `root` is taken from the checkout. A worktree is a git
+worktree of the checkout, so it is a governed checkout of the same project, with its edit checks, brief and signs of
+life: by its own committed `.dibs.toml`, or, without one, by the checkout's. It is never a pool of its own: a worktree
+command run inside one acts on its checkout's pool. dibs writes nothing into a worktree's tree. After every preparation
+and reset it marks the worktree prepared in the worktree's own git directory (`.git/worktrees/<id>/dibs/pool-worktree.toml`,
+a `[pool_worktree]` table naming the checkout and the worktree), and only when git says the directory is a worktree of
+the checkout's repository. A base that tracks a `.dibs.toml` of its own lends its worktrees like any other.
 
 ```sh
 dibs worktree take [--purpose "..."] [--item gh:acme/widgets#42] [--agent KEY] [--wait 14m] [--deadline 5m]
@@ -392,13 +393,14 @@ session or one of its agents: another holder may be working in it. `dibs worktre
 releases whoever holds it.
 
 `dibs worktree prepare` runs the project's `prepare` on a worktree that is not held on this machine, prepared already or
-not: that is how a worktree set aside as broken, or one whose environment went wrong, is taken back. A worktree this
-machine records a holder of is left alone, as preparing it would run over the holder's work: named, the command refuses
-(exit status 1, code `worktree_held`); with `--all`, it says so and prepares the rest. The preparation a take starts in
+not: that is how a worktree set aside as broken, or one whose environment went wrong, is taken back. A worktree somebody
+may still work in is left alone, as preparing it would run over their work: one this machine records a holder of, and one
+with a sign of life younger than 20 minutes since it was last let go of (an agent that ended may be continued in it).
+Named, the command refuses (exit status 1, code `worktree_held`); with `--all`, it says so and prepares the rest. The preparation a take starts in
 the background also leaves alone a worktree that was prepared while it waited for the lock.
 
 **Taking never loses work.** Before the project's `reset` runs, dibs looks at the worktree. If its tree has changes
-(untracked files included, ignored ones and its own `.dibs.toml` not), or its `HEAD` is a commit that no branch and no
+(untracked files included, ignored ones not), or its `HEAD` is a commit that no branch and no
 remote ref contains, dibs makes a branch `dibs/rescue/<name>-<UTC time>` at `HEAD`, commits the changes onto it whole
 (without the repository's hooks, as the member), and says so; the take's answer names the branch, and the notice names
 the untracked files it committed (how many, and the first five), so a stray dump or a credential is seen before the
@@ -420,7 +422,8 @@ Windows) with these in its environment:
 The working directory is the checkout's root, standard input is closed, and, on Unix, the command runs in a process group
 of its own, which is killed when its time is over. Its standard output and error go to dibs's standard error (so they
 never mix with the path `take` prints), except under `--deadline` and in a preparation a take started in the background:
-there they go to `<name>.log` in the state directory, emptied as each step starts. A host waits for the pipes it gave
+there they go to `logs/<name>.log` in the state directory, emptied as each step starts and readable by you alone (mode
+`0600` in a `0700` directory on Unix), since a project's output may print what nobody else on the machine should read. A host waits for the pipes it gave
 dibs to close, and a process the command leaves running would otherwise hold them open past the host's own limit. The time is 20 minutes for `prepare`, 10 for `reset` and 2 for `idle`. Exit status 0 is
 success. Any other status, or no end in time, sets a `prepare` or `reset` worktree aside as broken: no take offers it
 until `dibs worktree prepare <name>` succeeds (a reset that the deadline of a hook cut short is not the worktree's fault and
@@ -435,9 +438,10 @@ leaves a locked worktree for its next run.
 | `worktrees/<scope>/<pool>/<name>.hold.json` | the holder this machine took the worktree for (session id and agent key), the purpose, the item, when, and whether its reset finished; written on a take, removed on a release |
 | `worktrees/<scope>/<pool>/<name>.beat` | its modification time is the holder's last sign of life; hooks and `dibs worktree beat` touch it, with no network |
 | `worktrees/<scope>/<pool>/<name>.free-since` | when the worktree was first seen free |
+| `worktrees/<scope>/<pool>/<name>.left` | the session whose agent ended in the worktree, which keeps it from other holders for 20 minutes or until that session ends |
 | `worktrees/<scope>/<pool>/<name>.stopped` | when its environment was stopped for being left idle |
 | `worktrees/<scope>/<pool>/<name>.broken` | when and why it was set aside |
-| `worktrees/<scope>/<pool>/<name>.log` | the output of the last project command run under a deadline or in the background |
+| `worktrees/<scope>/<pool>/logs/<name>.log` | the output of the last project command run under a deadline or in the background, private to you |
 | `cache/<scope>/worktree-<pool>-<name>.lock` | held while the worktree is prepared, reset or stopped |
 | `cache/<scope>/worktree-beats-sent` | when the signs of life were last sent to the server |
 | `cache/<scope>/worktrees-unserved` | when the server was last found to serve no worktree pools |
@@ -455,7 +459,8 @@ docker and `PATH` settings the `idle` command needs. It sends the signs of life,
 (the server frees holds on silence and on a session's end without telling the machine), forgets the records of holds the
 server no longer has, writes down when a worktree was first seen free, and, when the table has an `idle` command, runs it once for each worktree that has been
 free for `idle_after`, prepared, not worked in since, and not stopped since. It stops nothing else and removes nothing; it
-names the directories in the pool's directory beyond `count`. Without a `[worktrees]` table it does nothing and succeeds.
+names the directories in the pool's directory beyond `count`. Where the repository declares no pool it does nothing and
+succeeds.
 
 ## Agent hosts
 
@@ -539,8 +544,10 @@ preparation finishes), dibs starts preparing one in the background and Claude Co
 have made itself, with a line saying the pool is still being prepared and the worktree has no environment of its own;
 later subagents get pool worktrees as they become ready. Everywhere else, whether the checkout has no pool, dibs is
 switched off, missing or too old, or the server cannot be reached, Claude Code gets the worktree it would have made itself
-(`.claude/worktrees/<name>` on a new branch `worktree-<name>`), and a line says the pool was not used. Creating a worktree
-never fails because of dibs.
+(`.claude/worktrees/<name>` on a new branch `worktree-<name>`), and a line says the pool was not used. That worktree is a
+linked worktree of the checkout, so the checkout's `.dibs.toml` governs it too, with nothing written into it. Creating a
+worktree never fails because of dibs. A subagent's end lets go of its hold but keeps its worktree from other holders for
+20 minutes, as Claude Code may continue the subagent in it; the end of its session lets go of it at once.
 
 #### Waking a session that waits for you (opt-in)
 

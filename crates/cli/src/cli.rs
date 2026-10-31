@@ -110,7 +110,7 @@ pub enum Command {
     #[command(subcommand)]
     Slot(SlotCommand),
     /// Take, release, list and prepare the worktrees this checkout lends its agents: a fixed pool
-    /// beside it, one holder each, declared by the [worktrees] table of its .dibs.toml.
+    /// beside it, one holder each, declared by the [worktrees] table of .git/dibs/worktrees.toml.
     #[command(subcommand)]
     Worktree(WorktreeCommand),
     /// Send a heartbeat and refresh what this machine remembers about the project, as far as

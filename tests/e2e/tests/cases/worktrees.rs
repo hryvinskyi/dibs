@@ -47,7 +47,12 @@ fn two_takes_are_two_worktrees_and_a_third_waits_until_one_is_released() {
             path
         );
         assert!(path.join(".git").exists(), "{name} is a git worktree");
-        assert!(path.join(".dibs.toml").is_file(), "{name} is governed");
+        assert!(
+            !path.join(".dibs.toml").exists(),
+            "{name} is governed by the checkout's file, nothing written into it"
+        );
+        let (code, status) = bob.json(&path, &["status"]);
+        assert_eq!(code, Some(0), "{name} is governed: {status}");
     }
     assert_eq!(
         pool.commands_run(),

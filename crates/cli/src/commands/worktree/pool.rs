@@ -1,95 +1,56 @@
-//! A checkout's pool of worktrees as a command finds it: from the checkout that lends it, or from
-//! inside one of its worktrees, whose own `.dibs.toml` names that checkout — a worktree is never a
-//! pool of its own. The pool's worktrees, where each lives, what this machine knows of each, the
-//! lock whatever resets, prepares or stops one holds, and the `.dibs.toml` dibs writes into a
-//! worktree so that it is a governed checkout of the same project.
+//! A checkout's pool of worktrees as a command finds it: from any work tree of the repository that
+//! lends it — its main work tree, one of the pool's worktrees, or another linked worktree — as a
+//! worktree is never a pool of its own. The pool's worktrees, where each lives, what this machine
+//! knows of each, the lock whatever resets, prepares or stops one holds, and the mark that says a
+//! worktree was prepared.
 //!
-//! A pool's tables are read only from a `.dibs.toml` that git neither tracks nor leaves unignored,
-//! as git answers in the directory of the file. The `[worktrees]` table names commands dibs runs as
-//! the person reading it; from a committed file — or one a commit could pick up — those would be
-//! whatever a branch says, run on every member's machine that checks it out. So a checkout whose
-//! `[worktrees]` table sits in such a file lends no pool and runs nothing, and a worktree whose
-//! `[pool_worktree]` table does is no pool worktree. The worktree's own file is written only where
-//! git would neither track nor see it, and never through a link: the base it is reset to decides
-//! what else lies in the worktree.
+//! The pool is declared only by the settings file in the repository's git directory, which no
+//! branch carries, so a command it names is only ever the member's own; its worktrees are told
+//! apart by where they lie. A worktree is marked prepared in its own git directory, never in its
+//! tree, and only when git says it is a worktree of the same repository.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use time::OffsetDateTime;
 
-use dibs_client::checkout::{Checkout, FILE_NAME, WorktreeSettings, pool_id};
+use dibs_client::checkout::Checkout;
 use dibs_client::credentials::CredentialKey;
+use dibs_client::git_dirs::GitDirs;
 use dibs_client::state::{StateDir, WorktreeState};
+use dibs_client::worktree_pool::{
+    PoolWorktree, WorktreeSettings, pool_id, read_marker, read_settings, settings_file,
+    write_marker,
+};
 use dibs_domain::ids::SessionId;
 use dibs_domain::worktree::{AgentKey, PoolId, Silence, WorktreeName};
 
-use crate::commands::worktree::rescue::{GitFailed, WorktreeGit};
 use crate::commands::worktree::select::Facts;
 use crate::failure::{Failure, sentence};
 
-/// Where git stands on a checkout's own `.dibs.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Standing {
-    /// Git tracks it: it is committed, or staged to be.
-    Tracked,
-    /// Git neither tracks nor ignores it: the next `git add -A` stages it.
-    Exposed,
-    /// Git ignores it and does not track it: it stays on this machine.
-    Private,
-}
-
-/// Tells where git stands on the `.dibs.toml` of a directory.
-pub trait ConfigStandings: fmt::Debug + Sync {
-    /// Where git stands on `<dir>/.dibs.toml`, which need not exist.
-    ///
-    /// # Errors
-    /// The end of a sentence saying why git could not tell.
-    fn standing(&self, dir: &Path) -> Result<Standing, String>;
-}
-
-/// Asks the git of the directory.
+/// Why a worktree was not marked prepared.
 #[derive(Debug)]
-pub struct GitStandings;
-
-impl ConfigStandings for GitStandings {
-    fn standing(&self, dir: &Path) -> Result<Standing, String> {
-        let git = WorktreeGit::new(dir);
-        let reason = |failed: GitFailed| failed.reason();
-        if git.tracks(FILE_NAME).map_err(reason)? {
-            return Ok(Standing::Tracked);
-        }
-        if git.ignores(FILE_NAME).map_err(reason)? {
-            return Ok(Standing::Private);
-        }
-        Ok(Standing::Exposed)
-    }
-}
-
-/// Why the `.dibs.toml` of a worktree was not written.
-#[derive(Debug)]
-pub enum ConfigNotWritten {
-    /// Git would track or see the file there, or could not tell.
+pub enum NotMarked {
+    /// The directory is no worktree of the checkout's repository.
     Refused(String),
     /// The file system failed.
     Io(io::Error),
 }
 
-impl ConfigNotWritten {
+impl NotMarked {
     /// What happened, as the end of a sentence about the worktree.
     pub fn reason(&self) -> String {
         match self {
             Self::Refused(reason) => reason.clone(),
-            Self::Io(_) => "its .dibs.toml could not be written".to_owned(),
+            Self::Io(_) => "its mark of being prepared could not be written".to_owned(),
         }
     }
 }
 
-impl fmt::Display for ConfigNotWritten {
+impl fmt::Display for NotMarked {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Refused(reason) => f.write_str(reason),
@@ -98,7 +59,7 @@ impl fmt::Display for ConfigNotWritten {
     }
 }
 
-impl From<io::Error> for ConfigNotWritten {
+impl From<io::Error> for NotMarked {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
     }
@@ -108,99 +69,72 @@ impl From<io::Error> for ConfigNotWritten {
 #[derive(Debug, Clone)]
 pub struct Pool {
     checkout: Checkout,
+    git: GitDirs,
     settings: WorktreeSettings,
     id: PoolId,
     state: StateDir,
     files: WorktreeState,
-    standings: &'static dyn ConfigStandings,
-}
-
-/// The `.dibs.toml` of a pool worktree.
-#[derive(Serialize)]
-struct WorktreeFile<'a> {
-    server: &'a str,
-    project: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    repo: Option<&'a str>,
-    pool_worktree: PoolWorktreeFile,
-}
-
-#[derive(Serialize)]
-struct PoolWorktreeFile {
-    checkout: String,
-    name: String,
 }
 
 /// How often a lock held by another run is tried again.
 const LOCK_POLL: Duration = Duration::from_millis(100);
 
 impl Pool {
-    /// The pool of the checkout `here` governs — its own, or, inside a pool worktree, the pool of
-    /// the checkout that lends it — with this machine's state under `state_base`, and the worktree
-    /// `here` is, when it is one. Git is asked where it stands on the files that hold the pool's
-    /// tables.
+    /// The pool of the repository `here` is a work tree of, with this machine's state under
+    /// `state_base`, and the worktree of it `here` is, when it is one.
     ///
     /// # Errors
-    /// A configuration [`Failure`] saying which file declares no pool, why it cannot be read, or
-    /// that git tracks it or does not ignore it.
+    /// A configuration [`Failure`] saying that the repository declares no pool, or why its
+    /// declaration cannot be used.
     pub fn locate(
         here: &Checkout,
         state_base: &Path,
     ) -> Result<(Self, Option<WorktreeName>), Failure> {
-        static GIT: GitStandings = GitStandings;
-        Self::locate_with(here, state_base, &GIT)
+        Self::find(here, state_base)?.ok_or_else(|| no_pool(here))
     }
 
-    /// [`Pool::locate`], with `standings` telling where git stands on each file.
+    /// [`Pool::locate`], `None` when the repository declares no pool.
     ///
     /// # Errors
-    /// As [`Pool::locate`].
-    pub fn locate_with(
+    /// A configuration [`Failure`] saying why the pool it declares cannot be used.
+    pub fn find(
         here: &Checkout,
         state_base: &Path,
-        standings: &'static dyn ConfigStandings,
-    ) -> Result<(Self, Option<WorktreeName>), Failure> {
-        let (lender, inside) = match &here.config().pool_worktree {
-            Some(mark) => {
-                kept_local(here, "[pool_worktree]", standings.standing(here.root()))?;
-                let lender = Checkout::discover(&mark.checkout)
-                    .map_err(|error| {
-                        Failure::config("invalid_checkout", sentence(&error.to_string()))
-                    })?
-                    .filter(|lender| lender.config().worktrees.is_some())
-                    .ok_or_else(|| {
-                        Failure::config(
-                            "no_worktree_pool",
-                            format!(
-                                "{} says this is the worktree {} of the checkout at {}, which lends no worktrees any more; work in the checkout or another worktree.",
-                                here.file().display(),
-                                mark.name,
-                                mark.checkout.display()
-                            ),
-                        )
-                    })?;
-                (lender, Some(mark.name.clone()))
-            }
-            None => (here.clone(), None),
+    ) -> Result<Option<(Self, Option<WorktreeName>)>, Failure> {
+        let Some(dirs) = GitDirs::around(here.root()) else {
+            return Ok(None);
         };
-        let Some(settings) = lender.config().worktrees.clone() else {
-            return Err(Failure::config(
-                "no_worktree_pool",
-                format!(
-                    "{} has no [worktrees] table, so this checkout lends no worktrees; add one with count, prepare and reset to give it a pool.",
-                    lender.file().display()
-                ),
-            ));
+        let unusable = |text: String| Failure::config("no_worktree_pool", text);
+        let Some(main) = dirs.main_work_tree() else {
+            return match fs::symlink_metadata(settings_file(&dirs)) {
+                Ok(_) => Err(unusable(format!(
+                    "{} declares a pool, but its repository has no main work tree to lend it from.",
+                    settings_file(&dirs).display()
+                ))),
+                Err(_) => Ok(None),
+            };
         };
-        kept_local(&lender, "[worktrees]", standings.standing(lender.root()))?;
+        let Some(settings) = read_settings(&dirs, &main)
+            .map_err(|error| Failure::config("invalid_checkout", sentence(&error.to_string())))?
+        else {
+            return Ok(None);
+        };
+        let lender = Checkout::discover(&main)
+            .ok()
+            .flatten()
+            .filter(|lender| lender.root() == main)
+            .unwrap_or_else(|| Checkout::new(main.clone(), here.config().clone()));
+        let main_git = GitDirs::at(&main).ok_or_else(|| {
+            unusable(format!(
+                "The checkout at {} that lends the pool is no git work tree.",
+                main.display()
+            ))
+        })?;
         let id = pool_id(&settings.root).map_err(|_| {
-            Failure::config(
-                "no_worktree_pool",
-                format!(
-                    "The pool at {} cannot be named on this machine.",
-                    settings.root.display()
-                ),
-            )
+            unusable(format!(
+                "The pool at {} cannot be named on this machine.",
+                settings.root.display()
+            ))
         })?;
         let key = CredentialKey {
             server: lender.config().server.clone(),
@@ -210,13 +144,22 @@ impl Pool {
         let files = state.worktrees(&id);
         let pool = Self {
             checkout: lender,
+            git: main_git,
             settings,
             id,
             state,
             files,
-            standings,
         };
-        Ok((pool, inside))
+        let inside = pool.worktree_of(dirs.work_tree());
+        Ok(Some((pool, inside)))
+    }
+
+    /// The worktree of the pool whose top is `work_tree`, when it is one.
+    fn worktree_of(&self, work_tree: &Path) -> Option<WorktreeName> {
+        let here = fs::canonicalize(work_tree).ok()?;
+        self.names()
+            .into_iter()
+            .find(|name| fs::canonicalize(self.path(name)).is_ok_and(|path| path == here))
     }
 
     /// The pool's id.
@@ -273,17 +216,22 @@ impl Pool {
         self.settings.path_of(name)
     }
 
-    /// Whether the worktree `name` was prepared: its own `.dibs.toml`, written once a preparation or
-    /// a reset ended well, names it as this worktree.
+    /// Whether the worktree `name` was prepared: its git directory holds the mark a preparation
+    /// or a reset that ended well leaves, naming it as this worktree of this checkout.
     pub fn is_prepared(&self, name: &WorktreeName) -> bool {
-        let file = self.path(name).join(FILE_NAME);
-        let Ok(text) = fs::read_to_string(&file) else {
+        let Some(dirs) = self.own_worktree(name) else {
             return false;
         };
-        Checkout::parse(&file, &text)
-            .ok()
-            .and_then(|config| config.pool_worktree)
-            .is_some_and(|mark| mark.name == *name)
+        read_marker(&dirs).is_some_and(|mark| {
+            mark.name == *name && same_dir(&mark.checkout, self.checkout.root())
+        })
+    }
+
+    /// The git directories of the worktree `name`, when it is a linked worktree of the checkout's
+    /// repository.
+    fn own_worktree(&self, name: &WorktreeName) -> Option<GitDirs> {
+        GitDirs::at(&self.path(name))
+            .filter(|dirs| dirs.is_linked() && dirs.same_repository(&self.git))
     }
 
     /// Whether the worktree `name` is a git worktree on disk.
@@ -340,61 +288,28 @@ impl Pool {
         after_release && now - beat < Silence::DEFAULT.agent
     }
 
-    /// Writes the worktree's own `.dibs.toml`: the checkout's server, project and repository, and
-    /// the `[pool_worktree]` table naming the checkout and the worktree. Refused where git tracks
-    /// the file — the base the worktree was reset to carries one — or would not ignore it. Written
-    /// beside it into a file made afresh, whatever lay at that name removed first, then renamed
-    /// over it: a link the base carries is replaced, never followed.
+    /// Marks the worktree `name` prepared, in its own git directory: nothing is written into its
+    /// tree. Refused when the directory is no linked worktree of the checkout's repository.
     ///
     /// # Errors
-    /// [`ConfigNotWritten`] saying why.
-    pub fn write_config(&self, name: &WorktreeName) -> Result<(), ConfigNotWritten> {
-        let dir = self.path(name);
-        match self.standings.standing(&dir) {
-            Ok(Standing::Private) => {}
-            Ok(Standing::Tracked) => {
-                return Err(ConfigNotWritten::Refused(format!(
-                    "{FILE_NAME} is tracked at {}, and dibs writes that file in each worktree itself; reset the pool to a base that does not carry one",
-                    self.settings.base
-                )));
-            }
-            Ok(Standing::Exposed) => {
-                return Err(ConfigNotWritten::Refused(format!(
-                    "git does not ignore {FILE_NAME} there, so the file dibs writes would be committed; add /{FILE_NAME} to the checkout's .git/info/exclude"
-                )));
-            }
-            Err(reason) => {
-                return Err(ConfigNotWritten::Refused(format!(
-                    "{reason}, so its {FILE_NAME} was not written"
-                )));
-            }
-        }
-        let config = self.checkout.config();
-        let lender = fs::canonicalize(self.checkout.root())
+    /// [`NotMarked`] saying why.
+    pub fn mark_prepared(&self, name: &WorktreeName) -> Result<(), NotMarked> {
+        let dirs = self.own_worktree(name).ok_or_else(|| {
+            NotMarked::Refused(format!(
+                "{} is no worktree of the repository of {}",
+                self.path(name).display(),
+                self.checkout.root().display()
+            ))
+        })?;
+        let checkout = fs::canonicalize(self.checkout.root())
             .unwrap_or_else(|_| self.checkout.root().to_path_buf());
-        let file = WorktreeFile {
-            server: config.server.as_str(),
-            project: config.project.as_str(),
-            repo: config.repo.as_ref().map(|repo| repo.as_str()),
-            pool_worktree: PoolWorktreeFile {
-                checkout: lender.to_string_lossy().into_owned(),
-                name: name.to_string(),
+        write_marker(
+            &dirs,
+            &PoolWorktree {
+                checkout,
+                name: name.clone(),
             },
-        };
-        let text = toml::to_string(&file).map_err(io::Error::other)?;
-        let path = dir.join(FILE_NAME);
-        let temp = dir.join(format!("{FILE_NAME}.dibs-new"));
-        match fs::remove_file(&temp) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
-        }
-        let mut written = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        written.write_all(text.as_bytes())?;
-        drop(written);
-        fs::rename(&temp, &path)?;
+        )?;
         Ok(())
     }
 
@@ -432,9 +347,9 @@ impl Pool {
     }
 
     /// The log the project's commands write for the worktree `name` when no person reads their
-    /// output: one per worktree, emptied as each step starts.
+    /// output: one per worktree, emptied as each step starts, in a directory of its own.
     pub fn log(&self, name: &WorktreeName) -> PathBuf {
-        self.files.dir().join(format!("{name}.log"))
+        self.files.dir().join("logs").join(format!("{name}.log"))
     }
 
     fn open_lock(&self, name: &WorktreeName) -> io::Result<File> {
@@ -447,96 +362,157 @@ impl Pool {
     }
 }
 
-/// Refuses the pool table `table` of `checkout` unless git, as `standing` says, neither tracks its
-/// file nor leaves it unignored.
-fn kept_local(
-    checkout: &Checkout,
-    table: &str,
-    standing: Result<Standing, String>,
-) -> Result<(), Failure> {
-    let file = checkout.file();
-    let file = file.display();
-    let said = match standing {
-        Ok(Standing::Private) => return Ok(()),
-        Ok(Standing::Tracked) => format!(
-            "{file} holds a {table} table, but git tracks the file, so dibs runs no command of it: a committed table would run on every machine that checks the branch out. Keep a pool's {FILE_NAME} out of git: untrack it (git rm --cached {FILE_NAME}) and add /{FILE_NAME} to .git/info/exclude."
-        ),
-        Ok(Standing::Exposed) => format!(
-            "{file} holds a {table} table, but git does not ignore the file, so the next commit could carry it and dibs runs no command of it. Add /{FILE_NAME} to .git/info/exclude, keeping it untracked."
-        ),
-        Err(reason) => format!(
-            "{file} holds a {table} table, but {reason}, so dibs cannot tell that the file is kept out of git and runs no command of it."
-        ),
-    };
-    Err(Failure::config("worktrees_not_local", said))
+/// The failure of a command run where the repository declares no pool.
+fn no_pool(here: &Checkout) -> Failure {
+    let home = GitDirs::around(here.root()).map_or_else(
+        || ".git/dibs/worktrees.toml".to_owned(),
+        |dirs| settings_file(&dirs).display().to_string(),
+    );
+    let mut text = format!(
+        "This checkout lends no worktrees: {home} declares no pool. Write a [worktrees] table with count, prepare and reset there to give it one."
+    );
+    if let Some(ignored) = here.ignored_tables() {
+        text.push(' ');
+        text.push_str(&ignored);
+    }
+    Failure::config("no_worktree_pool", text)
+}
+
+/// Whether two paths name one directory as the file system resolves them.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
+    use dibs_client::checkout::FILE_NAME;
+
     use super::*;
 
-    fn checkout(dir: &Path) -> Checkout {
-        let file = dir.join(FILE_NAME);
-        let text = "server = \"https://dibs.example.com\"\nproject = \"widgets\"\n[worktrees]\ncount = 2\nprepare = \"true\"\nreset = \"true\"\n";
-        Checkout::new(dir.to_path_buf(), Checkout::parse(&file, text).unwrap())
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
-    #[derive(Debug)]
-    struct Says(Standing);
-
-    impl ConfigStandings for Says {
-        fn standing(&self, _dir: &Path) -> Result<Standing, String> {
-            Ok(self.0)
-        }
+    /// A repository `widgets` with a committed `.dibs.toml`, one commit made.
+    fn repository(dir: &Path) -> PathBuf {
+        let main = fs::canonicalize(dir).unwrap().join("widgets");
+        fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(
+            main.join(FILE_NAME),
+            "server = \"https://dibs.example.com\"\nproject = \"widgets\"\n",
+        )
+        .unwrap();
+        git(&main, &["add", "-A"]);
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=a",
+                "-c",
+                "user.email=a@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "first",
+            ],
+        );
+        main
     }
 
-    #[derive(Debug)]
-    struct CannotTell;
-
-    impl ConfigStandings for CannotTell {
-        fn standing(&self, _dir: &Path) -> Result<Standing, String> {
-            Err("git could not tell whether it tracks a file in /home/alice/widgets".to_owned())
-        }
-    }
-
-    static TRACKED: Says = Says(Standing::Tracked);
-    static EXPOSED: Says = Says(Standing::Exposed);
-    static PRIVATE: Says = Says(Standing::Private);
-    static UNKNOWN: CannotTell = CannotTell;
+    const POOL: &str = "[worktrees]\ncount = 2\nprepare = \"true\"\nreset = \"true\"\n";
 
     #[test]
-    fn a_pool_is_lent_only_from_a_file_git_neither_tracks_nor_leaves_unignored() {
+    fn a_pool_is_declared_only_in_the_git_directory_and_found_from_every_work_tree() {
         let home = tempfile::tempdir().unwrap();
-        let here = checkout(&home.path().join("widgets"));
+        let main = repository(home.path());
         let state = home.path().join("state");
-        let refused = |standings: &'static dyn ConfigStandings| {
-            Pool::locate_with(&here, &state, standings).unwrap_err()
-        };
-        let tracked = refused(&TRACKED);
-        assert_eq!(tracked.code, "worktrees_not_local");
+        let here = Checkout::discover(&main).unwrap().unwrap();
+        assert!(Pool::find(&here, &state).unwrap().is_none());
+        let refused = Pool::locate(&here, &state).unwrap_err();
+        assert_eq!(refused.code, "no_worktree_pool");
         assert!(
-            tracked.message.contains("git tracks the file"),
+            refused
+                .message
+                .contains(&main.join(".git/dibs/worktrees.toml").display().to_string()),
             "{}",
-            tracked.message
+            refused.message
         );
-        assert!(
-            tracked.message.contains("git rm --cached .dibs.toml")
-                && tracked.message.contains(".git/info/exclude"),
-            "{}",
-            tracked.message
-        );
-        let exposed = refused(&EXPOSED);
-        assert!(
-            exposed.message.contains("git does not ignore the file"),
-            "{}",
-            exposed.message
-        );
-        assert!(
-            refused(&UNKNOWN).message.contains("cannot tell"),
-            "a file git cannot answer for lends nothing"
-        );
-        let (pool, inside) = Pool::locate_with(&here, &state, &PRIVATE).unwrap();
+
+        fs::create_dir_all(main.join(".git/dibs")).unwrap();
+        fs::write(main.join(".git/dibs/worktrees.toml"), POOL).unwrap();
+        let (pool, inside) = Pool::locate(&here, &state).unwrap();
         assert_eq!(pool.names().len(), 2);
         assert_eq!(inside, None);
+        assert_eq!(pool.checkout().root(), main);
+
+        let worktree1 = pool.path(&pool.names()[0]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &worktree1.to_string_lossy(),
+                "HEAD",
+            ],
+        );
+        let in_worktree = Checkout::discover(&worktree1).unwrap().unwrap();
+        let (from_inside, inside) = Pool::locate(&in_worktree, &state).unwrap();
+        assert_eq!(inside, Some(pool.names()[0].clone()));
+        assert_eq!(from_inside.id(), pool.id());
+        assert_eq!(
+            from_inside.checkout().root(),
+            main,
+            "never a pool of its own"
+        );
+        assert!(!pool.is_prepared(&pool.names()[0]));
+        pool.mark_prepared(&pool.names()[0]).unwrap();
+        assert!(pool.is_prepared(&pool.names()[0]));
+        assert!(
+            main.join(".git/worktrees/worktree1/dibs/pool-worktree.toml")
+                .is_file(),
+            "the mark lies in the worktree's git directory"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_is_no_worktree_of_the_repository_is_never_marked() {
+        let home = tempfile::tempdir().unwrap();
+        let main = repository(home.path());
+        fs::create_dir_all(main.join(".git/dibs")).unwrap();
+        fs::write(main.join(".git/dibs/worktrees.toml"), POOL).unwrap();
+        let here = Checkout::discover(&main).unwrap().unwrap();
+        let (pool, _) = Pool::locate(&here, &home.path().join("state")).unwrap();
+        let name = pool.names()[0].clone();
+        let elsewhere = pool.path(&name).with_file_name("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let stranger = repository(&elsewhere);
+        fs::rename(&stranger, pool.path(&name)).unwrap();
+        let refused = pool.mark_prepared(&name).unwrap_err();
+        assert!(
+            refused
+                .reason()
+                .contains("is no worktree of the repository"),
+            "{refused}"
+        );
+        assert!(!pool.is_prepared(&name));
+        assert!(!pool.path(&name).join(".git/dibs").exists());
     }
 }

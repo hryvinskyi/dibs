@@ -133,10 +133,10 @@ impl Setup {
         self.checkout_on("api", &self.server.url(), Some("api"))
     }
 
-    /// A checkout `widgets` of `api` lending a pool of `count` worktrees beside it, its
-    /// `.dibs.toml` kept out of git as a pool's checkout keeps it, and the scripts its pool's
-    /// commands run: a preparation that adds the worktree, and a reset that checks out the base and
-    /// cleans it.
+    /// A checkout `widgets` of `api` lending a pool of `count` worktrees beside it, declared in its
+    /// git directory, its `.dibs.toml` kept out of git so that only the checkout's file governs its
+    /// worktrees, and the scripts its pool's commands run: a preparation that adds the worktree, and
+    /// a reset that checks out the base and cleans it.
     pub fn pool(&self, count: u8) -> PathBuf {
         let checkout = self.checkout_on("widgets", &self.server.url(), Some("api"));
         git(&checkout, &["rm", "-q", "--cached", ".dibs.toml"]);
@@ -153,13 +153,13 @@ impl Setup {
         for (name, script) in [("prepare.sh", PREPARE), ("reset.sh", RESET)] {
             fs::write(kit.join(name), script).unwrap();
         }
-        let mut config = fs::read_to_string(checkout.join(".dibs.toml")).unwrap();
-        config.push_str(&format!(
-            "\n[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\n",
+        let table = format!(
+            "[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\n",
             kit.join("prepare.sh").display(),
             kit.join("reset.sh").display(),
-        ));
-        fs::write(checkout.join(".dibs.toml"), config).unwrap();
+        );
+        fs::create_dir_all(checkout.join(".git/dibs")).unwrap();
+        fs::write(checkout.join(".git/dibs/worktrees.toml"), table).unwrap();
         checkout
     }
 

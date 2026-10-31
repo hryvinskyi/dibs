@@ -344,8 +344,9 @@ and a pool with no hold leaves no row.
 A hold ends when it is released, when its session ends (`POST /v1/sessions/{id}/end`), when its member is removed, or
 when its holder goes unseen for 20 minutes (an agent) or 12 hours (a session). The same 30-second sweep that applies the
 slots ends the silent holds of every pool with a hold, each pool in a transaction of its own; a pool that fails to sweep
-is logged (*a worktree pool could not be swept*) and the others are swept. The worktree events are private to their
-member and the admins, so another member's board shows a hold, or its end, at its next refresh. An admin ends a hold
+is logged (*a worktree pool could not be swept*) and the others are swept. The worktree events reach every member of
+the project, as the board shows every member's holds with the same fields; they carry the host, the worktree, the
+holder's kind and purpose, and never the machine, the pool, the session or the agent. An admin ends a hold
 with `POST /v1/admin/worktrees/force-release`, naming the member, the host and the worktree as the board shows them;
 the member is sent the reason.
 
@@ -660,10 +661,9 @@ Worktrees (see [Worktrees](#worktrees)). Older clients never call the routes. On
 1. Take the snapshot, as for every release: migrations only go forward.
 2. Upgrade the server. Nothing is configured on it, and a project whose members declare no pool is unchanged.
 3. Once the 0.1.9 client binaries are published, set `DIBS_LATEST_CLIENT` to 0.1.9 and restart the server. Leave
-   `DIBS_MIN_CLIENT` alone: a pool is declared only in a member's own `.dibs.toml`, untracked and excluded from git,
-   which reaches no other member's machine, so a client of 0.1.8 never meets one in a checkout its member did not set up.
-   A client of 0.1.8 refuses a file that holds a `[worktrees]` table, as it knows no such key, and governs nothing in
-   that checkout: a member upgrades their binary before adding the table.
+   `DIBS_MIN_CLIENT` alone: a pool is declared only in the repository's git directory (`.git/dibs/worktrees.toml`), and a
+   pool worktree is marked in its own git directory, so no table about a pool is ever in a `.dibs.toml`. A client of
+   0.1.8 never sees one, and reads every `.dibs.toml` as before.
 
 The plugin of 0.1.9 names 0.1.9 as its `min_binary`, because its hooks now ask dibs for a worktree and tell it when an
 agent or a session ends. A plugin that updated ahead of its binary says so once per session; until the binary follows,
@@ -672,10 +672,11 @@ are skipped. A client of 0.1.9 ahead of its server is served `404` on the worktr
 the host's own, its signs of life and session ends are dropped, and the server is not asked again for a day. Upgrade the
 server before the clients.
 
-What a member sets up, once per checkout that should lend worktrees: a `[worktrees]` table in the checkout's `.dibs.toml`
-(`count`, `prepare` and `reset`, and `idle` and `idle_after` to stop an unused environment; see the README), the file
-kept out of git — untracked, and `/.dibs.toml` in `.git/info/exclude` — since dibs runs no command of a table git tracks
-or would commit, and a
+What a member sets up, once per checkout that should lend worktrees: a `[worktrees]` table in the repository's git
+directory, `.git/dibs/worktrees.toml` (`count`, `prepare` and `reset`, and `idle` and `idle_after` to stop an unused
+environment; see the README), mode `0600` since it holds commands. A file there is never tracked, pulled or part of a
+branch, so a command in it is only ever the member's own; the checkout's `.dibs.toml` stays committed or local as before,
+and dibs never acts on a `[worktrees]` table found in it. And a
 schedule, such as launchd, systemd or cron, that runs `dibs worktree upkeep` in the checkout every five minutes. A
 scheduled job starts without the person's shell, so it must be given the `PATH` and the container-runtime settings
 (`DOCKER_HOST` or `DOCKER_CONTEXT`) that the `idle` command needs; without them the environment is not stopped, and

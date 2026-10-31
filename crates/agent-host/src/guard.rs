@@ -224,8 +224,10 @@ impl Run<'_> {
             HostEvent::BeforeTool {
                 cwd, call, agent, ..
             } => self.before_tool(cwd, call, agent.as_ref()),
-            HostEvent::AfterTool { cwd, thread, .. } => {
-                self.leave_beat(cwd, cwd);
+            HostEvent::AfterTool {
+                cwd, thread, agent, ..
+            } => {
+                self.leave_holders_beat(cwd, agent.as_ref());
                 Ok(Judged::plain(self.deliver(
                     *thread,
                     self.capabilities.context_after_tool,
@@ -327,6 +329,13 @@ impl Run<'_> {
             text.push('\n');
             text.push_str(push);
         }
+        let notice = match (notice, self.workspace.config_advice()) {
+            (notice, None) => notice,
+            (None, Some(advice)) => Some(Text::new(advice)),
+            (Some(notice), Some(advice)) => {
+                Some(Text::new(format!("{}\n{advice}", notice.as_str())))
+            }
+        };
         Ok(GuardOutcome::NoObjection {
             context: Some(Text::new(text)),
             notice,
@@ -344,7 +353,12 @@ impl Run<'_> {
             ToolCall::Shell { .. } => self.capabilities.deny_shell,
             ToolCall::Other => false,
         };
-        if deniable && let Some(refusal) = self.not_the_holder(cwd, agent) {
+        let holding = if deniable {
+            self.holding(cwd, agent)
+        } else {
+            worktrees::Holding::Go
+        };
+        if let worktrees::Holding::Refused(refusal) = holding {
             return Ok(Judged::plain(GuardOutcome::Deny {
                 reason: Text::new(refusal),
             }));
@@ -363,9 +377,17 @@ impl Run<'_> {
                 ..
             })
         );
-        if !denied {
-            self.leave_beats(cwd, call);
+        if denied {
+            return judged;
         }
+        if let worktrees::Holding::Free(name) = &holding
+            && let Some(refusal) = self.retake(name, agent)
+        {
+            return Ok(Judged::plain(GuardOutcome::Deny {
+                reason: Text::new(refusal),
+            }));
+        }
+        self.leave_beats(cwd, call);
         judged
     }
 

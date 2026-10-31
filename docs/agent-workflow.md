@@ -238,8 +238,9 @@ said; `git push --no-verify` goes past it only as a conscious choice your person
 
 ## Worktrees: a tree of your own
 
-A checkout whose `.dibs.toml` has a `[worktrees]` table lends the worktrees of a pool, kept on your member's machine, each
-a long-lived checkout with an environment of its own. A worktree is held by one agent, or by one session, at a time,
+A checkout whose repository declares a pool — your person sets it up in `.git/dibs/worktrees.toml`, never in
+`.dibs.toml` — lends the worktrees of the pool, kept on your member's machine, each a long-lived checkout with an
+environment of its own. A worktree is held by one agent, or by one session, at a time,
 and a holder holds one at a time: two agents of the same member never share one. A session's agents work in the
 worktree the session holds, and the session may look into its agents'. A worktree is not a slot, and holding one has
 nothing to do with the slots above.
@@ -248,8 +249,8 @@ nothing to do with the slots above.
   that enters one are lent a worktree of the pool, and it is released when that subagent or session ends. The path
   it gives you is where you work. A pool worktree has no name you can ask for: entering a worktree by a name you
   chose gives you the one your session holds, or a free one, never a tree of that name.
-- When a subagent ends, its worktree is kept from everyone else for 20 minutes after its last tool call, so that a
-  subagent you continue finds it as it left it.
+- When a subagent ends, its worktree is kept from everyone else for 20 minutes after its last tool call, or until the
+  session that started it ends, so that a subagent you continue finds it as it left it.
 - When you need a tree you were not given — a second branch to build and test beside your own, an experiment, a
   review of someone else's change — take one: `dibs_worktree_take` with a purpose every member may read (never a
   credential, a host name or a customer's data), the work item if there is one, and `wait_seconds` (up to 840) to wait
