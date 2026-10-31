@@ -118,7 +118,8 @@ usable() {
 # field <name>: the text of the string field <name> of the hook's input, held in `input`; paths
 # with a double quote in them are not read.
 field() {
-  printf '%s\n' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
+  printf '%s\n' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1 |
+    sed -e 's/\\\\/\\/g' -e 's/\\\//\//g'
 }
 
 # directory <line>: whether the line is an absolute path to an existing directory.
@@ -182,7 +183,8 @@ fi
 case $event in
   worktree-remove)
     input=$(cat)
-    path=$(field worktree_path)
+    # A Windows path comes with backslashes, which git and this shell also read as slashes.
+    path=$(field worktree_path | tr '\\' /)
     top=
     case $path in
       */.claude/worktrees/?*)
