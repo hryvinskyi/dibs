@@ -1,8 +1,13 @@
-//! The conformance kit over the `neutral` host, as every adapter's tests run it over theirs.
+//! The conformance kit over the `neutral` host, as every adapter's tests run it over theirs, and
+//! over adapters that break the rules it holds every adapter to.
 
-use dibs_agent_host::adapter::{HostAdapter, HostId, HostReply, ParseError};
+use dibs_agent_host::adapter::{
+    HostAdapter, HostId, HostReply, OwnWorktrees, ParseError, WorktreeTerms,
+};
 use dibs_agent_host::capabilities::Capabilities;
-use dibs_agent_host::conformance::{self, Fixtures, ReplyFixture};
+use dibs_agent_host::conformance::{
+    self, Fixtures, ReadReply, ReadWorktree, ReplyFixture, ReplyReader,
+};
 use dibs_agent_host::event::HostEvent;
 use dibs_agent_host::neutral::{self, Neutral, NeutralReader};
 use dibs_agent_host::outcome::GuardOutcome;
@@ -40,10 +45,7 @@ impl HostAdapter for Careless {
 
     fn render(&self, event: &str, outcome: &GuardOutcome) -> HostReply {
         if !event.is_empty() {
-            return HostReply {
-                stdout: b"not a reply".to_vec(),
-                exit: 0,
-            };
+            return HostReply::stdout(b"not a reply".to_vec());
         }
         let mut reply = Neutral.render(event, outcome);
         if outcome.denies() {
@@ -182,4 +184,167 @@ fn waking_an_idle_session_is_declared_exactly_by_an_adapter_whose_push_carries_t
         assert!(bare.contains(expected), "missing '{expected}' in:\n{bare}");
     }
     assert!(check(false, true).contains("push_to_idle is not declared"));
+}
+
+/// The neutral host, declaring or not that it serves worktrees, with terms or without, and
+/// rendering a wanted worktree's answers well or badly.
+struct Serving {
+    declares: bool,
+    terms: Option<WorktreeTerms>,
+    renders_well: bool,
+}
+
+const TERMS: WorktreeTerms = WorktreeTerms {
+    hook_timeout: std::time::Duration::from_secs(900),
+    own: OwnWorktrees {
+        dir: "tool/worktrees",
+        branch_prefix: "worktree-",
+    },
+};
+
+impl HostAdapter for Serving {
+    fn id(&self) -> HostId {
+        HostId::new("serving")
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            serves_worktrees: self.declares,
+            ..Neutral.capabilities()
+        }
+    }
+
+    fn parse(&self, event: &str, input: &[u8]) -> Result<HostEvent, ParseError> {
+        Neutral.parse(event, input)
+    }
+
+    fn render(&self, event: &str, outcome: &GuardOutcome) -> HostReply {
+        match outcome {
+            GuardOutcome::Worktree { path, .. } if self.renders_well => {
+                HostReply::stdout(format!("{}\n", path.display()).into_bytes())
+            }
+            GuardOutcome::NoWorktree { reason } if self.renders_well => HostReply {
+                stdout: Vec::new(),
+                stderr: reason.as_str().as_bytes().to_vec(),
+                exit: 1,
+            },
+            GuardOutcome::NoWorktree { reason } => HostReply {
+                stdout: Vec::new(),
+                stderr: reason.as_str().as_bytes().to_vec(),
+                exit: 2,
+            },
+            other => Neutral.render(event, other),
+        }
+    }
+
+    fn worktree_terms(&self) -> Option<WorktreeTerms> {
+        self.terms
+    }
+}
+
+/// Reads the neutral reply, and a wanted worktree's answer as `Serving` writes it.
+struct ServingReader;
+
+impl ReplyReader for ServingReader {
+    fn read(&self, reply: &HostReply) -> Option<ReadReply> {
+        NeutralReader.read(reply)
+    }
+
+    fn read_worktree(&self, reply: &HostReply) -> Option<ReadWorktree> {
+        if reply.exit == 0 {
+            let stdout = String::from_utf8(reply.stdout.clone()).ok()?;
+            let last = stdout.lines().last()?;
+            return last
+                .starts_with('/')
+                .then(|| ReadWorktree::Path(last.to_owned()));
+        }
+        String::from_utf8(reply.stderr.clone())
+            .ok()
+            .map(ReadWorktree::Refused)
+    }
+}
+
+#[test]
+fn serving_worktrees_is_declared_exactly_by_an_adapter_with_terms_that_renders_both_answers() {
+    let check = |adapter: &Serving, fixtures: &Fixtures| {
+        conformance::check(adapter, fixtures, &ServingReader)
+            .err()
+            .unwrap_or_default()
+            .join("\n")
+    };
+    let mut fixtures = neutral::fixtures();
+    fixtures.replies.retain(|fixture| {
+        !matches!(
+            fixture.outcome,
+            GuardOutcome::Worktree { .. } | GuardOutcome::NoWorktree { .. }
+        )
+    });
+    let well = Serving {
+        declares: true,
+        terms: Some(TERMS),
+        renders_well: true,
+    };
+    assert_eq!(check(&well, &fixtures), "");
+    assert!(
+        check(
+            &Serving {
+                terms: None,
+                ..well
+            },
+            &fixtures
+        )
+        .contains("serves_worktrees is declared, but the adapter declares no worktree terms")
+    );
+    assert!(
+        check(
+            &Serving {
+                declares: false,
+                ..well
+            },
+            &fixtures
+        )
+        .contains("the adapter declares worktree terms, but serves_worktrees is not declared")
+    );
+    let badly = check(
+        &Serving {
+            renders_well: false,
+            ..well
+        },
+        &fixtures,
+    );
+    for expected in [
+        "the host does not read the worktree's directory back",
+        "the reply refusing a worktree exits 2",
+    ] {
+        assert!(
+            badly.contains(expected),
+            "missing '{expected}' in:\n{badly}"
+        );
+    }
+    let outside = Serving {
+        terms: Some(WorktreeTerms {
+            hook_timeout: std::time::Duration::from_secs(60),
+            own: OwnWorktrees {
+                dir: "../elsewhere",
+                branch_prefix: "",
+            },
+        }),
+        ..well
+    };
+    let terms = check(&outside, &fixtures);
+    for expected in [
+        "leaves a take no time",
+        "is not a directory inside the repository",
+        "makes no branch name",
+    ] {
+        assert!(
+            terms.contains(expected),
+            "missing '{expected}' in:\n{terms}"
+        );
+    }
+    let mut unwanted = fixtures.clone();
+    unwanted
+        .events
+        .retain(|fixture| fixture.event != "worktree-wanted");
+    assert!(check(&well, &unwanted).contains("no fixture reads an event as a wanted worktree"));
 }

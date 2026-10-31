@@ -25,9 +25,9 @@ pub mod timing;
 pub mod upkeep;
 pub mod wording;
 
-pub use adapter::{HostAdapter, HostId, HostReply, ParseError, Probe};
+pub use adapter::{HostAdapter, HostId, HostReply, OwnWorktrees, ParseError, Probe, WorktreeTerms};
 pub use capabilities::Capabilities;
-pub use event::{EventKind, HostEvent, SessionKey, Thread, ToolCall};
+pub use event::{AgentKey, EventKind, HostEvent, SessionKey, Thread, ToolCall, WorktreeLabel};
 pub use guard::{Guard, HookAnswer, HookRequest};
 pub use outcome::GuardOutcome;
 pub use registry::HostRegistry;

@@ -21,11 +21,14 @@ pub struct Capabilities {
     pub tells_subagent: bool,
     /// The host can wake an idle session with a pushed message.
     pub push_to_idle: bool,
+    /// The host asks the guard for the worktrees its sessions and agents run in, and waits for
+    /// the directory: its own way of making one is replaced by the guard's answer.
+    pub serves_worktrees: bool,
 }
 
 impl Capabilities {
     /// Every capability with its name, in a fixed order, for showing to a person.
-    pub fn named(&self) -> [(&'static str, bool); 7] {
+    pub fn named(&self) -> [(&'static str, bool); 8] {
         [
             ("deny_edit", self.deny_edit),
             ("deny_shell", self.deny_shell),
@@ -34,6 +37,7 @@ impl Capabilities {
             ("context_at_prompt", self.context_at_prompt),
             ("tells_subagent", self.tells_subagent),
             ("push_to_idle", self.push_to_idle),
+            ("serves_worktrees", self.serves_worktrees),
         ]
     }
 }

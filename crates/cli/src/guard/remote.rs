@@ -72,6 +72,19 @@ impl Remote {
     /// # Errors
     /// [`RemoteError::Config`] when no token can be read without asking.
     pub fn client(&self) -> Result<Client, RemoteError> {
+        self.client_with(ClientOptions {
+            connect_timeout: CALL_LIMIT,
+            timeout: CALL_LIMIT,
+            ..ClientOptions::default()
+        })
+    }
+
+    /// A client signed in with the stored token, its calls bounded as `options` say: a caller that
+    /// may wait longer than a hook's edit check asks with the client's ordinary limits.
+    ///
+    /// # Errors
+    /// [`RemoteError::Config`] when no token can be read without asking.
+    pub fn client_with(&self, options: ClientOptions) -> Result<Client, RemoteError> {
         let lookup = |name: &str| self.env.get(name).cloned();
         let credentials =
             Credentials::new(self.credentials_file.clone(), Arc::new(OsKeychain), &lookup)
@@ -87,11 +100,6 @@ impl Remote {
                     self.key.project, self.key.server
                 )));
             }
-        };
-        let options = ClientOptions {
-            connect_timeout: CALL_LIMIT,
-            timeout: CALL_LIMIT,
-            ..ClientOptions::default()
         };
         Ok(Client::new(self.key.server.clone(), token, options)?)
     }

@@ -19,6 +19,7 @@ use dibs_domain::review::PrRef;
 use dibs_domain::settings::EditPolicy;
 
 use dibs_domain::slot::{BranchPattern, Purpose, RepoRef, SlotName};
+use dibs_domain::worktree::{AgentKey, WorktreeName};
 
 use crate::ports::{
     ClaimLine, GrantAskLine, HeldWay, InboxView, NewerRelease, OfferLine, Pending, ReadyLine,
@@ -978,6 +979,125 @@ fn sentence(text: &str) -> String {
         out.push('.');
     }
     out
+}
+
+/// Why the pool of worktrees did not serve a wanted worktree while the guard is switched off.
+pub const WORKTREE_SWITCHED_OFF: &str = "dibs is switched off on this machine";
+
+/// Why the pool of worktrees did not serve a worktree wanted where no checkout is governed.
+pub const WORKTREE_UNGOVERNED: &str =
+    "no .dibs.toml governs this directory, so no pool of worktrees lends to it";
+
+/// Why the pool of worktrees did not serve a worktree wanted in a checkout that lends none.
+pub const WORKTREE_NO_POOL: &str =
+    "this checkout lends no worktrees: its .dibs.toml has no [worktrees] table";
+
+/// The notice of a worktree made as the host would make it, the pool of worktrees not having
+/// served one for `reason`.
+pub fn own_worktree(reason: &str) -> String {
+    format!(
+        "dibs: the pool of worktrees was not used ({}); this is a plain git worktree, without an environment of its own.",
+        trimmed(reason)
+    )
+}
+
+/// The reason no worktree is given at all: the pool did not serve one for `reason`, and the plain
+/// worktree could not be made either, for `failure`.
+pub fn no_own_worktree(reason: &str, failure: &str) -> String {
+    format!(
+        "dibs: the pool of worktrees was not used ({}), and a plain git worktree could not be made either: {}",
+        trimmed(reason),
+        sentence(failure)
+    )
+}
+
+/// The reason a wanted worktree is refused: every worktree of the pool is held, as `busy` says.
+pub fn worktrees_busy(busy: &str) -> String {
+    format!(
+        "dibs: {} Wait until one is released, or release one that is no longer needed with dibs worktree release <name>.",
+        sentence(busy)
+    )
+}
+
+/// The notice of a worktree taken from the pool, made of what the take did on the way; `None`
+/// when it did nothing worth saying.
+pub fn took_worktree(notes: &[String]) -> Option<String> {
+    let said: Vec<String> = notes
+        .iter()
+        .map(|note| note.trim())
+        .filter(|note| !note.is_empty())
+        .map(sentence)
+        .collect();
+    (!said.is_empty()).then(|| format!("dibs: {}", said.join(" ")))
+}
+
+/// The notice of a pool worktree whose hold could not be released.
+pub fn worktree_not_released(worktree: &WorktreeName, failure: &str) -> String {
+    format!(
+        "dibs: the hold of {worktree} could not be released: {} It ends when its holder stays silent, or with dibs worktree release {worktree}.",
+        sentence(failure)
+    )
+}
+
+/// The notice of a worktree that was to be removed and was kept.
+pub fn worktree_kept(path: &std::path::Path, why: &str) -> String {
+    format!(
+        "dibs: the worktree at {} was kept: {} Remove it with git worktree remove once what it holds is saved.",
+        path.display(),
+        sentence(why)
+    )
+}
+
+/// Another holder of a pool worktree, as a refusal names it.
+pub struct WorktreeHolderShown<'a> {
+    /// The holder's agent; `None` for a session.
+    pub agent: Option<&'a AgentKey>,
+    /// Why they took it, when known.
+    pub purpose: Option<&'a Purpose>,
+    /// Since when, when known.
+    pub since: Option<OffsetDateTime>,
+}
+
+/// The refusal of an edit or a command in the pool worktree `worktree`, which `holder` holds and
+/// the session or agent asking does not; `rescued` names the branch the work found in it was
+/// last saved on.
+pub fn not_the_holder(
+    worktree: &WorktreeName,
+    holder: &WorktreeHolderShown<'_>,
+    rescued: Option<&str>,
+) -> String {
+    let who = holder.agent.map_or_else(
+        || "another session".to_owned(),
+        |agent| format!("the agent {} of another session", quoted(agent.as_str())),
+    );
+    let why = holder
+        .purpose
+        .map(|purpose| format!(" for \"{}\"", quoted(purpose.as_str())))
+        .unwrap_or_default();
+    let since = holder
+        .since
+        .map(|since| format!(" since {}", clock(since)))
+        .unwrap_or_default();
+    let mut text = format!(
+        "{worktree} is a pool worktree held by {who}{why}{since}; this session holds no hold on it, so dibs refuses edits and commands in it. Work in a worktree this session holds, or take one with dibs worktree take."
+    );
+    if let Some(branch) = rescued {
+        let _ = write!(
+            text,
+            " Work found in {worktree} when it was last taken was saved on the branch {branch}."
+        );
+    }
+    text
+}
+
+/// What the brief says of a session that starts in a pool worktree another holder has.
+pub fn started_where_not_the_holder(refusal: &str) -> String {
+    format!("This session starts in a pool worktree it does not hold. {refusal}")
+}
+
+/// A sentence without the spaces around it and its final full stop, to sit inside another.
+fn trimmed(text: &str) -> &str {
+    text.trim().trim_end_matches('.')
 }
 
 #[cfg(test)]

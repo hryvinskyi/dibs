@@ -21,6 +21,16 @@
 //!   every edit.
 //! - **Nothing is produced that the host cannot carry**, and nothing is fetched only to feed such
 //!   an answer.
+//! - **A worktree is wanted and given back outside every other rule.** A host that serves
+//!   worktrees has its own way of making and removing one replaced by the guard's answer, so the
+//!   guard answers it whether or not it is switched off and wherever the host asks, and makes the
+//!   host's own worktree whenever the pool cannot serve one. Its take is the one call a hook waits
+//!   minutes for, bounded by the host's timeout, and the one refusal not made by the server's
+//!   verdict on an edit: every worktree of the pool held until that deadline.
+//! - **Nobody works in a pool worktree they do not hold.** A session or agent working in one its
+//!   session holds no hold on takes it again when it is free, and is refused edits and commands
+//!   when another holder has it; this is read from this machine's records, so the common case asks
+//!   the server nothing.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -41,7 +51,7 @@ use dibs_domain::slot::{
 use crate::adapter::{HostAdapter, HostReply};
 use crate::capabilities::Capabilities;
 use crate::delivery;
-use crate::event::{EventKind, HostEvent, Thread, ToolCall};
+use crate::event::{AgentKey, EventKind, HostEvent, Thread, ToolCall};
 use crate::outcome::GuardOutcome;
 use crate::ports::{
     Activity, Cached, Clock, CoordinationGateway, KnownSettings, PathAnswer, PortError, Seen,
@@ -127,10 +137,12 @@ impl<'a> Guard<'a> {
         let event = adapter.parse(request.event, request.input);
         let kind = event.as_ref().ok().map(HostEvent::kind);
         let outcome = match event {
-            Ok(event) if request.switched_off => {
-                self.count_switched_off(adapter, &event);
-                GuardOutcome::silent()
-            }
+            Ok(event) if request.switched_off => self
+                .worktree_event(adapter, &event, true)
+                .unwrap_or_else(|| {
+                    self.count_switched_off(adapter, &event);
+                    GuardOutcome::silent()
+                }),
             _ if request.switched_off => GuardOutcome::silent(),
             Ok(event) => self.decide(adapter, &event, request.pushes),
             Err(error) => GuardOutcome::notice(wording::unreadable(&error.to_string())),
@@ -164,6 +176,9 @@ impl<'a> Guard<'a> {
         event: &HostEvent,
         pushes: bool,
     ) -> GuardOutcome {
+        if let Some(outcome) = self.worktree_event(adapter, event, false) {
+            return outcome;
+        }
         let session = SessionRef {
             host: adapter.id(),
             key: event.session_key().clone(),
@@ -203,19 +218,28 @@ impl Run<'_> {
     fn event(&self, event: &HostEvent) -> GuardOutcome {
         self.stamp(event);
         let decided = match event {
-            HostEvent::SessionStarted { .. } => self.session_started().map(Judged::plain),
-            HostEvent::BeforeTool { cwd, call, .. } => self.before_tool(cwd, call),
-            HostEvent::AfterTool { thread, .. } => Ok(Judged::plain(self.deliver(
-                *thread,
-                self.capabilities.context_after_tool,
-                false,
-            ))),
+            HostEvent::SessionStarted { cwd, .. } => self.session_started(cwd).map(Judged::plain),
+            HostEvent::BeforeTool {
+                cwd, call, agent, ..
+            } => self.before_tool(cwd, call, agent.as_ref()),
+            HostEvent::AfterTool { cwd, thread, .. } => {
+                self.leave_beat(cwd, cwd);
+                Ok(Judged::plain(self.deliver(
+                    *thread,
+                    self.capabilities.context_after_tool,
+                    false,
+                )))
+            }
             HostEvent::PromptSubmitted { thread, .. } => Ok(Judged::plain(self.deliver(
                 *thread,
                 self.capabilities.context_at_prompt,
                 true,
             ))),
-            HostEvent::Stopped { .. } => return GuardOutcome::silent(),
+            HostEvent::Stopped { .. }
+            | HostEvent::WorktreeWanted { .. }
+            | HostEvent::WorktreeReturned { .. } => return GuardOutcome::silent(),
+            HostEvent::AgentEnded { agent, .. } => return self.agent_ended(agent),
+            HostEvent::SessionEnded { .. } => return self.session_ended(),
         };
         let outcome = match decided {
             Ok(judged) => self.counted(judged),
@@ -237,14 +261,19 @@ impl Run<'_> {
         let activity = match event {
             HostEvent::SessionStarted { .. } | HostEvent::Stopped { .. } => Activity::Waiting,
             HostEvent::AfterTool { .. } | HostEvent::PromptSubmitted { .. } => Activity::Working,
-            HostEvent::BeforeTool { .. } => return,
+            HostEvent::BeforeTool { .. }
+            | HostEvent::WorktreeWanted { .. }
+            | HostEvent::WorktreeReturned { .. }
+            | HostEvent::AgentEnded { .. }
+            | HostEvent::SessionEnded { .. } => return,
         };
         self.workspace
             .ledger()
             .stamp(&self.session, activity, self.now);
     }
 
-    fn session_started(&self) -> Result<GuardOutcome, Problem> {
+    fn session_started(&self, cwd: &Path) -> Result<GuardOutcome, Problem> {
+        let elsewhere = self.not_the_holder(cwd, None);
         if !self.capabilities.context_at_start {
             return Ok(GuardOutcome::silent());
         }
@@ -288,6 +317,10 @@ impl Run<'_> {
             now: self.now,
         };
         let mut text = brief.text();
+        if let Some(refusal) = elsewhere {
+            text.push('\n');
+            text.push_str(&wording::started_where_not_the_holder(&refusal));
+        }
         if let Some(push) = self.push_notice {
             text.push('\n');
             text.push_str(push);
@@ -298,7 +331,23 @@ impl Run<'_> {
         })
     }
 
-    fn before_tool(&self, cwd: &Path, call: &ToolCall) -> Result<Judged, Problem> {
+    fn before_tool(
+        &self,
+        cwd: &Path,
+        call: &ToolCall,
+        agent: Option<&AgentKey>,
+    ) -> Result<Judged, Problem> {
+        self.leave_beats(cwd, call);
+        let deniable = match call {
+            ToolCall::Edit { .. } => self.capabilities.deny_edit,
+            ToolCall::Shell { .. } => self.capabilities.deny_shell,
+            ToolCall::Other => false,
+        };
+        if deniable && let Some(refusal) = self.not_the_holder(cwd, agent) {
+            return Ok(Judged::plain(GuardOutcome::Deny {
+                reason: Text::new(refusal),
+            }));
+        }
         match call {
             ToolCall::Edit { paths } if self.capabilities.deny_edit => self.edits(cwd, paths),
             ToolCall::Shell { command } if self.capabilities.deny_shell => self.shell(cwd, command),
@@ -905,6 +954,8 @@ fn answered_by_hold(
     spec.hot_rule_for(path).is_none()
         && area_of(settings, repo, path).is_some_and(|area| held.contains(&area))
 }
+
+mod worktrees;
 
 #[cfg(test)]
 mod tests;

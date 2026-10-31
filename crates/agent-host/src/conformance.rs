@@ -15,7 +15,11 @@
 //! declares it can wake an idle session has a push extension and no other host has one, and what
 //! it pushes of a hostile message carries the rule that a delivery authorises nothing, no
 //! instruction to acknowledge, no angle bracket, no character that does not show as itself, and
-//! stays small.
+//! stays small; a host that declares it serves worktrees says how long it waits for one and where
+//! it would make one itself (inside the repository, and for longer than the guard's margin), sends
+//! a wanted worktree as one of its events, and renders both of the guard's answers to it — the
+//! directory, with exit `0`, and the refusal, with an exit that is neither `0` nor `2` — so that
+//! its reader reads them back.
 
 use serde_json::Value;
 
@@ -24,8 +28,10 @@ use dibs_domain::ids::{MessageId, ThreadId};
 use dibs_domain::message::{Importance, Subject};
 use dibs_domain::session::AgentLabel;
 
-use crate::adapter::{HostAdapter, HostReply};
-use crate::event::HostEvent;
+use std::path::PathBuf;
+
+use crate::adapter::{HostAdapter, HostReply, WorktreeTerms};
+use crate::event::{EventKind, HostEvent};
 use crate::outcome::GuardOutcome;
 use crate::ports::{Pending, PendingMessage};
 use crate::text::shows;
@@ -155,10 +161,25 @@ pub struct ReadReply {
     pub notice: Option<String>,
 }
 
+/// A host's answer to a wanted worktree, read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadWorktree {
+    /// The directory the host goes on in.
+    Path(String),
+    /// The reason the host's creation of the worktree fails with.
+    Refused(String),
+}
+
 /// Reads a host's reply back, as the host would.
 pub trait ReplyReader {
     /// The reply as the host reads it; `None` when the host could not read it at all.
     fn read(&self, reply: &HostReply) -> Option<ReadReply>;
+
+    /// A reply to a wanted worktree as the host reads it; `None` when it could not read one, which
+    /// is what a host that serves no worktrees answers.
+    fn read_worktree(&self, _reply: &HostReply) -> Option<ReadWorktree> {
+        None
+    }
 }
 
 /// Checks an adapter against its fixtures and the rules every adapter keeps.
@@ -211,6 +232,7 @@ pub fn check(
         }
     }
     check_push(adapter, &mut broken);
+    check_worktrees(adapter, fixtures, reader, &mut broken);
     if broken.is_empty() {
         Ok(())
     } else {
@@ -288,6 +310,109 @@ fn check_push(adapter: &dyn HostAdapter, broken: &mut Vec<String>) {
     if size > PUSH_MAX_BYTES {
         broken.push(format!(
             "a push of a long message is {size} bytes, more than {PUSH_MAX_BYTES}"
+        ));
+    }
+}
+
+/// A worktree's terms exactly when the host declares it serves worktrees, terms that leave the
+/// guard time and keep the host's own worktrees inside the repository, a wanted worktree among the
+/// host's events, and both answers to it rendered so that the host reads them back.
+fn check_worktrees(
+    adapter: &dyn HostAdapter,
+    fixtures: &Fixtures,
+    reader: &dyn ReplyReader,
+    broken: &mut Vec<String>,
+) {
+    let declared = adapter.capabilities().serves_worktrees;
+    let Some(terms) = adapter.worktree_terms() else {
+        if declared {
+            broken.push(
+                "serves_worktrees is declared, but the adapter declares no worktree terms"
+                    .to_owned(),
+            );
+        }
+        return;
+    };
+    if !declared {
+        broken.push(
+            "the adapter declares worktree terms, but serves_worktrees is not declared".to_owned(),
+        );
+    }
+    if terms.hook_timeout <= WorktreeTerms::MARGIN {
+        broken.push(format!(
+            "the hook that answers a wanted worktree times out within {}s, which leaves a take no time",
+            WorktreeTerms::MARGIN.as_secs()
+        ));
+    }
+    if !terms.own.is_inside() {
+        broken.push(format!(
+            "the host's own worktrees live at '{}', which is not a directory inside the repository",
+            terms.own.dir
+        ));
+    }
+    let prefix_ok = !terms.own.branch_prefix.is_empty()
+        && terms
+            .own
+            .branch_prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
+        && !terms.own.branch_prefix.starts_with(['/', '.', '-']);
+    if !prefix_ok {
+        broken.push(format!(
+            "the branch prefix '{}' of the host's own worktrees makes no branch name",
+            terms.own.branch_prefix
+        ));
+    }
+    let wanted = fixtures.events.iter().find(|fixture| {
+        fixture
+            .expected
+            .as_ref()
+            .is_some_and(|event| event.kind() == EventKind::WorktreeWanted)
+    });
+    let Some(wanted) = wanted else {
+        broken.push(
+            "serves_worktrees is declared, but no fixture reads an event as a wanted worktree"
+                .to_owned(),
+        );
+        return;
+    };
+    let path = "/work/acme-worktrees/worktree2";
+    let given = adapter.render(
+        &wanted.event,
+        &GuardOutcome::Worktree {
+            path: PathBuf::from(path),
+            notice: Some(crate::text::Text::new("taken from the pool")),
+        },
+    );
+    if given.exit != 0 {
+        broken.push(format!(
+            "{}: the reply carrying a worktree exits {}, so the host would not take it",
+            wanted.event, given.exit
+        ));
+    }
+    if reader.read_worktree(&given) != Some(ReadWorktree::Path(path.to_owned())) {
+        broken.push(format!(
+            "{}: the host does not read the worktree's directory back from the reply",
+            wanted.event
+        ));
+    }
+    let reason = "every worktree is held";
+    let refused = adapter.render(
+        &wanted.event,
+        &GuardOutcome::NoWorktree {
+            reason: crate::text::Text::new(reason),
+        },
+    );
+    if refused.exit == 0 || refused.exit == 2 {
+        broken.push(format!(
+            "{}: the reply refusing a worktree exits {}, which the host does not read as a failed creation",
+            wanted.event, refused.exit
+        ));
+    }
+    if reader.read_worktree(&refused) != Some(ReadWorktree::Refused(reason.to_owned())) {
+        broken.push(format!(
+            "{}: the host does not read the reason a worktree was refused back from the reply",
+            wanted.event
         ));
     }
 }

@@ -1,5 +1,6 @@
 //! The guard's ports, implemented over the client: the checkouts it works in, what this machine
-//! remembers, the project's server, and the background upkeep.
+//! remembers, the project's server, the background upkeep, and the pool of worktrees a checkout
+//! lends.
 
 pub mod cache;
 pub mod gateway;
@@ -11,6 +12,7 @@ pub mod timing;
 pub mod upkeep;
 pub mod views;
 pub mod workspace;
+pub mod worktrees;
 
 use time::OffsetDateTime;
 

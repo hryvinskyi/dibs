@@ -3,8 +3,9 @@
 //! <event>` and acts on the reply.
 //!
 //! Protocol 1. The event is the command's argument: `session-started`, `before-tool`,
-//! `after-tool`, `prompt-submitted` or `stopped` (the main agent finished its turn and the session
-//! waits for its person). The input on standard input is one JSON object:
+//! `after-tool`, `prompt-submitted`, `stopped` (the main agent finished its turn and the session
+//! waits for its person), `worktree-wanted`, `worktree-returned`, `agent-ended` (an agent the main
+//! agent started finished) or `session-ended`. The input on standard input is one JSON object:
 //!
 //! ```json
 //! {"protocol": 1, "session": "s-1", "cwd": "/work/api", "thread": "main",
@@ -14,7 +15,11 @@
 //! `thread` (`main`, `subagent` or `unknown`, the default) belongs to `before-tool`, `after-tool`
 //! and `prompt-submitted`; `tool` to `before-tool`, where it is required: `{"kind": "edit", "paths": [...]}`,
 //! `{"kind": "shell", "command": "..."}`, or any other kind, which is a tool the guard has no say
-//! about. The reply on standard output is one JSON object, and the exit status is always `0`:
+//! about. `agent`, the host's key of the agent the event comes from, belongs to `before-tool`,
+//! `after-tool` and `worktree-wanted`, and is required by `agent-ended`; `label`, the name of the
+//! worktree wanted, is required by `worktree-wanted`; `path`, the worktree's directory, by
+//! `worktree-returned`. The reply on standard output is one JSON object, and the exit status is
+//! always `0`:
 //!
 //! ```json
 //! {"protocol": 1, "decision": "no_objection", "context": "...", "notice": "..."}
@@ -23,6 +28,9 @@
 //!
 //! `context` and `notice` are left out when there is none. Within protocol 1 a field may be added
 //! to either side and none is renamed or removed, so a reader ignores fields it does not know.
+//!
+//! This host does not serve worktrees: a worktree it wants is no business of the guard's, which
+//! answers it with no objection, and a worktree it returns is left as it is.
 
 use std::path::PathBuf;
 
@@ -31,7 +39,7 @@ use serde_json::Value;
 
 use crate::adapter::{HostAdapter, HostId, HostReply, ParseError};
 use crate::capabilities::Capabilities;
-use crate::event::{HostEvent, SessionKey, Thread, ToolCall};
+use crate::event::{AgentKey, HostEvent, SessionKey, Thread, ToolCall, WorktreeLabel};
 use crate::outcome::GuardOutcome;
 use crate::text::Text;
 
@@ -56,6 +64,12 @@ struct Input {
     thread: Option<String>,
     #[serde(default)]
     tool: Option<Value>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +112,7 @@ impl HostAdapter for Neutral {
             context_at_prompt: true,
             tells_subagent: true,
             push_to_idle: false,
+            serves_worktrees: false,
         }
     }
 
@@ -120,6 +135,7 @@ impl HostAdapter for Neutral {
         }
         let cwd = PathBuf::from(input.cwd);
         let thread = thread(input.thread.as_deref())?;
+        let agent = agent(input.agent.as_deref())?;
         Ok(match name {
             EventName::SessionStarted => HostEvent::SessionStarted { session_key, cwd },
             EventName::BeforeTool => HostEvent::BeforeTool {
@@ -127,11 +143,13 @@ impl HostAdapter for Neutral {
                 cwd,
                 call: tool(input.tool)?,
                 thread,
+                agent,
             },
             EventName::AfterTool => HostEvent::AfterTool {
                 session_key,
                 cwd,
                 thread,
+                agent,
             },
             EventName::PromptSubmitted => HostEvent::PromptSubmitted {
                 session_key,
@@ -139,6 +157,31 @@ impl HostAdapter for Neutral {
                 thread,
             },
             EventName::Stopped => HostEvent::Stopped { session_key, cwd },
+            EventName::WorktreeWanted => HostEvent::WorktreeWanted {
+                session_key,
+                cwd,
+                label: label(input.label.as_deref())?,
+                agent,
+            },
+            EventName::WorktreeReturned => HostEvent::WorktreeReturned {
+                session_key,
+                cwd,
+                path: input
+                    .path
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+                    .ok_or_else(|| {
+                        ParseError::Malformed("worktree-returned needs a path".to_owned())
+                    })?,
+            },
+            EventName::AgentEnded => HostEvent::AgentEnded {
+                session_key,
+                cwd,
+                agent: agent.ok_or_else(|| {
+                    ParseError::Malformed("agent-ended needs an agent".to_owned())
+                })?,
+            },
+            EventName::SessionEnded => HostEvent::SessionEnded { session_key, cwd },
         })
     }
 
@@ -153,10 +196,20 @@ impl HostAdapter for Neutral {
                 protocol: PROTOCOL,
                 reason,
             },
+            GuardOutcome::Worktree { notice, .. } => Reply::NoObjection {
+                protocol: PROTOCOL,
+                context: None,
+                notice: notice.as_ref(),
+            },
+            GuardOutcome::NoWorktree { reason } => Reply::NoObjection {
+                protocol: PROTOCOL,
+                context: None,
+                notice: Some(reason),
+            },
         };
         let mut stdout = serde_json::to_vec(&reply).unwrap_or_default();
         stdout.push(b'\n');
-        HostReply { stdout, exit: 0 }
+        HostReply::stdout(stdout)
     }
 }
 
@@ -168,6 +221,10 @@ enum EventName {
     AfterTool,
     PromptSubmitted,
     Stopped,
+    WorktreeWanted,
+    WorktreeReturned,
+    AgentEnded,
+    SessionEnded,
 }
 
 impl EventName {
@@ -178,9 +235,34 @@ impl EventName {
             "after-tool" => Some(Self::AfterTool),
             "prompt-submitted" => Some(Self::PromptSubmitted),
             "stopped" => Some(Self::Stopped),
+            "worktree-wanted" => Some(Self::WorktreeWanted),
+            "worktree-returned" => Some(Self::WorktreeReturned),
+            "agent-ended" => Some(Self::AgentEnded),
+            "session-ended" => Some(Self::SessionEnded),
             _ => None,
         }
     }
+}
+
+fn agent(value: Option<&str>) -> Result<Option<AgentKey>, ParseError> {
+    value
+        .map(|key| {
+            AgentKey::parse(key).map_err(|_| {
+                ParseError::Malformed(
+                    "agent is 1 to 64 characters with no spaces or control characters".to_owned(),
+                )
+            })
+        })
+        .transpose()
+}
+
+fn label(value: Option<&str>) -> Result<WorktreeLabel, ParseError> {
+    value.and_then(WorktreeLabel::parse).ok_or_else(|| {
+        ParseError::Malformed(
+            "label is 1 to 64 letters, digits, '.', '_' or '-', starting with a letter or a digit"
+                .to_owned(),
+        )
+    })
 }
 
 fn thread(value: Option<&str>) -> Result<Thread, ParseError> {
@@ -225,6 +307,9 @@ pub fn fixtures() -> crate::conformance::Fixtures {
     use crate::conformance::{EventFixture, Fixtures, ReplyFixture};
 
     let key = SessionKey::fixture;
+    let Ok(a1b2) = AgentKey::parse("a1b2") else {
+        return Fixtures::default();
+    };
     let events = vec![
         EventFixture::parses(
             "session-started",
@@ -244,6 +329,7 @@ pub fn fixtures() -> crate::conformance::Fixtures {
                     paths: vec![PathBuf::from("src/a.rs"), PathBuf::from("C:\\work\\api\\b.rs")],
                 },
                 thread: Thread::Main,
+                agent: None,
             },
         ),
         EventFixture::parses(
@@ -256,6 +342,7 @@ pub fn fixtures() -> crate::conformance::Fixtures {
                     command: "make release".to_owned(),
                 },
                 thread: Thread::Subagent,
+                agent: None,
             },
         ),
         EventFixture::parses(
@@ -266,6 +353,7 @@ pub fn fixtures() -> crate::conformance::Fixtures {
                 cwd: PathBuf::from("/work"),
                 call: ToolCall::Other,
                 thread: Thread::Unknown,
+                agent: None,
             },
         ),
         EventFixture::parses(
@@ -275,6 +363,7 @@ pub fn fixtures() -> crate::conformance::Fixtures {
                 session_key: key("s-1"),
                 cwd: PathBuf::from("/work"),
                 thread: Thread::Unknown,
+                agent: None,
             },
         ),
         EventFixture::parses(
@@ -313,8 +402,60 @@ pub fn fixtures() -> crate::conformance::Fixtures {
                     command: "git push origin main".to_owned(),
                 },
                 thread: Thread::Main,
+                agent: None,
             },
         ),
+        EventFixture::parses(
+            "after-tool",
+            br#"{"protocol":1,"session":"s-1","cwd":"/work/pool/w2","thread":"subagent","agent":"a1b2"}"#,
+            HostEvent::AfterTool {
+                session_key: key("s-1"),
+                cwd: PathBuf::from("/work/pool/w2"),
+                thread: Thread::Subagent,
+                agent: Some(a1b2.clone()),
+            },
+        ),
+        EventFixture::parses(
+            "worktree-wanted",
+            br#"{"protocol":1,"session":"s-1","cwd":"/work","label":"agent-a1b2","agent":"a1b2"}"#,
+            HostEvent::WorktreeWanted {
+                session_key: key("s-1"),
+                cwd: PathBuf::from("/work"),
+                label: WorktreeLabel::fixture("agent-a1b2"),
+                agent: Some(a1b2.clone()),
+            },
+        ),
+        EventFixture::parses(
+            "worktree-returned",
+            br#"{"protocol":1,"session":"s-1","cwd":"/work","path":"/work/pool/w2"}"#,
+            HostEvent::WorktreeReturned {
+                session_key: key("s-1"),
+                cwd: PathBuf::from("/work"),
+                path: PathBuf::from("/work/pool/w2"),
+            },
+        ),
+        EventFixture::parses(
+            "agent-ended",
+            br#"{"protocol":1,"session":"s-1","cwd":"/work/pool/w2","agent":"a1b2"}"#,
+            HostEvent::AgentEnded {
+                session_key: key("s-1"),
+                cwd: PathBuf::from("/work/pool/w2"),
+                agent: a1b2.clone(),
+            },
+        ),
+        EventFixture::parses(
+            "session-ended",
+            br#"{"protocol":1,"session":"s-1","cwd":"/work"}"#,
+            HostEvent::SessionEnded {
+                session_key: key("s-1"),
+                cwd: PathBuf::from("/work"),
+            },
+        ),
+        EventFixture::refuses("worktree-wanted", br#"{"protocol":1,"session":"s-1","cwd":"/work"}"#),
+        EventFixture::refuses("worktree-wanted", br#"{"protocol":1,"session":"s-1","cwd":"/work","label":"../up"}"#),
+        EventFixture::refuses("worktree-returned", br#"{"protocol":1,"session":"s-1","cwd":"/work"}"#),
+        EventFixture::refuses("agent-ended", br#"{"protocol":1,"session":"s-1","cwd":"/work"}"#),
+        EventFixture::refuses("after-tool", br#"{"protocol":1,"session":"s-1","cwd":"/work","agent":"a b"}"#),
         EventFixture::refuses(
             "before-tool",
             br#"{"protocol":2,"session":"s-1","cwd":"/work","tool":{"kind":"other"}}"#,
@@ -345,6 +486,12 @@ pub fn fixtures() -> crate::conformance::Fixtures {
             reason: Text::new("held by alice"),
         })
         .denies("held by alice"),
+        ReplyFixture::outcome(GuardOutcome::NoWorktree {
+            reason: Text::new("every worktree is held"),
+        })
+        .on("worktree-wanted")
+        .allows()
+        .carries_notice("every worktree is held"),
     ];
     Fixtures { events, replies }
 }

@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use dibs_agent_host::adapter::ParseError;
-use dibs_agent_host::event::{EventKind, HostEvent, SessionKey, Thread, ToolCall};
+use dibs_agent_host::event::{AgentKey, EventKind, HostEvent, SessionKey, Thread, ToolCall};
 
 use crate::event::HookEvent;
 
@@ -68,11 +68,13 @@ pub fn parse(hook: HookEvent, input: &[u8]) -> Result<HostEvent, ParseError> {
         return Err(malformed("cwd is empty"));
     }
     let cwd = PathBuf::from(&input.cwd);
-    let thread = if input.agent_id.as_deref().is_some_and(|id| !id.is_empty()) {
+    let agent_id = input.agent_id.as_deref().filter(|id| !id.is_empty());
+    let thread = if agent_id.is_some() {
         Thread::Subagent
     } else {
         Thread::Main
     };
+    let agent = agent_id.and_then(|id| AgentKey::parse(id).ok());
     Ok(match hook.kind {
         EventKind::SessionStarted => HostEvent::SessionStarted { session_key, cwd },
         EventKind::BeforeTool => HostEvent::BeforeTool {
@@ -80,11 +82,13 @@ pub fn parse(hook: HookEvent, input: &[u8]) -> Result<HostEvent, ParseError> {
             cwd,
             call: tool_call(input.tool_name.as_deref(), input.tool_input.as_ref())?,
             thread,
+            agent,
         },
         EventKind::AfterTool => HostEvent::AfterTool {
             session_key,
             cwd,
             thread,
+            agent,
         },
         EventKind::PromptSubmitted => HostEvent::PromptSubmitted {
             session_key,
@@ -92,6 +96,12 @@ pub fn parse(hook: HookEvent, input: &[u8]) -> Result<HostEvent, ParseError> {
             thread,
         },
         EventKind::Stopped => HostEvent::Stopped { session_key, cwd },
+        EventKind::WorktreeWanted
+        | EventKind::WorktreeReturned
+        | EventKind::AgentEnded
+        | EventKind::SessionEnded => {
+            return Err(ParseError::UnknownEvent(hook.argument.to_owned()));
+        }
     })
 }
 

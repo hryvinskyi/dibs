@@ -3,6 +3,11 @@
 //! There is no "allow". A host has a permission system of its own, which asks its person before a
 //! tool runs or lets the tool run as the person configured; the guard never answers in its place.
 //! It either has no objection, which leaves the host's own decision standing, or it denies.
+//!
+//! A host that waits for a worktree gets a value instead: the directory to work in, or the reason
+//! there is none.
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +26,20 @@ pub enum GuardOutcome {
     /// The tool must not run; the reason says why and what to do instead.
     Deny {
         /// The reason, for the agent.
+        reason: Text,
+    },
+    /// The worktree a host asked for: the directory to work in. Given only for a wanted worktree,
+    /// and only to a host that serves worktrees.
+    Worktree {
+        /// The worktree's directory, absolute.
+        path: PathBuf,
+        /// One line for the person: where the worktree came from, when that is worth saying.
+        notice: Option<Text>,
+    },
+    /// No worktree can be given: the host's creation of one fails with this reason. Given only
+    /// for a wanted worktree, and only to a host that serves worktrees.
+    NoWorktree {
+        /// Why, and what to do about it.
         reason: Text,
     },
 }

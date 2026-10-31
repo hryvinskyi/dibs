@@ -78,6 +78,7 @@ impl HostAdapter for ClaudeCode {
             context_at_prompt: true,
             tells_subagent: true,
             push_to_idle: true,
+            serves_worktrees: false,
         }
     }
 

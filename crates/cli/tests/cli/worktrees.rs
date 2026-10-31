@@ -12,6 +12,11 @@
 //! worktree the server freed once it has been free long enough, and not again until it is taken,
 //! leaves a worktree another dibs is resetting alone, and names what lies beyond the pool's count;
 //! a server without the worktree routes has the signs of life dropped without a word.
+//!
+//! Through the hooks: a tool run in a worktree, an edit of a file in one and a command line that
+//! runs git in one leave its sign of life; a session working in a worktree another holder has is
+//! refused, and one working in a worktree nobody holds takes it again as it is; an agent's end and
+//! a session's end let go of what they held.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -215,6 +220,31 @@ impl Pool {
     fn beat(&self, name: &str) {
         let out = self.dibs(&["worktree", "beat", name]);
         assert_eq!(status(&out), 0);
+    }
+
+    /// `dibs hook neutral <event>` in `cwd`, for the hook session `sess-1234-abcd`, with the
+    /// event's own `fields`.
+    fn hook(&self, cwd: &Path, event: &str, fields: serde_json::Value) -> Output {
+        let mut input = serde_json::json!({
+            "protocol": 1,
+            "session": "sess-1234-abcd",
+            "cwd": cwd.to_string_lossy(),
+        });
+        for (key, value) in fields.as_object().unwrap() {
+            input[key] = value.clone();
+        }
+        self.setup
+            .dibs(&self.setup.alice, cwd)
+            .args(["hook", "neutral", event])
+            .write_stdin(input.to_string())
+            .output()
+            .unwrap()
+    }
+
+    /// The decision of a hook's reply, which exits 0.
+    fn decided(out: &Output) -> serde_json::Value {
+        assert_eq!(status(out), 0, "{}", text(&out.stderr));
+        json(out)
     }
 
     /// How often the idle command ran for `name`.
@@ -960,4 +990,86 @@ fn answer_one(
         return;
     }
     let _ = std::io::copy(&mut server, &mut client);
+}
+
+#[test]
+fn a_tool_an_edit_and_a_git_command_in_a_worktree_leave_its_sign_of_life_from_the_hooks() {
+    let pool = Pool::new(3);
+    let worktree = pool.take("agent-1");
+    let beat = |name: &str| pool.state_file(name, "beat");
+    let after = Pool::decided(&pool.hook(&worktree, "after-tool", serde_json::json!({})));
+    assert_eq!(after["decision"], "no_objection", "{after}");
+    assert!(beat("worktree1").exists(), "a tool ran in worktree1");
+
+    let second = pool.worktree("worktree1").with_file_name("worktree2");
+    let edit = serde_json::json!({
+        "tool": {"kind": "edit", "paths": [second.join("README.md").to_string_lossy()]}
+    });
+    Pool::decided(&pool.hook(&pool.checkout, "before-tool", edit));
+    let third = second.with_file_name("worktree3");
+    let shell = serde_json::json!({
+        "tool": {"kind": "shell", "command": format!("git -C '{}' status", third.display())}
+    });
+    Pool::decided(&pool.hook(&pool.checkout, "before-tool", shell));
+    let dir = beat("worktree1").parent().unwrap().to_path_buf();
+    for name in ["worktree2", "worktree3"] {
+        assert!(dir.join(format!("{name}.beat")).exists(), "{name}");
+    }
+}
+
+#[test]
+fn a_session_in_a_worktree_another_holder_has_is_refused_and_one_nobody_holds_is_taken_again() {
+    let pool = Pool::new(1);
+    let worktree = pool.take("agent-1");
+    let command = serde_json::json!({"tool": {"kind": "shell", "command": "ls"}});
+    let refused = Pool::decided(&pool.hook(&worktree, "before-tool", command.clone()));
+    assert_eq!(refused["decision"], "deny", "{refused}");
+    let reason = refused["reason"].as_str().unwrap();
+    assert!(
+        reason
+            .contains("worktree1 is a pool worktree held by the agent agent-1 of another session"),
+        "{reason}"
+    );
+
+    pool.release("worktree1");
+    let allowed = Pool::decided(&pool.hook(&worktree, "before-tool", command));
+    assert_eq!(allowed["decision"], "no_objection", "{allowed}");
+    let listed = pool.listed();
+    let held = &listed["worktrees"][0]["held"];
+    assert!(
+        held["session"].as_str().unwrap().ends_with("/sess-123"),
+        "the hook's session holds it now: {listed}"
+    );
+    assert_eq!(held["agent"], serde_json::Value::Null);
+    assert_eq!(pool.steps(), ["prepare worktree1"], "taken again as it is");
+
+    let ended = Pool::decided(&pool.hook(&pool.checkout, "session-ended", serde_json::json!({})));
+    assert_eq!(ended["decision"], "no_objection", "{ended}");
+    let listed = pool.listed();
+    assert_eq!(
+        listed["worktrees"][0]["held"],
+        serde_json::Value::Null,
+        "{listed}"
+    );
+    assert_eq!(listed["worktrees"][0]["record"], serde_json::Value::Null);
+}
+
+#[test]
+fn an_agents_end_lets_go_of_its_worktree_and_another_agents_end_of_nothing() {
+    let pool = Pool::new(1);
+    let worktree = pool.take("agent-1");
+    pool.release("worktree1");
+    let by_agent = serde_json::json!({
+        "agent": "b2",
+        "thread": "subagent",
+        "tool": {"kind": "shell", "command": "ls"}
+    });
+    Pool::decided(&pool.hook(&worktree, "before-tool", by_agent));
+    let held = || pool.listed()["worktrees"][0]["held"].clone();
+    assert_eq!(held()["agent"], "b2");
+    Pool::decided(&pool.hook(&worktree, "agent-ended", serde_json::json!({"agent": "c3"})));
+    assert_eq!(held()["agent"], "b2", "another agent held nothing");
+    Pool::decided(&pool.hook(&worktree, "agent-ended", serde_json::json!({"agent": "b2"})));
+    assert_eq!(held(), serde_json::Value::Null);
+    assert!(worktree.exists(), "its directory stays");
 }

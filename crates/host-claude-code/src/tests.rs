@@ -9,7 +9,7 @@ use dibs_agent_host::adapter::{HostAdapter, HostReply, ParseError};
 use dibs_agent_host::conformance::{
     self, EventFixture, Fixtures, ReadReply, ReplyFixture, ReplyReader,
 };
-use dibs_agent_host::event::{HostEvent, SessionKey, Thread, ToolCall};
+use dibs_agent_host::event::{AgentKey, HostEvent, SessionKey, Thread, ToolCall};
 use dibs_agent_host::outcome::GuardOutcome;
 use dibs_agent_host::text::Text;
 
@@ -47,6 +47,7 @@ fn before(cwd: &str, call: ToolCall, thread: Thread) -> HostEvent {
         cwd: PathBuf::from(cwd),
         call,
         thread,
+        agent: None,
     }
 }
 
@@ -132,13 +133,15 @@ fn fixtures() -> Fixtures {
                 "agent_id": "agent-abc123",
                 "agent_type": "Explore"
             })),
-            before(
-                "/work/api",
-                ToolCall::Shell {
+            HostEvent::BeforeTool {
+                session_key: key(),
+                cwd: PathBuf::from("/work/api"),
+                call: ToolCall::Shell {
                     command: "make release".to_owned(),
                 },
-                Thread::Subagent,
-            ),
+                thread: Thread::Subagent,
+                agent: AgentKey::parse("agent-abc123").ok(),
+            },
         ),
         EventFixture::parses(
             "pre-tool-use",
@@ -192,6 +195,7 @@ fn fixtures() -> Fixtures {
                 session_key: key(),
                 cwd: PathBuf::from("/work/api"),
                 thread: Thread::Main,
+                agent: None,
             },
         ),
         EventFixture::parses(
@@ -205,6 +209,7 @@ fn fixtures() -> Fixtures {
                 session_key: key(),
                 cwd: PathBuf::from("/work/api"),
                 thread: Thread::Subagent,
+                agent: AgentKey::parse("def456").ok(),
             },
         ),
         EventFixture::parses(

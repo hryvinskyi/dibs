@@ -74,6 +74,14 @@ pub fn render(event: Option<HookEvent>, outcome: &GuardOutcome) -> HostReply {
                 }),
             system_message: notice.as_ref().map(|notice| notice.one_line()),
         },
+        GuardOutcome::Worktree { notice, .. } => Output {
+            specific: None,
+            system_message: notice.as_ref().map(|notice| notice.one_line()),
+        },
+        GuardOutcome::NoWorktree { reason } => Output {
+            specific: None,
+            system_message: Some(reason.one_line()),
+        },
     };
     if output.specific.is_none() && output.system_message.is_none() {
         return HostReply::empty();
@@ -82,5 +90,5 @@ pub fn render(event: Option<HookEvent>, outcome: &GuardOutcome) -> HostReply {
     if !stdout.is_empty() {
         stdout.push(b'\n');
     }
-    HostReply { stdout, exit: 0 }
+    HostReply::stdout(stdout)
 }

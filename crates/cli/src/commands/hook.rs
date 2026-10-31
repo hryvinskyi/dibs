@@ -5,7 +5,10 @@
 //! clap refuses, a checkout or credential that cannot be used — each is an answer of no objection
 //! with a notice. `DIBS_OFF` makes every answer a silent no objection without any network call;
 //! the session is counted, on this machine, as one that ran switched off, and the run is left out
-//! of the hook timings.
+//! of the hook timings. A worktree a host wants or gives back is answered switched off or not, as
+//! the guard says; a wanted worktree's answer is the directory, or a refusal on standard error and
+//! a failing status, as the host's adapter writes them, and its run, which may wait minutes, is
+//! left out of the hook timings.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -52,10 +55,19 @@ pub fn hook(host: &str, event: &str, env: &HashMap<String, String>, started: Ins
     {
         tracing::debug!(error = %error, "the hook's reply could not be written");
     }
+    if !answer.reply.stderr.is_empty() {
+        let mut stderr = std::io::stderr().lock();
+        if let Err(error) = stderr
+            .write_all(&answer.reply.stderr)
+            .and_then(|()| stderr.flush())
+        {
+            tracing::debug!(error = %error, "the hook's message could not be written");
+        }
+    }
     if let Some(diagnostic) = &answer.diagnostic {
         eprintln!("{}", diagnostic.one_line());
     }
-    if let Some(kind) = answer.kind.filter(|_| !off) {
+    if let Some(kind) = answer.kind.filter(|kind| !off && kind.timed()) {
         record(env, host, kind, started);
     }
     ExitCode::from(exit_status(answer.reply.exit))

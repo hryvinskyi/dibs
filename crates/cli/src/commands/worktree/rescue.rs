@@ -14,6 +14,7 @@ use std::process::Command;
 
 use time::{OffsetDateTime, UtcOffset};
 
+use dibs_client::api::Member;
 use dibs_client::checkout::FILE_NAME;
 use dibs_domain::worktree::WorktreeName;
 
@@ -43,6 +44,17 @@ pub struct Author {
     pub name: String,
     /// The address.
     pub email: String,
+}
+
+impl Author {
+    /// The member as a rescue commit's author: their name, and an address made of their handle
+    /// that reaches nobody, for a worktree whose git knows no address of its own.
+    pub fn of(member: &Member) -> Self {
+        Self {
+            name: member.display_name.to_string(),
+            email: format!("{}@users.dibs.invalid", member.handle),
+        }
+    }
 }
 
 /// The git of one worktree.

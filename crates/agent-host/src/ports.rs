@@ -2,7 +2,8 @@
 //! implement them over plain values. Nothing behind them is reached any other way: the guard reads
 //! no clock, file or network itself.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -23,9 +24,10 @@ use dibs_domain::review::PrRef;
 use dibs_domain::session::HostName;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::slot::{Liveness, Purpose, SlotName};
+use dibs_domain::worktree::{AgentKey, WorktreeName};
 
-use crate::adapter::HostId;
-use crate::event::SessionKey;
+use crate::adapter::{HostId, OwnWorktrees};
+use crate::event::{SessionKey, WorktreeLabel};
 use crate::upkeep::Due;
 
 /// Why a port could not do what it was asked.
@@ -560,6 +562,143 @@ pub trait Workspaces {
     /// # Errors
     /// [`PortError::Refused`] when the checkout's configuration cannot be used.
     fn open(&self, cwd: &Path) -> Result<Option<Box<dyn Workspace + '_>>, PortError>;
+
+    /// Git, for the worktrees a host would make and remove itself, in any repository, governed or
+    /// not.
+    fn git(&self) -> &dyn Git;
+}
+
+/// What became of a worktree the host would have removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    /// It was removed.
+    Removed,
+    /// Nothing is there to remove.
+    Absent,
+    /// It was left in place; the sentence says why (it holds changes, it is no worktree).
+    Kept(String),
+}
+
+/// Git, as the guard uses it to stand in for a host's own worktrees.
+pub trait Git {
+    /// Makes the worktree the host would make for `label` in the repository `cwd` lies in, as
+    /// `own` lays it out, on a new branch from the commit checked out there; answers its
+    /// directory. A worktree already made there for the label is answered as it is.
+    ///
+    /// # Errors
+    /// The sentence saying why no worktree could be made.
+    fn make_worktree(
+        &self,
+        cwd: &Path,
+        own: &OwnWorktrees,
+        label: &WorktreeLabel,
+    ) -> Result<PathBuf, String>;
+
+    /// Removes the worktree at `path` as git removes one: never by force, so a worktree that holds
+    /// changes is kept.
+    fn remove_worktree(&self, path: &Path) -> Removal;
+}
+
+/// The holder of a pool worktree: a session of a host, or one agent of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeHolder {
+    /// The session.
+    pub session: SessionRef,
+    /// The agent; `None` for the session's main agent.
+    pub agent: Option<AgentKey>,
+}
+
+/// What a take of a pool worktree came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeTake {
+    /// The holder holds this worktree, ready to work in.
+    Took {
+        /// The worktree.
+        worktree: WorktreeName,
+        /// Its directory, absolute.
+        path: PathBuf,
+        /// What the take did on the way that the person should know: work rescued onto a branch, a
+        /// worktree set aside. Sentences.
+        notes: Vec<String>,
+    },
+    /// Every worktree of the pool stayed held, or was being prepared, until the deadline. The
+    /// sentence names the holders.
+    Busy(String),
+    /// The pool could not serve a worktree at all: the server is unreachable, too old or refused,
+    /// or no worktree of the pool could be made ready. The sentence says why.
+    CannotServe(String),
+}
+
+/// A hold of a pool worktree this machine keeps a record of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeRecord {
+    /// The worktree.
+    pub worktree: WorktreeName,
+    /// Whether the holder is the session asked about, or one of its agents.
+    pub this_session: bool,
+    /// The holder's agent; `None` for a session itself.
+    pub agent: Option<AgentKey>,
+    /// Why it was taken, when the record says.
+    pub purpose: Option<Purpose>,
+    /// When it was taken.
+    pub since: OffsetDateTime,
+}
+
+/// What taking a worktree again by its name came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retaken {
+    /// The holder holds it now.
+    Took,
+    /// Another holder has it.
+    Held {
+        /// That holder's agent; `None` for a session.
+        agent: Option<AgentKey>,
+        /// Why they took it.
+        purpose: Option<Purpose>,
+    },
+}
+
+/// The pool of worktrees the checkout of a workspace lends, or belongs to.
+pub trait WorktreePool {
+    /// Takes a worktree of the pool for `holder` and makes it ready, finishing within `deadline`:
+    /// the holder's own worktree again when it holds one already, untouched.
+    fn take(&self, holder: &WorktreeHolder, deadline: Duration) -> WorktreeTake;
+
+    /// Takes the worktree `name` again for `holder`, as it is: nothing is rescued or reset, as the
+    /// holder is already at work in it.
+    ///
+    /// # Errors
+    /// [`PortError`] when the server gave no decision.
+    fn retake(&self, name: &WorktreeName, holder: &WorktreeHolder) -> Result<Retaken, PortError>;
+
+    /// Releases the hold of `name` this machine's record names, for that holder only, and forgets
+    /// the record. Nothing is released when no record is kept.
+    ///
+    /// # Errors
+    /// [`PortError`] when the server gave no decision.
+    fn release(&self, name: &WorktreeName) -> Result<(), PortError>;
+
+    /// Ends `session` on the server, which frees every hold of it and of its agents, and forgets
+    /// this machine's records of them.
+    ///
+    /// # Errors
+    /// [`PortError`] when the server gave no decision.
+    fn end_session(&self, session: &SessionRef) -> Result<(), PortError>;
+
+    /// Every hold of the pool this machine keeps a record of, each saying whether `session` or one
+    /// of its agents holds it. Read from this machine alone.
+    fn records(&self, session: &SessionRef) -> Vec<WorktreeRecord>;
+
+    /// The newest branch the work found in `name` was rescued onto, when there is one.
+    fn rescued(&self, name: &WorktreeName) -> Option<String>;
+
+    /// Leaves a sign of life of the holder working in `name` at `at`, on this machine only. A sign
+    /// that cannot be left is lost.
+    fn touch(&self, name: &WorktreeName, at: OffsetDateTime);
+
+    /// The worktree of the pool `path` (absolute, or relative to `cwd`) lies in, when it lies in
+    /// one.
+    fn worktree_at(&self, cwd: &Path, path: &Path) -> Option<WorktreeName>;
 }
 
 /// One governed checkout and the project it belongs to.
@@ -600,6 +739,10 @@ pub trait Workspace {
 
     /// What this machine counts for the project's reports.
     fn tallies(&self) -> &dyn Tallies;
+
+    /// The pool of worktrees the checkout lends, or, when it is one of a pool's worktrees, the
+    /// pool it belongs to; `None` when it has none.
+    fn worktree_pool(&self) -> Option<&dyn WorktreePool>;
 }
 
 /// What this machine counts for the project's reports: kinds and counts only, never a path, a

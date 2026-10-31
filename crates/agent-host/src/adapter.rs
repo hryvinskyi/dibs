@@ -5,6 +5,8 @@
 //! always gives the same event and the same outcome always gives the same reply.
 
 use std::fmt;
+use std::path::Path;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -37,11 +39,14 @@ impl fmt::Display for HostId {
     }
 }
 
-/// What the hook process prints on standard output and the status it exits with.
+/// What the hook process prints on standard output and standard error, and the status it exits
+/// with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostReply {
     /// Standard output.
     pub stdout: Vec<u8>,
+    /// Standard error: what a host shows its person of a hook whose output it reads as a value.
+    pub stderr: Vec<u8>,
     /// The exit status.
     pub exit: u8,
 }
@@ -49,10 +54,64 @@ pub struct HostReply {
 impl HostReply {
     /// Nothing printed, exit `0`: the form of "no objection" every command hook understands.
     pub fn empty() -> Self {
+        Self::stdout(Vec::new())
+    }
+
+    /// `stdout` on standard output, nothing on standard error, exit `0`.
+    pub fn stdout(stdout: Vec<u8>) -> Self {
         Self {
-            stdout: Vec::new(),
+            stdout,
+            stderr: Vec::new(),
             exit: 0,
         }
+    }
+}
+
+/// Where a host makes a worktree of its own, which the guard makes in its place when the pool of
+/// worktrees cannot serve one: `<top of the repository>/<dir>/<label>`, on a new branch
+/// `<branch_prefix><label>` from the commit checked out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OwnWorktrees {
+    /// The directory the host's worktrees live in, relative to the top of the repository, with
+    /// `/` separators.
+    pub dir: &'static str,
+    /// What the name of a worktree's branch starts with.
+    pub branch_prefix: &'static str,
+}
+
+impl OwnWorktrees {
+    /// Whether `dir` is a relative path that stays inside the repository: not empty, no root, no
+    /// `..` and no `.` component.
+    pub fn is_inside(&self) -> bool {
+        let dir = Path::new(self.dir);
+        !self.dir.is_empty()
+            && !self.dir.starts_with('/')
+            && !self.dir.contains('\\')
+            && dir.is_relative()
+            && self
+                .dir
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+    }
+}
+
+/// How a host that serves worktrees waits for one, declared by its adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorktreeTerms {
+    /// How long the host waits for the hook that answers a wanted worktree before it gives up.
+    pub hook_timeout: Duration,
+    /// Where the host would make a worktree of its own.
+    pub own: OwnWorktrees,
+}
+
+impl WorktreeTerms {
+    /// How long the guard leaves itself out of the hook's timeout to answer: a minute, so that a
+    /// take that runs to its deadline still answers before the host gives up.
+    pub const MARGIN: Duration = Duration::from_secs(60);
+
+    /// How long a take may run: the hook's timeout less [`Self::MARGIN`].
+    pub fn deadline(&self) -> Duration {
+        self.hook_timeout.saturating_sub(Self::MARGIN)
     }
 }
 
@@ -120,5 +179,47 @@ pub trait HostAdapter: Send + Sync {
     /// exactly when [`Capabilities::push_to_idle`] is set. None by default.
     fn push_extension(&self) -> Option<Box<dyn McpExtension>> {
         None
+    }
+
+    /// How the host waits for a worktree and where it would make one itself: present exactly when
+    /// [`Capabilities::serves_worktrees`] is set. None by default.
+    fn worktree_terms(&self) -> Option<WorktreeTerms> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_take_leaves_a_minute_of_the_hooks_timeout_to_answer() {
+        let own = OwnWorktrees {
+            dir: "tool/worktrees",
+            branch_prefix: "worktree-",
+        };
+        let terms = WorktreeTerms {
+            hook_timeout: Duration::from_secs(900),
+            own,
+        };
+        assert_eq!(terms.deadline(), Duration::from_secs(840));
+        let short = WorktreeTerms {
+            hook_timeout: Duration::from_secs(30),
+            own,
+        };
+        assert_eq!(short.deadline(), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_hosts_own_worktrees_live_inside_the_repository() {
+        let own = |dir| OwnWorktrees {
+            dir,
+            branch_prefix: "w-",
+        };
+        assert!(own("tool/worktrees").is_inside());
+        assert!(own("worktrees").is_inside());
+        for outside in ["", "/tmp/w", "../w", "a/../../w", "a//b", "./w", "a\\b"] {
+            assert!(!own(outside).is_inside(), "{outside}");
+        }
     }
 }

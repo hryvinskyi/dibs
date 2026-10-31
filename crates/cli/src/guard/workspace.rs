@@ -1,7 +1,8 @@
 //! The governed checkouts the guard works in: the nearest `.dibs.toml` above an event's directory,
-//! the repository it says it is (confirmed against its `origin`), and the project's state, server
-//! and upkeep.
+//! the repository it says it is (confirmed against its `origin`), the project's state, server and
+//! upkeep, and the pool of worktrees the checkout lends or belongs to.
 
+use std::cell::OnceCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -9,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
 use dibs_agent_host::ports::{
-    CoordinationGateway, DeliveryLedger, LocalCache, PortError, Tallies, Upkeep, Workspace,
-    Workspaces,
+    CoordinationGateway, DeliveryLedger, Git as HostGit, LocalCache, PortError, Tallies, Upkeep,
+    Workspace, Workspaces, WorktreePool,
 };
 use dibs_agent_host::upkeep::is_fresh;
 use dibs_client::branch::{current_branch, head};
@@ -31,6 +32,7 @@ use crate::guard::ledger::SessionLedgers;
 use crate::guard::remote::{Remote, RemoteError, checkout_of};
 use crate::guard::report::StateTallies;
 use crate::guard::upkeep::DetachedSync;
+use crate::guard::worktrees::{ClientWorktreePool, OwnWorktreeGit};
 
 /// The variable that names a git directory other than the checkout's own.
 pub const GIT_DIR: &str = "GIT_DIR";
@@ -41,12 +43,16 @@ pub const ORIGIN_FRESH: Duration = Duration::minutes(10);
 /// Every checkout on this machine, found from the environment the binary received.
 pub struct ClientWorkspaces {
     env: HashMap<String, String>,
+    git: OwnWorktreeGit,
 }
 
 impl ClientWorkspaces {
     /// The checkouts, with the client's directories taken from `env`.
     pub fn new(env: HashMap<String, String>) -> Self {
-        Self { env }
+        Self {
+            env,
+            git: OwnWorktreeGit,
+        }
     }
 }
 
@@ -65,8 +71,15 @@ impl Workspaces for ClientWorkspaces {
         let remote = Remote::new(&checkout, &locations, &self.env);
         let git_dir = self.env.get(GIT_DIR).map(PathBuf::from);
         Ok(Some(Box::new(ClientWorkspace::new(
-            checkout, remote, git_dir,
+            checkout,
+            remote,
+            git_dir,
+            locations.state_dir().to_path_buf(),
         ))))
+    }
+
+    fn git(&self) -> &dyn HostGit {
+        &self.git
     }
 }
 
@@ -80,12 +93,23 @@ pub struct ClientWorkspace {
     upkeep: DetachedSync,
     ledger: SessionLedgers,
     tallies: StateTallies,
+    remote: Remote,
+    state_base: PathBuf,
+    pool: OnceCell<Option<ClientWorktreePool>>,
 }
 
 impl ClientWorkspace {
-    fn new(checkout: Checkout, remote: Remote, git_dir: Option<PathBuf>) -> Self {
+    fn new(
+        checkout: Checkout,
+        remote: Remote,
+        git_dir: Option<PathBuf>,
+        state_base: PathBuf,
+    ) -> Self {
         let state = remote.state.clone();
         Self {
+            remote: remote.clone(),
+            state_base,
+            pool: OnceCell::new(),
             cache: StateCache::new(state.clone(), checkout.root()),
             upkeep: DetachedSync::new(state.clone(), checkout.root()),
             ledger: SessionLedgers::new(state.clone()),
@@ -181,5 +205,12 @@ impl Workspace for ClientWorkspace {
 
     fn tallies(&self) -> &dyn Tallies {
         &self.tallies
+    }
+
+    fn worktree_pool(&self) -> Option<&dyn WorktreePool> {
+        self.pool
+            .get_or_init(|| ClientWorktreePool::of(&self.checkout, &self.remote, &self.state_base))
+            .as_ref()
+            .map(|pool| pool as &dyn WorktreePool)
     }
 }

@@ -41,7 +41,7 @@ use crate::guard::SystemClock;
 use crate::guard::machine::machine_id;
 
 /// The purpose of a take that names none.
-const DEFAULT_PURPOSE: &str = "work in a worktree";
+pub const DEFAULT_PURPOSE: &str = "work in a worktree";
 
 /// Makes the key a take mints for a holder that names no agent of its own, so that two takes of
 /// one session are two holders.
@@ -160,10 +160,7 @@ async fn take(args: WorktreeTakeArgs, ctx: &Context, ids: &dyn IdGen) -> Result<
         pool: &pool,
         commands: &ShellCommands,
         clock: &SystemClock,
-        author: Author {
-            name: member.display_name.to_string(),
-            email: format!("{}@users.dibs.invalid", member.handle),
-        },
+        author: Author::of(member),
         notes: &notes,
     };
     let ask = Ask {
