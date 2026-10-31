@@ -674,6 +674,54 @@ fn where_no_pool_lends_a_worktree_dibs_makes_claude_codes_own_and_says_why() {
 }
 
 #[test]
+fn a_pool_with_nothing_prepared_makes_claude_codes_own_worktree_at_once_and_prepares_one_meanwhile()
+{
+    let setup = Setup::new();
+    let widgets = setup.pool(2);
+
+    let asked = std::time::Instant::now();
+    let made = worktree_create(&setup, "bob", &widgets, "agent-x");
+    assert_eq!(made.status.code(), Some(0), "{}", text(&made.stderr));
+    assert!(
+        asked.elapsed() < std::time::Duration::from_secs(60),
+        "answered without waiting for a preparation: {:?}",
+        asked.elapsed()
+    );
+    let own = canonical(&widgets.join(".claude/worktrees/agent-x"));
+    assert_eq!(last_line(&made), own);
+    assert!(own.join(".git").is_file(), "a linked worktree");
+    let said = text(&made.stderr);
+    assert!(
+        said.contains("the pool of worktrees is still being prepared")
+            && said.contains("without an environment of its own")
+            && said.contains("worktree1 is being prepared"),
+        "{said}"
+    );
+
+    let prepared = setup.pool_worktree("worktree1").join(".dibs.toml");
+    let started = std::time::Instant::now();
+    while !prepared.exists() {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "the background preparation never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !setup.pool_worktree("worktree2").exists(),
+        "one preparation was started, not one per worktree"
+    );
+
+    let next = worktree_create(&setup, "bob", &widgets, "agent-y");
+    assert_eq!(next.status.code(), Some(0), "{}", text(&next.stderr));
+    assert_eq!(
+        last_line(&next),
+        setup.pool_worktree("worktree1"),
+        "once prepared, the pool lends it"
+    );
+}
+
+#[test]
 fn a_repeated_request_for_the_same_agents_worktree_gets_it_back_untouched() {
     let setup = Setup::new();
     let widgets = setup.pool(2);

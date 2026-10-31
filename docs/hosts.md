@@ -185,17 +185,20 @@ What the guard does:
 - **A worktree wanted** is taken from the pool for its holder, the session or the named agent of it, within the host's
   deadline: the `hook_timeout` of the adapter's `worktree_terms()` less a minute. The take prefers a prepared
   worktree whose environment runs, resets it, and never prepares one on this path, since a first preparation pulls
-  images and installs dependencies and does not fit. When only unprepared worktrees are free, it starts
-  `dibs worktree prepare <name>` in the background and answers busy, with a sentence saying so. The same holder asking
-  again, a retried hook, gets the same worktree untouched.
+  images and installs dependencies and does not fit. When no prepared worktree is free while the pool still has
+  worktrees nobody works in that are not prepared yet (a new pool, until its first preparation finishes), it starts
+  `dibs worktree prepare <name>` in the background for the first one no other run prepares already, and answers at
+  once that the pool is still being prepared. Only when every worktree it could hand out is held does it wait for one
+  to be freed. The same holder asking again, a retried hook, gets the same worktree untouched.
 - **The answer is a directory, a refusal, or the host's own worktree.** The refusal, a sentence for the host to fail the
   creation with, is given only when every worktree of the pool stayed held until the deadline, or when the pool cannot
   serve one and the host's own worktree cannot be made either. In every other case, whether dibs is switched off, no
   checkout governs the directory, the checkout has no `[worktrees]` table, the server cannot be reached or is older
-  than the client (a `404` on a worktree route), or no worktree of the pool could be made ready, the guard makes
-  the worktree the host would have made, where `worktree_terms().own` says (a directory under the top of the
-  repository, a new branch from the commit checked out), and says why in a line for the person. Making a worktree
-  never fails because of dibs.
+  than the client (a `404` on a worktree route), no worktree of the pool could be made ready, or the pool is still
+  being prepared, the guard makes the worktree the host would have made, where `worktree_terms().own` says (a
+  directory under the top of the repository, a new branch from the commit checked out), and says why in a line for
+  the person. For a pool still being prepared, that line says the worktree is a plain one without an environment of
+  its own, and which worktrees are being prepared. Making a worktree never fails because of dibs.
 - **A worktree returned** that is a pool worktree its session (or one of its agents) holds is released, never
   deleted. Any other worktree is removed as git removes one, without force; a dirty one is kept, with a line saying so.
 - **An agent ended** releases the holds this machine recorded for that agent; **a session ended** ends the session on

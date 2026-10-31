@@ -201,8 +201,8 @@ async fn take(args: WorktreeTakeArgs, ctx: &Context, ids: &dyn IdGen) -> Result<
 }
 
 /// What a take came to, as a command or a tool answers it: the worktree made ready, or the
-/// [`Failure`] of a pool whose worktrees are all held, of a worktree that would not become ready,
-/// or of the server.
+/// [`Failure`] of a pool whose worktrees are all held, of a pool still being prepared, of a
+/// worktree that would not become ready, or of the server.
 ///
 /// # Errors
 /// The [`Failure`] the take's outcome stands for.
@@ -213,6 +213,9 @@ pub fn took(
     match taken {
         Ok(Taken::Took(taken)) => Ok(taken),
         Ok(Taken::Busy { sentence, .. }) => Err(Failure::refused("worktree_busy", sentence)),
+        Ok(Taken::Preparing { sentence, .. }) => {
+            Err(Failure::refused("worktree_preparing", sentence))
+        }
         Err(TakeError::Server(error)) => Err(connection.failed(error)),
         Err(TakeError::Unusable(sentence)) => Err(Failure::refused("worktree_unusable", sentence)),
     }

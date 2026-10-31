@@ -178,8 +178,8 @@ impl ClientWorktreePool {
     }
 }
 
-/// What a take came to, as the guard reads it: anything but a worktree made ready or every
-/// worktree held is a pool that cannot serve.
+/// What a take came to, as the guard reads it: a worktree made ready, every worktree held, a pool
+/// still being prepared; anything else is a pool that cannot serve.
 fn took(taken: Result<Taken, TakeError>, notes: Vec<String>) -> WorktreeTake {
     match taken {
         Ok(Taken::Took(taken)) => WorktreeTake::Took {
@@ -188,6 +188,7 @@ fn took(taken: Result<Taken, TakeError>, notes: Vec<String>) -> WorktreeTake {
             notes,
         },
         Ok(Taken::Busy { sentence, .. }) => WorktreeTake::Busy(sentence),
+        Ok(Taken::Preparing { sentence, .. }) => WorktreeTake::Preparing(sentence),
         Err(TakeError::Server(error)) => WorktreeTake::CannotServe(sentence(&error.to_string())),
         Err(TakeError::Unusable(reason)) => WorktreeTake::CannotServe(reason),
     }
@@ -437,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn a_take_that_neither_made_a_worktree_ready_nor_found_all_held_cannot_serve() {
+    fn a_take_answers_held_and_being_prepared_apart_and_anything_else_cannot_serve() {
         let ready = Taken::Took(TakenWorktree {
             worktree: name("worktree2"),
             path: PathBuf::from("/pool/worktree2"),
@@ -458,11 +459,21 @@ mod tests {
         let busy = Taken::Busy {
             sentence: "Every worktree is held.".to_owned(),
             held: Vec::new(),
-            preparing: None,
         };
         assert_eq!(
             took(Ok(busy), Vec::new()),
             WorktreeTake::Busy("Every worktree is held.".to_owned())
+        );
+        let preparing = Taken::Preparing {
+            sentence: "worktree1 is being prepared and can be taken once ready.".to_owned(),
+            preparing: Some(name("worktree1")),
+        };
+        assert_eq!(
+            took(Ok(preparing), Vec::new()),
+            WorktreeTake::Preparing(
+                "worktree1 is being prepared and can be taken once ready.".to_owned()
+            ),
+            "a pool still being prepared is not a pool whose every worktree is held"
         );
         assert_eq!(
             took(

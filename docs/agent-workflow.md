@@ -273,7 +273,8 @@ slots above.
   final: you hold no hold on it, so work in a worktree you hold, or take your own. A worktree nobody holds that you were
   already working in (after `/clear`, or a resumed agent) is taken again for you as it is.
 - If the pool cannot serve the worktree your host asked for — dibs switched off, no pool in this checkout, a server that
-  cannot be reached — dibs says so and your host gets the plain git worktree it would have made itself, without an
+  cannot be reached, a pool whose worktrees are still being prepared (a new pool has none ready until its first
+  preparation finishes) — dibs says so and your host gets the plain git worktree it would have made itself, without an
   environment of its own. The work goes on; tell your person if you needed the environment.
 
 ## Hot files

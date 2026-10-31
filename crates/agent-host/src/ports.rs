@@ -621,9 +621,12 @@ pub enum WorktreeTake {
         /// worktree set aside. Sentences.
         notes: Vec<String>,
     },
-    /// Every worktree of the pool stayed held, or was being prepared, until the deadline. The
-    /// sentence names the holders.
+    /// Every worktree of the pool stayed held until the deadline. The sentence names the holders.
     Busy(String),
+    /// No prepared worktree was free while the pool still has worktrees nobody holds that are not
+    /// prepared yet, and a preparation does not fit in the deadline. The sentence says which are
+    /// being prepared.
+    Preparing(String),
     /// The pool could not serve a worktree at all: the server is unreachable, too old or refused,
     /// or no worktree of the pool could be made ready. The sentence says why.
     CannotServe(String),

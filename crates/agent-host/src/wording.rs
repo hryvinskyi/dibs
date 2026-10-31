@@ -992,6 +992,18 @@ pub const WORKTREE_UNGOVERNED: &str =
 pub const WORKTREE_NO_POOL: &str =
     "this checkout lends no worktrees: its .dibs.toml has no [worktrees] table";
 
+/// Why the pool of worktrees did not serve a wanted worktree while it is still being prepared.
+pub const WORKTREE_PREPARING: &str = "the pool of worktrees is still being prepared";
+
+/// The notice of a worktree made as the host would make it while the pool of worktrees is still
+/// being prepared, as `preparing` says.
+pub fn own_worktree_while_preparing(preparing: &str) -> String {
+    format!(
+        "dibs: {WORKTREE_PREPARING}, so this is a plain git worktree, without an environment of its own. {}",
+        sentence(preparing)
+    )
+}
+
 /// The notice of a worktree made as the host would make it, the pool of worktrees not having
 /// served one for `reason`.
 pub fn own_worktree(reason: &str) -> String {

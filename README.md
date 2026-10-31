@@ -366,8 +366,10 @@ one that somebody still works in by this machine's records: a sign of life left 
 that agent, so two takes of one session are two holders; the same `--agent` taking again gets the same worktree, untouched,
 unless the previous reset never finished. `--wait` (at most 14 minutes) asks again every 5 seconds while every worktree is
 held; the exit status is 1 when none could be had, and the answer names who holds them. `--deadline` is for a caller that
-must answer in time (a host's hook): it waits only as long as leaves a reset its time, never prepares, and starts
-`dibs worktree prepare` in the background for the first worktree that needs it instead. `dibs_worktree_take`,
+must answer in time (a host's hook): it never prepares. When no prepared worktree is free while some worktree nobody
+works in is not prepared yet, it starts `dibs worktree prepare` in the background for the first that needs it and answers
+at once that the pool is still being prepared (exit status 1, code `worktree_preparing`); only when every worktree it
+could hand out is held does it wait, as long as leaves a reset its time. `dibs_worktree_take`,
 `dibs_worktree_release` and `dibs_worktrees` are the same operations as tools of `dibs mcp`; every tool take is an agent of
 its own as well.
 
@@ -500,12 +502,16 @@ sessions: the first session to claim it shows it. It is framed as a teammate's r
 **Worktrees.** In a checkout that lends a [pool](#worktree-pools), the plugin answers Claude Code's `WorktreeCreate` hook
 (every subagent with `isolation: worktree`, `EnterWorktree`, `--worktree`) with a worktree of the pool instead of letting
 Claude Code make one, and releases it when the subagent or session ends (`SubagentStop`, `SessionEnd`, `WorktreeRemove`).
-The hook gets a 900 second timeout and answers within 840 seconds: it waits for a free worktree for up to 4 minutes, what
-that deadline leaves a reset of up to 10 minutes, and never prepares a worktree itself. It answers with the worktree's path
-or, only when every worktree stayed held, with a refusal that fails the creation. Everywhere else, whether
-the checkout has no pool, dibs is switched off, missing or too old, or the server cannot be reached, Claude Code gets
-the worktree it would have made itself (`.claude/worktrees/<name>` on a new branch `worktree-<name>`), and a line says the
-pool was not used. Creating a worktree never fails because of dibs.
+The hook gets a 900 second timeout and answers within 840 seconds: when every worktree is held it waits for one to be
+freed for up to 4 minutes, what that deadline leaves a reset of up to 10 minutes, and it never prepares a worktree itself.
+It answers with the worktree's path or, only when every worktree stayed held, with a refusal that fails the creation.
+When no prepared worktree is free but the pool still has worktrees not prepared yet (a new pool, until its first
+preparation finishes), dibs starts preparing one in the background and Claude Code at once gets the worktree it would
+have made itself, with a line saying the pool is still being prepared and the worktree has no environment of its own;
+later subagents get pool worktrees as they become ready. Everywhere else, whether the checkout has no pool, dibs is
+switched off, missing or too old, or the server cannot be reached, Claude Code gets the worktree it would have made itself
+(`.claude/worktrees/<name>` on a new branch `worktree-<name>`), and a line says the pool was not used. Creating a worktree
+never fails because of dibs.
 
 #### Waking a session that waits for you (opt-in)
 

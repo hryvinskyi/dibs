@@ -61,6 +61,15 @@ pub fn to_prepare(facts: &[Facts]) -> Option<WorktreeName> {
         .map(|facts| facts.name.clone())
 }
 
+/// The worktrees not prepared yet that a take under a deadline is waiting on rather than refused
+/// by: neither broken nor in use, whether a preparation of them runs already or not.
+pub fn unprepared(facts: &[Facts]) -> Vec<&Facts> {
+    facts
+        .iter()
+        .filter(|facts| !facts.prepared && !facts.broken && !facts.in_use)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +176,40 @@ mod tests {
             Some("worktree4")
         );
         assert_eq!(to_prepare(&facts[..3]), None);
+    }
+
+    #[test]
+    fn unprepared_worktrees_are_those_neither_broken_nor_in_use_being_prepared_or_not() {
+        let facts = [
+            worktree("worktree1"),
+            Facts {
+                prepared: false,
+                locked: true,
+                ..worktree("worktree2")
+            },
+            Facts {
+                prepared: false,
+                broken: true,
+                ..worktree("worktree3")
+            },
+            Facts {
+                prepared: false,
+                in_use: true,
+                ..worktree("worktree4")
+            },
+            Facts {
+                prepared: false,
+                ..worktree("worktree5")
+            },
+        ];
+        let names: Vec<&str> = unprepared(&facts)
+            .into_iter()
+            .map(|facts| facts.name.as_str())
+            .collect();
+        assert_eq!(names, ["worktree2", "worktree5"]);
+        assert!(
+            unprepared(&facts[..1]).is_empty(),
+            "a pool whose every worktree is prepared has none left to wait on"
+        );
     }
 }

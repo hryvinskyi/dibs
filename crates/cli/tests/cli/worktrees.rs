@@ -597,6 +597,7 @@ fn a_waiting_take_gets_the_worktree_once_its_holder_releases_it() {
 #[test]
 fn a_take_under_a_deadline_never_prepares_and_starts_a_preparation_instead() {
     let pool = Pool::new(2);
+    let asked = Instant::now();
     let out = pool.dibs(&[
         "worktree",
         "take",
@@ -604,10 +605,25 @@ fn a_take_under_a_deadline_never_prepares_and_starts_a_preparation_instead() {
         "agent-1",
         "--deadline",
         "30s",
+        "--json",
     ]);
     assert_eq!(status(&out), 1);
-    let said = text(&out.stderr);
+    assert!(
+        asked.elapsed() < Duration::from_secs(10),
+        "a pool still being prepared is answered at once, not waited on: {:?}",
+        asked.elapsed()
+    );
+    let refused: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        refused["error"]["code"], "worktree_preparing",
+        "not every worktree is held: {refused}"
+    );
+    let said = refused["error"]["message"].as_str().unwrap();
     assert!(said.contains("worktree1 is being prepared"), "{said}");
+    assert!(
+        !said.contains("worktree2"),
+        "one preparation at a time: {said}"
+    );
     let started = Instant::now();
     while !pool.worktree("worktree1").join(".dibs.toml").exists() {
         assert!(

@@ -3,9 +3,9 @@
 //! the check that nobody works in a pool worktree their session does not hold.
 //!
 //! A worktree wanted is answered whatever else stands: switched off, outside every governed
-//! checkout, in a checkout that lends no worktrees, with the server out of reach. Every one of
-//! those makes the worktree the host would have made itself, and says why; only a pool whose every
-//! worktree stayed held until the host's deadline refuses. A worktree given back is released when
+//! checkout, in a checkout that lends no worktrees, with the server out of reach, in a pool still
+//! being prepared. Every one of those makes the worktree the host would have made itself, and says
+//! why; only a pool whose every worktree stayed held until the host's deadline refuses. A worktree given back is released when
 //! it is a pool worktree its session holds, and never deleted; any other worktree given back is
 //! removed as git removes one, never by force.
 
@@ -75,21 +75,21 @@ impl Guard<'_> {
         let Some(terms) = served(adapter) else {
             return GuardOutcome::silent();
         };
-        let reason = if switched_off {
-            wording::WORKTREE_SWITCHED_OFF.to_owned()
+        let unserved = if switched_off {
+            Unserved::because(wording::WORKTREE_SWITCHED_OFF)
         } else {
             match self.pool_answer(cwd, holder, &terms) {
                 Ok(outcome) => return outcome,
-                Err(reason) => reason,
+                Err(unserved) => unserved,
             }
         };
         match self.workspaces.git().make_worktree(cwd, &terms.own, label) {
             Ok(path) => GuardOutcome::Worktree {
                 path,
-                notice: Some(Text::new(wording::own_worktree(&reason))),
+                notice: Some(Text::new(unserved.notice)),
             },
             Err(failure) => GuardOutcome::NoWorktree {
-                reason: Text::new(wording::no_own_worktree(&reason, &failure)),
+                reason: Text::new(wording::no_own_worktree(&unserved.reason, &failure)),
             },
         }
     }
@@ -100,14 +100,14 @@ impl Guard<'_> {
         cwd: &Path,
         holder: &WorktreeHolder,
         terms: &WorktreeTerms,
-    ) -> Result<GuardOutcome, String> {
+    ) -> Result<GuardOutcome, Unserved> {
         let workspace = match self.workspaces.open(cwd) {
             Ok(Some(workspace)) => workspace,
-            Ok(None) => return Err(wording::WORKTREE_UNGOVERNED.to_owned()),
-            Err(error) => return Err(error.to_string()),
+            Ok(None) => return Err(Unserved::because(wording::WORKTREE_UNGOVERNED)),
+            Err(error) => return Err(Unserved::because(&error.to_string())),
         };
         let Some(pool) = workspace.worktree_pool() else {
-            return Err(wording::WORKTREE_NO_POOL.to_owned());
+            return Err(Unserved::because(wording::WORKTREE_NO_POOL));
         };
         match pool.take(holder, terms.deadline()) {
             WorktreeTake::Took { path, notes, .. } => Ok(GuardOutcome::Worktree {
@@ -117,7 +117,11 @@ impl Guard<'_> {
             WorktreeTake::Busy(busy) => Ok(GuardOutcome::NoWorktree {
                 reason: Text::new(wording::worktrees_busy(&busy)),
             }),
-            WorktreeTake::CannotServe(reason) => Err(reason),
+            WorktreeTake::Preparing(preparing) => Err(Unserved {
+                reason: wording::WORKTREE_PREPARING.to_owned(),
+                notice: wording::own_worktree_while_preparing(&preparing),
+            }),
+            WorktreeTake::CannotServe(reason) => Err(Unserved::because(&reason)),
         }
     }
 
@@ -154,6 +158,25 @@ impl Guard<'_> {
         match self.workspaces.git().remove_worktree(&path) {
             Removal::Removed | Removal::Absent => GuardOutcome::silent(),
             Removal::Kept(why) => GuardOutcome::notice(wording::worktree_kept(&path, &why)),
+        }
+    }
+}
+
+/// Why the pool did not serve a wanted worktree, and the notice of the host's own worktree made
+/// in its place.
+struct Unserved {
+    /// The reason, to sit inside another sentence.
+    reason: String,
+    /// The notice of the host's own worktree.
+    notice: String,
+}
+
+impl Unserved {
+    /// The pool did not serve for `reason`, and the notice says so.
+    fn because(reason: &str) -> Self {
+        Self {
+            reason: reason.to_owned(),
+            notice: wording::own_worktree(reason),
         }
     }
 }

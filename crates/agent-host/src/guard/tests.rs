@@ -3088,6 +3088,46 @@ fn every_worktree_held_until_the_deadline_is_the_one_refusal() {
 }
 
 #[test]
+fn a_pool_still_being_prepared_makes_the_hosts_own_worktree_and_says_it_has_no_environment() {
+    let world = World::new().with(|state| {
+        state.took = WorktreeTake::Preparing(
+            "No prepared worktree of this pool is free yet. worktree1 is being prepared and can be taken once ready."
+                .to_owned(),
+        );
+    });
+    let answer = run(&world, "lending", "worktree-wanted", &wanted());
+    let (path, notice) = given(&answer);
+    assert_eq!(path, "/work/tool/worktrees/agent-a1b2");
+    let notice = notice.unwrap();
+    assert!(
+        notice.starts_with("dibs: the pool of worktrees is still being prepared, so this is a plain git worktree, without an environment of its own."),
+        "{notice}"
+    );
+    assert!(notice.contains("worktree1 is being prepared"), "{notice}");
+    assert_eq!(
+        world.calls(),
+        [
+            "take s-1 a1b2 840s",
+            "make /work agent-a1b2 tool/worktrees worktree-"
+        ],
+        "the pool is asked once, then the host's own worktree is made"
+    );
+
+    let unmade = World::new().with(|state| {
+        state.took = WorktreeTake::Preparing("worktree1 is being prepared.".to_owned());
+        state.made = Err("/work lies in no git repository".to_owned());
+    });
+    let answer = run(&unmade, "lending", "worktree-wanted", &wanted());
+    assert_eq!(answer.reply.exit, 1);
+    let reason = String::from_utf8(answer.reply.stderr.clone()).unwrap();
+    assert!(
+        reason.contains("(the pool of worktrees is still being prepared)")
+            && reason.contains("lies in no git repository"),
+        "{reason}"
+    );
+}
+
+#[test]
 fn a_pool_that_cannot_serve_makes_the_hosts_own_worktree_and_says_why() {
     let world = World::new().with(|state| {
         state.took = WorktreeTake::CannotServe(

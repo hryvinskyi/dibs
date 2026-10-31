@@ -12,10 +12,12 @@
 //! worktree that fails anywhere after the server handed it over is set aside as broken, its hold
 //! released, and the next one is tried; the take fails only when none is left.
 //!
-//! A take under a deadline finishes within it: it waits for a free worktree only as long as leaves
-//! a reset its time, and never prepares one itself, as a first preparation does not fit; when no
-//! prepared worktree is free, it starts the preparation of one in the background and answers busy.
-//! A reset the deadline cut short does not set its worktree aside: the worktree is not at fault.
+//! A take under a deadline finishes within it, and never prepares a worktree itself, as a first
+//! preparation does not fit. When no prepared worktree is free while the pool still has worktrees
+//! nobody works in that are not prepared yet, it starts the preparation of one in the background
+//! and answers at once that the pool is still being prepared. Only when every worktree it could
+//! hand out is held does it wait, as long as leaves a reset its time, and then answer busy. A reset
+//! the deadline cut short does not set its worktree aside: the worktree is not at fault.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -85,12 +87,19 @@ pub struct TakenWorktree {
 pub enum Taken {
     /// The holder holds this worktree, ready to work in.
     Took(TakenWorktree),
-    /// No worktree could be handed out in the time given.
+    /// Every worktree that could be handed out stayed held for the time given.
     Busy {
-        /// What stands in the way, as a sentence.
+        /// Who holds them, as a sentence.
         sentence: String,
         /// The holds of the worktrees offered, as the server named them.
         held: Vec<OwnWorktreeHold>,
+    },
+    /// A take under a deadline found no prepared worktree free while the pool still has worktrees
+    /// nobody works in that are not prepared yet: the pool cannot serve one in time, though not
+    /// every worktree is held.
+    Preparing {
+        /// Which worktrees are being prepared, or wait to be, as a sentence.
+        sentence: String,
         /// The worktree whose preparation the take started in the background.
         preparing: Option<WorktreeName>,
     },
@@ -154,15 +163,12 @@ impl<P: ProjectCommands> Taker<'_, P> {
         }
         let mut tried: BTreeSet<WorktreeName> = BTreeSet::new();
         let mut failures: Vec<String> = Vec::new();
-        let mut preparing: Option<WorktreeName> = None;
         loop {
             if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 if failures.is_empty() {
-                    return Ok(Taken::Busy {
-                        sentence: "No worktree could be made ready in the time given.".to_owned(),
-                        held: Vec::new(),
-                        preparing,
-                    });
+                    return Err(TakeError::Unusable(
+                        "No worktree could be made ready in the time given.".to_owned(),
+                    ));
                 }
                 return Err(TakeError::Unusable(format!(
                     "No worktree of this pool could be made ready in the time given: {}.",
@@ -200,8 +206,15 @@ impl<P: ProjectCommands> Taker<'_, P> {
                     failures.join("; ")
                 )));
             }
-            if deadline.is_some() && preparing.is_none() {
-                preparing = self.prepare_in_background(&facts);
+            if deadline.is_some() {
+                let unprepared = select::unprepared(&facts);
+                if !unprepared.is_empty() {
+                    let preparing = self.prepare_in_background(&facts);
+                    return Ok(Taken::Preparing {
+                        sentence: preparing_sentence(&unprepared, preparing.as_ref()),
+                        preparing,
+                    });
+                }
             }
             let left = wait_until.saturating_duration_since(Instant::now());
             if !left.is_zero() {
@@ -209,9 +222,8 @@ impl<P: ProjectCommands> Taker<'_, P> {
                 continue;
             }
             return Ok(Taken::Busy {
-                sentence: busy_sentence(&held, &facts, preparing.as_ref()),
+                sentence: busy_sentence(&held, &facts),
                 held,
-                preparing,
             });
         }
     }
@@ -465,13 +477,8 @@ fn spawn_prepare(checkout: &std::path::Path, name: &WorktreeName) -> std::io::Re
     command.spawn().map(|_| ())
 }
 
-/// What a busy take says: who holds each worktree offered, which are set aside, and which is being
-/// prepared.
-fn busy_sentence(
-    held: &[OwnWorktreeHold],
-    facts: &[Facts],
-    preparing: Option<&WorktreeName>,
-) -> String {
+/// What a busy take says: who holds each worktree offered, and which are set aside.
+fn busy_sentence(held: &[OwnWorktreeHold], facts: &[Facts]) -> String {
     let mut parts = Vec::new();
     if held.is_empty() {
         parts.push("No worktree of this pool is free to hand out.".to_owned());
@@ -502,10 +509,64 @@ fn busy_sentence(
             broken.join(", ")
         ));
     }
-    if let Some(name) = preparing {
-        parts.push(format!(
-            "{name} is being prepared and can be taken in a few minutes."
-        ));
-    }
     parts.join(" ")
+}
+
+/// What a take says of a pool still being prepared: which of its `unprepared` worktrees are being
+/// prepared — by another run, or by the one this take started, `preparing` — or, when none is,
+/// which wait for a preparation that could not be started.
+fn preparing_sentence(unprepared: &[&Facts], preparing: Option<&WorktreeName>) -> String {
+    let (being, waiting): (Vec<&Facts>, Vec<&Facts>) = unprepared
+        .iter()
+        .partition(|facts| facts.locked || Some(&facts.name) == preparing);
+    let listed = |list: &[&Facts]| -> (String, &'static str) {
+        let names: Vec<&str> = list.iter().map(|facts| facts.name.as_str()).collect();
+        let verb = if names.len() == 1 { "is" } else { "are" };
+        (names.join(", "), verb)
+    };
+    let said = if being.is_empty() {
+        let (names, verb) = listed(&waiting);
+        format!("{names} {verb} not prepared yet; dibs worktree prepare <name> prepares one.")
+    } else {
+        let (names, verb) = listed(&being);
+        format!("{names} {verb} being prepared and can be taken once ready.")
+    };
+    format!("No prepared worktree of this pool is free yet. {said}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unprepared(name: &str, locked: bool) -> Facts {
+        Facts {
+            name: WorktreeName::parse(name).unwrap(),
+            prepared: false,
+            stopped: false,
+            broken: false,
+            in_use: false,
+            locked,
+        }
+    }
+
+    #[test]
+    fn a_pool_being_prepared_names_what_is_prepared_and_what_waits() {
+        let started = unprepared("worktree1", false);
+        let other = unprepared("worktree2", true);
+        let idle = unprepared("worktree3", false);
+        assert_eq!(
+            preparing_sentence(&[&started], Some(&started.name)),
+            "No prepared worktree of this pool is free yet. worktree1 is being prepared and can be taken once ready."
+        );
+        assert_eq!(
+            preparing_sentence(&[&started, &other, &idle], Some(&started.name)),
+            "No prepared worktree of this pool is free yet. worktree1, worktree2 are being prepared and can be taken once ready.",
+            "a worktree a later take prepares on demand is not named"
+        );
+        assert_eq!(
+            preparing_sentence(&[&started, &idle], None),
+            "No prepared worktree of this pool is free yet. worktree1, worktree3 are not prepared yet; dibs worktree prepare <name> prepares one.",
+            "a preparation that could not start is not said to run"
+        );
+    }
 }
