@@ -1,6 +1,6 @@
 //! The project's own commands for its worktrees: `prepare` makes a missing one ready to work in,
-//! `reset` brings a reused one back to the base. dibs knows git and its server; whatever else a
-//! worktree needs is the project's.
+//! `reset` brings a reused one back to the base, `idle` stops the environment of one left free. dibs
+//! knows git and its server; whatever else a worktree needs is the project's.
 //!
 //! A command is run by the system's shell (`sh -c` on Unix, `cmd /C` on Windows) with the checkout
 //! as its working directory, standard input closed, and its output on dibs's standard error, out of
@@ -25,6 +25,8 @@ pub enum Step {
     Prepare,
     /// Bring a reused worktree back to the base.
     Reset,
+    /// Stop the environment of a worktree left free.
+    Idle,
 }
 
 impl Step {
@@ -33,6 +35,7 @@ impl Step {
         match self {
             Self::Prepare => Duration::from_secs(20 * 60),
             Self::Reset => Duration::from_secs(10 * 60),
+            Self::Idle => Duration::from_secs(2 * 60),
         }
     }
 
@@ -41,6 +44,7 @@ impl Step {
         match self {
             Self::Prepare => "prepare",
             Self::Reset => "reset",
+            Self::Idle => "idle",
         }
     }
 }

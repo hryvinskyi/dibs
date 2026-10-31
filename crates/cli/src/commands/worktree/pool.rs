@@ -137,6 +137,11 @@ impl Pool {
         &self.files
     }
 
+    /// What this machine remembers of the pool's project.
+    pub fn state(&self) -> &StateDir {
+        &self.state
+    }
+
     /// The pool's worktrees, in order.
     pub fn names(&self) -> Vec<WorktreeName> {
         self.settings.names()
@@ -182,6 +187,23 @@ impl Pool {
     /// Whether the worktree `name` is a git worktree on disk.
     pub fn exists(&self, name: &WorktreeName) -> bool {
         self.path(name).join(".git").exists()
+    }
+
+    /// The git worktrees in the pool's directory that are none of its worktrees — left there when
+    /// the pool was made smaller — by directory name, in order.
+    pub fn beyond_count(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(&self.settings.root) else {
+            return Vec::new();
+        };
+        let names = self.names();
+        let mut beyond: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().join(".git").exists())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|directory| !names.iter().any(|name| name.as_str() == directory))
+            .collect();
+        beyond.sort();
+        beyond
     }
 
     /// What a take by the holder `session`/`agent` at `now` knows of the worktree `name`.

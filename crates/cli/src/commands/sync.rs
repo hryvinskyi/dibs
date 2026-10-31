@@ -1,6 +1,8 @@
 //! `dibs sync`: what a hook leaves to the background, done now — the heartbeat when it is due,
-//! the settings, status and inbox caches refreshed when they are old, and, with a fresh inbox, the
-//! deliveries it owes claimed for the session of a host that can show them.
+//! the settings, status and inbox caches refreshed when they are old, the signs of life left in
+//! the worktrees of the project's pools on this machine sent when one is newer than the last
+//! sending a minute ago or more, and, with a fresh inbox, the deliveries it owes claimed for the
+//! session of a host that can show them.
 //!
 //! With `--update`, and at most once a day, it also asks the server which client it recommends and,
 //! when that is newer than this one, installs it as `dibs self-update` would — after the sync lock
@@ -44,6 +46,7 @@ use semver::Version;
 
 use crate::cli::SyncArgs;
 use crate::commands::self_update;
+use crate::commands::worktree::beats::Beats;
 use crate::context::{AGENT, Context};
 use crate::failure::{Failure, Kind};
 use crate::guard::cache::StateCache;
@@ -67,6 +70,8 @@ struct Synced {
     heartbeat: bool,
     status: bool,
     inbox: bool,
+    /// How many signs of life left in pool worktrees reached the server.
+    worktree_beats: usize,
     /// How many days of the project's report the heartbeat carried.
     reported: usize,
     /// How many deliveries it claimed for the session, and how many of them it won.
@@ -151,6 +156,7 @@ async fn sync_now(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
             status: true,
             inbox: true,
             update: false,
+            worktree_beats: true,
         }
     } else {
         let mut due = Due::at(now, &freshness(&cache));
@@ -309,6 +315,18 @@ async fn run(
         }
         synced.heartbeat = true;
     }
+    if due.worktree_beats
+        && let (Some(session), Some(machine)) = (session, checked.machine)
+    {
+        let sender = remote.session(client, session).await?;
+        let beats = Beats {
+            client,
+            state: &remote.state,
+            sender,
+            machine,
+        };
+        synced.worktree_beats = beats.send(now).await?.beats;
+    }
     if due.status {
         let status = client.status().await?;
         if let Err(error) = remote.state.remember_status(&status, now) {
@@ -421,6 +439,8 @@ fn freshness(cache: &StateCache) -> Freshness {
         status_at: cache.status().map(|cached| cached.at),
         inbox_at: cache.inbox().map(|cached| cached.at),
         versions_at: cache.versions_checked_at(),
+        newest_worktree_beat: cache.newest_worktree_beat(),
+        worktree_beats_sent_at: cache.worktree_beats_sent_at(),
     }
 }
 
@@ -473,6 +493,7 @@ fn report(args: &SyncArgs, ctx: &Context, synced: &Synced) {
         (synced.heartbeat, "heartbeat"),
         (synced.status, "status"),
         (synced.inbox, "inbox"),
+        (synced.worktree_beats > 0, "worktree beats"),
     ]
     .iter()
     .filter(|(did, _)| *did)

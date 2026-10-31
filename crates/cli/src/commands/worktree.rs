@@ -1,15 +1,18 @@
-//! Worktree pools: `worktree take`, `worktree release`, `worktree list` and `worktree prepare`.
+//! Worktree pools: `worktree take`, `worktree release`, `worktree list`, `worktree prepare`,
+//! `worktree beat` and `worktree upkeep`.
 //!
 //! A checkout whose `.dibs.toml` has a `[worktrees]` table lends a fixed pool of long-lived
 //! worktrees beside it to its member's sessions and agents, one holder each; the server keeps the
 //! holds, this machine keeps the worktrees. Every command run inside one of the pool's worktrees
 //! acts on the pool of the checkout that lends it.
 
+pub mod beats;
 pub mod pool;
 pub mod project;
 pub mod rescue;
 pub mod select;
 pub mod take;
+pub mod upkeep;
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -25,7 +28,9 @@ use dibs_domain::report::MachineId;
 use dibs_domain::slot::Purpose;
 use dibs_domain::worktree::{AgentKey, AgentKeyError, WorktreeName};
 
-use crate::cli::{WorktreeCommand, WorktreePrepareArgs, WorktreeReleaseArgs, WorktreeTakeArgs};
+use crate::cli::{
+    WorktreeBeatArgs, WorktreeCommand, WorktreePrepareArgs, WorktreeReleaseArgs, WorktreeTakeArgs,
+};
 use crate::commands::worktree::pool::Pool;
 use crate::commands::worktree::project::{ProjectCommands, ShellCommands, Site, Step};
 use crate::commands::worktree::rescue::{Author, WorktreeGit};
@@ -68,7 +73,35 @@ pub async fn run(command: WorktreeCommand, ctx: &Context) -> Result<(), Failure>
         WorktreeCommand::Release(args) => release(args, ctx).await,
         WorktreeCommand::List => list(ctx).await,
         WorktreeCommand::Prepare(args) => prepare(args, ctx).await,
+        WorktreeCommand::Beat(args) => beat(&args, ctx),
+        WorktreeCommand::Upkeep => upkeep::upkeep(ctx).await,
     }
+}
+
+/// Leaves a sign of life in a worktree of the pool, as a tool run in it would.
+fn beat(args: &WorktreeBeatArgs, ctx: &Context) -> Result<(), Failure> {
+    let (pool, _, _) = locate(ctx)?;
+    let name = pool.known(&args.worktree)?;
+    pool.files()
+        .touch_beat(&name, SystemClock.now())
+        .map_err(|error| {
+            tracing::debug!(error = %error, "a sign of life could not be left");
+            Failure::config(
+                "state",
+                format!(
+                    "No sign of life could be left for {name} in this machine's state directory."
+                ),
+            )
+        })?;
+    ctx.printer.show(
+        &serde_json::json!({ "worktree": name, "beat": true }),
+        || {
+            format!(
+                "Left a sign of life in {name}; the next sync or upkeep sends it to the server."
+            )
+        },
+    );
+    Ok(())
 }
 
 /// The pool the current directory belongs to, the worktree it lies in when it is one, and the

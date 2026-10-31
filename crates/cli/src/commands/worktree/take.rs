@@ -375,6 +375,8 @@ impl<P: ProjectCommands> Taker<'_, P> {
         let record = WorktreeHoldRecord {
             session_id: ask.session,
             agent: ask.agent.clone(),
+            purpose: Some(ask.purpose.clone()),
+            item: ask.item,
             taken_at,
             reset_done: done,
         };

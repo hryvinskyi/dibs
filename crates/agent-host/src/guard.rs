@@ -740,6 +740,8 @@ impl Run<'_> {
             status_at: cache.status().map(|cached| cached.at),
             inbox_at: cache.inbox().map(|cached| cached.at),
             versions_at: cache.versions_checked_at(),
+            newest_worktree_beat: cache.newest_worktree_beat(),
+            worktree_beats_sent_at: cache.worktree_beats_sent_at(),
         };
         let mut due = Due::at(self.now, &freshness);
         due.update &= starting;

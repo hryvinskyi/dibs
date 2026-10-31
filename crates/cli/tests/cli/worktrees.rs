@@ -6,13 +6,23 @@
 //! or whose reset fails is set aside and the next one taken; a worktree somebody still works in is
 //! skipped; a take waits for a release; a take under a deadline starts a preparation in the
 //! background; and a checkout without a pool says so.
+//!
+//! The signs of life left in a worktree keep its holder's hold, and one the server let go of while
+//! they could not reach it is taken again for that holder; the upkeep stops the environment of a
+//! worktree the server freed once it has been free long enough, and not again until it is taken,
+//! leaves a worktree another dibs is resetting alone, and names what lies beyond the pool's count;
+//! a server without the worktree routes has the signs of life dropped without a word.
 
 use std::fs;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::support::{API_REMOTE, Setup, git, json, status, text, write};
+use crate::support::{API_REMOTE, Setup, git, json, make_checkout, status, text, write};
 
 /// A checkout `widgets` lending a pool of `count` worktrees, the scripts its commands run, and the
 /// log those scripts write.
@@ -38,10 +48,33 @@ if [ -e "$KIT/fail-reset-$DIBS_WORKTREE_NAME" ]; then exit 7; fi
 cd "$DIBS_WORKTREE_PATH" && git checkout -q --detach "$DIBS_WORKTREE_BASE" && git clean -ffdq
 "#;
 
+const IDLE: &str = r#"#!/bin/sh
+echo "idle $DIBS_WORKTREE_NAME|$DIBS_WORKTREE_PATH|$DIBS_WORKTREE_BASE|$DIBS_CHECKOUT|$(pwd -P)" >> "$KIT/log"
+"#;
+
+/// How long a worktree of the test pools stays free before its environment is stopped.
+const IDLE_AFTER: Duration = Duration::from_secs(1);
+
 impl Pool {
     fn new(count: u8) -> Self {
         let setup = Setup::new();
-        let checkout = setup.checkout("widgets", Some("api"), API_REMOTE);
+        let server = setup.server.url();
+        Self::on(setup, &server, count)
+    }
+
+    /// A pool whose checkout names the server at `server`, alice signed in to it.
+    fn on(setup: Setup, server: &str, count: u8) -> Self {
+        let checkout = setup.root.path().join("widgets");
+        make_checkout(&checkout, server, "acme", Some("api"), API_REMOTE);
+        if server != setup.server.url() {
+            let out = setup
+                .dibs(&setup.alice, &setup.elsewhere())
+                .args(["login", "--server", server])
+                .write_stdin(format!("{}\n", setup.alice.token))
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", text(&out.stderr));
+        }
         git(&checkout, &["rm", "-q", "--cached", ".dibs.toml"]);
         let exclude = checkout.join(".git/info/exclude");
         let mut excluded = fs::read_to_string(&exclude).unwrap_or_default();
@@ -52,7 +85,11 @@ impl Pool {
             &["commit", "-q", "-m", "keep the configuration local"],
         );
         let kit = setup.root.path().join("kit");
-        for (name, script) in [("prepare.sh", PREPARE), ("reset.sh", RESET)] {
+        for (name, script) in [
+            ("prepare.sh", PREPARE),
+            ("reset.sh", RESET),
+            ("idle.sh", IDLE),
+        ] {
             let body = script.replacen(
                 "#!/bin/sh\n",
                 &format!("#!/bin/sh\nKIT='{}'\n", kit.display()),
@@ -62,9 +99,11 @@ impl Pool {
         }
         let mut config = fs::read_to_string(checkout.join(".dibs.toml")).unwrap();
         config.push_str(&format!(
-            "\n[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\n",
+            "\n[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\nidle = \"sh '{}'\"\nidle_after = \"{}s\"\n",
             kit.join("prepare.sh").display(),
-            kit.join("reset.sh").display()
+            kit.join("reset.sh").display(),
+            kit.join("idle.sh").display(),
+            IDLE_AFTER.as_secs()
         ));
         fs::write(checkout.join(".dibs.toml"), config).unwrap();
         let log = kit.join("log");
@@ -163,6 +202,30 @@ impl Pool {
         let out = self.dibs(&["worktree", "list", "--json"]);
         assert_eq!(status(&out), 0);
         json(&out)
+    }
+
+    /// `dibs worktree upkeep --json`, which must succeed; answers what it printed.
+    fn upkeep(&self) -> serde_json::Value {
+        let out = self.dibs(&["worktree", "upkeep", "--json"]);
+        assert_eq!(status(&out), 0);
+        json(&out)
+    }
+
+    /// Leaves a sign of life in a worktree through the command line.
+    fn beat(&self, name: &str) {
+        let out = self.dibs(&["worktree", "beat", name]);
+        assert_eq!(status(&out), 0);
+    }
+
+    /// How often the idle command ran for `name`.
+    fn idles(&self, name: &str) -> usize {
+        let step = format!("idle {name}");
+        self.steps().iter().filter(|line| **line == step).count()
+    }
+
+    /// Waits until the worktrees freed now have been free long enough to be stopped.
+    fn wait_out_idle_after(&self) {
+        std::thread::sleep(IDLE_AFTER + Duration::from_millis(200));
     }
 }
 
@@ -553,4 +616,348 @@ fn a_checkout_without_a_pool_says_how_to_declare_one() {
         .output()
         .unwrap();
     assert_eq!(status(&outside), 2);
+}
+
+impl Pool {
+    /// The lock file of the worktree `name`, which a take, a preparation or an upkeep holds while
+    /// it works on it.
+    fn lock_file(&self, name: &str) -> PathBuf {
+        let cache = self.setup.home(&self.setup.alice).join("state/cache");
+        let suffix = format!("-{name}.lock");
+        for scope in fs::read_dir(&cache).unwrap() {
+            for file in fs::read_dir(scope.unwrap().path()).unwrap() {
+                let path = file.unwrap().path();
+                let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if file_name.starts_with("worktree-") && file_name.ends_with(&suffix) {
+                    return path;
+                }
+            }
+        }
+        panic!("no lock of {name} under {}", cache.display());
+    }
+}
+
+#[test]
+fn signs_of_life_keep_the_hold_of_the_holder_their_record_names() {
+    let pool = Pool::new(2);
+    pool.take("agent-1");
+    pool.setup.server.advance(time::Duration::minutes(15));
+    pool.beat("worktree1");
+    let upkept = pool.upkeep();
+    assert_eq!(upkept["beats"]["beats"], 1, "{upkept}");
+    assert_eq!(upkept["beats"]["retaken"], serde_json::json!([]));
+    assert_eq!(upkept["let_go"], serde_json::json!([]));
+
+    pool.setup.server.advance(time::Duration::minutes(10));
+    let listed = pool.listed();
+    let held = &listed["worktrees"][0]["held"];
+    assert_eq!(
+        held["agent"], "agent-1",
+        "twenty-five minutes after the take, ten after its sign of life: {listed}"
+    );
+    assert!(
+        held["last_seen"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-03-02T09:15"),
+        "{held}"
+    );
+    let again = pool.upkeep();
+    assert_eq!(again["beats"]["beats"], 0, "a sign of life is sent once");
+}
+
+#[test]
+fn a_hold_the_server_let_go_of_while_its_holder_worked_is_taken_again_for_it() {
+    let pool = Pool::new(1);
+    let out = pool.dibs(&[
+        "worktree",
+        "take",
+        "--agent",
+        "agent-1",
+        "--purpose",
+        "fix the totals",
+    ]);
+    assert_eq!(status(&out), 0);
+    pool.setup.server.advance(time::Duration::minutes(21));
+    pool.beat("worktree1");
+    let upkept = pool.upkeep();
+    assert_eq!(
+        upkept["beats"]["retaken"],
+        serde_json::json!(["worktree1"]),
+        "{upkept}"
+    );
+    assert_eq!(upkept["let_go"], serde_json::json!([]));
+    assert_eq!(upkept["freed"], serde_json::json!([]));
+    let listed = pool.listed();
+    let held = &listed["worktrees"][0]["held"];
+    assert_eq!(held["agent"], "agent-1", "{listed}");
+    assert_eq!(held["purpose"], "fix the totals");
+    assert_eq!(pool.steps(), ["prepare worktree1"], "nothing was reset");
+    let said = pool.dibs(&["worktree", "upkeep"]);
+    assert_eq!(status(&said), 0);
+    assert!(
+        text(&said.stdout).contains("Nothing was due."),
+        "{}",
+        text(&said.stdout)
+    );
+}
+
+#[test]
+fn upkeep_stops_a_worktree_the_server_freed_once_until_it_is_taken_again() {
+    let pool = Pool::new(1);
+    pool.take("agent-1");
+    pool.wait_out_idle_after();
+    let held = pool.upkeep();
+    assert_eq!(held["freed"], serde_json::json!([]), "{held}");
+    assert_eq!(
+        pool.idles("worktree1"),
+        0,
+        "a held worktree keeps its environment"
+    );
+
+    pool.setup.server.advance(time::Duration::minutes(21));
+    let freed = pool.upkeep();
+    assert_eq!(freed["let_go"], serde_json::json!(["worktree1"]), "{freed}");
+    assert_eq!(freed["freed"], serde_json::json!(["worktree1"]));
+    assert_eq!(pool.idles("worktree1"), 0, "free for less than idle_after");
+
+    pool.wait_out_idle_after();
+    let stopped = pool.upkeep();
+    assert_eq!(
+        stopped["stopped"],
+        serde_json::json!(["worktree1"]),
+        "{stopped}"
+    );
+    assert_eq!(pool.idles("worktree1"), 1);
+    let log = fs::read_to_string(&pool.log).unwrap();
+    let line = log.lines().find(|line| line.starts_with("idle ")).unwrap();
+    let fields: Vec<&str> = line.split('|').collect();
+    assert_eq!(canonical(Path::new(fields[1])), pool.worktree("worktree1"));
+    assert_eq!(canonical(Path::new(fields[4])), canonical(&pool.checkout));
+    assert_eq!(pool.listed()["worktrees"][0]["stopped"], true);
+
+    pool.wait_out_idle_after();
+    pool.upkeep();
+    assert_eq!(pool.idles("worktree1"), 1, "stopped once");
+
+    pool.take("agent-2");
+    assert_eq!(
+        pool.listed()["worktrees"][0]["stopped"],
+        false,
+        "a take clears the stop"
+    );
+    pool.release("worktree1");
+    pool.wait_out_idle_after();
+    pool.upkeep();
+    assert_eq!(
+        pool.idles("worktree1"),
+        2,
+        "stopped again once it was taken and freed"
+    );
+}
+
+#[test]
+fn upkeep_leaves_a_worktree_alone_while_another_dibs_holds_its_lock() {
+    let pool = Pool::new(1);
+    pool.take("agent-1");
+    pool.release("worktree1");
+    pool.wait_out_idle_after();
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(pool.lock_file("worktree1"))
+        .unwrap();
+    lock.lock().unwrap();
+    let started = Instant::now();
+    let busy = pool.upkeep();
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "the upkeep does not wait for the lock"
+    );
+    assert_eq!(busy["busy"], serde_json::json!(["worktree1"]), "{busy}");
+    assert_eq!(pool.idles("worktree1"), 0);
+    drop(lock);
+    let stopped = pool.upkeep();
+    assert_eq!(
+        stopped["stopped"],
+        serde_json::json!(["worktree1"]),
+        "{stopped}"
+    );
+    assert_eq!(pool.idles("worktree1"), 1);
+}
+
+#[test]
+fn upkeep_does_nothing_without_a_pool_and_names_what_lies_beyond_the_count() {
+    let pool = Pool::new(1);
+    let api = pool.setup.checkout("api", Some("api"), API_REMOTE);
+    let out = pool
+        .setup
+        .dibs(&pool.setup.alice, &api)
+        .args(["worktree", "upkeep"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&out), 0);
+    assert!(text(&out.stdout).contains("[worktrees]"));
+
+    pool.take("agent-1");
+    let stray = pool.setup.root.path().join("widgets-worktrees/worktree2");
+    git(
+        &pool.checkout,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            stray.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let upkept = pool.upkeep();
+    assert_eq!(
+        upkept["beyond"],
+        serde_json::json!(["worktree2"]),
+        "{upkept}"
+    );
+    let said = pool.dibs(&["worktree", "upkeep"]);
+    assert_eq!(status(&said), 0);
+    assert!(
+        text(&said.stdout)
+            .contains("worktree2 lies in the pool's directory beyond its 1 worktrees"),
+        "{}",
+        text(&said.stdout)
+    );
+    assert!(stray.join(".git").exists(), "left as it is");
+    assert_eq!(pool.idles("worktree2"), 0);
+}
+
+#[test]
+fn a_server_without_the_worktree_routes_has_the_signs_of_life_dropped_without_a_word() {
+    let setup = Setup::new();
+    let old = OldServer::before(&setup.server.url());
+    let pool = Pool::on(setup, &old.url, 1);
+    pool.take("agent-1");
+    old.missing.store(true, Ordering::SeqCst);
+
+    pool.beat("worktree1");
+    let out = pool.dibs(&["sync"]);
+    assert_eq!(status(&out), 0);
+    assert_eq!(text(&out.stderr), "", "no word about the signs of life");
+    assert_eq!(old.beats.load(Ordering::SeqCst), 1);
+
+    pool.beat("worktree1");
+    let again = pool.dibs(&["sync", "--force"]);
+    assert_eq!(status(&again), 0);
+    assert_eq!(text(&again.stderr), "");
+    assert_eq!(
+        old.beats.load(Ordering::SeqCst),
+        1,
+        "a server without the routes is not asked again within a day"
+    );
+
+    let upkeep = pool.dibs(&["worktree", "upkeep"]);
+    assert_eq!(status(&upkeep), 0);
+    assert!(
+        text(&upkeep.stderr).contains("keeps no worktree holds"),
+        "{}",
+        text(&upkeep.stderr)
+    );
+    assert_eq!(old.beats.load(Ordering::SeqCst), 1);
+}
+
+/// A server in front of the test server that, once `missing` is set, answers the worktree routes
+/// as a server older than them does, and counts the beats it is sent. Every connection carries one
+/// request.
+struct OldServer {
+    url: String,
+    missing: Arc<AtomicBool>,
+    beats: Arc<AtomicUsize>,
+}
+
+impl OldServer {
+    fn before(target: &str) -> Self {
+        let upstream: SocketAddr = target.strip_prefix("http://").unwrap().parse().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let missing = Arc::new(AtomicBool::new(false));
+        let beats = Arc::new(AtomicUsize::new(0));
+        let (routes_missing, beaten) = (missing.clone(), beats.clone());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(client) = stream else { continue };
+                let (routes_missing, beaten) = (routes_missing.clone(), beaten.clone());
+                std::thread::spawn(move || answer_one(client, upstream, &routes_missing, &beaten));
+            }
+        });
+        Self {
+            url,
+            missing,
+            beats,
+        }
+    }
+}
+
+/// Reads one request from `client`; answers a worktree route itself while `missing` is set, and
+/// passes any other request to `upstream`, asking it to close the connection after its answer.
+fn answer_one(
+    mut client: TcpStream,
+    upstream: SocketAddr,
+    missing: &AtomicBool,
+    beats: &AtomicUsize,
+) {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let head_end = loop {
+        if let Some(end) = request.windows(4).position(|four| four == b"\r\n\r\n") {
+            break end + 4;
+        }
+        match client.read(&mut chunk) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => request.extend_from_slice(&chunk[..read]),
+        }
+    };
+    let head = String::from_utf8_lossy(&request[..head_end]).into_owned();
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    while request.len() < head_end + length {
+        match client.read(&mut chunk) {
+            Ok(0) | Err(_) => return,
+            Ok(read) => request.extend_from_slice(&chunk[..read]),
+        }
+    }
+    let path = head.split_whitespace().nth(1).unwrap_or_default();
+    if path.starts_with("/v1/worktrees/beat") {
+        beats.fetch_add(1, Ordering::SeqCst);
+    }
+    if missing.load(Ordering::SeqCst)
+        && (path.starts_with("/v1/worktrees") || path.ends_with("/end"))
+    {
+        let body = r#"{"error":{"code":"not_found","message":"there is no such route"}}"#;
+        let _ = write!(
+            client,
+            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        return;
+    }
+    let mut forwarded: Vec<u8> = head
+        .lines()
+        .filter(|line| !line.is_empty() && !line.to_ascii_lowercase().starts_with("connection:"))
+        .flat_map(|line| format!("{line}\r\n").into_bytes())
+        .collect();
+    forwarded.extend_from_slice(b"Connection: close\r\n\r\n");
+    forwarded.extend_from_slice(&request[head_end..]);
+    let Ok(mut server) = TcpStream::connect(upstream) else {
+        return;
+    };
+    if server.write_all(&forwarded).is_err() {
+        return;
+    }
+    let _ = std::io::copy(&mut server, &mut client);
 }

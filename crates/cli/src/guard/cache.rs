@@ -168,4 +168,12 @@ impl LocalCache for StateCache {
             latest: latest.to_string(),
         })
     }
+
+    fn newest_worktree_beat(&self) -> Option<OffsetDateTime> {
+        self.state.newest_worktree_beat()
+    }
+
+    fn worktree_beats_sent_at(&self) -> Option<OffsetDateTime> {
+        self.state.worktree_beats_sent_at()
+    }
 }

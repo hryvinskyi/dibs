@@ -621,6 +621,13 @@ pub enum WorktreeCommand {
     /// Prepare a worktree, or all of them, with the project's prepare command, and take a worktree
     /// set aside as broken back into the pool when it succeeds.
     Prepare(WorktreePrepareArgs),
+    /// Leave a sign of life in a worktree for its holder, as a tool run in it would: for a person
+    /// or a script working in it from outside it, so that its hold does not end for silence.
+    Beat(WorktreeBeatArgs),
+    /// Keep the pool, as a schedule does every few minutes: send the signs of life left in its
+    /// worktrees, and stop the environment of each worktree free longer than idle_after with the
+    /// project's idle command. Does nothing in a checkout without a pool.
+    Upkeep,
 }
 
 /// `dibs worktree take`.
@@ -659,6 +666,14 @@ pub struct WorktreeReleaseArgs {
     /// The agent whose worktree to release, as its take named or printed it.
     #[arg(long, value_parser = AgentKey::parse)]
     pub agent: Option<AgentKey>,
+}
+
+/// `dibs worktree beat`.
+#[derive(Debug, Args)]
+pub struct WorktreeBeatArgs {
+    /// The worktree (`worktree2`).
+    #[arg(value_parser = WorktreeName::parse)]
+    pub worktree: WorktreeName,
 }
 
 /// `dibs worktree prepare`.
@@ -1039,6 +1054,9 @@ mod tests {
         assert!(
             Cli::try_parse_from(["dibs", "worktree", "prepare", "worktree1", "--all"]).is_err()
         );
+        assert!(Cli::try_parse_from(["dibs", "worktree", "beat", "worktree1"]).is_ok());
+        assert!(Cli::try_parse_from(["dibs", "worktree", "beat"]).is_err());
+        assert!(Cli::try_parse_from(["dibs", "worktree", "upkeep"]).is_ok());
     }
 
     #[test]

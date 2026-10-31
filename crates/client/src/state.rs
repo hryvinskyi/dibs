@@ -19,12 +19,15 @@
 //!   started;
 //! - `cache/<scope>/versions.json` — the client versions the server serves and recommends, and when
 //!   they were last asked for;
+//! - `cache/<scope>/worktree-beats-sent` — when the signs of life left in the pools' worktrees were
+//!   last sent to the server; `cache/<scope>/worktrees-unserved` — when the server was last found
+//!   to serve no worktree pools;
 //! - `cache/<scope>/<name>.lock` — the lock files of whoever holds them, among them
 //!   `worktree-<pool>-<name>.lock`, held by whatever resets, prepares or stops one worktree of a
 //!   pool;
 //! - `cache/<scope>/<name>` — files callers keep for themselves ([`StateDir::file`]);
 //! - `worktrees/<scope>/<pool>/` — what this machine knows of each worktree of one pool
-//!   ([`WorktreeState`]): `<name>.hold.json`, the holder this machine took it for, when, and
+//!   ([`WorktreeState`]): `<name>.hold.json`, the holder this machine took it for, why, when, and
 //!   whether its reset finished, written on a take and removed on a release; `<name>.beat`, whose
 //!   time of last change is the holder's last sign of life in it; `<name>.free-since`, when it was
 //!   last seen free; `<name>.stopped`, when its environment was stopped for being left idle; and
@@ -48,6 +51,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::message::{Importance, SessionLabel, Subject};
 use dibs_domain::settings::SettingsDocument;
+use dibs_domain::slot::Purpose;
 use dibs_domain::worktree::{AgentKey, PoolId, WorktreeName};
 
 use crate::api::{Inbox, PendingOffer, Session, Status, Versions};
@@ -75,6 +79,12 @@ pub struct WorktreeHoldRecord {
     /// The holder's agent; `None` for the session itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentKey>,
+    /// Why it was taken, so that a hold the server let go of is taken again for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<Purpose>,
+    /// The work item it was taken for, by local id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<ItemId>,
     /// When it was taken.
     #[serde(with = "time::serde::rfc3339")]
     pub taken_at: OffsetDateTime,
@@ -245,6 +255,59 @@ impl StateDir {
         WorktreeState {
             dir: self.worktrees.join(pool.as_str()),
         }
+    }
+
+    /// Every pool of the project this machine keeps files of, each with its id, in the order of
+    /// their ids.
+    pub fn worktree_pools(&self) -> Vec<(PoolId, WorktreeState)> {
+        let Ok(entries) = fs::read_dir(&self.worktrees) else {
+            return Vec::new();
+        };
+        let mut pools: Vec<(PoolId, WorktreeState)> = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| PoolId::parse(&entry.file_name().to_string_lossy()).ok())
+            .map(|pool| {
+                let files = self.worktrees(&pool);
+                (pool, files)
+            })
+            .collect();
+        pools.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        pools
+    }
+
+    /// The newest sign of life left in a worktree of any of the project's pools on this machine.
+    pub fn newest_worktree_beat(&self) -> Option<OffsetDateTime> {
+        self.worktree_pools()
+            .iter()
+            .filter_map(|(_, files)| files.newest_beat())
+            .max()
+    }
+
+    /// When the signs of life left in the pools' worktrees were last sent.
+    pub fn worktree_beats_sent_at(&self) -> Option<OffsetDateTime> {
+        self.moment("worktree-beats-sent")
+    }
+
+    /// Remembers that the signs of life left until `at` were sent.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn remember_worktree_beats_sent(&self, at: OffsetDateTime) -> io::Result<()> {
+        self.remember_moment("worktree-beats-sent", at)
+    }
+
+    /// When the server was last found to serve no worktree pools.
+    pub fn worktrees_unserved_at(&self) -> Option<OffsetDateTime> {
+        self.moment("worktrees-unserved")
+    }
+
+    /// Remembers that the server served no worktree pools at `at`.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn remember_worktrees_unserved(&self, at: OffsetDateTime) -> io::Result<()> {
+        self.remember_moment("worktrees-unserved", at)
     }
 
     /// The lock file held by whatever resets, prepares or stops the worktree `name` of `pool`:
@@ -592,6 +655,25 @@ impl WorktreeState {
         remove(&self.path(name, "hold.json"))
     }
 
+    /// Every holder this machine holds a record of, with the worktree, in the order of the names.
+    pub fn holds(&self) -> Vec<(WorktreeName, WorktreeHoldRecord)> {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut holds: Vec<(WorktreeName, WorktreeHoldRecord)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let file = entry.file_name();
+                let name = file.to_str()?.strip_suffix(".hold.json")?.to_owned();
+                let name = WorktreeName::parse(&name).ok()?;
+                let record = self.hold(&name)?;
+                Some((name, record))
+            })
+            .collect();
+        holds.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        holds
+    }
+
     /// The file whose time of last change is the holder's last sign of life in `name`.
     pub fn beat_file(&self, name: &WorktreeName) -> PathBuf {
         self.path(name, "beat")
@@ -601,6 +683,37 @@ impl WorktreeState {
     pub fn beat_at(&self, name: &WorktreeName) -> Option<OffsetDateTime> {
         let modified = fs::metadata(self.beat_file(name)).ok()?.modified().ok()?;
         Some(OffsetDateTime::from(modified))
+    }
+
+    /// Leaves a sign of life in `name` at `at`: its beat file, made when missing, last changed
+    /// then.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn touch_beat(&self, name: &WorktreeName, at: OffsetDateTime) -> io::Result<()> {
+        fs::create_dir_all(&self.dir)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.beat_file(name))?;
+        file.set_modified(at.into())
+    }
+
+    /// The newest sign of life left in any worktree of the pool.
+    pub fn newest_beat(&self) -> Option<OffsetDateTime> {
+        let entries = fs::read_dir(&self.dir).ok()?;
+        entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|file| file.ends_with(".beat"))
+            })
+            .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+            .map(OffsetDateTime::from)
+            .max()
     }
 
     /// When `name` was last seen free: released here, or found free by the server.
@@ -1012,11 +1125,14 @@ mod tests {
         let record = WorktreeHoldRecord {
             session_id: SessionId(4),
             agent: Some(AgentKey::parse("a1b2").unwrap()),
+            purpose: Some(Purpose::parse("fix the totals").unwrap()),
+            item: Some(ItemId(7)),
             taken_at: at,
             reset_done: false,
         };
         worktrees.remember_hold(&name, &record).unwrap();
         assert_eq!(worktrees.hold(&name), Some(record.clone()));
+        assert_eq!(worktrees.holds(), vec![(name.clone(), record.clone())]);
         assert!(record.is_of(SessionId(4), Some(&AgentKey::parse("a1b2").unwrap())));
         assert!(!record.is_of(SessionId(4), None));
         assert_eq!(
@@ -1053,8 +1169,29 @@ mod tests {
         assert_eq!(worktrees.broken(&name), None);
 
         assert_eq!(worktrees.beat_at(&name), None);
+        assert_eq!(worktrees.newest_beat(), None);
+        assert_eq!(state.newest_worktree_beat(), None);
         fs::write(worktrees.beat_file(&name), b"").unwrap();
         assert!(worktrees.beat_at(&name).is_some());
+        let beat = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        worktrees.touch_beat(&name, beat).unwrap();
+        let earlier = WorktreeName::parse("worktree1").unwrap();
+        other
+            .touch_beat(&earlier, beat - Duration::hours(1))
+            .unwrap();
+        assert_eq!(worktrees.beat_at(&name), Some(beat));
+        assert_eq!(worktrees.newest_beat(), Some(beat));
+        assert_eq!(
+            state.newest_worktree_beat(),
+            Some(beat),
+            "the newest of every pool"
+        );
+        let pools: Vec<String> = state
+            .worktree_pools()
+            .iter()
+            .map(|(pool, _)| pool.to_string())
+            .collect();
+        assert_eq!(pools, ["beef", "c0ffee"]);
         assert!(
             worktrees
                 .beat_file(&name)

@@ -671,6 +671,12 @@ pub trait LocalCache {
 
     /// The release the server last recommended, when it is newer than the one running.
     fn newer_release(&self) -> Option<NewerRelease>;
+
+    /// When the newest sign of life was left in a pool worktree of the project on this machine.
+    fn newest_worktree_beat(&self) -> Option<OffsetDateTime>;
+
+    /// When the signs of life left in pool worktrees were last sent to the server.
+    fn worktree_beats_sent_at(&self) -> Option<OffsetDateTime>;
 }
 
 /// The project's server. Every answer it fetches is also remembered, so the next read of

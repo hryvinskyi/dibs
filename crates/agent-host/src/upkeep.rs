@@ -1,6 +1,6 @@
-//! When the caches need the server again, and when the server counts as unreachable. Both the
-//! guard, which starts the upkeep, and the upkeep itself, which does what is due, decide by these
-//! rules, so the two never disagree.
+//! When the caches need the server again, when the signs of life left in pool worktrees are to be
+//! sent, and when the server counts as unreachable. Both the guard, which starts the upkeep, and the
+//! upkeep itself, which does what is due, decide by these rules, so the two never disagree.
 
 use time::{Duration, OffsetDateTime};
 
@@ -25,6 +25,11 @@ pub const DEFAULT_HEARTBEAT: Duration = Duration::minutes(1);
 /// How often, at most, the server is asked which client it recommends, and a newer one installed.
 pub const UPDATE_EVERY: Duration = Duration::days(1);
 
+/// How often, at most, the signs of life left in pool worktrees are sent. It does not follow the
+/// project's heartbeat interval: a hold of an agent ends after minutes of silence, and a long
+/// interval must never bring a working agent near that.
+pub const WORKTREE_BEATS_EVERY: Duration = Duration::minutes(1);
+
 /// When each cache was last filled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Freshness {
@@ -40,6 +45,10 @@ pub struct Freshness {
     pub inbox_at: Option<OffsetDateTime>,
     /// When the server was last asked which client it recommends.
     pub versions_at: Option<OffsetDateTime>,
+    /// The newest sign of life left in a pool worktree on this machine.
+    pub newest_worktree_beat: Option<OffsetDateTime>,
+    /// When the signs of life in pool worktrees were last sent.
+    pub worktree_beats_sent_at: Option<OffsetDateTime>,
 }
 
 /// What is due.
@@ -55,6 +64,9 @@ pub struct Due {
     pub inbox: bool,
     /// The server was not asked within a day which client it recommends.
     pub update: bool,
+    /// A sign of life in a pool worktree is newer than the last sending, and that sending is
+    /// [`WORKTREE_BEATS_EVERY`] old.
+    pub worktree_beats: bool,
 }
 
 impl Due {
@@ -70,12 +82,22 @@ impl Due {
             status: older(freshness.status_at, STATUS_FRESH),
             inbox: older(freshness.inbox_at, INBOX_FRESH),
             update: older(freshness.versions_at, UPDATE_EVERY),
+            worktree_beats: freshness.newest_worktree_beat.is_some_and(|beat| {
+                freshness
+                    .worktree_beats_sent_at
+                    .is_none_or(|sent| beat > sent)
+            }) && older(freshness.worktree_beats_sent_at, WORKTREE_BEATS_EVERY),
         }
     }
 
     /// Whether anything is due.
     pub fn any(&self) -> bool {
-        self.settings || self.heartbeat || self.status || self.inbox || self.update
+        self.settings
+            || self.heartbeat
+            || self.status
+            || self.inbox
+            || self.update
+            || self.worktree_beats
     }
 
     /// Only what asks the server nothing about the project: the check for a newer client, when it
@@ -113,6 +135,8 @@ mod tests {
             status_at: Some(now),
             inbox_at: Some(now),
             versions_at: Some(now),
+            newest_worktree_beat: None,
+            worktree_beats_sent_at: None,
         }
     }
 
@@ -158,9 +182,12 @@ mod tests {
             status_at: None,
             inbox_at: None,
             versions_at: None,
+            newest_worktree_beat: None,
+            worktree_beats_sent_at: None,
         };
         let due = Due::at(now, &never);
         assert!(due.settings && due.heartbeat && due.status && due.inbox && due.update);
+        assert!(!due.worktree_beats, "no sign of life left, nothing to send");
         let future = fresh_all(now + Duration::hours(1));
         assert!(Due::at(now, &future).status);
     }
@@ -182,6 +209,59 @@ mod tests {
             }
         );
         assert!(!Due::default().update_only().any());
+    }
+
+    #[test]
+    fn signs_of_life_in_worktrees_are_due_when_newer_than_the_last_sending_a_minute_old() {
+        let sent = NOW + Duration::days(3);
+        let due = |beat: Option<OffsetDateTime>, sent_at: Option<OffsetDateTime>, now| {
+            let mut freshness = fresh_all(now);
+            freshness.newest_worktree_beat = beat;
+            freshness.worktree_beats_sent_at = sent_at;
+            Due::at(now, &freshness)
+        };
+        let later = sent + Duration::seconds(10);
+        assert!(due(Some(later), None, later).worktree_beats, "never sent");
+        assert!(
+            !due(Some(later), Some(sent), later + Duration::seconds(49)).worktree_beats,
+            "a sending less than a minute old holds the next one back"
+        );
+        let minute = sent + Duration::minutes(1);
+        let fresh = due(Some(later), Some(sent), minute);
+        assert!(fresh.worktree_beats && fresh.any());
+        assert!(
+            !due(Some(sent - Duration::seconds(1)), Some(sent), minute).worktree_beats,
+            "every sign of life was sent"
+        );
+        assert!(
+            !due(None, Some(sent), sent + Duration::hours(1)).worktree_beats,
+            "no worktree, nothing to send"
+        );
+        assert!(
+            due(
+                Some(sent + Duration::hours(2)),
+                Some(sent + Duration::hours(1)),
+                sent
+            )
+            .worktree_beats,
+            "a sending from the future is due"
+        );
+    }
+
+    #[test]
+    fn the_heartbeat_interval_never_holds_signs_of_life_in_worktrees_back() {
+        let then = NOW + Duration::days(5);
+        let mut freshness = fresh_all(then);
+        freshness.heartbeat_every = Duration::hours(1);
+        freshness.worktree_beats_sent_at = Some(then);
+        freshness.newest_worktree_beat = Some(then + Duration::seconds(30));
+        let due = Due::at(then + Duration::minutes(1), &freshness);
+        assert!(due.worktree_beats);
+        assert!(!due.heartbeat);
+        assert!(
+            !due.update_only().worktree_beats,
+            "nothing for the project while the server is unreachable"
+        );
     }
 
     #[test]

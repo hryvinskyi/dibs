@@ -86,6 +86,8 @@ struct State {
     upkeep_due: Vec<crate::upkeep::Due>,
     versions_checked: Option<OffsetDateTime>,
     newer: Option<crate::ports::NewerRelease>,
+    newest_worktree_beat: Option<OffsetDateTime>,
+    worktree_beats_sent: Option<OffsetDateTime>,
     git: Option<dibs_domain::push::GitFacts>,
     git_reads: u32,
     branch: Option<BranchName>,
@@ -142,6 +144,8 @@ impl State {
             upkeep_due: Vec::new(),
             versions_checked: Some(at(0)),
             newer: None,
+            newest_worktree_beat: None,
+            worktree_beats_sent: None,
             git: Some(dibs_domain::push::GitFacts {
                 branch: Some("feature".to_owned()),
                 config: vec![
@@ -396,6 +400,14 @@ impl LocalCache for World {
 
     fn newer_release(&self) -> Option<crate::ports::NewerRelease> {
         self.0.borrow().newer.clone()
+    }
+
+    fn newest_worktree_beat(&self) -> Option<OffsetDateTime> {
+        self.0.borrow().newest_worktree_beat
+    }
+
+    fn worktree_beats_sent_at(&self) -> Option<OffsetDateTime> {
+        self.0.borrow().worktree_beats_sent
     }
 }
 
@@ -1498,6 +1510,37 @@ fn upkeep_starts_only_when_something_is_due() {
     run(&world, "neutral", "after-tool", &input(None));
     assert_eq!(world.0.borrow().upkeep_starts, 1, "the status is due");
     assert!(world.calls().is_empty(), "upkeep is never waited for");
+}
+
+#[test]
+fn a_sign_of_life_in_a_worktree_starts_the_upkeep_once_the_last_sending_is_a_minute_old() {
+    let world = World::new().with(|state| {
+        state.now = at(20);
+        state.worktree_beats_sent = Some(at(0));
+        state.newest_worktree_beat = Some(at(15));
+    });
+    run(&world, "neutral", "after-tool", &input(None));
+    assert_eq!(
+        world.0.borrow().upkeep_starts,
+        0,
+        "the last sending is not a minute old"
+    );
+    world.set(|state| {
+        state.now = at(60);
+        state.status.as_mut().unwrap().at = at(60);
+        state.inbox.as_mut().unwrap().at = at(60);
+        state.last_heartbeat = Some(at(60));
+    });
+    run(&world, "neutral", "after-tool", &input(None));
+    let state = world.0.borrow();
+    assert_eq!(state.upkeep_starts, 1);
+    assert_eq!(
+        state.upkeep_due[0],
+        crate::upkeep::Due {
+            worktree_beats: true,
+            ..crate::upkeep::Due::default()
+        }
+    );
 }
 
 #[test]
