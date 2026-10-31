@@ -39,6 +39,7 @@ pub mod settings;
 pub mod slot;
 mod text;
 pub mod wide;
+pub mod worktree;
 
 #[cfg(test)]
 mod testing;

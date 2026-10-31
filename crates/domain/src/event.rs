@@ -22,6 +22,7 @@ use crate::retention::PruneCounts;
 use crate::review::PrRef;
 use crate::session::HostName;
 use crate::slot::{Purpose, RunExit, SlotName};
+use crate::worktree::{HolderKind, WorktreeName};
 
 /// One entry of a project's log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +161,11 @@ pub enum EventKind {
     FeedbackGiven(FeedbackGiven),
     /// An integration reported that a pull request stopped, or started again, merging cleanly.
     PrStateReported(PrStateReported),
+    /// A session or one of its agents took a worktree of its member's pool. Seen by admins and by
+    /// that member only.
+    WorktreeTaken(WorktreeTaken),
+    /// A worktree hold ended. Seen by admins and by the pool's member only.
+    WorktreeReleased(WorktreeReleased),
 }
 
 impl EventKind {
@@ -219,6 +225,8 @@ impl EventKind {
             Self::HookReported(_) => "hook_reported",
             Self::FeedbackGiven(_) => "feedback_given",
             Self::PrStateReported(_) => "pr_state_reported",
+            Self::WorktreeTaken(_) => "worktree_taken",
+            Self::WorktreeReleased(_) => "worktree_released",
         }
     }
 
@@ -289,6 +297,8 @@ impl EventKind {
             Self::ClaimNarrowed(e) => vec![Some(e.member)],
             Self::HookReported(e) => vec![Some(e.member)],
             Self::FeedbackGiven(e) => vec![Some(e.member)],
+            Self::WorktreeTaken(e) => vec![Some(e.member)],
+            Self::WorktreeReleased(e) => vec![Some(e.member), e.by],
         };
         named.into_iter().flatten().collect()
     }
@@ -348,7 +358,9 @@ impl EventKind {
             | Self::YieldUnescalated(_)
             | Self::HookReported(_)
             | Self::FeedbackGiven(_)
-            | Self::PrStateReported(_) => None,
+            | Self::PrStateReported(_)
+            | Self::WorktreeTaken(_)
+            | Self::WorktreeReleased(_) => None,
         }
     }
 
@@ -413,7 +425,9 @@ impl EventKind {
             | Self::YieldUnescalated(_)
             | Self::HookReported(_)
             | Self::FeedbackGiven(_)
-            | Self::PrStateReported(_) => None,
+            | Self::PrStateReported(_)
+            | Self::WorktreeTaken(_)
+            | Self::WorktreeReleased(_) => None,
         }
     }
 
@@ -442,6 +456,8 @@ impl EventKind {
         match self {
             Self::HookReported(e) => Some(e.member),
             Self::FeedbackGiven(e) => Some(e.member),
+            Self::WorktreeTaken(e) => Some(e.member),
+            Self::WorktreeReleased(e) => Some(e.member),
             Self::ItemCreated(_)
             | Self::Claimed(_)
             | Self::Renewed(_)
@@ -1041,6 +1057,57 @@ pub struct PrStateReported {
     pub mergeable: bool,
 }
 
+/// A worktree of a member's pool was taken. Carries what the board shows of the hold — never the
+/// machine, the pool or the agent, which stay on the member's machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeTaken {
+    /// The member whose pool it is.
+    pub member: MemberId,
+    /// The host of the session that took it.
+    pub host: HostName,
+    /// The worktree.
+    pub worktree: WorktreeName,
+    /// Whether a session or one of its agents holds it.
+    pub holder: HolderKind,
+    /// Why.
+    pub purpose: Purpose,
+}
+
+/// Why a worktree hold ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeReleaseCause {
+    /// Its member, or an admin, released it.
+    Released,
+    /// Its holder went unseen for longer than its kind of holder may.
+    Silent,
+    /// The session holding it, or whose agent held it, ended.
+    SessionEnded,
+    /// The member was removed from the project.
+    MemberRemoved,
+}
+
+/// A worktree hold ended. Carries what [`WorktreeTaken`] carries, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeReleased {
+    /// The member whose pool it is.
+    pub member: MemberId,
+    /// The host of the session that held it.
+    pub host: HostName,
+    /// The worktree.
+    pub worktree: WorktreeName,
+    /// Whether a session or one of its agents held it.
+    pub holder: HolderKind,
+    /// Why it was held.
+    pub purpose: Purpose,
+    /// Why it ended.
+    pub cause: WorktreeReleaseCause,
+    /// The admin who ended another member's hold or removed the member; `None` when the member
+    /// released it, when it ended on its own, or when the service's operator acted from the
+    /// server's command line.
+    pub by: Option<MemberId>,
+}
+
 /// An admin deleted a conversation. Carries the id only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadDeleted {
@@ -1564,7 +1631,98 @@ mod tests {
             .chain(slot_kinds())
             .chain(review_kinds())
             .all(|kind| kind.private_to().is_none());
-        assert!(public, "only reports and feedback are kept private");
+        assert!(
+            public,
+            "only reports, feedback and worktree holds are kept private"
+        );
+        let private: Vec<Option<MemberId>> =
+            worktree_kinds().iter().map(EventKind::private_to).collect();
+        assert_eq!(private, [Some(ALICE), Some(ALICE), Some(ALICE)]);
+    }
+
+    fn worktree_kinds() -> Vec<EventKind> {
+        use crate::worktree::{HolderKind, WorktreeName};
+        let host = HostName::parse("laptop").unwrap();
+        let worktree = WorktreeName::parse("worktree2").unwrap();
+        let purpose = Purpose::parse("fix the rounding").unwrap();
+        vec![
+            EventKind::WorktreeTaken(WorktreeTaken {
+                member: ALICE,
+                host: host.clone(),
+                worktree: worktree.clone(),
+                holder: HolderKind::Agent,
+                purpose: purpose.clone(),
+            }),
+            EventKind::WorktreeReleased(WorktreeReleased {
+                member: ALICE,
+                host: host.clone(),
+                worktree: worktree.clone(),
+                holder: HolderKind::Session,
+                purpose: purpose.clone(),
+                cause: WorktreeReleaseCause::Silent,
+                by: None,
+            }),
+            EventKind::WorktreeReleased(WorktreeReleased {
+                member: ALICE,
+                host,
+                worktree,
+                holder: HolderKind::Agent,
+                purpose,
+                cause: WorktreeReleaseCause::Released,
+                by: Some(BOB),
+            }),
+        ]
+    }
+
+    #[test]
+    fn worktree_events_round_trip_and_carry_the_member_host_worktree_holder_kind_and_purpose_only()
+    {
+        let allowed = [
+            "member", "host", "worktree", "holder", "purpose", "cause", "by",
+        ];
+        for kind in worktree_kinds() {
+            let value = serde_json::to_value(&kind).unwrap();
+            assert_eq!(value["kind"], kind.name());
+            assert!(kind.name().starts_with("worktree_"));
+            for field in value["payload"].as_object().unwrap().keys() {
+                assert!(
+                    allowed.contains(&field.as_str()),
+                    "{} carries {field}",
+                    kind.name()
+                );
+            }
+            assert_eq!(
+                (
+                    kind.message(),
+                    kind.thread(),
+                    kind.slot(),
+                    kind.completion()
+                ),
+                (None, None, None, None)
+            );
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(back, kind);
+        }
+        let kinds = worktree_kinds();
+        assert_eq!(
+            serde_json::to_value(&kinds[0]).unwrap()["payload"],
+            serde_json::json!({
+                "member": 1,
+                "host": "laptop",
+                "worktree": "worktree2",
+                "holder": "agent",
+                "purpose": "fix the rounding",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&kinds[1]).unwrap()["payload"]["cause"],
+            "silent"
+        );
+        assert_eq!(kinds[1].members(), BTreeSet::from([ALICE]));
+        assert_eq!(kinds[2].members(), BTreeSet::from([ALICE, BOB]));
+        let bad = r#"{"kind":"worktree_taken","payload":{"member":1,"host":"laptop",
+            "worktree":"../x","holder":"agent","purpose":"p"}}"#;
+        assert!(serde_json::from_str::<EventKind>(bad).is_err());
     }
 
     #[test]
