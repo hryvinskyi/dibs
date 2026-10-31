@@ -84,8 +84,9 @@ impl Scene {
     }
 }
 
-/// A message to one member about a slot, which dibs writes for a member who acted on it, in a
-/// thread of its own: `high`, asking for no acknowledgement, so it reaches them while they work.
+/// A message to one member about a hold of theirs another member ended, which dibs writes for the
+/// member who acted, in a thread of its own: `high`, asking for no acknowledgement, so it reaches
+/// them while they work.
 pub(crate) struct Notice<'a> {
     pub(crate) ids: &'a dyn IdGen,
     pub(crate) from: MemberId,

@@ -10,8 +10,9 @@
 //! record by a key unique across projects and return the project with it ([`TokenRows::token_by_hash`],
 //! [`UiSessionRows::ui_session`]), create, look up or list projects themselves ([`ProjectRows`]),
 //! sweep expired browser sessions of every project ([`UiSessionRows::delete_expired_ui_sessions`]),
-//! or find the projects whose slots are in use ([`SlotRows::busy_slot_projects`]) or whose claims
-//! wait for areas ([`ClaimRows::pending_projects`]).
+//! or find the projects whose slots are in use ([`SlotRows::busy_slot_projects`]), the worktree
+//! pools with a hold ([`WorktreeRows::busy_worktree_pools`]) or the projects whose claims wait for
+//! areas ([`ClaimRows::pending_projects`]).
 
 use std::collections::BTreeSet;
 
@@ -39,6 +40,7 @@ use dibs_domain::review::PrRef;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
+use dibs_domain::worktree::{PoolKey, WorktreePool};
 
 use crate::records::{
     CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
@@ -104,6 +106,7 @@ pub trait Tx:
     + AskedGrantRows
     + EscalationRows
     + SlotRows
+    + WorktreeRows
     + DeliveryRows
     + RaisedRows
     + EventRows
@@ -577,6 +580,30 @@ pub trait SlotRows: Send {
     async fn put_slot_board(&mut self, project: ProjectId, board: &SlotBoard) -> StoreResult<()>;
     /// Every project with a hold, a waiter or an offer, ordered by id.
     async fn busy_slot_projects(&mut self) -> StoreResult<Vec<ProjectId>>;
+}
+
+/// The holds of the worktree pools of the project's members. A pool exists only through its holds:
+/// one where nothing is held is not stored.
+#[async_trait]
+pub trait WorktreeRows: Send {
+    /// The holds of one pool, ordered by worktree; an empty pool of that key when nothing is held.
+    async fn worktree_pool(
+        &mut self,
+        project: ProjectId,
+        key: &PoolKey,
+    ) -> StoreResult<WorktreePool>;
+    /// Every pool of the project with a hold, ordered by key, each with its holds ordered by
+    /// worktree.
+    async fn worktree_pools(&mut self, project: ProjectId) -> StoreResult<Vec<WorktreePool>>;
+    /// Replaces every hold of the pool of `pool.key()` with the holds of `pool`; an empty pool
+    /// removes them all.
+    async fn put_worktree_pool(
+        &mut self,
+        project: ProjectId,
+        pool: &WorktreePool,
+    ) -> StoreResult<()>;
+    /// Every pool with a hold, of every project, ordered by project and key.
+    async fn busy_worktree_pools(&mut self) -> StoreResult<Vec<(ProjectId, PoolKey)>>;
 }
 
 /// The project's append-only event log.

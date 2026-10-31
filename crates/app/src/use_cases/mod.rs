@@ -62,6 +62,7 @@ mod take_over;
 mod unacked;
 mod upsert_items;
 mod wide_asks;
+mod worktrees;
 mod writing;
 
 #[cfg(test)]
@@ -138,6 +139,12 @@ pub use take_over::{TakeOver, TakeOverInput, TakenOverClaim};
 pub use unacked::{Unacked, UnackedMessage};
 pub use upsert_items::{UpsertItems, UpsertReport};
 pub use wide_asks::Announced;
+pub use worktrees::{
+    BeatWorktrees, BeatWorktreesInput, BoardHold, EndSession, ForceReleaseWorktree,
+    ForceReleaseWorktreeInput, ForcedWorktrees, HeldWorktree, OwnPool, ReleaseWorktree,
+    ReleaseWorktreeInput, TakeWorktree, TakeWorktreeInput, TickWorktrees, TookWorktree,
+    WorktreeBeatInput, WorktreeRelease, WorktreeSweepReport, Worktrees, WorktreesView,
+};
 
 use crate::dependencies::Dependencies;
 
@@ -279,6 +286,20 @@ pub struct UseCases {
     pub slots: Slots,
     /// See [`TickSlots`].
     pub tick_slots: TickSlots,
+    /// See [`TakeWorktree`].
+    pub take_worktree: TakeWorktree,
+    /// See [`ReleaseWorktree`].
+    pub release_worktree: ReleaseWorktree,
+    /// See [`ForceReleaseWorktree`].
+    pub force_release_worktree: ForceReleaseWorktree,
+    /// See [`BeatWorktrees`].
+    pub beat_worktrees: BeatWorktrees,
+    /// See [`EndSession`].
+    pub end_session: EndSession,
+    /// See [`Worktrees`].
+    pub worktrees: Worktrees,
+    /// See [`TickWorktrees`].
+    pub tick_worktrees: TickWorktrees,
     /// See [`TickHandovers`].
     pub tick_handovers: TickHandovers,
 }
@@ -355,6 +376,13 @@ impl UseCases {
             slot_run_finished: SlotRunFinished::new(deps),
             slots: Slots::new(deps),
             tick_slots: TickSlots::new(deps),
+            take_worktree: TakeWorktree::new(deps),
+            release_worktree: ReleaseWorktree::new(deps),
+            force_release_worktree: ForceReleaseWorktree::new(deps),
+            beat_worktrees: BeatWorktrees::new(deps),
+            end_session: EndSession::new(deps),
+            worktrees: Worktrees::new(deps),
+            tick_worktrees: TickWorktrees::new(deps),
             tick_handovers: TickHandovers::new(deps),
         }
     }

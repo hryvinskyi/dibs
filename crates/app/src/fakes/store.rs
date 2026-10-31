@@ -33,12 +33,13 @@ use dibs_domain::session::HostName;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
+use dibs_domain::worktree::{PoolKey, WorktreePool};
 
 use crate::ports::{
     AckRows, AskedGrantRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows,
     GrantRows, ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
     SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
-    UiSessionRows, WideAskRows,
+    UiSessionRows, WideAskRows, WorktreeRows,
 };
 use crate::records::{
     CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
@@ -70,6 +71,7 @@ struct State {
     asked_grants: BTreeMap<(ProjectId, MessageId), AskedGrant>,
     escalations: BTreeMap<(ProjectId, MessageId), EscalationRecord>,
     slots: BTreeMap<ProjectId, SlotBoard>,
+    worktrees: BTreeMap<(ProjectId, PoolKey), WorktreePool>,
     deliveries: BTreeMap<(ProjectId, MemberId, DeliverySubject), Delivery>,
     raised: BTreeMap<(ProjectId, MessageId), (MemberId, OffsetDateTime)>,
     calls: BTreeMap<(ProjectId, MemberId), OffsetDateTime>,
@@ -150,7 +152,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 27] = [
+        let checks: [(&'static str, bool); 28] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -271,6 +273,16 @@ impl State {
                             && h.item.is_none_or(|i| item(*p, i))
                     }) && board.waiters.iter().all(|w| member(*p, w.member))
                         && board.offers.iter().all(|o| member(*p, o.member))
+                }),
+            ),
+            (
+                "a worktree hold",
+                self.worktrees.iter().all(|((p, key), pool)| {
+                    member(*p, key.member)
+                        && pool.holds().iter().all(|h| {
+                            self.sessions.contains_key(&(*p, h.holder.session()))
+                                && h.item.is_none_or(|i| item(*p, i))
+                        })
                 }),
             ),
             (
@@ -1379,6 +1391,50 @@ impl SlotRows for MemoryTx {
 
     async fn busy_slot_projects(&mut self) -> StoreResult<Vec<ProjectId>> {
         Ok(self.work.slots.keys().copied().collect())
+    }
+}
+
+#[async_trait]
+impl WorktreeRows for MemoryTx {
+    async fn worktree_pool(
+        &mut self,
+        project: ProjectId,
+        key: &PoolKey,
+    ) -> StoreResult<WorktreePool> {
+        Ok(self
+            .work
+            .worktrees
+            .get(&(project, key.clone()))
+            .cloned()
+            .unwrap_or_else(|| WorktreePool::empty(key.clone())))
+    }
+
+    async fn worktree_pools(&mut self, project: ProjectId) -> StoreResult<Vec<WorktreePool>> {
+        Ok(self
+            .work
+            .worktrees
+            .iter()
+            .filter(|((p, _), _)| *p == project)
+            .map(|(_, pool)| pool.clone())
+            .collect())
+    }
+
+    async fn put_worktree_pool(
+        &mut self,
+        project: ProjectId,
+        pool: &WorktreePool,
+    ) -> StoreResult<()> {
+        let key = (project, pool.key().clone());
+        if pool.is_empty() {
+            self.work.worktrees.remove(&key);
+        } else {
+            self.work.worktrees.insert(key, pool.clone());
+        }
+        Ok(())
+    }
+
+    async fn busy_worktree_pools(&mut self) -> StoreResult<Vec<(ProjectId, PoolKey)>> {
+        Ok(self.work.worktrees.keys().cloned().collect())
     }
 }
 

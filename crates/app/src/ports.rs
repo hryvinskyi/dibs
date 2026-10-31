@@ -7,7 +7,7 @@ pub use store::{
     AckRows, AskedGrantRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows,
     GrantRows, ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
     SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
-    UiSessionRows, WideAskRows,
+    UiSessionRows, WideAskRows, WorktreeRows,
 };
 
 use time::OffsetDateTime;

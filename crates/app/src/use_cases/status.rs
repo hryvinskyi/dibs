@@ -22,6 +22,7 @@ use crate::use_cases::escalate::{OpenEscalation, open_escalations};
 use crate::use_cases::radar::{NamedOverlap, live_overlaps};
 use crate::use_cases::ready::{ReadyScope, ReadyView};
 use crate::use_cases::slots::{Scene, SlotLine, scene_lines};
+use crate::use_cases::worktrees::{OwnPool, PoolScene, own_pools};
 use crate::work::Work;
 
 /// A claim with its item, each member with their handle.
@@ -86,6 +87,8 @@ pub struct StatusView {
     pub ready: ReadyView,
     /// Every declared slot with its group's hold, queue and offer.
     pub slots: Vec<SlotLine>,
+    /// The caller's own worktree pools with a hold, ordered by key, each hold with its session.
+    pub worktrees: Vec<OwnPool>,
     /// The escalations the caller may read that no arbiter has acknowledged yet, newest first.
     pub escalations: Vec<OpenEscalation>,
     /// Since when the project's integrations have not called, once that is long enough to count
@@ -99,9 +102,10 @@ pub struct StatusView {
 }
 
 /// Shows the project's live and stale claims, the areas held, the live wide claims with where each
-/// of their areas stands, the caller's ready list, where the slots stand — after applying, and
-/// recording, what time changed about them — the escalations still waiting for an arbiter,
-/// whether the project's integrations went silent, and the overlaps between live claims.
+/// of their areas stands, the caller's ready list, where the slots stand and what the caller's
+/// worktree pools hold — after applying, and recording, what time changed about them — the
+/// escalations still waiting for an arbiter, whether the project's integrations went silent, and
+/// the overlaps between live claims.
 pub struct Status {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -134,6 +138,18 @@ impl Status {
         let mut work = Work::begin_for(&*self.store, actor).await?;
         let mut scene = Scene::load(&mut work, &self.hot_rules, now).await?;
         scene.save(&mut work, &*self.ids, now).await?;
+        let mut pools = PoolScene::load_all(&mut work, Some(actor.member), now).await?;
+        for pool in &mut pools {
+            pool.save(&mut work, now).await?;
+        }
+        let worktrees = own_pools(
+            &mut work,
+            pools
+                .iter()
+                .map(|scene| &scene.pool)
+                .filter(|pool| !pool.is_empty()),
+        )
+        .await?;
         let settings = scene.settings.clone();
         let stale_after = settings.stale_after();
         let names = Names::load(&mut work).await?;
@@ -152,6 +168,7 @@ impl Status {
             wide: Vec::new(),
             ready,
             slots: scene_lines(&mut work, &scene).await?,
+            worktrees,
             escalations: open_escalations(&mut work, actor, &names, &self.ref_schemes).await?,
             integration_silent_since: None,
             overlaps: Vec::new(),

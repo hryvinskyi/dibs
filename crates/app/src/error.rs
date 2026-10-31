@@ -17,6 +17,7 @@ use dibs_domain::review::{DropRefused, ReviewRefused};
 use dibs_domain::settings::{AreaLookupError, SettingsError};
 use dibs_domain::slot::{BeatRefused, SlotRefused};
 use dibs_domain::wide::WideScopeError;
+use dibs_domain::worktree::WorktreeRefused;
 
 use crate::named::Refusal;
 use crate::ports::StoreError;
@@ -137,6 +138,9 @@ pub enum AppError {
     /// A run's heartbeat found its hold gone; the refusal carries the handle of who holds it now.
     #[error(transparent)]
     Beat(#[from] Refusal<BeatRefused>),
+    /// A request about a worktree of a pool was refused.
+    #[error(transparent)]
+    Worktree(#[from] WorktreeRefused),
     /// The grant was refused.
     #[error(transparent)]
     Grant(#[from] GrantRefused),
@@ -278,6 +282,12 @@ impl AppError {
                 BeatRefused::TakenOver { .. } => "taken_over",
                 BeatRefused::Ended => "run_ended",
             },
+            Self::Worktree(refused) => match refused {
+                WorktreeRefused::NoNames | WorktreeRefused::NamedTwice { .. } => {
+                    "worktree_names_invalid"
+                }
+                WorktreeRefused::NotHeld => "worktree_not_held",
+            },
             Self::Grant(refused) => match refused {
                 GrantRefused::SelfGrant => "self_grant",
                 GrantRefused::UnknownArea { .. } => "unknown_area",
@@ -347,6 +357,26 @@ mod tests {
         });
         assert_eq!(error.code(), "internal");
         assert!(!error.to_string().contains("claims row"));
+    }
+
+    #[test]
+    fn a_worktree_refusal_has_a_code_of_its_own() {
+        let name = dibs_domain::worktree::WorktreeName::parse("worktree1").unwrap();
+        let cases = [
+            (WorktreeRefused::NoNames, "worktree_names_invalid"),
+            (
+                WorktreeRefused::NamedTwice { worktree: name },
+                "worktree_names_invalid",
+            ),
+            (WorktreeRefused::NotHeld, "worktree_not_held"),
+        ];
+        for (refused, code) in cases {
+            assert_eq!(AppError::from(refused).code(), code);
+        }
+        assert_eq!(
+            AppError::from(WorktreeRefused::NotHeld).to_string(),
+            "that worktree is not held"
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@ use dibs_domain::item::ItemStatus;
 use dibs_domain::message::{Author, Importance, Recipients};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::slot::{RemovedFromSlots, SlotName, decide_member_removed};
+use dibs_domain::worktree::decide_member_removed as worktrees_member_removed;
 
 use crate::authority::AdminAuthority;
 use crate::dependencies::Dependencies;
@@ -21,6 +22,7 @@ use crate::use_cases::claim_ending::{Ending, end_claim};
 use crate::use_cases::common::{existing_item, present_member_by_handle};
 use crate::use_cases::handover::Handovers;
 use crate::use_cases::slots::Scene;
+use crate::use_cases::worktrees::PoolScene;
 use crate::use_cases::writing::{Posted, SystemPost, system_body, titled_body};
 use crate::work::Work;
 
@@ -33,6 +35,8 @@ pub struct RemovedMember {
     pub released: Vec<ItemName>,
     /// What they had among the slots.
     pub slots: RemovedFromSlots,
+    /// How many holds of their worktree pools ended.
+    pub worktrees: usize,
     /// How many of their tokens were revoked.
     pub tokens_revoked: u64,
     /// How many of their browser sessions ended.
@@ -43,7 +47,8 @@ pub struct RemovedMember {
 /// operator of the service, in one transaction: every token of theirs is revoked and every browser
 /// session ended; each of their claims is released, its item open again (`force_released`); their
 /// holds on slots end and their places in queues and the offers to them go, the freed slots
-/// offered on (`slot_force_released`); they are marked removed (`member_removed`); and dibs tells
+/// offered on (`slot_force_released`); every hold of their worktree pools ends
+/// (`worktree_released`); they are marked removed (`member_removed`); and dibs tells
 /// the project, in one message, what was released. The areas other claims waited for their claims
 /// to hand over move to those claims, and their own claims' waits end with them. Their messages,
 /// and every record that names them, stay. A removed member is no recipient, takes nothing and
@@ -126,6 +131,13 @@ impl RemoveMember {
             decide_member_removed(&scene.board, scene.catalog(), member.id, admin, now);
         let slots = scene.apply(transition);
         scene.save(&mut work, &*self.ids, now).await?;
+        let mut worktrees = 0;
+        for mut pool in PoolScene::load_all(&mut work, Some(member.id), now).await? {
+            worktrees += pool
+                .apply(worktrees_member_removed(&pool.pool, admin))
+                .len();
+            pool.save(&mut work, now).await?;
+        }
         work.remove_member(project, member.id, now).await?;
         work.record(
             now,
@@ -168,6 +180,7 @@ impl RemoveMember {
             member,
             released,
             slots,
+            worktrees,
             tokens_revoked,
             ui_sessions_ended,
         })

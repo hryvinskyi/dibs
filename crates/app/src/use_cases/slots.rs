@@ -22,5 +22,5 @@ pub use run::{SlotRunBeat, TakeOverSlot, TakeOverSlotInput, TakenOverSlot};
 pub use take::{HoldMode, TakeSlot, TakeSlotInput, TookKind, TookSlot};
 pub use view::{NamedHold, NamedOffer, NamedWaiter, SlotLine};
 
-pub(crate) use scene::Scene;
+pub(crate) use scene::{Notice, Scene};
 pub(crate) use view::scene_lines;
