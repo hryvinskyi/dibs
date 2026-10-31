@@ -7,7 +7,7 @@
 //! merge report completes, an overlap of two members' branches reported by an integration, a
 //! feature claim that receives the area a debt claim hands over, the figures of a pilot that
 //! members' machines reported, and a session waiting for its person woken by a message about the
-//! item it works on.
+//! item it works on, and the worktrees of a pool lent to one member's agents.
 
 #[cfg(test)]
 mod harness;
@@ -38,3 +38,5 @@ mod review;
 mod slots;
 #[cfg(test)]
 mod wide;
+#[cfg(test)]
+mod worktrees;

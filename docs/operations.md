@@ -651,6 +651,31 @@ given, addressed to the grantee and about their item, so that it reaches the ses
 request for a grant says that giving it tells the asker. No migration. The client's `dibs_grant` describes it. Upgrade
 the server, then set `DIBS_LATEST_CLIENT` to 0.1.8.
 
+**0.1.9, a pool of worktrees for a member's agents.** A server of 0.1.9 migrates the database (migration 13,
+`0013_worktree_holds.sql`, a new table of worktree holds) and serves `GET /v1/worktrees`, `POST /v1/worktrees/take`,
+`POST /v1/worktrees/release`, `POST /v1/worktrees/beat`, `POST /v1/sessions/{id}/end` and
+`POST /v1/admin/worktrees/force-release`; its sweep ends silent holds beside the slots, and the board lists them under
+Worktrees (see [Worktrees](#worktrees)). Older clients never call the routes. On deploy:
+
+1. Take the snapshot, as for every release: migrations only go forward.
+2. Upgrade the server. Nothing is configured on it, and a project whose members declare no pool is unchanged.
+3. Once the 0.1.9 client binaries are published, set `DIBS_LATEST_CLIENT` to 0.1.9 and restart the server. Leave
+   `DIBS_MIN_CLIENT` alone: a client of 0.1.8 has no pool to ask for.
+
+The plugin of 0.1.9 names 0.1.9 as its `min_binary`, because its hooks now ask dibs for a worktree and tell it when an
+agent or a session ends. A plugin that updated ahead of its binary says so once per session; until the binary follows,
+the worktree a session asks for is the one its host makes itself, and the hooks that tell dibs an agent or a session ended
+are skipped. A client of 0.1.9 ahead of its server is served `404` on the worktree routes and does the same: a worktree is
+the host's own, its signs of life and session ends are dropped, and the server is not asked again for a day. Upgrade the
+server before the clients.
+
+What a member sets up, once per checkout that should lend worktrees: a `[worktrees]` table in the checkout's `.dibs.toml`
+(`count`, `prepare` and `reset`, and `idle` and `idle_after` to stop an unused environment; see the README), and a
+schedule, such as launchd, systemd or cron, that runs `dibs worktree upkeep` in the checkout every five minutes. A
+scheduled job starts without the person's shell, so it must be given the `PATH` and the container-runtime settings
+(`DOCKER_HOST` or `DOCKER_CONTEXT`) that the `idle` command needs; without them the environment is not stopped, and
+`upkeep` says which worktree it could not stop. Worktrees are prepared on the first take that finds none prepared.
+
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without

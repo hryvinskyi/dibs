@@ -425,6 +425,106 @@ pub fn checkout(dir: &Path, server: &Server, repo: Option<&str>, remote: &str) -
     dir.to_owned()
 }
 
+/// A checkout that lends a pool of worktrees beside it, and the commands its pool runs.
+pub struct Pool {
+    /// The checkout that lends the pool.
+    pub checkout: PathBuf,
+    /// The directory the pool's worktrees live in.
+    pub root: PathBuf,
+    log: PathBuf,
+}
+
+impl Pool {
+    /// The directory of the worktree `name`, as the file system resolves it.
+    pub fn worktree(&self, name: &str) -> PathBuf {
+        let path = self.root.join(name);
+        fs::canonicalize(&path).unwrap_or(path)
+    }
+
+    /// What the pool's commands did, in order: `prepare worktree1`, `reset worktree1`,
+    /// `idle worktree2`.
+    pub fn commands_run(&self) -> Vec<String> {
+        fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+/// The commands of a pool: each one writes what it did into the log, and `prepare` adds the
+/// worktree to the checkout at the base, `reset` checks the base out and cleans the worktree.
+fn pool_commands(log: &Path) -> [(&'static str, String); 3] {
+    let log = log.display();
+    [
+        (
+            "prepare",
+            format!(
+                "echo \"prepare $DIBS_WORKTREE_NAME\" >> '{log}'\n\
+                 if [ ! -e \"$DIBS_WORKTREE_PATH/.git\" ]; then\n\
+                 git -C \"$DIBS_CHECKOUT\" worktree add -q --detach \"$DIBS_WORKTREE_PATH\" \"$DIBS_WORKTREE_BASE\" || exit 6\n\
+                 fi\n"
+            ),
+        ),
+        (
+            "reset",
+            format!(
+                "echo \"reset $DIBS_WORKTREE_NAME\" >> '{log}'\n\
+                 cd \"$DIBS_WORKTREE_PATH\" && git checkout -q --detach \"$DIBS_WORKTREE_BASE\" && git clean -ffdq\n"
+            ),
+        ),
+        (
+            "idle",
+            format!("echo \"idle $DIBS_WORKTREE_NAME\" >> '{log}'\n"),
+        ),
+    ]
+}
+
+/// A git checkout at `dir`, like [`checkout`], that lends `count` worktrees from the directory
+/// beside it and stops a free one after `idle_after`. Its `.dibs.toml` is kept out of git, as a
+/// pool's checkout keeps it, so that a worktree made from it holds only what an agent wrote.
+pub fn pool_checkout(
+    dir: &Path,
+    server: &Server,
+    remote: &str,
+    count: u8,
+    idle_after: &str,
+) -> Pool {
+    checkout(dir, server, None, remote);
+    git(dir, &["rm", "-q", "--cached", ".dibs.toml"]);
+    let exclude = dir.join(".git/info/exclude");
+    let mut excluded = fs::read_to_string(&exclude).unwrap_or_default();
+    excluded.push_str("\n.dibs.toml\n");
+    fs::write(&exclude, excluded).unwrap();
+    git(dir, &["commit", "-q", "-m", "keep the configuration local"]);
+
+    let kit = dir.with_file_name(format!(
+        "{}-kit",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    fs::create_dir_all(&kit).unwrap();
+    let log = kit.join("commands.log");
+    let mut config = fs::read_to_string(dir.join(".dibs.toml")).unwrap();
+    config.push_str(&format!(
+        "\n[worktrees]\ncount = {count}\nbase = \"main\"\nidle_after = \"{idle_after}\"\n"
+    ));
+    for (step, script) in pool_commands(&log) {
+        let file = kit.join(format!("{step}.sh"));
+        fs::write(&file, script).unwrap();
+        config.push_str(&format!("{step} = \"sh '{}'\"\n", file.display()));
+    }
+    fs::write(dir.join(".dibs.toml"), config).unwrap();
+    let root = dir.with_file_name(format!(
+        "{}-worktrees",
+        dir.file_name().unwrap().to_string_lossy()
+    ));
+    Pool {
+        checkout: dir.to_owned(),
+        root,
+        log,
+    }
+}
+
 /// Starts the branch `name` in the checkout at `dir` and moves the checkout onto it.
 pub fn start_branch(dir: &Path, name: &str) {
     git(dir, &["checkout", "-q", "-b", name]);
@@ -475,5 +575,17 @@ impl Team {
     /// a project that lists several.
     pub fn checkout(&self, name: &str, repo: Option<&str>, remote: &str) -> PathBuf {
         checkout(&self.root.path().join(name), &self.server, repo, remote)
+    }
+
+    /// A checkout named `name` under the team's root that lends `count` worktrees beside it and
+    /// stops a free one after `idle_after`.
+    pub fn pool(&self, name: &str, remote: &str, count: u8, idle_after: &str) -> Pool {
+        pool_checkout(
+            &self.root.path().join(name),
+            &self.server,
+            remote,
+            count,
+            idle_after,
+        )
     }
 }

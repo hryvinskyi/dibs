@@ -672,3 +672,58 @@ fn where_no_pool_lends_a_worktree_dibs_makes_claude_codes_own_and_says_why() {
         assert!(!own.exists(), "removed as git removes a clean worktree");
     }
 }
+
+#[test]
+fn a_repeated_request_for_the_same_agents_worktree_gets_it_back_untouched() {
+    let setup = Setup::new();
+    let widgets = setup.pool(2);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "worktree1"]);
+    let worktree = setup.pool_worktree("worktree1");
+
+    let first = worktree_create(&setup, "bob", &widgets, "agent-x");
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+    assert_eq!(last_line(&first), worktree);
+    let scratch = worktree.join("scratch.txt");
+    fs::write(&scratch, "work in progress\n").unwrap();
+
+    let second = worktree_create(&setup, "bob", &widgets, "agent-x");
+    assert_eq!(second.status.code(), Some(0), "{}", text(&second.stderr));
+    assert_eq!(last_line(&second), worktree);
+    assert!(
+        scratch.exists(),
+        "asking again is not a new take, so nothing is reset"
+    );
+    let held: Vec<Value> = setup
+        .worktrees("bob", &widgets)
+        .into_iter()
+        .filter(|listed| !listed["held"].is_null())
+        .collect();
+    assert_eq!(held.len(), 1, "one hold, not two: {held:?}");
+}
+
+#[test]
+fn an_agents_edit_in_its_pool_worktree_is_checked_against_claims_like_one_in_the_checkout() {
+    let setup = Setup::new();
+    let api = setup.api();
+    let widgets = setup.pool(1);
+    setup.claim("alice", &api, "gh:acme/api#1", &["billing"]);
+    setup.claim("bob", &widgets, "gh:acme/api#2", &[]);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "worktree1"]);
+    let worktree = setup.pool_worktree("worktree1");
+    let created = worktree_create(&setup, "bob", &widgets, "agent-x");
+    assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
+
+    let write = |path: &str| {
+        let mut input: Value = serde_json::from_str(&write_of(&worktree, path)).unwrap();
+        input["agent_id"] = json!("x");
+        input["agent_type"] = json!("general-purpose");
+        reply(&setup.hook("bob", &worktree, "pre-tool-use", &input.to_string()))
+    };
+    let denied = write("src/billing/a.rs");
+    assert_eq!(decision(&denied), Some("deny"), "{denied}");
+    let reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(reason.contains("alice holds for work item"), "{reason}");
+    assert_eq!(write("src/search/q.rs"), Value::Null);
+}
