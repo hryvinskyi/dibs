@@ -19,6 +19,7 @@ use dibs_domain::report::{FeedbackReason, RefusalId};
 use dibs_domain::review::PrRef;
 use dibs_domain::slot::{Purpose, SlotName};
 use dibs_domain::wide::WideReason;
+use dibs_domain::worktree::{AgentKey, WorktreeName};
 
 use crate::commands::feedback::FeedbackOn;
 use crate::failure::{Failure, sentence};
@@ -736,6 +737,85 @@ impl SlotInput {
     }
 }
 
+/// `dibs_worktree_take`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeTakeInput {
+    /// Why you take it, as every member reads it on the board; never a credential, a host or a
+    /// customer's data.
+    pub purpose: String,
+    /// The work item it is for: its local id or its reference.
+    pub item: Option<ItemKeyInput>,
+    /// When every worktree is held, wait up to this many seconds (at most 840) for one to be
+    /// released.
+    pub wait_seconds: Option<u64>,
+}
+
+/// The longest wait a worktree take may ask for, in seconds.
+pub const MAX_WORKTREE_WAIT_SECONDS: u64 = crate::cli::MAX_WORKTREE_WAIT.as_secs();
+
+impl WorktreeTakeInput {
+    /// The purpose.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it is empty or too long.
+    pub fn purpose(&self) -> Result<Purpose, Failure> {
+        Purpose::parse(&self.purpose).map_err(|error| invalid("purpose", &error.to_string()))
+    }
+
+    /// The wait asked for; zero when none was.
+    ///
+    /// # Errors
+    /// A [`Failure`] for a wait longer than [`MAX_WORKTREE_WAIT_SECONDS`].
+    pub fn wait(&self) -> Result<std::time::Duration, Failure> {
+        match self.wait_seconds {
+            Some(seconds) if seconds > MAX_WORKTREE_WAIT_SECONDS => Err(invalid(
+                "wait_seconds",
+                "wait at most 840 seconds, the longest one take waits",
+            )),
+            Some(seconds) => Ok(std::time::Duration::from_secs(seconds)),
+            None => Ok(std::time::Duration::ZERO),
+        }
+    }
+}
+
+/// `dibs_worktree_release`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorktreeReleaseInput {
+    /// The worktree to release (`worktree2`), whichever of your agents holds it.
+    pub name: Option<String>,
+    /// The agent key the take answered: releases the worktree that agent holds.
+    pub agent: Option<String>,
+}
+
+/// Which hold a release ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Releasing {
+    /// The hold of this worktree.
+    Worktree(WorktreeName),
+    /// The hold of this agent of the tool server's session.
+    Agent(AgentKey),
+}
+
+impl WorktreeReleaseInput {
+    /// What it releases.
+    ///
+    /// # Errors
+    /// A [`Failure`] unless exactly one of `name` and `agent` is given and valid.
+    pub fn releasing(&self) -> Result<Releasing, Failure> {
+        match (&self.name, &self.agent) {
+            (Some(name), None) => WorktreeName::parse(name.trim())
+                .map(Releasing::Worktree)
+                .map_err(|error| invalid("name", &format!("'{name}': {error}"))),
+            (None, Some(agent)) => AgentKey::parse(agent.trim())
+                .map(Releasing::Agent)
+                .map_err(|error| invalid("agent", &format!("'{agent}': {error}"))),
+            _ => Err(invalid("name", "give exactly one of name and agent")),
+        }
+    }
+}
+
 fn slot_name(field: &str, text: &str) -> Result<SlotName, Failure> {
     SlotName::parse(text.trim()).map_err(|error| invalid(field, &format!("'{text}': {error}")))
 }
@@ -1103,5 +1183,59 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_worktree_take_needs_a_purpose_and_waits_at_most_the_longest_a_take_waits() {
+        let take = |value: serde_json::Value| parse::<WorktreeTakeInput>(value);
+        let plain = take(json!({"purpose": "review the invoice change"}));
+        assert_eq!(
+            plain.purpose().unwrap().as_str(),
+            "review the invoice change"
+        );
+        assert_eq!(plain.wait().unwrap(), std::time::Duration::ZERO);
+        assert_eq!(
+            take(json!({"purpose": "x", "wait_seconds": 840}))
+                .wait()
+                .unwrap(),
+            std::time::Duration::from_secs(840)
+        );
+        let long = take(json!({"purpose": "x", "wait_seconds": 841}))
+            .wait()
+            .unwrap_err();
+        assert!(
+            long.message.starts_with("`wait_seconds`: "),
+            "{}",
+            long.message
+        );
+        assert!(take(json!({"purpose": " "})).purpose().is_err());
+        assert!(
+            serde_json::from_value::<WorktreeTakeInput>(json!({"purpose": "x", "slot": "a"}))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<WorktreeTakeInput>(json!({})).is_err());
+    }
+
+    #[test]
+    fn a_worktree_release_names_a_worktree_or_an_agent_and_not_both() {
+        let release = |value: serde_json::Value| parse::<WorktreeReleaseInput>(value).releasing();
+        assert_eq!(
+            release(json!({"name": " worktree2 "})).unwrap(),
+            Releasing::Worktree(WorktreeName::parse("worktree2").unwrap())
+        );
+        assert_eq!(
+            release(json!({"agent": "cli-0123456789ab"})).unwrap(),
+            Releasing::Agent(AgentKey::parse("cli-0123456789ab").unwrap())
+        );
+        for value in [
+            json!({}),
+            json!({"name": "worktree2", "agent": "cli-0123456789ab"}),
+            json!({"name": "Worktree 2"}),
+            json!({"agent": "has space"}),
+        ] {
+            let failure = release(value.clone()).unwrap_err();
+            assert_eq!(failure.code, "invalid_input", "{value}");
+            assert!(failure.message.ends_with('.'), "{}", failure.message);
+        }
     }
 }

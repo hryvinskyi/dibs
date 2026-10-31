@@ -1,6 +1,6 @@
 ---
 name: dibs
-description: How to work in a checkout that dibs coordinates with the rest of the team. Use it when the dibs brief appears at the start of a session, before the first edit of a governed path, when dibs refuses an edit or a shell command or adds a note to one, when a slot is offered to you, and when a teammate's message arrives.
+description: How to work in a checkout that dibs coordinates with the rest of the team. Use it when the dibs brief appears at the start of a session, before the first edit of a governed path, when dibs refuses an edit or a shell command or adds a note to one, when a slot is offered to you, when you need a worktree or dibs refuses work in one another agent holds, and when a teammate's message arrives.
 ---
 <!-- Rendered from docs/agent-workflow.md by `cargo xtask integrations`; edit that file, not this one. -->
 
@@ -241,6 +241,46 @@ A slot names the commands that need it by patterns over one simple command at a 
 action's script, `eval`, or the branch of a `git push` that names none: do not use these to go around a slot. A push is
 checked again by git's `pre-push` hook (`dibs check --push`), which knows the exact branch whatever the command line
 said; `git push --no-verify` goes past it only as a conscious choice your person makes.
+
+## Worktrees: a tree of your own
+
+A checkout whose `.dibs.toml` has a `[worktrees]` table lends the worktrees of a pool, kept on your member's machine, each
+a long-lived checkout with an environment of its own. A worktree is held by one agent (or one session) at a time:
+two agents of the same member never share one. A worktree is not a slot, and holding one has nothing to do with the
+slots above.
+
+- Often your host gives you one, and you need to do nothing: a subagent started in a worktree of its own and a session
+  that enters one are lent a worktree of the pool, and it is released when that subagent or session ends. The path
+  it gives you is where you work.
+- When you need a tree you were not given — a second branch to build and test beside your own, an experiment, a
+  review of someone else's change — take one: `dibs_worktree_take` with a purpose every member may read (never a
+  credential, a host name or a customer's data), the work item if there is one, and `wait_seconds` (up to 840) to wait
+  when every worktree is held (`dibs worktree take --purpose "..." [--item <item>] [--wait 14m]` on the command line,
+  which prints the path as its last line). `dibs_worktrees` (`dibs worktree list`) shows which are free, who holds
+  the others, and which are set aside as broken.
+- The answer has the worktree's path, the agent key that take made for you — every take is a holder of its own, even
+  within one session — and `rescued` and `notes` when the take did something on the way. Keep the key: it is how you
+  release.
+- Work only in that path. Do not edit, build or run commands for this work in your own checkout or in a directory you
+  made yourself; edits and commands that name the worktree (a path inside it, `cd` into it, `git -C` on it) tell dibs
+  you are still using it. If you must work in it from somewhere else, `dibs worktree beat <name>` says so.
+- A hold is kept by those signs of life: an agent's ends after 20 minutes without one and a session's after 12 hours,
+  and the worktree is then offered to the next take. So do not leave a worktree you hold idle for long; if you will be
+  away, release it.
+- Release it the moment you are done (`dibs_worktree_release` with its name or your agent key; `dibs worktree release
+  <name>`). Commit and push what you want to keep first: the next take of the worktree resets it, and whatever no
+  branch keeps — changes in the tree, commits on no branch — is saved on a rescue branch first.
+- When a take reports `rescued`, the previous user of that worktree left work in it, and it is saved on a branch named
+  `dibs/rescue/<worktree>-<time>`. Tell your person which branch; do not delete it, and do not build on it unless they
+  ask.
+- If every worktree is held, the refusal names who holds them and why. Wait for one, or work on something else;
+  never take over a held worktree by working in it, and never remove one.
+- A refusal of an edit or a shell command that says you work in a pool worktree held by another session or agent is
+  final: you hold no hold on it, so work in a worktree you hold, or take your own. A worktree nobody holds that you were
+  already working in (after `/clear`, or a resumed agent) is taken again for you as it is.
+- If the pool cannot serve the worktree your host asked for — dibs switched off, no pool in this checkout, a server that
+  cannot be reached — dibs says so and your host gets the plain git worktree it would have made itself, without an
+  environment of its own. The work goes on; tell your person if you needed the environment.
 
 ## Hot files
 

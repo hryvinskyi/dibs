@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use dibs_client::Client;
 use dibs_client::api::{
     Acked, ClaimRequest, Claimed, CreatedItem, DropPrRequest, EditCheck, Ended, GrantAsked,
     Granted, Inbox, InboxRequest, Items, MarkedRead, NarrowRequest, Narrowed, PostMessage, Posted,
@@ -12,20 +13,29 @@ use dibs_client::api::{
 };
 use dibs_client::api::{
     Escalated, EscalationRequest, FeedbackGiven, HoldMode, ReleaseSlotRequest, SlotAnswer,
-    SlotReleased, Slots, TakeSlotRequest, Took,
+    SlotReleased, Slots, TakeSlotRequest, Took, WorktreeRelease, WorktreeReleased,
 };
+use dibs_client::locations::Locations;
 use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::message::SessionLabel;
+use dibs_domain::report::MachineId;
 
 use crate::commands::check::Governed;
 use crate::commands::feedback;
+use crate::commands::worktree::pool::Pool;
+use crate::commands::worktree::project::ShellCommands;
+use crate::commands::worktree::rescue::Author;
+use crate::commands::worktree::take::{Ask, TakeError, Taken, TakenWorktree, Taker};
+use crate::commands::worktree::{self, Listing, RandomIds};
 use crate::context::{Connection, Context};
 use crate::failure::Failure;
+use crate::guard::SystemClock;
 use crate::mcp::inputs::{
     AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget,
-    FeedbackInput, GrantInput, InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput,
+    FeedbackInput, GrantInput, InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, Releasing,
     ReviewInput, SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
+    WorktreeReleaseInput, WorktreeTakeInput,
 };
 
 /// The kind of agent the sessions of a tool server that pushes nothing report.
@@ -33,6 +43,21 @@ const AGENT: &str = "mcp";
 
 /// How often a waiting slot take asks again.
 const SLOT_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often a waiting worktree take asks again.
+const WORKTREE_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A worktree taken for an agent of the tool server's session: the worktree made ready, and what
+/// the take did along the way.
+#[derive(Debug, serde::Serialize)]
+pub struct WorktreeTaken {
+    /// The worktree, its path, its holder and what was done to it.
+    #[serde(flatten)]
+    pub taken: TakenWorktree,
+    /// What the take said while it ran: work rescued onto a branch, a preparation that was
+    /// started.
+    pub notes: Vec<String>,
+}
 
 /// Either a new conversation or a message in one: what `dibs_send` answers.
 #[derive(Debug, serde::Serialize)]
@@ -73,6 +98,7 @@ pub struct Link {
     session: SessionId,
     label: SessionLabel,
     cwd: PathBuf,
+    locations: Locations,
     registration: Registration,
 }
 
@@ -84,6 +110,7 @@ impl Link {
     /// The [`Failure`] of signing in or of registering.
     pub async fn open(ctx: &Context, registration: Registration) -> Result<Self, Failure> {
         let connection = ctx.connect().await?;
+        let locations = ctx.locations()?;
         let session = connection
             .register(registration.agent, &registration.name, registration.push)
             .await?;
@@ -95,6 +122,7 @@ impl Link {
             session: session.session_id,
             label: session.label,
             cwd: ctx.cwd.clone(),
+            locations,
             registration,
         })
     }
@@ -471,6 +499,94 @@ impl Link {
         self.call(self.connection.client.slots()).await
     }
 
+    /// Takes a worktree of the checkout's pool for a fresh agent of this session, rescues the
+    /// work it held, resets it (or prepares it), and answers it with the agent key; with a wait,
+    /// asks again every 5 seconds until one is released or the wait is over. The take runs on a
+    /// thread of its own, as the project's commands it waits for may run for minutes.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, a directory whose checkout lends no worktrees, every
+    /// worktree held past the wait, a worktree that would not become ready, or of the call.
+    pub async fn worktree_take(&self, input: WorktreeTakeInput) -> Result<WorktreeTaken, Failure> {
+        let purpose = input.purpose()?;
+        let wait = input.wait()?;
+        let item = match &input.item {
+            Some(key) => Some(self.resolve(&key.key("item")?).await?),
+            None => None,
+        };
+        let pool = self.pool()?;
+        let machine = worktree::machine(&self.locations)?;
+        let ask = Ask {
+            session: self.session,
+            agent: Some(worktree::minted(&RandomIds)?),
+            purpose,
+            item,
+            wait,
+            deadline: None,
+            poll_every: WORKTREE_POLL,
+        };
+        let client = self.connection.client.clone();
+        let author = Author::of(&self.connection.me.member);
+        let (taken, notes) = tokio::task::spawn_blocking(move || {
+            take_on_a_thread(&client, &pool, machine, author, &ask)
+        })
+        .await
+        .map_err(|_| Failure::config("worktree_take", "The worktree take did not finish."))??;
+        let taken = worktree::took(&self.connection, taken)?;
+        Ok(WorktreeTaken { taken, notes })
+    }
+
+    /// Releases a worktree the caller holds, by its name or by the agent key its take answered.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, a worktree the pool does not have, or of the call.
+    pub async fn worktree_release(
+        &self,
+        input: WorktreeReleaseInput,
+    ) -> Result<WorktreeReleased, Failure> {
+        let releasing = input.releasing()?;
+        let pool = self.pool()?;
+        let release = match releasing {
+            Releasing::Worktree(name) => WorktreeRelease::Worktree {
+                worktree: pool.known(&name)?,
+            },
+            Releasing::Agent(agent) => WorktreeRelease::Holder {
+                holder_session: self.session,
+                agent: Some(agent),
+            },
+        };
+        let machine = worktree::machine(&self.locations)?;
+        worktree::release_hold(&self.connection, &pool, machine, self.session, release).await
+    }
+
+    /// Every worktree of the checkout's pool and where it stands: prepared or not, who holds it
+    /// and why, whether it is set aside as broken, and the branches its work was rescued on.
+    ///
+    /// # Errors
+    /// A [`Failure`] for a directory whose checkout lends no worktrees, or of the call.
+    pub async fn worktrees(&self) -> Result<Listing, Failure> {
+        let pool = self.pool()?;
+        let machine = worktree::machine(&self.locations)?;
+        let holds = match worktree::own_holds(&self.connection, &pool, &machine).await {
+            Ok(holds) => Some(holds),
+            Err(error) if error.is_unavailable() => None,
+            Err(error) => return Err(self.connection.failed(error)),
+        };
+        Ok(worktree::listing(&pool, holds))
+    }
+
+    /// The pool of the checkout the tool server runs in, or of the checkout whose worktree that
+    /// is.
+    fn pool(&self) -> Result<Pool, Failure> {
+        let here = self.connection.checkout.as_ref().ok_or_else(|| {
+            Failure::config(
+                "no_checkout",
+                "No .dibs.toml was found here or above in this repository; start the tool server in a checkout whose .dibs.toml has a [worktrees] table, or in one of its worktrees.",
+            )
+        })?;
+        Pool::locate(here, self.locations.state_dir()).map(|(pool, _)| pool)
+    }
+
     async fn resolve(&self, key: &dibs_domain::item::ItemKey) -> Result<ItemId, Failure> {
         self.connection.resolve(key).await
     }
@@ -481,4 +597,32 @@ impl Link {
     ) -> Result<T, Failure> {
         call.await.map_err(|error| self.connection.failed(error))
     }
+}
+
+/// Runs a take to its end on the calling thread, which may block for as long as the project's
+/// commands run, with the notes it made.
+fn take_on_a_thread(
+    client: &Client,
+    pool: &Pool,
+    machine: MachineId,
+    author: Author,
+    ask: &Ask,
+) -> Result<(Result<Taken, TakeError>, Vec<String>), Failure> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| Failure::config("no_runtime", "The worktree take could not start."))?;
+    let notes = std::cell::RefCell::new(Vec::new());
+    let note = |text: &str| notes.borrow_mut().push(text.to_owned());
+    let taker = Taker {
+        client,
+        machine,
+        pool,
+        commands: &ShellCommands,
+        clock: &SystemClock,
+        author,
+        notes: &note,
+    };
+    let taken = runtime.block_on(taker.take(ask));
+    Ok((taken, notes.into_inner()))
 }

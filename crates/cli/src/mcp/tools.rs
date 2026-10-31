@@ -24,7 +24,7 @@ use crate::mcp::answer;
 use crate::mcp::inputs::{
     AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, FeedbackInput, GrantInput,
     InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, SlotInput,
-    SlotTakeInput, TakeoverInput, ThreadInput,
+    SlotTakeInput, TakeoverInput, ThreadInput, WorktreeReleaseInput, WorktreeTakeInput,
 };
 use crate::mcp::link::{Link, Registration};
 use crate::mcp::push::{self, Pusher};
@@ -347,6 +347,37 @@ impl Tools {
     async fn dibs_slots(&self) -> CallToolResult {
         self.perform(|link| async move { link.slots().await }).await
     }
+
+    #[tool(
+        description = "Take a worktree of this checkout's pool for work that must not touch your own checkout (a second branch to build and test beside it, an experiment, a review of someone else's change). Use it when you need a worktree you did not enter through your host's own worktree feature; an agent your host starts in a worktree of its own already has one, and you need nothing. Give a purpose every member may read (never a credential, a host or a customer's data), optionally the work item, and wait_seconds (up to 840) to wait for a release when every worktree is held. The answer has the path (work and run commands only inside it, never beside it), the agent key this take minted (keep it: dibs_worktree_release takes it), whether it was prepared for you, rescued (the branch that now holds what the previous user left in it: tell your person) and notes. Each call takes a worktree of its own, even in one session; a take that is refused says what holds the others. Edits and shell commands inside the worktree, or dibs worktree beat NAME from a shell, show you are still using it: after 20 minutes of silence it is offered to the next take. Release it with dibs_worktree_release as soon as you are done."
+    )]
+    async fn dibs_worktree_take(
+        &self,
+        Parameters(input): Parameters<WorktreeTakeInput>,
+    ) -> CallToolResult {
+        self.perform(|link| async move { link.worktree_take(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Release a worktree you took, as soon as you are done with it: give its name (worktree2), or the agent key dibs_worktree_take answered. Commit and push what you want to keep first: work that no branch keeps (changes in the tree, commits on no branch) is saved on a rescue branch the next time the worktree is taken, and the worktree is reset."
+    )]
+    async fn dibs_worktree_release(
+        &self,
+        Parameters(input): Parameters<WorktreeReleaseInput>,
+    ) -> CallToolResult {
+        self.perform(|link| async move { link.worktree_release(input).await })
+            .await
+    }
+
+    #[tool(
+        description = "Show every worktree of this checkout's pool: whether it is prepared, who holds it and why and since when, whether it is set aside as broken, and the rescue branches made from it. Use it before dibs_worktree_take to see what is free, and to find the branch your earlier work was rescued on.",
+        annotations(read_only_hint = true)
+    )]
+    async fn dibs_worktrees(&self) -> CallToolResult {
+        self.perform(|link| async move { link.worktrees().await })
+            .await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -441,6 +472,9 @@ mod tests {
                 "dibs_status",
                 "dibs_takeover",
                 "dibs_thread",
+                "dibs_worktree_release",
+                "dibs_worktree_take",
+                "dibs_worktrees",
             ])
         );
     }
@@ -466,10 +500,9 @@ mod tests {
     #[test]
     fn a_misspelt_field_is_refused_by_the_schema_of_every_tool_that_takes_fields() {
         let tools = Tools::tool_router().list_all();
-        for tool in tools
-            .iter()
-            .filter(|tool| !["dibs_status", "dibs_ready", "dibs_slots"].contains(&&*tool.name))
-        {
+        for tool in tools.iter().filter(|tool| {
+            !["dibs_status", "dibs_ready", "dibs_slots", "dibs_worktrees"].contains(&&*tool.name)
+        }) {
             assert_eq!(
                 tool.input_schema.get("additionalProperties"),
                 Some(&false.into()),
@@ -501,7 +534,8 @@ mod tests {
                 "dibs_ready",
                 "dibs_slots",
                 "dibs_status",
-                "dibs_thread"
+                "dibs_thread",
+                "dibs_worktrees"
             ])
         );
     }

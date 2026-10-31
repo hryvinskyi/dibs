@@ -21,9 +21,13 @@ use rand::RngExt as _;
 use serde::Serialize;
 
 use dibs_agent_host::ports::Clock;
-use dibs_client::api::{OwnWorktreeHold, ReleaseWorktreeRequest, WorktreeRelease};
+use dibs_client::ClientError;
+use dibs_client::api::{
+    OwnWorktreeHold, ReleaseWorktreeRequest, WorktreeRelease, WorktreeReleased,
+};
 use dibs_client::locations::Locations;
 use dibs_client::state::{BrokenWorktree, WorktreeHoldRecord};
+use dibs_domain::ids::SessionId;
 use dibs_domain::report::MachineId;
 use dibs_domain::slot::Purpose;
 use dibs_domain::worktree::{AgentKey, AgentKeyError, WorktreeName};
@@ -34,8 +38,8 @@ use crate::cli::{
 use crate::commands::worktree::pool::Pool;
 use crate::commands::worktree::project::{ProjectCommands, ShellCommands, Site, Step};
 use crate::commands::worktree::rescue::{Author, WorktreeGit};
-use crate::commands::worktree::take::{Ask, TakeError, Taken, Taker};
-use crate::context::Context;
+use crate::commands::worktree::take::{Ask, TakeError, Taken, TakenWorktree, Taker};
+use crate::context::{Connection, Context};
 use crate::failure::{Failure, Kind, sentence};
 use crate::guard::SystemClock;
 use crate::guard::machine::machine_id;
@@ -61,6 +65,15 @@ impl IdGen for RandomIds {
         let bits = rand::rng().random::<u64>() & 0xffff_ffff_ffff;
         AgentKey::parse(&format!("cli-{bits:012x}"))
     }
+}
+
+/// A fresh agent key, so that a take of a holder that names no agent is a holder of its own.
+///
+/// # Errors
+/// A configuration [`Failure`] when no valid key could be made.
+pub fn minted(ids: &dyn IdGen) -> Result<AgentKey, Failure> {
+    ids.agent_key()
+        .map_err(|_| Failure::config("no_agent_key", "No agent key could be made for this take."))
 }
 
 /// Runs a worktree command.
@@ -119,7 +132,10 @@ fn locate(ctx: &Context) -> Result<(Pool, Option<WorktreeName>, Locations), Fail
 }
 
 /// This machine's id.
-fn machine(locations: &Locations) -> Result<MachineId, Failure> {
+///
+/// # Errors
+/// A configuration [`Failure`] when it can be neither read nor kept.
+pub fn machine(locations: &Locations) -> Result<MachineId, Failure> {
     machine_id(locations.state_dir()).ok_or_else(|| {
         Failure::config(
             "no_machine_id",
@@ -135,12 +151,7 @@ async fn take(args: WorktreeTakeArgs, ctx: &Context, ids: &dyn IdGen) -> Result<
     let session = connection.session().await?;
     let (agent, minted) = match args.agent {
         Some(agent) => (agent, false),
-        None => (
-            ids.agent_key().map_err(|_| {
-                Failure::config("no_agent_key", "No agent key could be made for this take.")
-            })?,
-            true,
-        ),
+        None => (minted(ids)?, true),
     };
     let item = match &args.item {
         Some(key) => Some(connection.resolve(key).await?),
@@ -172,23 +183,35 @@ async fn take(args: WorktreeTakeArgs, ctx: &Context, ids: &dyn IdGen) -> Result<
         deadline: args.deadline,
         poll_every: args.poll_every,
     };
-    match taker.take(&ask).await {
-        Ok(Taken::Took(taken)) => {
-            if taken.again {
-                printer.note(&format!(
-                    "{} is held by this holder already; it was left as it is.",
-                    taken.worktree
-                ));
-            }
-            if minted {
-                printer.note(&format!(
-                    "{} is held for the agent {agent}; release it with dibs worktree release --agent {agent}, or dibs worktree release {}.",
-                    taken.worktree, taken.worktree
-                ));
-            }
-            printer.show(&taken, || taken.path.display().to_string());
-            Ok(())
-        }
+    let taken = took(&connection, taker.take(&ask).await)?;
+    if taken.again {
+        printer.note(&format!(
+            "{} is held by this holder already; it was left as it is.",
+            taken.worktree
+        ));
+    }
+    if minted {
+        printer.note(&format!(
+            "{} is held for the agent {agent}; release it with dibs worktree release --agent {agent}, or dibs worktree release {}.",
+            taken.worktree, taken.worktree
+        ));
+    }
+    printer.show(&taken, || taken.path.display().to_string());
+    Ok(())
+}
+
+/// What a take came to, as a command or a tool answers it: the worktree made ready, or the
+/// [`Failure`] of a pool whose worktrees are all held, of a worktree that would not become ready,
+/// or of the server.
+///
+/// # Errors
+/// The [`Failure`] the take's outcome stands for.
+pub fn took(
+    connection: &Connection,
+    taken: Result<Taken, TakeError>,
+) -> Result<TakenWorktree, Failure> {
+    match taken {
+        Ok(Taken::Took(taken)) => Ok(taken),
         Ok(Taken::Busy { sentence, .. }) => Err(Failure::refused("worktree_busy", sentence)),
         Err(TakeError::Server(error)) => Err(connection.failed(error)),
         Err(TakeError::Unusable(sentence)) => Err(Failure::refused("worktree_unusable", sentence)),
@@ -210,14 +233,34 @@ async fn release(args: WorktreeReleaseArgs, ctx: &Context) -> Result<(), Failure
     let connection = ctx.connect().await?;
     let machine = machine(&locations)?;
     let session = connection.session().await?;
-    let release = match (&named, args.agent) {
-        (Some(name), _) => WorktreeRelease::Worktree {
-            worktree: name.clone(),
-        },
+    let release = match (named, args.agent) {
+        (Some(worktree), _) => WorktreeRelease::Worktree { worktree },
         (None, agent) => WorktreeRelease::Holder {
             holder_session: session,
             agent,
         },
+    };
+    let released = release_hold(&connection, &pool, machine, session, release).await?;
+    let name = &released.released.worktree;
+    ctx.printer.show(&released, || format!("Released {name}."));
+    Ok(())
+}
+
+/// Ends a hold of the pool for the caller's `session`, and forgets what this machine kept of it:
+/// the holder's record, and the sign of it being used.
+///
+/// # Errors
+/// The [`Failure`] of the server's refusal or silence.
+pub async fn release_hold(
+    connection: &Connection,
+    pool: &Pool,
+    machine: MachineId,
+    session: SessionId,
+    release: WorktreeRelease,
+) -> Result<WorktreeReleased, Failure> {
+    let named = match &release {
+        WorktreeRelease::Worktree { worktree } => Some(worktree.clone()),
+        WorktreeRelease::Holder { .. } => None,
     };
     let request = ReleaseWorktreeRequest {
         session_id: session,
@@ -235,8 +278,7 @@ async fn release(args: WorktreeReleaseArgs, ctx: &Context) -> Result<(), Failure
             if let Err(error) = files.mark_free(name, SystemClock.now()) {
                 tracing::debug!(error = %error, "a worktree's release could not be recorded");
             }
-            ctx.printer.show(&released, || format!("Released {name}."));
-            Ok(())
+            Ok(released)
         }
         Err(error) => {
             if error.code() == "worktree_not_held"
@@ -252,7 +294,7 @@ async fn release(args: WorktreeReleaseArgs, ctx: &Context) -> Result<(), Failure
 
 /// `dibs worktree list`, as `--json` prints it.
 #[derive(Debug, Serialize)]
-struct Listing {
+pub struct Listing {
     /// Where the pool's worktrees live.
     root: PathBuf,
     /// Whether the server's holds are in it; when not, only this machine's records are.
@@ -274,23 +316,60 @@ struct Listed {
     rescue_branches: Vec<String>,
 }
 
+/// The holds the server keeps on the pool of this machine.
+///
+/// # Errors
+/// The client's error, which [`ClientError::is_unavailable`] tells a server that gave no answer
+/// from one that refused.
+pub async fn own_holds(
+    connection: &Connection,
+    pool: &Pool,
+    machine: &MachineId,
+) -> Result<Vec<OwnWorktreeHold>, ClientError> {
+    let answer = connection.client.worktrees(Some(machine)).await?;
+    Ok(answer
+        .pools
+        .into_iter()
+        .filter(|own| own.pool == *pool.id())
+        .flat_map(|own| own.holds)
+        .collect())
+}
+
+/// Each worktree of the pool as this machine and, when `holds` are given, the server see it.
+pub fn listing(pool: &Pool, holds: Option<Vec<OwnWorktreeHold>>) -> Listing {
+    let server = holds.is_some();
+    let holds = holds.unwrap_or_default();
+    let checkout_git = WorktreeGit::new(pool.checkout().root());
+    let files = pool.files();
+    let worktrees = pool
+        .names()
+        .into_iter()
+        .map(|name| Listed {
+            path: pool.path(&name),
+            prepared: pool.is_prepared(&name),
+            stopped: files.stopped_at(&name).is_some(),
+            broken: files.broken(&name),
+            held: holds.iter().find(|hold| hold.worktree == name).cloned(),
+            record: files.hold(&name),
+            rescue_branches: checkout_git.rescue_branches(&name),
+            worktree: name,
+        })
+        .collect();
+    Listing {
+        root: pool.settings().root.clone(),
+        server,
+        worktrees,
+    }
+}
+
 async fn list(ctx: &Context) -> Result<(), Failure> {
     let (pool, _, locations) = locate(ctx)?;
-    let mut holds: Vec<OwnWorktreeHold> = Vec::new();
-    let mut server = false;
+    let mut holds = None;
     match ctx.connect().await {
         Ok(connection) => {
             let machine = machine(&locations)?;
-            match connection.client.worktrees(Some(&machine)).await {
-                Ok(answer) => {
-                    server = true;
-                    holds = answer
-                        .pools
-                        .into_iter()
-                        .filter(|own| own.pool == *pool.id())
-                        .flat_map(|own| own.holds)
-                        .collect();
-                }
+            match own_holds(&connection, &pool, &machine).await {
+                Ok(own) => holds = Some(own),
                 Err(error) if error.is_unavailable() => {
                     ctx.printer.warn(&format!(
                         "{} Only what this machine remembers is shown.",
@@ -308,27 +387,7 @@ async fn list(ctx: &Context) -> Result<(), Failure> {
         }
         Err(failure) => return Err(failure),
     }
-    let checkout_git = WorktreeGit::new(pool.checkout().root());
-    let files = pool.files();
-    let worktrees = pool
-        .names()
-        .into_iter()
-        .map(|name| Listed {
-            path: pool.path(&name),
-            prepared: pool.is_prepared(&name),
-            stopped: files.stopped_at(&name).is_some(),
-            broken: files.broken(&name),
-            held: holds.iter().find(|hold| hold.worktree == name).cloned(),
-            record: files.hold(&name),
-            rescue_branches: checkout_git.rescue_branches(&name),
-            worktree: name,
-        })
-        .collect();
-    let listing = Listing {
-        root: pool.settings().root.clone(),
-        server,
-        worktrees,
-    };
+    let listing = listing(&pool, holds);
     ctx.printer.show(&listing, || listing_text(&listing));
     Ok(())
 }

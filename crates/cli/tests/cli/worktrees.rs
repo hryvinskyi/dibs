@@ -13,6 +13,10 @@
 //! leaves a worktree another dibs is resetting alone, and names what lies beyond the pool's count;
 //! a server without the worktree routes has the signs of life dropped without a word.
 //!
+//! Through the tools: a take mints an agent of its own for each call, rescues what the worktree
+//! held, and waits for a release; the listing and a release by agent or by name agree with the
+//! command line; a checkout without a pool and a malformed release are tool errors.
+//!
 //! Through the hooks: a tool run in a worktree, an edit of a file in one and a command line that
 //! runs git in one leave its sign of life; a session working in a worktree another holder has is
 //! refused, and one working in a worktree nobody holds takes it again as it is; an agent's end and
@@ -27,6 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::mcp::Mcp;
 use crate::support::{API_REMOTE, Setup, git, json, make_checkout, status, text, write};
 
 /// A checkout `widgets` lending a pool of `count` worktrees, the scripts its commands run, and the
@@ -1072,4 +1077,181 @@ fn an_agents_end_lets_go_of_its_worktree_and_another_agents_end_of_nothing() {
     Pool::decided(&pool.hook(&worktree, "agent-ended", serde_json::json!({"agent": "b2"})));
     assert_eq!(held(), serde_json::Value::Null);
     assert!(worktree.exists(), "its directory stays");
+}
+
+#[test]
+fn a_tool_take_is_an_agent_of_its_own_and_the_command_line_sees_and_releases_it() {
+    let pool = Pool::new(3);
+    let mut tools = Mcp::start(&pool.setup, "alice", &pool.checkout);
+
+    let first = tools.tool(
+        "dibs_worktree_take",
+        serde_json::json!({"purpose": "review the invoice change"}),
+    );
+    let first = first.ok().clone();
+    assert_eq!(first["worktree"], "worktree1");
+    assert_eq!(first["prepared"], true);
+    assert_eq!(first["again"], false);
+    assert_eq!(first["notes"], serde_json::json!([]));
+    assert_eq!(
+        canonical(Path::new(first["path"].as_str().unwrap())),
+        pool.worktree("worktree1")
+    );
+    let agent = first["agent"].as_str().unwrap().to_owned();
+    assert!(agent.starts_with("cli-"), "{agent}");
+
+    let second = tools.tool(
+        "dibs_worktree_take",
+        serde_json::json!({"purpose": "try the new index"}),
+    );
+    assert_eq!(second.ok()["worktree"], "worktree2");
+    assert_ne!(second.ok()["agent"], first["agent"]);
+    assert_eq!(second.ok()["session_id"], first["session_id"]);
+
+    let listed = tools.tool("dibs_worktrees", serde_json::json!({}));
+    let listed = listed.ok();
+    assert_eq!(listed["server"], true);
+    assert_eq!(listed["worktrees"][0]["held"]["agent"], agent.as_str());
+    assert_eq!(
+        listed["worktrees"][0]["held"]["purpose"],
+        "review the invoice change"
+    );
+    assert_eq!(listed["worktrees"][2]["held"], serde_json::Value::Null);
+    assert_eq!(listed["worktrees"][2]["prepared"], false);
+    assert_eq!(
+        pool.listed()["worktrees"][1]["held"]["purpose"],
+        "try the new index"
+    );
+
+    write(&pool.worktree("worktree1"), "notes.txt", "keep me\n");
+    let released = tools.tool("dibs_worktree_release", serde_json::json!({"agent": agent}));
+    assert_eq!(released.ok()["released"]["worktree"], "worktree1");
+    let by_name = tools.tool(
+        "dibs_worktree_release",
+        serde_json::json!({"name": "worktree2"}),
+    );
+    assert_eq!(by_name.ok()["released"]["worktree"], "worktree2");
+    let nothing = tools.tool(
+        "dibs_worktree_release",
+        serde_json::json!({"name": "worktree2"}),
+    );
+    assert!(nothing.is_error, "{}", nothing.text);
+    assert_eq!(
+        pool.listed()["worktrees"][0]["held"],
+        serde_json::Value::Null
+    );
+
+    let again = tools.tool(
+        "dibs_worktree_take",
+        serde_json::json!({"purpose": "the next change"}),
+    );
+    let again = again.ok();
+    assert_eq!(again["worktree"], "worktree1");
+    assert_eq!(again["prepared"], false);
+    let rescued = again["rescued"].as_str().unwrap();
+    assert!(rescued.starts_with("dibs/rescue/worktree1-"), "{rescued}");
+    assert!(
+        again["notes"][0].as_str().unwrap().contains(rescued),
+        "{again}"
+    );
+    assert_eq!(
+        git(&pool.checkout, &["show", &format!("{rescued}:notes.txt")]),
+        "keep me\n"
+    );
+    assert_eq!(
+        pool.steps()[..2],
+        ["prepare worktree1", "prepare worktree2"]
+    );
+    assert_eq!(pool.steps()[2], "reset worktree1");
+}
+
+#[test]
+fn a_tool_take_with_every_worktree_held_says_who_holds_them_and_waits_for_a_release() {
+    let pool = Pool::new(1);
+    let mut tools = Mcp::start(&pool.setup, "alice", &pool.checkout);
+    let held = pool.take("agent-1");
+
+    let busy = tools.tool("dibs_worktree_take", serde_json::json!({"purpose": "x"}));
+    assert!(
+        busy.error().contains("worktree1 by the agent agent-1"),
+        "{}",
+        busy.text
+    );
+    let too_long = tools.tool(
+        "dibs_worktree_take",
+        serde_json::json!({"purpose": "x", "wait_seconds": 841}),
+    );
+    assert!(
+        too_long.error().contains("`wait_seconds`"),
+        "{}",
+        too_long.text
+    );
+
+    let started = Instant::now();
+    let waited = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            tools.tool(
+                "dibs_worktree_take",
+                serde_json::json!({"purpose": "x", "wait_seconds": 60}),
+            )
+        });
+        std::thread::sleep(Duration::from_millis(1500));
+        pool.release("worktree1");
+        waiting.join().unwrap()
+    });
+    assert_eq!(
+        canonical(Path::new(waited.ok()["path"].as_str().unwrap())),
+        held
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the wait ended with the release"
+    );
+    let listed = tools.tool("dibs_worktrees", serde_json::json!({}));
+    assert_eq!(
+        listed.ok()["worktrees"][0]["held"]["agent"],
+        waited.ok()["agent"]
+    );
+}
+
+#[test]
+fn the_worktree_tools_of_a_checkout_without_a_pool_and_a_malformed_release_are_tool_errors() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut tools = Mcp::start(&setup, "alice", &api);
+    for (tool, arguments) in [
+        ("dibs_worktree_take", serde_json::json!({"purpose": "x"})),
+        (
+            "dibs_worktree_release",
+            serde_json::json!({"name": "worktree1"}),
+        ),
+        ("dibs_worktrees", serde_json::json!({})),
+    ] {
+        let reply = tools.tool(tool, arguments);
+        assert!(
+            reply.error().contains("[worktrees]"),
+            "{tool}: {}",
+            reply.text
+        );
+    }
+
+    let pool = Pool::new(2);
+    let mut tools = Mcp::start(&pool.setup, "alice", &pool.checkout);
+    for arguments in [
+        serde_json::json!({}),
+        serde_json::json!({"name": "worktree1", "agent": "agent-1"}),
+        serde_json::json!({"name": "Worktree 1"}),
+    ] {
+        let reply = tools.tool("dibs_worktree_release", arguments);
+        assert!(reply.error().starts_with("`name`: "), "{}", reply.text);
+    }
+    let unknown = tools.tool(
+        "dibs_worktree_release",
+        serde_json::json!({"name": "worktree9"}),
+    );
+    assert!(
+        unknown.error().contains("worktree1, worktree2"),
+        "{}",
+        unknown.text
+    );
 }

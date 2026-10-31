@@ -319,6 +319,113 @@ asks the person to allow access, or answers late, counts as no token — the hoo
 after each `dibs self-update` macOS may ask once to allow the new binary access: run `dibs whoami` in a terminal and
 allow it there, never from inside an agent's session. `DIBS_OFF=1` switches the guard off on a machine.
 
+### Worktree pools
+
+A checkout can lend a fixed pool of long-lived worktrees to its member's sessions and agents, so that an agent that needs
+a tree of its own gets a prepared one instead of building one. The pool belongs to one machine and one checkout; the
+server keeps only who holds which worktree, one holder each: a session, or one agent of a session, so two agents of the
+same member never share a tree. A hold ends when it is released, when its session ends, or when its holder stays
+silent for 20 minutes (an agent) or 12 hours (a session).
+
+A checkout lends a pool when its `.dibs.toml` has a `[worktrees]` table:
+
+```toml
+[worktrees]
+count = 3                          # worktree1 … worktree3 (1 to 32; required)
+prepare = "sh ~/kit/prepare.sh"    # required: makes a worktree that is missing ready to work in
+reset = "sh ~/kit/reset.sh"        # required: brings a reused worktree back to the base
+idle = "sh ~/kit/idle.sh"          # optional: stops the environment of a worktree left free
+idle_after = "30m"                 # how long a worktree stays free before idle runs (default 30m)
+base = "origin/main"               # what a worktree is reset to (default origin/main)
+prefix = "worktree"                # names are <prefix>1 … <prefix><count> (default worktree)
+root = "/home/alice/pool"          # where they live (default: beside the checkout, <checkout>-worktrees)
+```
+
+`root` may not be the checkout or lie inside it. A worktree is a git worktree of the checkout, and dibs writes its own
+`.dibs.toml` into it after every preparation and reset: the checkout's `server`, `project` and `repo`, and a
+`[pool_worktree]` table (`checkout`, the absolute path of the checkout that lends it, and `name`). That makes the worktree
+a governed checkout of the same project, with its edit checks, brief and signs of life, and never a pool of its own: a
+worktree command run inside one acts on its checkout's pool. A file holds `[worktrees]` or `[pool_worktree]`, never both,
+and only dibs writes the second.
+
+```sh
+dibs worktree take [--purpose "..."] [--item gh:acme/widgets#42] [--agent KEY] [--wait 14m] [--deadline 5m]
+dibs worktree release [NAME | --agent KEY]        # or the worktree the current directory lies in
+dibs worktree list                                # prepared or not, who holds it and since when, set aside, rescued
+dibs worktree prepare NAME | --all                # prepare, and take a worktree set aside as broken back
+dibs worktree beat NAME                           # a sign of life, for work done in a worktree from outside it
+dibs worktree upkeep                              # what a schedule runs every few minutes (below)
+```
+
+`take` hands out the first free worktree of the ones this machine can offer, makes it ready, and prints its path as the
+last line (`--json` prints the worktree, path, agent, whether it was prepared for this take, and the branch its earlier
+work was rescued on). Prepared worktrees whose environment runs are offered first, then prepared ones whose environment
+was stopped, then ones never prepared, which `take` prepares itself. A worktree set aside as broken is not offered, nor
+one that somebody still works in by this machine's records: a sign of life left in it after its last release, younger than
+20 minutes. Without `--agent`, every take makes an agent key of its own (`cli-…`), prints it, and holds the worktree for
+that agent, so two takes of one session are two holders; the same `--agent` taking again gets the same worktree, untouched,
+unless the previous reset never finished. `--wait` (at most 14 minutes) asks again every 5 seconds while every worktree is
+held; the exit status is 1 when none could be had, and the answer names who holds them. `--deadline` is for a caller that
+must answer in time (a host's hook): it waits only as long as leaves a reset its time, never prepares, and starts
+`dibs worktree prepare` in the background for the first worktree that needs it instead. `dibs_worktree_take`,
+`dibs_worktree_release` and `dibs_worktrees` are the same operations as tools of `dibs mcp`; every tool take is an agent of
+its own as well.
+
+**Taking never loses work.** Before the project's `reset` runs, dibs looks at the worktree. If its tree has changes
+(untracked files included, ignored ones and its own `.dibs.toml` not), or its `HEAD` is a commit that no branch and no
+remote ref contains, dibs makes a branch `dibs/rescue/<name>-<UTC time>` at `HEAD`, commits the changes onto it whole
+(without the repository's hooks, as the member), and says so; the take's answer names the branch. dibs never pushes it and
+never deletes it. The worktree is then checked out on that branch, so the `reset` command must leave it by detaching
+(`git checkout --detach "$DIBS_WORKTREE_BASE"`) and must never move or delete it. A worktree in the middle of a rebase,
+merge, cherry-pick, revert or bisect cannot be committed whole: it is set aside as broken instead.
+
+**The project's commands.** dibs knows git and its server; the rest of a worktree (an environment, dependencies, databases,
+assets) is the project's, in `prepare`, `reset` and `idle`. Each is run by the system's shell (`sh -c`, `cmd /C` on
+Windows) with these in its environment:
+
+| Variable | Value |
+|---|---|
+| `DIBS_WORKTREE_NAME` | the worktree's name, `worktree2` |
+| `DIBS_WORKTREE_PATH` | its absolute directory; for `prepare` it may not exist yet |
+| `DIBS_WORKTREE_BASE` | the ref it is reset to |
+| `DIBS_CHECKOUT` | the absolute directory of the checkout that lends the pool |
+
+The working directory is the checkout's root, standard input is closed, the command's standard output goes to dibs's
+standard error (so it never mixes with the path `take` prints), and, on Unix, it runs in a process group of its own, which
+is killed when its time is over. The time is 20 minutes for `prepare`, 10 for `reset` and 2 for `idle`. Exit status 0 is
+success. Any other status, or no end in time, sets a `prepare` or `reset` worktree aside as broken: no take offers it
+until `dibs worktree prepare <name>` succeeds (a reset that the deadline of a hook cut short is not the worktree's fault and
+does not). A failing `idle` sets nothing aside: `upkeep` reports it and tries again. Preparing, resetting and stopping a
+worktree hold one lock per worktree, so they never run at once; `dibs worktree prepare` and `take` wait for it, `upkeep`
+leaves a locked worktree for its next run.
+
+**What this machine keeps** (under the state directory, per server and project; a pool's id is a digest of its directory):
+
+| File | Holds |
+|---|---|
+| `worktrees/<scope>/<pool>/<name>.hold.json` | the holder this machine took the worktree for (session id and agent key), the purpose, the item, when, and whether its reset finished; written on a take, removed on a release |
+| `worktrees/<scope>/<pool>/<name>.beat` | its modification time is the holder's last sign of life; hooks and `dibs worktree beat` touch it, with no network |
+| `worktrees/<scope>/<pool>/<name>.free-since` | when the worktree was first seen free |
+| `worktrees/<scope>/<pool>/<name>.stopped` | when its environment was stopped for being left idle |
+| `worktrees/<scope>/<pool>/<name>.broken` | when and why it was set aside |
+| `cache/<scope>/worktree-<pool>-<name>.lock` | held while the worktree is prepared, reset or stopped |
+| `cache/<scope>/worktree-beats-sent` | when the signs of life were last sent to the server |
+| `cache/<scope>/worktrees-unserved` | when the server was last found to serve no worktree pools |
+
+The signs of life are sent for the holder the hold record names, by the detached `dibs sync` and by `upkeep`, at most once
+a minute whatever `heartbeat_every` is. A sign the server answers as unknown (it let go of the hold while the signs could
+not reach it) takes that same worktree again for the same holder, if it is still free. A server older than the client
+answers `404` on the worktree routes: signs of life are dropped without a word and that server is not asked for them again
+for a day, a session end it cannot serve has nothing to let go of, and a worktree a host asks for falls back to the host's
+own, as when the server cannot be reached.
+
+**`dibs worktree upkeep`** is meant for a schedule (launchd, systemd, cron) every few minutes in the checkout, with the
+docker and `PATH` settings the `idle` command needs. It sends the signs of life, asks the server which worktrees it holds
+(the server frees holds on silence and on a session's end without telling the machine), forgets the records of holds the
+server no longer has, writes down when a worktree was first seen free, and, when the table has an `idle` command, runs it once for each worktree that has been
+free for `idle_after`, prepared, not worked in since, and not stopped since. It stops nothing else and removes nothing; it
+names the directories in the pool's directory beyond `count`. Without a `[worktrees]` table it does nothing and succeeds.
+
 ## Agent hosts
 
 Every agent host reaches dibs through MCP (`dibs mcp`, the same for all of them) and through its hooks, which call
@@ -328,7 +435,7 @@ a host.
 
 | Host | Status | What its guard sees |
 |---|---|---|
-| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, each `Bash` command before it runs, every tool after it ran, each prompt; edits another member holds and commands that need a slot another member holds are refused, a teammate's pressing message or a slot offered to you arrives between tool calls (or, opted in, wakes a session that waits for you), and subagents are told apart |
+| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, each `Bash` command before it runs, every tool after it ran, each prompt; edits another member holds and commands that need a slot another member holds are refused, a teammate's pressing message or a slot offered to you arrives between tool calls (or, opted in, wakes a session that waits for you), and subagents are told apart; the worktree a session or subagent asks for is lent from the machine's [pool](#worktree-pools) and let go of when it ends |
 | Codex CLI | planned | its command hooks |
 | OpenCode | planned | its in-process plugins, through a shim over `dibs hook neutral` |
 
@@ -389,6 +496,16 @@ A `Bash` command is split into simple commands and judged on your machine, from 
 command line never reaches the server, which is asked only where the slots the command touches stand. A message
 between tool calls reaches only the main agent, never a subagent, at most once a minute, and once across all your
 sessions: the first session to claim it shows it. It is framed as a teammate's request that authorises nothing.
+
+**Worktrees.** In a checkout that lends a [pool](#worktree-pools), the plugin answers Claude Code's `WorktreeCreate` hook
+(every subagent with `isolation: worktree`, `EnterWorktree`, `--worktree`) with a worktree of the pool instead of letting
+Claude Code make one, and releases it when the subagent or session ends (`SubagentStop`, `SessionEnd`, `WorktreeRemove`).
+The hook gets a 900 second timeout and answers within 840 seconds: it waits for a free worktree for up to 4 minutes, what
+that deadline leaves a reset of up to 10 minutes, and never prepares a worktree itself. It answers with the worktree's path
+or, only when every worktree stayed held, with a refusal that fails the creation. Everywhere else, whether
+the checkout has no pool, dibs is switched off, missing or too old, or the server cannot be reached, Claude Code gets
+the worktree it would have made itself (`.claude/worktrees/<name>` on a new branch `worktree-<name>`), and a line says the
+pool was not used. Creating a worktree never fails because of dibs.
 
 #### Waking a session that waits for you (opt-in)
 
@@ -481,6 +598,11 @@ dibs slot leave deploy:prod                       # stop waiting, or give up the
 dibs slot list                                    # every slot: who holds it and why, until when, who waits
 dibs slot test settings.toml -- 'cd ops && ./deploy.sh prod'   # what a command line needs, without a server
 dibs slot takeover deploy:prod --purpose "finish it" --reason "the deploy log stopped; checked the hosts"
+dibs worktree take --purpose "try the new index" [--wait 14m]   # a worktree of the pool's; its path is the last line; exit 1 while every one is held
+dibs worktree release worktree2                   # or --agent KEY, as the take printed it
+dibs worktree list                                # the pool: prepared, who holds each, set aside, rescue branches
+dibs worktree prepare --all                       # prepare the worktrees (or one by name); takes a broken one back
+dibs worktree upkeep                              # send the signs of life, stop the environment of worktrees left free
 dibs sync [--force] [--quiet] [--update] [--report]   # heartbeat and refresh what this machine remembers
 dibs self-update [--version 1.2.3]                # install a newer release, checked against the release key
 dibs mcp [--host <host>]                          # the same operations as MCP tools on stdin and stdout

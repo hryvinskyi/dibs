@@ -15,7 +15,7 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 24] = [
+const TOOLS: [&str; 27] = [
     "dibs_ack",
     "dibs_ask_grant",
     "dibs_check",
@@ -40,31 +40,34 @@ const TOOLS: [&str; 24] = [
     "dibs_status",
     "dibs_takeover",
     "dibs_thread",
+    "dibs_worktree_release",
+    "dibs_worktree_take",
+    "dibs_worktrees",
 ];
 
 /// What a tool call answered.
-struct Reply {
-    is_error: bool,
-    text: String,
-    structured: Value,
+pub(crate) struct Reply {
+    pub(crate) is_error: bool,
+    pub(crate) text: String,
+    pub(crate) structured: Value,
 }
 
 impl Reply {
     /// The structured answer of a call that worked.
-    fn ok(&self) -> &Value {
+    pub(crate) fn ok(&self) -> &Value {
         assert!(!self.is_error, "a tool error: {}", self.text);
         &self.structured
     }
 
     /// The sentence of a call that failed.
-    fn error(&self) -> &str {
+    pub(crate) fn error(&self) -> &str {
         assert!(self.is_error, "the call worked: {}", self.text);
         &self.text
     }
 }
 
 /// A running `dibs mcp` that has been through the handshake.
-struct Mcp {
+pub(crate) struct Mcp {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Receiver<String>,
@@ -74,7 +77,7 @@ struct Mcp {
 
 impl Mcp {
     /// Starts `dibs mcp` as `handle` in `cwd` and performs the handshake.
-    fn start(setup: &Setup, handle: &str, cwd: &Path) -> Self {
+    pub(crate) fn start(setup: &Setup, handle: &str, cwd: &Path) -> Self {
         Self::spawn(setup.process_as(handle, cwd))
     }
 
@@ -143,7 +146,7 @@ impl Mcp {
     }
 
     /// Calls a tool and answers its reply.
-    fn tool(&mut self, name: &str, arguments: Value) -> Reply {
+    pub(crate) fn tool(&mut self, name: &str, arguments: Value) -> Reply {
         let response = self.request("tools/call", json!({"name": name, "arguments": arguments}));
         let result = &response["result"];
         assert!(result.is_object(), "not a tool result: {response}");
