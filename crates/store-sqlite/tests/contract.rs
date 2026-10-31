@@ -146,6 +146,10 @@ mod contract {
         slot_boards_are_replaced_whole_ordered_and_scoped,
         a_slot_row_is_unique_per_slot_and_per_member_place,
         a_slot_row_naming_a_missing_record_fails_the_commit,
+        worktree_pools_are_replaced_whole_ordered_and_scoped,
+        a_session_and_each_of_its_agents_hold_a_worktree_of_their_own,
+        two_pools_of_one_machine_are_kept_apart,
+        a_worktree_hold_naming_a_missing_record_fails_the_commit,
         a_delivery_is_one_per_member_and_subject_and_scoped,
         a_delivery_naming_a_missing_session_fails_the_commit,
         raised_messages_are_counted_per_member_from_a_time,
@@ -2739,6 +2743,270 @@ mod contract {
             );
             let mut tx = store.begin().await.unwrap();
             assert!(tx.slot_board(A).await.unwrap().is_empty(), "{what}");
+        }
+    }
+
+    fn pool_key(member: MemberId, host: &str, pool: &str) -> dibs_domain::worktree::PoolKey {
+        dibs_domain::worktree::PoolKey {
+            member,
+            machine: machine(host),
+            pool: dibs_domain::worktree::PoolId::parse(pool).unwrap(),
+        }
+    }
+
+    fn agent(session: SessionId, key: &str) -> dibs_domain::worktree::Holder {
+        dibs_domain::worktree::Holder::Agent {
+            session,
+            agent: dibs_domain::worktree::AgentKey::parse(key).unwrap(),
+        }
+    }
+
+    fn worktree_hold(
+        worktree: &str,
+        holder: dibs_domain::worktree::Holder,
+        seen: i64,
+    ) -> dibs_domain::worktree::WorktreeHold {
+        dibs_domain::worktree::WorktreeHold {
+            worktree: dibs_domain::worktree::WorktreeName::parse(worktree).unwrap(),
+            holder,
+            host: HostName::parse("laptop").unwrap(),
+            purpose: purpose("fix the invoice totals"),
+            item: None,
+            taken_at: at(10),
+            last_seen: at(seen),
+        }
+    }
+
+    fn worktree_pool(
+        key: dibs_domain::worktree::PoolKey,
+        holds: Vec<dibs_domain::worktree::WorktreeHold>,
+    ) -> dibs_domain::worktree::WorktreePool {
+        dibs_domain::worktree::WorktreePool::new(key, holds).unwrap()
+    }
+
+    async fn worktree_pools_are_replaced_whole_ordered_and_scoped(store: Arc<dyn Store>) {
+        use dibs_domain::worktree::{Holder, WorktreePool};
+        seed(&store).await;
+        let alice = pool_key(ALICE, "laptop", "a1");
+        let bob = pool_key(BOB, "desk", "b1");
+        let dave = pool_key(DAVE, "laptop", "a1");
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.worktree_pool(A, &alice).await.unwrap(),
+            WorktreePool::empty(alice.clone()),
+            "nothing held is an empty pool of that key"
+        );
+        assert!(tx.worktree_pools(A).await.unwrap().is_empty());
+        assert!(tx.busy_worktree_pools().await.unwrap().is_empty());
+        let for_item = dibs_domain::worktree::WorktreeHold {
+            item: Some(FIRST),
+            ..worktree_hold("worktree3", agent(ALICE_LAPTOP, "agent-7f"), 40)
+        };
+        let alices = worktree_pool(
+            alice.clone(),
+            vec![
+                for_item.clone(),
+                worktree_hold("worktree1", Holder::Session(ALICE_LAPTOP), 30),
+            ],
+        );
+        let bobs = worktree_pool(
+            bob.clone(),
+            vec![worktree_hold("worktree2", Holder::Session(BOB_LAPTOP), 20)],
+        );
+        let daves = worktree_pool(
+            dave.clone(),
+            vec![worktree_hold("worktree1", Holder::Session(DAVE_LAPTOP), 20)],
+        );
+        tx.put_worktree_pool(A, &bobs).await.unwrap();
+        tx.put_worktree_pool(A, &alices).await.unwrap();
+        tx.put_worktree_pool(B, &daves).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let read = tx.worktree_pool(A, &alice).await.unwrap();
+        assert_eq!(read, alices);
+        let names: Vec<&str> = read.holds().iter().map(|h| h.worktree.as_str()).collect();
+        assert_eq!(names, ["worktree1", "worktree3"], "holds by worktree");
+        assert_eq!(read.hold_of(&for_item.holder), Some(&for_item));
+        assert_eq!(
+            tx.worktree_pools(A).await.unwrap(),
+            [alices.clone(), bobs.clone()],
+            "the project's pools by key, and no other project's"
+        );
+        assert_eq!(tx.worktree_pools(B).await.unwrap(), [daves]);
+        assert_eq!(
+            tx.busy_worktree_pools().await.unwrap(),
+            [(A, alice.clone()), (A, bob.clone()), (B, dave.clone())]
+        );
+
+        let replaced = worktree_pool(
+            alice.clone(),
+            vec![worktree_hold(
+                "worktree2",
+                agent(ALICE_LAPTOP, "agent-9c"),
+                50,
+            )],
+        );
+        tx.put_worktree_pool(A, &replaced).await.unwrap();
+        tx.put_worktree_pool(A, &WorktreePool::empty(bob.clone()))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.worktree_pool(A, &alice).await.unwrap(), replaced);
+        assert_eq!(
+            tx.worktree_pool(A, &bob).await.unwrap(),
+            WorktreePool::empty(bob.clone()),
+            "an empty pool removes every hold"
+        );
+        assert_eq!(tx.worktree_pools(A).await.unwrap(), [replaced]);
+        assert_eq!(
+            tx.busy_worktree_pools().await.unwrap(),
+            [(A, alice), (B, dave)]
+        );
+    }
+
+    async fn a_session_and_each_of_its_agents_hold_a_worktree_of_their_own(store: Arc<dyn Store>) {
+        use dibs_domain::worktree::Holder;
+        seed(&store).await;
+        let key = pool_key(ALICE, "laptop", "a1");
+        let session = Holder::Session(ALICE_LAPTOP);
+        let first = agent(ALICE_LAPTOP, "agent-1");
+        let second = agent(ALICE_LAPTOP, "agent-2");
+        let pool = worktree_pool(
+            key.clone(),
+            vec![
+                worktree_hold("worktree1", session.clone(), 10),
+                worktree_hold("worktree2", first.clone(), 11),
+                worktree_hold("worktree3", second.clone(), 12),
+            ],
+        );
+        let mut tx = store.begin().await.unwrap();
+        tx.put_worktree_pool(A, &pool).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let read = tx.worktree_pool(A, &key).await.unwrap();
+        let held: Vec<(&str, Holder)> = read
+            .holds()
+            .iter()
+            .map(|h| (h.worktree.as_str(), h.holder.clone()))
+            .collect();
+        assert_eq!(
+            held,
+            [
+                ("worktree1", session),
+                ("worktree2", first),
+                ("worktree3", second)
+            ],
+            "a session without an agent and its agents are three holders"
+        );
+    }
+
+    async fn two_pools_of_one_machine_are_kept_apart(store: Arc<dyn Store>) {
+        use dibs_domain::worktree::{Holder, WorktreePool};
+        seed(&store).await;
+        let checkout = pool_key(ALICE, "laptop", "a1");
+        let other_checkout = pool_key(ALICE, "laptop", "a2");
+        let other_machine = pool_key(ALICE, "desk", "a1");
+        let holder = Holder::Session(ALICE_LAPTOP);
+        let pools: Vec<WorktreePool> = [&checkout, &other_checkout, &other_machine]
+            .into_iter()
+            .zip([10, 20, 30])
+            .map(|(key, seen)| {
+                worktree_pool(
+                    key.clone(),
+                    vec![worktree_hold("worktree1", holder.clone(), seen)],
+                )
+            })
+            .collect();
+        let mut tx = store.begin().await.unwrap();
+        for pool in &pools {
+            tx.put_worktree_pool(A, pool).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        for pool in &pools {
+            assert_eq!(&tx.worktree_pool(A, pool.key()).await.unwrap(), pool);
+        }
+        assert_eq!(tx.worktree_pools(A).await.unwrap().len(), 3);
+        tx.put_worktree_pool(A, &WorktreePool::empty(checkout.clone()))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert!(tx.worktree_pool(A, &checkout).await.unwrap().is_empty());
+        assert_eq!(
+            tx.worktree_pools(A).await.unwrap(),
+            pools[1..],
+            "emptying one pool leaves the others of the machine and the member"
+        );
+    }
+
+    async fn a_worktree_hold_naming_a_missing_record_fails_the_commit(store: Arc<dyn Store>) {
+        use dibs_domain::worktree::Holder;
+        seed(&store).await;
+        let alice = pool_key(ALICE, "laptop", "a1");
+        let cases = [
+            (
+                "a pool of a member of another project",
+                worktree_pool(
+                    pool_key(DAVE, "laptop", "a1"),
+                    vec![worktree_hold("worktree1", Holder::Session(ALICE_LAPTOP), 1)],
+                ),
+            ),
+            (
+                "a hold of a missing session",
+                worktree_pool(
+                    alice.clone(),
+                    vec![worktree_hold(
+                        "worktree1",
+                        Holder::Session(SessionId(999)),
+                        1,
+                    )],
+                ),
+            ),
+            (
+                "a hold of an agent of another project's session",
+                worktree_pool(
+                    alice.clone(),
+                    vec![worktree_hold("worktree1", agent(DAVE_LAPTOP, "agent-1"), 1)],
+                ),
+            ),
+            (
+                "a hold for a missing item",
+                worktree_pool(
+                    alice.clone(),
+                    vec![dibs_domain::worktree::WorktreeHold {
+                        item: Some(ItemId(999)),
+                        ..worktree_hold("worktree1", Holder::Session(ALICE_LAPTOP), 1)
+                    }],
+                ),
+            ),
+            (
+                "a hold for another project's item",
+                worktree_pool(
+                    alice.clone(),
+                    vec![dibs_domain::worktree::WorktreeHold {
+                        item: Some(GADGET),
+                        ..worktree_hold("worktree1", Holder::Session(ALICE_LAPTOP), 1)
+                    }],
+                ),
+            ),
+        ];
+        for (what, pool) in cases {
+            let mut tx = store.begin().await.unwrap();
+            tx.put_worktree_pool(A, &pool).await.unwrap();
+            assert!(
+                matches!(tx.commit().await, Err(StoreError::Backend(_))),
+                "{what}"
+            );
+            let mut tx = store.begin().await.unwrap();
+            assert!(tx.worktree_pools(A).await.unwrap().is_empty(), "{what}");
+            assert!(tx.busy_worktree_pools().await.unwrap().is_empty(), "{what}");
         }
     }
 

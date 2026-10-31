@@ -986,4 +986,188 @@ mod migrations {
             );
         }
     }
+
+    #[tokio::test]
+    async fn worktree_holds_start_empty_on_a_database_of_before_and_refuse_a_holder_twice() {
+        use std::collections::BTreeMap;
+
+        use dibs_domain::grant::{AskedGrant, GrantAsk};
+        use dibs_domain::ids::SessionId;
+        use dibs_domain::report::{DayCounts, MachineId, ReportDay, Tally};
+        use dibs_domain::session::HostName;
+        use dibs_domain::slot::Purpose;
+        use dibs_domain::worktree::{
+            Holder, PoolId, PoolKey, WorktreeHold, WorktreeName, WorktreePool,
+        };
+        use time::OffsetDateTime;
+
+        let rows = format!(
+            "{}\n\
+             INSERT INTO slot_holds (project_id, slot, member_id, session_id, host, purpose, \
+             item_id, liveness, run_id, workflow, sha, taken_at, expires_at, last_seen, \
+             stalled_at) VALUES (1, 'deploy:prod', 12, 32, 'desktop', 'ship it', NULL, \
+             'session', NULL, NULL, NULL, 0, 600000000000, 0, NULL);\n\
+             INSERT INTO hook_reports (project_id, day, member_id, machine, host, counts, \
+             durations) VALUES (1, '2026-03-02', 11, '{:032x}', 'laptop', '{{\"frozen\": 1}}', \
+             '[]');\n\
+             INSERT INTO grant_asks (project_id, message_id, asker_id, item_id, repo, area, \
+             holder_id) VALUES (1, 93, 12, 52, 'default', 'billing', 11);",
+            rows_at_deliveries(),
+            1
+        );
+        let (_dir, path) = database_at(12, &rows).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let project = ProjectId(1);
+        let alice = MemberId(11);
+        assert_eq!(tx.claims(project).await.unwrap().len(), 2);
+        assert_eq!(tx.slot_board(project).await.unwrap().holds.len(), 1);
+        let day = ReportDay::parse("2026-03-02").unwrap();
+        let reports = tx.hook_reports(project, day, day).await.unwrap();
+        assert_eq!(
+            reports
+                .iter()
+                .map(|r| r.report.counts.clone())
+                .collect::<Vec<_>>(),
+            [DayCounts::new(BTreeMap::from([(Tally::Frozen, 1)]), Vec::new()).unwrap()]
+        );
+        assert_eq!(
+            tx.unanswered_asked_grants(project, alice).await.unwrap(),
+            [AskedGrant {
+                message: MessageId(93),
+                ask: GrantAsk {
+                    asker: MemberId(12),
+                    item: ItemId(52),
+                    area: QualifiedArea::parse("default:billing").unwrap(),
+                },
+                holder: alice,
+            }]
+        );
+        assert!(tx.worktree_pools(project).await.unwrap().is_empty());
+        assert!(tx.busy_worktree_pools().await.unwrap().is_empty());
+        let key = PoolKey {
+            member: alice,
+            machine: MachineId::from_bits(1),
+            pool: PoolId::parse("a1").unwrap(),
+        };
+        let pool = WorktreePool::new(
+            key.clone(),
+            vec![WorktreeHold {
+                worktree: WorktreeName::parse("worktree1").unwrap(),
+                holder: Holder::Session(SessionId(31)),
+                host: HostName::parse("laptop").unwrap(),
+                purpose: Purpose::parse("fix the totals").unwrap(),
+                item: Some(ItemId(51)),
+                taken_at: OffsetDateTime::UNIX_EPOCH,
+                last_seen: OffsetDateTime::UNIX_EPOCH,
+            }],
+        )
+        .unwrap();
+        tx.put_worktree_pool(project, &pool).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.worktree_pool(project, &key).await.unwrap(), pool);
+        assert_eq!(tx.busy_worktree_pools().await.unwrap(), [(project, key)]);
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        let insert = |machine: &str, pool: &str, worktree: &str, session: u64, agent: &str| {
+            format!(
+                "INSERT INTO worktree_holds (project_id, member_id, machine, pool, worktree, \
+                 session_id, agent, host, purpose, item_id, taken_at, last_seen) VALUES (1, 11, \
+                 '{machine}', '{pool}', '{worktree}', {session}, {agent}, 'laptop', 'work', \
+                 NULL, 0, 0)"
+            )
+        };
+        let laptop = format!("{:032x}", 1);
+        for (what, bad) in [
+            (
+                "the worktree held twice",
+                insert(&laptop, "a1", "worktree1", 32, "NULL"),
+            ),
+            (
+                "the session holding a second worktree",
+                insert(&laptop, "a1", "worktree2", 31, "NULL"),
+            ),
+            (
+                "an empty agent",
+                insert(&laptop, "a1", "worktree2", 32, "''"),
+            ),
+            (
+                "a machine that is no id",
+                insert("laptop", "a1", "worktree2", 32, "NULL"),
+            ),
+            (
+                "a pool that is no id",
+                insert(&laptop, "A-1", "worktree2", 32, "NULL"),
+            ),
+            (
+                "a missing session",
+                insert(&laptop, "a1", "worktree2", 99, "NULL"),
+            ),
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(bad))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{what}"
+            );
+        }
+        for (what, good) in [
+            (
+                "an agent of the holding session",
+                insert(&laptop, "a1", "worktree2", 31, "'agent-1'"),
+            ),
+            (
+                "another agent of it",
+                insert(&laptop, "a1", "worktree3", 31, "'agent-2'"),
+            ),
+            (
+                "the session in another pool of the machine",
+                insert(&laptop, "a2", "worktree1", 31, "NULL"),
+            ),
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(good))
+                    .execute(&pool)
+                    .await
+                    .is_ok(),
+                "{what}"
+            );
+        }
+        assert!(
+            sqlx::query(sqlx::AssertSqlSafe(insert(
+                &laptop,
+                "a1",
+                "worktree4",
+                31,
+                "'agent-1'"
+            )))
+            .execute(&pool)
+            .await
+            .is_err(),
+            "the agent holding a second worktree"
+        );
+        for update in [
+            "UPDATE worktree_holds SET item_id = 99",
+            "UPDATE worktree_holds SET member_id = 99",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{update}"
+            );
+        }
+    }
 }

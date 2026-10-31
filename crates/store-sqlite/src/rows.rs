@@ -20,6 +20,7 @@ mod threads;
 mod tokens;
 mod ui_sessions;
 mod wide_asks;
+mod worktrees;
 
 use sqlx::Sqlite;
 use sqlx::query::Query;
