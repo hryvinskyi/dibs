@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn a_linked_worktree_leads_to_its_main_work_tree() {
         let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
+        let root = crate::paths::canonical(dir.path()).unwrap();
         let admin = root.join("main/.git/worktrees/second");
         let (main, second) = linked(&root, &format!("gitdir: {}\n", admin.display()), "../..\n");
         let dirs = GitDirs::at(&second).unwrap();
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn relative_gitdir_and_commondir_lines_are_read_from_their_own_directories() {
         let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
+        let root = crate::paths::canonical(dir.path()).unwrap();
         let (main, second) = linked(&root, "gitdir: ../main/.git/worktrees/second\n", "../..\n");
         let dirs = GitDirs::at(&second).unwrap();
         assert_eq!(dirs.git_dir(), root.join("main/.git/worktrees/second"));
@@ -226,7 +226,7 @@ mod tests {
     #[test]
     fn a_submodules_git_file_is_a_work_tree_of_its_own_and_no_linked_worktree() {
         let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
+        let root = crate::paths::canonical(dir.path()).unwrap();
         let outer = root.join("outer");
         write(&outer.join(".git/HEAD"), "ref: refs/heads/main\n");
         write(
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     fn a_bare_common_directory_has_no_main_work_tree() {
         let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
+        let root = crate::paths::canonical(dir.path()).unwrap();
         let bare = root.join("widgets.git");
         write(&bare.join("HEAD"), "ref: refs/heads/main\n");
         write(
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn a_common_directory_in_no_work_tree_of_its_own_has_no_main_work_tree() {
         let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
+        let root = crate::paths::canonical(dir.path()).unwrap();
         let separate = root.join("store/widgets");
         write(&separate.join("HEAD"), "ref: refs/heads/main\n");
         let admin = separate.join("worktrees/second");

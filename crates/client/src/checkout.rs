@@ -640,7 +640,7 @@ mod tests {
     /// A repository at `<dir>/widgets` with one commit, and its linked worktree at
     /// `<dir>/widgets-worktrees/worktree1`, as git makes them.
     fn repository_with_a_worktree(dir: &Path) -> (PathBuf, PathBuf) {
-        let main = fs::canonicalize(dir).unwrap().join("widgets");
+        let main = crate::paths::canonical(dir).unwrap().join("widgets");
         fs::create_dir_all(main.join("src")).unwrap();
         git(&main, &["init", "-q", "-b", "main"]);
         write(&main.join("src/lib.rs"), "\n");
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn a_submodules_or_a_bare_repositorys_work_tree_borrows_no_file() {
         let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap();
+        let root = crate::paths::canonical(dir.path()).unwrap();
         let outer = root.join("outer");
         write(&outer.join(FILE_NAME), API);
         write(&outer.join(".git/HEAD"), "ref: refs/heads/main\n");
@@ -734,7 +734,7 @@ mod tests {
     #[test]
     fn a_pool_table_in_the_file_is_never_read_and_the_rest_of_the_file_governs() {
         let dir = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(dir.path()).unwrap().join("widgets");
+        let root = crate::paths::canonical(dir.path()).unwrap().join("widgets");
         fs::create_dir_all(root.join(".git")).unwrap();
         write(
             &root.join(FILE_NAME),
