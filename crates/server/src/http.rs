@@ -128,6 +128,7 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route("/v1/me", get(routes::me::me))
         .route("/v1/members", get(routes::members::list))
         .route("/v1/sessions", post(routes::sessions::register))
+        .route("/v1/sessions/{id}/end", post(routes::sessions::end))
         .route("/v1/heartbeat", post(routes::sessions::heartbeat))
         .route(
             "/v1/items",
@@ -192,6 +193,10 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
             "/v1/slots/{name}/run-finished",
             post(routes::slots::run_finished),
         )
+        .route("/v1/worktrees", get(routes::worktrees::list))
+        .route("/v1/worktrees/take", post(routes::worktrees::take))
+        .route("/v1/worktrees/release", post(routes::worktrees::release))
+        .route("/v1/worktrees/beat", post(routes::worktrees::beat))
         .route("/v1/events", get(routes::events::list))
         .route("/v1/events/stream", get(routes::events::stream))
         .route("/v1/escalations", post(routes::escalations::escalate))
@@ -222,6 +227,10 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         .route(
             "/v1/admin/slots/{name}/force-release",
             post(routes::slots::force_release),
+        )
+        .route(
+            "/v1/admin/worktrees/force-release",
+            post(routes::worktrees::force_release),
         )
         .merge(ui::routes())
         .fallback(no_route)

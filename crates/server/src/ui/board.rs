@@ -1,6 +1,8 @@
-//! `GET /ui/board`: the board — the slots, the live wide claims, what is ready to pick up, what is
-//! in progress, what went stale with a take-over form, and what was done today — filtered by area
-//! and by member through the query string; the slots are shown whole, whatever the filter.
+//! `GET /ui/board`: the board — the slots, the worktrees members' machines lend, the live wide
+//! claims, what is ready to pick up, what is in progress, what went stale with a take-over form,
+//! and what was done today — filtered by area and by member through the query string; the slots
+//! and the worktrees are shown whole, whatever the filter. A worktree is shown only while it is
+//! held, on a card of its member and host.
 //! `GET /ui/board/fragment` renders the same columns alone, for the page's script to swap in when
 //! the claims, the items or the slots change.
 //!
@@ -50,6 +52,7 @@ use crate::ui::session::{PageSession, ScriptSession, UiSession};
 use crate::ui::signed_page;
 use crate::ui::slots::{SlotRow, SlotState};
 use crate::ui::status::STATUS_CHANGES;
+use crate::ui::worktrees::{ItemMarks, WorktreeCard};
 use crate::ui::zone::viewer_offset;
 
 /// What the board keeps, as the query string names it. An empty value keeps everything.
@@ -154,7 +157,7 @@ const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependen
      slot_offer_lapsed slot_released slot_expired slot_force_released slot_stalled slot_resumed \
      slot_stall_taken_over escalated acked thread_started member_removed overlap_found \
      footprint_changed yield_requested area_handed_over wait_withdrawn claim_narrowed \
-     item_reopened";
+     item_reopened worktree_taken worktree_released";
 
 /// An escalation waiting for an arbiter, as the board's banner shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +240,8 @@ struct BoardColumns {
     /// The overlaps between live claims, in key order.
     overlaps: Vec<OverlapBanner>,
     slots: Vec<SlotRow>,
+    /// The worktree holds, one card per member and host.
+    worktrees: Vec<WorktreeCard>,
     wide: Vec<WideRow>,
     ready: Vec<ReadyCard>,
     waiting: Vec<ReadyCard>,
@@ -351,7 +356,27 @@ async fn columns(
     let zone = viewer_offset(headers);
     let since = start_of_day(now, zone.unwrap_or(UtcOffset::UTC));
     let completed = state.app.list_completed.execute(actor, since).await?;
+    let pools = state.app.worktrees.execute(actor, None).await?;
     let shown: Vec<&dibs_app::use_cases::HeldItem> = view.live.iter().chain(&view.stale).collect();
+    let mut items = ItemMarks::default();
+    for held in &shown {
+        let item = &held.item.item;
+        items.insert(item.id, item.external_ref.as_ref(), held.link.as_ref());
+    }
+    for (item, link) in view
+        .ready
+        .ready
+        .iter()
+        .map(|entry| (&entry.item.item, &entry.link))
+        .chain(
+            view.ready
+                .excluded
+                .iter()
+                .map(|entry| (&entry.item.item, &entry.link)),
+        )
+    {
+        items.insert(item.id, item.external_ref.as_ref(), link.as_ref());
+    }
     let rows = |held: &[dibs_app::use_cases::HeldItem]| {
         held.iter()
             .filter(|held| filter.keeps_claim(&held.claim))
@@ -387,6 +412,7 @@ async fn columns(
             .iter()
             .map(|line| SlotRow::of(line, now))
             .collect(),
+        worktrees: WorktreeCard::of_all(&pools.board, &items, now),
         wide: view
             .wide
             .iter()

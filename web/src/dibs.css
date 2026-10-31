@@ -352,6 +352,13 @@ a.chip[aria-current="true"] { background: var(--c-accent); border-color: var(--c
 .slot--stalled { border-color: transparent; background: var(--c-danger-bg); }
 .slot--stalled .slot__detail { color: var(--c-text); }
 .slot--stalled .slot__warn { color: var(--c-danger-fg); font-weight: var(--fw-bold); }
+.worktrees { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr)); gap: var(--sp-3); margin: 0; padding: 0; list-style: none; }
+.worktree-card { display: grid; gap: 4px; align-content: start; min-width: 0; padding: var(--sp-4); border: var(--bw) solid var(--c-border); border-radius: var(--r-2); background: var(--c-surface); box-shadow: var(--shadow-card); font-size: var(--fs-sm); }
+.worktree-card__head { margin-bottom: 4px; font-size: var(--fs-md); overflow-wrap: anywhere; }
+.worktree-card__holds { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.worktree-card__hold { color: var(--c-text-muted); overflow-wrap: anywhere; }
+.worktree-card__hold .member { color: var(--c-text); }
+.worktree-card__name { color: var(--c-text); font-family: var(--font-mono); font-weight: var(--fw-bold); }
 .board { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-4); align-items: start; }
 .column { display: grid; gap: var(--sp-3); min-width: 0; padding: var(--sp-3); border-radius: var(--r-2); background: var(--c-surface-2); }
 .column__head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); padding: 2px var(--sp-1); }

@@ -53,3 +53,5 @@ mod ui;
 mod versions;
 #[cfg(test)]
 mod wide;
+#[cfg(test)]
+mod worktrees;

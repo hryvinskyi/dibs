@@ -1,8 +1,9 @@
-//! `POST /v1/sessions` and `POST /v1/heartbeat`: a session announcing itself and staying alive.
+//! `POST /v1/sessions`, `POST /v1/heartbeat` and `POST /v1/sessions/{id}/end`: a session
+//! announcing itself, staying alive, and saying it ended.
 
 use axum::Json;
-use axum::extract::State;
-use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::{JsonRejection, PathRejection};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
@@ -18,9 +19,10 @@ use dibs_domain::session::{AgentLabel, HostName};
 
 use crate::auth::Authed;
 use crate::error::ApiError;
-use crate::fields::{parse, parse_required, required, session_in_body};
+use crate::fields::{parse, parse_required, required, session_in_body, session_in_path};
 use crate::http::AppState;
 use crate::routes::reports::heartbeat_reports;
+use crate::views::worktrees::OwnHoldView;
 use crate::views::{SessionView, reply};
 
 /// The body of `POST /v1/sessions`.
@@ -118,4 +120,33 @@ pub async fn heartbeat(
         reports_accepted: outcome.accepted,
     };
     Ok(reply(StatusCode::OK, &answer))
+}
+
+#[derive(Serialize)]
+struct EndedAnswer {
+    /// The worktree holds that ended with the session, as they were.
+    released: Vec<OwnHoldView>,
+}
+
+/// The caller's session ended: every worktree hold it, or one of its agents, has in any of the
+/// caller's pools ends with it. The session itself stays registered, and a session that holds
+/// nothing is answered with nothing released.
+///
+/// # Errors
+/// `forbidden` for an integration; `not_found` for a session not the caller's.
+pub async fn end(
+    State(state): State<AppState>,
+    Authed(actor): Authed,
+    path: Result<Path<String>, PathRejection>,
+) -> Result<Response, ApiError> {
+    actor.require_person()?;
+    let Path(text) = path?;
+    let session = session_in_path(&text)?;
+    let ended = state.app.end_session.execute(&actor, session).await?;
+    Ok(reply(
+        StatusCode::OK,
+        &EndedAnswer {
+            released: ended.into_iter().map(OwnHoldView::of).collect(),
+        },
+    ))
 }

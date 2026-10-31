@@ -1891,3 +1891,84 @@ async fn the_board_shows_debt_work_and_the_areas_a_claim_waits_for() {
         "the board refreshes on it"
     );
 }
+
+#[tokio::test]
+async fn the_board_lists_each_held_worktree_on_its_members_card_and_drops_it_when_released() {
+    let (world, alice, bob) = team().await;
+    let laptop = world.session(&alice, "laptop").await;
+    let item = world
+        .item(&alice, Some("gh:acme/api#5"), "Invoice totals")
+        .await;
+    claim(&world, &alice, laptop, item, json!(["api:billing"])).await;
+    let take = |agent: Option<&str>, purpose: &str| {
+        let mut body = json!({
+            "session_id": laptop, "machine": "0123456789abcdef0123456789abcdef", "pool": "c0ffee42",
+            "names": ["worktree1", "worktree2"], "purpose": purpose, "item": item,
+        });
+        if let Some(agent) = agent {
+            body["agent"] = Value::from(agent);
+        }
+        let world = &world;
+        let alice = alice.clone();
+        async move {
+            let answer = world.post(&alice, "/v1/worktrees/take", body).await;
+            assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        }
+    };
+    take(Some("agent-1"), "fix <b>totals</b>").await;
+    take(None, "review the fix").await;
+    world.fakes.clock.advance(Duration::minutes(5));
+
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/board").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    assert!(
+        page.text.contains("worktree_taken") && page.text.contains("worktree_released"),
+        "the board refreshes on them"
+    );
+    let section = page.column("b-worktrees");
+    assert!(
+        section.contains(r#"<span class="member">alice</span> on laptop"#),
+        "{section}"
+    );
+    let row = |name: &str| {
+        let start = section.find(&format!(r#"data-worktree="{name}""#)).unwrap();
+        let end = section[start..].find("</li>").unwrap() + start;
+        &section[start..end]
+    };
+    let agents = row("worktree1");
+    assert!(
+        agents.contains(r#"<span class="member">alice</span>'s agent"#)
+            && agents.contains("fix &#60;b&#62;totals&#60;/b&#62;")
+            && !agents.contains("<b>"),
+        "{agents}"
+    );
+    assert!(
+        agents.contains(r#"href="https://github.com/acme/api/issues/5""#)
+            && agents.contains("gh:acme/api#5")
+            && agents.contains("5 min ago"),
+        "{agents}"
+    );
+    let sessions = row("worktree2");
+    assert!(
+        sessions.contains("review the fix") && !sessions.contains("'s agent"),
+        "{sessions}"
+    );
+    for hidden in [
+        "0123456789abcdef0123456789abcdef",
+        "c0ffee42",
+        "agent-1",
+        "laptop/mcp",
+    ] {
+        assert!(!page.text.contains(hidden), "{hidden}");
+    }
+    let fragment = browser.get(&world, "/ui/board/fragment").await;
+    assert_eq!(fragment.text, region(&page));
+
+    let ended = world
+        .post(&alice, &format!("/v1/sessions/{laptop}/end"), json!({}))
+        .await;
+    assert_eq!(ended.status, StatusCode::OK, "{}", ended.body);
+    let after = browser.get(&world, "/ui/board/fragment").await;
+    assert!(!after.text.contains("b-worktrees"), "{}", after.text);
+}

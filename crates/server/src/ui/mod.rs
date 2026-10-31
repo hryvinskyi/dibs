@@ -22,6 +22,7 @@ mod slots;
 mod status;
 mod takeover;
 mod threads;
+mod worktrees;
 mod zone;
 
 use axum::Router;

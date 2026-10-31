@@ -231,6 +231,7 @@ all of this in one transaction, so it happens whole or not at all:
   operator);
 - each hold of theirs on a slot ends, their places in slot queues and the offers to them go, and a freed slot is offered
   to the next member waiting (`slot_force_released`, cause `member_removed`);
+- each hold of their worktree pools ends (`worktree_released`, cause `member_removed`);
 - they are marked removed (`member_removed`) and leave `GET /v1/members`;
 - dibs tells the project, in one message from dibs addressed to everyone, what was released (the first 20 of each
   kind by name, then how many more, however much they held).
@@ -331,6 +332,22 @@ next waiter — for every project with a hold, a waiter or an offer (the same sw
 [waiting areas](#feature-work-over-debt-work)). The sweep stops when the server is told to stop,
 after the requests in flight, and finishes a sweep it is running before the write-ahead log is checkpointed. An admin
 ends any hold with `dibs admin slot force-release <slot> --reason …`; the holder is sent the reason.
+
+## Worktrees
+
+A member's machine may lend the worktrees of a pool beside a checkout to the member's sessions and their agents; the
+machine prepares and resets them, and the server keeps only who holds which. A hold row names the member, the machine
+and pool its client named (an id and a digest the server shows to the member alone), the worktree, the holder's session
+and agent, the host, the purpose, the item, and when it was taken and last seen. Nothing about a free worktree is kept,
+and a pool with no hold leaves no row.
+
+A hold ends when it is released, when its session ends (`POST /v1/sessions/{id}/end`), when its member is removed, or
+when its holder goes unseen for 20 minutes (an agent) or 12 hours (a session). The same 30-second sweep that applies the
+slots ends the silent holds of every pool with a hold, each pool in a transaction of its own; a pool that fails to sweep
+is logged (*a worktree pool could not be swept*) and the others are swept. The worktree events are private to their
+member and the admins, so another member's board shows a hold, or its end, at its next refresh. An admin ends a hold
+with `POST /v1/admin/worktrees/force-release`, naming the member, the host and the worktree as the board shows them;
+the member is sent the reason.
 
 ## Pull requests and the integration
 

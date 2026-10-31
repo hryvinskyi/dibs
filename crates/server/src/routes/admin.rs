@@ -138,13 +138,16 @@ struct RemovedAnswer {
     removed_at: Option<OffsetDateTime>,
     released: Vec<ItemNameView>,
     slots: LeftSlots,
+    /// How many holds of their worktree pools ended.
+    worktrees: usize,
     tokens_revoked: u64,
     ui_sessions_ended: u64,
 }
 
 /// Removes the member with this handle from the project, in one transaction: their tokens are
 /// revoked and their browser sessions end, their claims are released, their holds, places in
-/// queues and offers among the slots end, and dibs tells the project what was released. Their
+/// queues and offers among the slots end, the holds of their worktree pools end, and dibs tells the
+/// project what was released. Their
 /// messages stay. Answers what went with them.
 ///
 /// # Errors
@@ -170,6 +173,7 @@ pub async fn remove_member(
                 waited: removed.slots.waited,
                 offered: removed.slots.offered,
             },
+            worktrees: removed.worktrees,
             tokens_revoked: removed.tokens_revoked,
             ui_sessions_ended: removed.ui_sessions_ended,
         },

@@ -28,6 +28,7 @@ use dibs_domain::review::{DropRefused, ReviewRefused};
 use dibs_domain::settings::AreaLookupError;
 use dibs_domain::slot::{BeatRefused, SlotRefused};
 use dibs_domain::wide::WideScopeError;
+use dibs_domain::worktree::WorktreeRefused;
 
 /// A refusal or failure as the client receives it.
 #[derive(Debug, Clone, PartialEq)]
@@ -361,6 +362,7 @@ fn status_of(error: &AppError) -> StatusCode {
         })
         | AppError::Escalation(EscalationRefused::NoArbiters)
         | AppError::AlreadyEscalated { .. }
+        | AppError::Worktree(WorktreeRefused::NotHeld)
         | AppError::SelfRemoval => StatusCode::CONFLICT,
         AppError::CursorExpired { .. } => StatusCode::GONE,
         AppError::NotARecipient(_)
@@ -392,6 +394,7 @@ fn status_of(error: &AppError) -> StatusCode {
             | BatchRefused::Duplicate { .. },
         )
         | AppError::EditCheck(EditCheckRefused::UnknownRepo { .. })
+        | AppError::Worktree(WorktreeRefused::NoNames | WorktreeRefused::NamedTwice { .. })
         | AppError::Recipients(RecipientsError::Empty) => StatusCode::UNPROCESSABLE_ENTITY,
         AppError::Delivery(DeliveryRefused::NotRecipient) => StatusCode::FORBIDDEN,
         AppError::Delivery(
@@ -571,6 +574,9 @@ fn details_of(error: &AppError) -> Map<String, Value> {
             ..
         }) => details.put("pr", pr),
         AppError::AlreadyEscalated { thread } => details.put("thread_id", thread),
+        AppError::Worktree(WorktreeRefused::NamedTwice { worktree }) => {
+            details.put("worktree", worktree);
+        }
         _ => {}
     }
     details.0
@@ -760,6 +766,16 @@ mod tests {
                 StatusCode::GONE,
                 "cursor_expired",
             ),
+            (
+                AppError::Worktree(WorktreeRefused::NoNames),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "worktree_names_invalid",
+            ),
+            (
+                AppError::Worktree(WorktreeRefused::NotHeld),
+                StatusCode::CONFLICT,
+                "worktree_not_held",
+            ),
         ];
         for (error, status, code) in cases {
             let answer = ApiError::from(error);
@@ -786,6 +802,18 @@ mod tests {
             Value::Object(answer.details().clone()),
             json!({"area": "api:billing", "holder": "alice", "item": 9, "item_ref": "gh:acme/web#12"})
         );
+    }
+
+    #[test]
+    fn a_worktree_named_twice_is_named_in_the_details() {
+        let worktree = dibs_domain::worktree::WorktreeName::parse("worktree2").unwrap();
+        let answer = ApiError::from(AppError::Worktree(WorktreeRefused::NamedTwice { worktree }));
+        assert_eq!(
+            (answer.status(), answer.code()),
+            (StatusCode::UNPROCESSABLE_ENTITY, "worktree_names_invalid")
+        );
+        assert_eq!(answer.message(), "The worktree worktree2 is named twice.");
+        assert_eq!(answer.details()["worktree"], "worktree2");
     }
 
     #[test]

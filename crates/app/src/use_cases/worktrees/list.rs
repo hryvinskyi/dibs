@@ -54,10 +54,13 @@ impl Worktrees {
             .map(|scene| scene.pool)
             .filter(|pool| !pool.is_empty())
             .collect();
-        let mine = pools.iter().filter(|pool| {
-            let key = pool.key();
-            key.member == actor.member && machine.is_none_or(|machine| key.machine == *machine)
-        });
+        let mine: Vec<_> = pools
+            .iter()
+            .filter(|pool| {
+                let key = pool.key();
+                key.member == actor.member && machine.is_none_or(|machine| key.machine == *machine)
+            })
+            .collect();
         let mine = own_pools(&mut work, mine).await?;
         let names = Names::load(&mut work).await?;
         let board = board(&names, &pools)?;

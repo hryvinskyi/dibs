@@ -22,6 +22,7 @@ pub mod slots;
 pub mod status;
 pub mod threads;
 pub mod version;
+pub mod worktrees;
 
 use axum::Json;
 use serde_json::{Value, json};

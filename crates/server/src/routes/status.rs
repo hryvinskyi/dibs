@@ -17,6 +17,7 @@ use crate::error::ApiError;
 use crate::http::AppState;
 use crate::versions::ClientReads;
 use crate::views::slots::SlotView;
+use crate::views::worktrees::OwnPoolView;
 use crate::views::{HeldItemView, OverlapView, ReadyView, reply};
 
 #[derive(Serialize)]
@@ -27,6 +28,8 @@ struct StatusAnswer {
     wide: Vec<WideClaimView>,
     ready: ReadyView,
     slots: Vec<SlotView>,
+    /// The caller's own worktree pools with a hold, each with the machine and pool it was named by.
+    worktrees: Vec<OwnPoolView>,
     escalations: Vec<EscalationView>,
     /// Since when the project's integrations have not called, once that counts as silent; `null`
     /// while one calls or when there is none.
@@ -116,8 +119,8 @@ struct HoldView {
 }
 
 /// The project's live claims, its stale claims, the areas the live ones hold, the live wide claims
-/// with where each of their areas stands, the caller's ready list, the slots, the escalations
-/// still waiting for an arbiter, each ordered as the use case orders it, since when the project's
+/// with where each of their areas stands, the caller's ready list, the slots, the caller's own
+/// worktree pools with a hold, the escalations still waiting for an arbiter, each ordered as the use case orders it, since when the project's
 /// integrations are silent, and the overlaps the radar found between live claims.
 ///
 /// # Errors
@@ -148,6 +151,7 @@ pub async fn status(
             .into_iter()
             .map(|line| SlotView::of(line, reads))
             .collect(),
+        worktrees: view.worktrees.into_iter().map(OwnPoolView::of).collect(),
         escalations: view
             .escalations
             .into_iter()

@@ -59,6 +59,7 @@ Roles: `member` and `admin` are people; `importer` is an integration that feeds 
 integration holds no claim, receives no message and reads no conversation. Its token may call exactly the routes marked
 *any* and *import* below — `GET /v1/version`, `GET /v1/me`, `GET /v1/members`, `GET /v1/events`, `GET`, `POST` and `PUT /v1/items`,
 `GET /v1/items/{id}`, `GET /v1/ready`, `GET /v1/slots` and `GET /v1/slots/{name}`, `POST /v1/slots/{name}/run-finished`,
+`GET /v1/worktrees`,
 `POST /v1/prs/merged`, `POST /v1/prs/closed`, `POST /v1/prs/state`, `GET /v1/review-claims`, `GET /v1/claims`,
 `GET /v1/pr-status` and `PUT /v1/items/{id}/footprint` — and every other route
 answers it `403 forbidden`. An integration's calls are recorded, at most one a minute: every call of an importer's
@@ -94,11 +95,11 @@ cause of an internal failure and answers `internal`.
 | `403` | `forbidden`, `not_holder` (details: `holder`; for a slot and a review too), `not_grantor`, `not_a_recipient` (an acknowledgement or a delivery for somebody a message did not reach), `not_author` |
 | `404` | `not_found` (also: a record of another project, and a conversation the caller may not read), `unknown_slot` (`slot`) |
 | `405` | `method_not_allowed` |
-| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`; for an area another claim waits for also `waiting`, `own`), `kind_fixed` (`kind`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `reserved` (`until`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal`, `claim_stale`, `pr_recorded` (`item`, `item_ref`, `holder`), `pr_not_recorded` (`pr`) |
+| `409` | `held` (details: `holder`, `since`, `last_seen`), `stale` (`holder`, `last_seen`), `area_held` (`area`, `holder`, `item`, `item_ref`; for an area another claim waits for also `waiting`, `own`), `kind_fixed` (`kind`), `not_stale` (`holder`, `last_seen`), `nothing_to_take`, `own_claim`, `no_claim`, `item_closed` (`status`), `grantee_has_no_claim`, `handle_taken`, `project_exists`, `dependency_cycle`, `ack_not_required`, `holds_other_slot` (`held`), `slot_not_held`, `not_waiting`, `own_hold`, `not_stalled` (`holder`, `last_seen`), `run_ended`, `taken_over` (`holder`), `delivered` (`session_id`, `at`), `reserved` (`until`), `offer_gone`, `no_arbiters`, `already_escalated` (`thread_id`), `self_removal`, `claim_stale`, `pr_recorded` (`item`, `item_ref`, `holder`), `pr_not_recorded` (`pr`), `worktree_not_held` |
 | `410` | `cursor_expired` (details: `pruned_through`) |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
-| `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`; `pr` for a review), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`) |
+| `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`; `pr` for a review), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`), `worktree_names_invalid` (`worktree`, for a name given twice) |
 | `426` | `client_too_old` (details: `min_client`) |
 | `429` | `too_many_attempts` (details: `retry_after`), `importance_limited` (`limit`, `frees_at`) |
 | `500` | `internal` |
@@ -116,6 +117,7 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/members` | any | The project's members. |
 | `POST /v1/sessions` | people | Register a session, or update the one of the same label. |
 | `POST /v1/heartbeat` | people | A session's sign of life, the branch its checkout is on, and what its machine counted. |
+| `POST /v1/sessions/{id}/end` | people | A session of yours ended: the worktree holds it and its agents have end. |
 | `GET /v1/items` | any | List work items. |
 | `POST /v1/items` | any | Create a work item, or return the one a reference names. |
 | `PUT /v1/items` | import | Create and update the items an outside source lists, and their imported dependencies. |
@@ -137,7 +139,7 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/claims` | any | The live claims, with where each one's work stands and the branch it is on in each repository. |
 | `GET /v1/pr-status` | import | The status a forge shows on a repository's pull requests into a base branch. |
 | `PUT /v1/items/{id}/footprint` | import | What the branch of the item's claim changes against its base; the overlaps it makes are announced. |
-| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims, the caller's ready list, the slots, whether the integrations went silent, and the overlaps between live claims. |
+| `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims, the caller's ready list, the slots, the caller's worktree pools, whether the integrations went silent, and the overlaps between live claims. |
 | `POST /v1/edit-check` | people | May I edit these paths? |
 | `POST /v1/grants` | people | Let another member edit in an area you hold. |
 | `DELETE /v1/grants/{id}` | people | Withdraw a grant you gave. |
@@ -163,6 +165,10 @@ cause of an internal failure and answers `internal`.
 | `POST /v1/slots/{name}/takeover` | people | Take over another member's stalled hold. |
 | `POST /v1/slots/{name}/offer/deliver` | people | Claim the delivery of the slot's offer to you to one of your sessions; the first claim wins. |
 | `POST /v1/slots/{name}/run-finished` | import | A forge workflow run finished: end the hold that waited for it. |
+| `GET /v1/worktrees` | any | Your worktree pools, and every member's worktree holds. |
+| `POST /v1/worktrees/take` | people | Take a worktree of your pool for a session or one of its agents, or hear who holds them all. |
+| `POST /v1/worktrees/release` | people | End a hold of your pool, by worktree or by holder. |
+| `POST /v1/worktrees/beat` | people | The signs of life of the holders of your pool. |
 | `GET /v1/events` | any | A page of the project's event log. |
 | `GET /v1/events/stream` | people | The event log as server-sent events. |
 | `POST /v1/admin/members` | admin | Add a member. |
@@ -173,6 +179,7 @@ cause of an internal failure and answers `internal`.
 | `PUT /v1/admin/settings` | admin | Replace the project's settings. |
 | `POST /v1/admin/items/{id}/force-release` | admin | End any member's claim. |
 | `POST /v1/admin/slots/{name}/force-release` | admin | End any member's hold on a slot. |
+| `POST /v1/admin/worktrees/force-release` | admin | End a member's hold on a worktree. |
 
 A path that is no route is answered `404 not_found`; a route with the wrong method, `405 method_not_allowed`. A path
 segment that is not an id names no record and is answered `404 not_found`.
@@ -211,7 +218,7 @@ them to acknowledge it; `acks` is in a thread read only, for a message that asks
 **What dibs writes.** Some messages no member typed: a wide claim's announcements, the request to hand an area over to a
 feature claim and the notice that it was handed over, the notice to a member whose stale
 claim was taken over, whose slot hold an admin ended or another member took over, whose slot hold expired or whose offer
-lapsed, an escalation, and the notice that a member left. dibs writes them itself, in the project's name: `author` is
+lapsed, whose worktree hold an admin ended, an escalation, and the notice that a member left. dibs writes them itself, in the project's name: `author` is
 `"dibs"`, `system` is `true` and `label` is `dibs`. When a member's action caused one, that member starts its thread
 (`thread.author` is their handle, `thread.system` is `false`) and the message speaks for them: it reaches the thread's
 other readers, never them, and asks them nothing. When nobody acted (an expiry, a lapse, the operator's command), dibs
@@ -297,6 +304,11 @@ given twice (the first is kept), a day past the seventh, or every report when `m
 a duration whose `agent`, `event` or `buckets` (7 whole numbers) it cannot read, or past the 64th, are left out and the
 rest is kept. The server logs each report left out as a warning naming the member and why, never what it held. The
 machine's id is shown to nobody: not on the log, not in the figures.
+
+`POST /v1/sessions/{id}/end` takes no body: the caller's session `id` ended, and every worktree hold it, or one of its
+agents, has in any of the caller's pools ends with it (`worktree_released`, cause `session_ended`). The session stays
+registered. Answers `{ "released": [own hold, …] }` (see [Worktrees](#worktrees)), ordered by pool and worktree, empty
+when it held nothing, so it may be sent again. `not_found` for a session that is not the caller's.
 
 ### Items
 
@@ -543,6 +555,8 @@ A claim carries `state`: `working` while its holder works on it, `in_review` whi
               "areas": [{ "area": "default:billing", "state": "waiting", "holder": "alice", "item": 12 },
                         { "area": "default:search", "state": "free", "holder": null, "item": null }] }],
   "ready": { "ready": [], "excluded": [] },
+  "slots": [],
+  "worktrees": [{ "machine": "…", "pool": "…", "holds": [own hold] }],
   "escalations": [{ "subject": { "item": 12 }, "about": "work item gh:acme/widgets#7 \"Refund rounding\"",
                     "by": "bob", "arbiters": ["carol"], "thread_id": 40, "message_id": 41, "at": "…" }],
   "integration_silent_since": null,
@@ -560,6 +574,9 @@ they are silent, merges complete no claims and pull request statuses go stale. A
 
 `overlaps` lists, by kind and then by items, the overlaps the radar found whose claims are all live (see
 [Branches and overlaps](#branches-and-overlaps)).
+
+`worktrees` lists the caller's own worktree pools with a hold, each with the machine and pool its client named it by,
+as `GET /v1/worktrees` answers them (see [Worktrees](#worktrees)); silent holds end before it is read.
 
 `escalations` lists, newest first, the escalations the caller may read (it reached them, or they sent it) that no arbiter
 has acknowledged yet. `holds` never lists an area a wide claim names. `wide` lists the live wide claims by item, each area with where it
@@ -993,6 +1010,84 @@ A settings change that no longer declares a slot ends its hold, its queue and it
 (`slot_force_released`, cause `slot_removed`). The slot events carry the slot, the members and, for `slot_taken`,
 `slot_queued` and `slot_stall_taken_over`, the purpose; they never carry a reason.
 
+### Worktrees
+
+A member's machine may keep a pool of long-lived checkouts beside a checkout (`worktree1`, `worktree2`, …) and lend them
+to the member's sessions and to the agents those sessions start. The server keeps the holds only: which worktree is held,
+by whom, why and since when. Which worktrees a pool has, and whether they are prepared, is the machine's to know; the
+server never lists a free worktree. A pool is the member's, on one machine, for one checkout: a request names it by
+`machine` (the id the member's dibs gave the machine, 32 lowercase hexadecimal digits) and `pool` (1 to 64 lowercase
+letters and digits, a digest of the pool's directory the machine computes). Both are the caller's: the server answers
+them to the caller alone, never to another member, never on the log or the board. A request always reaches the
+caller's own pool, whatever it names; two members naming the same machine and pool reach two pools.
+
+A hold is not the member's but one **holder**'s: a session of theirs (`holder_session`), or one agent that session started
+(`holder_session` with `agent`, the agent host's own id of the agent: 1 to 64 characters, no whitespace). A worktree is
+held by one holder at most, and a holder holds one worktree at most in a pool; a session and each of its agents are
+different holders. A hold ends when it is released, when its session ends, when its member is removed, or when its
+holder goes unseen for too long: **20 minutes** for an agent, which is seen at every tool call it makes, and **12 hours**
+for a session, which waits for its person between turns. Every worktree route ends the silent holds of the pool it
+reads before it answers, and the server does the same every 30 seconds for every pool with a hold.
+
+```text
+own hold   { worktree, holder: "session" | "agent", session_id, session (its label), agent | null, host, purpose,
+             item | null, taken_at, last_seen }
+own pool   { machine, pool, holds: [own hold, …] }
+board hold { member, host, worktree, holder: "session" | "agent", purpose, item | null, since }
+```
+
+An *own hold* is a hold of the caller's own pool; a *board hold* is a hold as every member sees it, naming neither the
+machine, the pool, the session nor the agent.
+
+`GET /v1/worktrees`, optionally `?machine=<id>`, answers `{ "pools": [own pool, …], "board": [board hold, …] }`: the
+caller's own pools with a hold (only those on `machine` when it is named), ordered by machine and pool, and every
+member's holds, the caller's included, ordered by member, host and worktree. An integration may read it; it has no pool.
+`invalid_request` for a `machine` that is no machine id.
+
+`POST /v1/worktrees/take`, body `{ "session_id": 9, "machine": "…", "pool": "…", "names": ["worktree1", "worktree2"],
+"agent": "a1b2", "purpose": "fix the totals", "item": 12 }` (`agent` and `item` optional). `names` are the worktrees the
+machine can hand out, best first; `purpose` is 1 to 200 characters every member reads. Answers
+`{ "outcome": "took" | "busy", "worktree": "worktree2" | null, "again": false, "held": [own hold, …] }`:
+
+- a holder that holds a worktree of the pool gets it again, `again: true`, seen now and otherwise unchanged, whatever
+  `names` says — a retried take never gets a second one;
+- otherwise the first name nobody holds becomes the holder's (`worktree_taken`);
+- otherwise the take is `busy` and `held` names the hold of each worktree named, in the order named. The server queues
+  nothing: the machine asks again.
+
+Refusals: `worktree_names_invalid` (`422`) for no name, or a name given twice (details `worktree`); `not_found` for a
+session or item not the caller's; `invalid_request` for a missing or invalid field.
+
+`POST /v1/worktrees/release`, body `{ "session_id": 9, "machine": "…", "pool": "…", "worktree": "worktree2" }` or
+`{ …, "holder_session": 9, "agent": "a1b2" }` (`agent` optional), ends the hold of that worktree, whichever of the
+caller's sessions or agents holds it, or the hold of that holder (`worktree_released`, cause `released`). Answers
+`{ "released": own hold }`. Refusals: `worktree_not_held` (`409`) when nothing it names is held; `not_found` for a
+session not the caller's; `invalid_request` for naming both a worktree and a holder, or neither, or an `agent` without
+its `holder_session`.
+
+`POST /v1/worktrees/beat`, body `{ "session_id": 9, "machine": "…", "pool": "…", "beats": [{ "worktree": "worktree2",
+"holder_session": 9, "agent": "a1b2", "seen_at": "2026-03-02T09:14:00Z" }, …] }` (`agent` optional), carries the
+holders' signs of life, sent by any session of the caller on behalf of any of the caller's sessions and their agents. A
+beat that names a worktree and its holder moves the hold's `last_seen` to `seen_at` — never back, and a time after now
+counts as now. Answers `{ "kept": [beaten, …], "unknown": [beaten, …] }`, each `{ worktree, holder_session, agent | null }`
+once, in the order first named: `kept` the holds the beats named, `unknown` the pairs that hold nothing — the worktree is
+free or another holder has it, as when a hold ended while its beats could not reach the server. Silent holds end before
+the beats are applied, whenever they were sent. Refusals: `not_found` for a session, sending or named by a beat, that is
+not the caller's; `invalid_request` for a missing or invalid field, named by its place (`beats[0].seen_at`).
+
+`POST /v1/sessions/{id}/end` ends every hold of a session and its agents; see [Sessions](#sessions).
+
+`POST /v1/admin/worktrees/force-release`, body `{ "session_id": 9, "member": "bob", "host": "desktop", "worktree":
+"worktree1", "reason": "…" }`, ends a member's hold, named as the board names it, in each of the member's pools on that
+host that holds the worktree, and has dibs tell the member, quoting `reason` (`worktree_released`, cause `released`, `by`
+the admin). Answers `{ "released": [board hold, …], "thread_id": 31 | null }` (`null` when the admin's own hold ended).
+Refusals: `worktree_not_held` (`409`) when the member holds that worktree on that host in no pool; `not_found` for a member
+the project does not have.
+
+The worktree events, `worktree_taken` and `worktree_released`, carry what the board shows of a hold and never the
+machine, the pool, the session or the agent. They are the member's own: only they and the project's admins see them, so
+another member's board shows a change at its next refresh, not at once.
+
 ### Events
 
 Every change appends an event to the project's log. `GET /v1/events?after=<id>&limit=<n>` answers a page, oldest first:
@@ -1052,6 +1147,8 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `hook_reported` | `member`, `host`, `day`, `counts`, `durations` (the day's report as its machine sent it) |
 | `feedback_given` | `member`, `about` (`{"kind": "false_refusal", "refusal", "tally"}` or `{"kind": "conflict", "repo", "area"}`), `reason` |
 | `pr_state_reported` | `pr`, `mergeable` |
+| `worktree_taken` | `member` (whose pool), `host`, `worktree`, `holder` (`session`, `agent`), `purpose` |
+| `worktree_released` | as `worktree_taken`, and `cause` (`released`, `silent`, `session_ended`, `member_removed`), `by` (the admin who ended another member's hold or removed the member; else `null`) |
 
 `item_updated` is appended when one of an item's reported facts actually changed; read the item for what it says now.
 `wide_claimed` is appended when a claim becomes wide or its scope grows; a renewal that names nothing new appends none.
@@ -1059,9 +1156,10 @@ A grant an acknowledgement made ends like any grant, with `grant_revoked` naming
 `acked` is about a conversation, like `thread_started` and `message_posted`: a caller who may not read the conversation
 does not see it, and so is `escalated` of a conversation. A deleted conversation's events are shown to nobody; its
 `thread_deleted` names its id alone. Removing a member appends a `force_released` for each claim of theirs and a
-`slot_force_released` (cause `member_removed`) for each hold, place and offer, then `member_removed`.
-`hook_reported` and `feedback_given` are seen only by the member they name and by admins, on the log and on the stream
-alike; every other reader's cursor moves past them.
+`slot_force_released` (cause `member_removed`) for each hold, place and offer, a `worktree_released` (cause
+`member_removed`) for each worktree hold, then `member_removed`.
+`hook_reported`, `feedback_given`, `worktree_taken` and `worktree_released` are seen only by the member they name and by
+admins, on the log and on the stream alike; every other reader's cursor moves past them.
 
 ### The event stream
 
@@ -1248,17 +1346,18 @@ The handle `dibs` is taken (`handle_taken`): it is the name what dibs writes goe
 
 `DELETE /v1/admin/members/{handle}` removes a member, in one transaction: every token of theirs is revoked and every
 browser session ended; each claim of theirs is released, its item open again; each slot hold of theirs ends, their
-places in slot queues and the offers to them go, and a freed slot is offered on; dibs tells the project what was
-released, in one message to everyone. Their messages and every record that names them stay, and so does their handle.
+places in slot queues and the offers to them go, and a freed slot is offered on; every hold of their worktree pools
+ends; dibs tells the project what was released, in one message to everyone. Their messages and every record that names them stay, and so does their handle.
 Answers
 
 ```json
 { "member": member, "removed_at": "…", "released": [item ref, …],
-  "slots": { "held": ["deploy:prod"], "waited": [], "offered": [] }, "tokens_revoked": 1, "ui_sessions_ended": 0 }
+  "slots": { "held": ["deploy:prod"], "waited": [], "offered": [] }, "worktrees": 2, "tokens_revoked": 1,
+  "ui_sessions_ended": 0 }
 ```
 
-Refusals: `not_found` for a handle the project has no member of, or one removed before; `self_removal` (`409`) for the
-caller's own handle. A removed member is left out of `GET /v1/members`.
+`worktrees` counts the worktree holds that ended. Refusals: `not_found` for a handle the project has no member of, or
+one removed before; `self_removal` (`409`) for the caller's own handle. A removed member is left out of `GET /v1/members`.
 
 `POST /v1/admin/members/{handle}/tokens` revokes every token of the member and ends the browser sessions those tokens
 opened, then answers `201 { "member": member, "token": "dibs_…" }`.
@@ -1383,8 +1482,10 @@ arbiter, linking to its conversation. The board's *Ready* column is the viewer's
 areas and a link to its tracker, and below it the open items that are not ready with their blockers or the held area;
 an item its tracker closed while a claim holds it is marked *Closed upstream*. A claim made as debt work carries a *Debt* badge on the board and the
 status page, and a claim that waits for areas lists each as *waiting for default:billing from alice*; the pages read
-them again when an area is handed over, a wait ends or a claim is narrowed. Above the columns, the live wide claims are
-listed with their reason and, for each area, who has acknowledged them; the area filter keeps the wide claims that name
+them again when an area is handed over, a wait ends or a claim is narrowed. Above the columns, below the slots, the
+worktrees members' machines lend are listed while they are held, one card per member and host, each hold with its
+worktree, whether the member's session or one of its agents holds it, its purpose, the item it is for and since when;
+a free worktree is never listed, and the filter keeps them all. Then the live wide claims are listed with their reason and, for each area, who has acknowledged them; the area filter keeps the wide claims that name
 the area, the member filter those of the member and those that wait for the member's acknowledgement. When a claim or an
 item changes, the page fetches `GET /ui/board/fragment` with the same query string, once per burst of events and not
 while the tab is hidden, and swaps its columns in, except while a form in them is in use, when it shows its reload

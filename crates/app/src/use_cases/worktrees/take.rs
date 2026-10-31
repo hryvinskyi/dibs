@@ -110,9 +110,10 @@ impl TakeWorktree {
         let took = match scene.apply(transition) {
             TakeAnswer::Took { worktree, again } => TookWorktree::Took { worktree, again },
             TakeAnswer::Busy { held } => {
-                let holds = held
+                let holds: Vec<_> = held
                     .iter()
-                    .filter_map(|held| scene.pool.hold(&held.worktree).cloned());
+                    .filter_map(|held| scene.pool.hold(&held.worktree).cloned())
+                    .collect();
                 TookWorktree::Busy {
                     held: Labels::default().all(&mut work, holds).await?,
                 }

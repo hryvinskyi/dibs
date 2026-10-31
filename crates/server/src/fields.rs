@@ -86,6 +86,18 @@ pub fn thread_in_path(text: &str) -> Result<ThreadId, ApiError> {
         .ok_or_else(|| not_found_text(&format!("there is no thread '{text}'")))
 }
 
+/// The session a path segment names. Text that is not an id names none of the caller's sessions.
+///
+/// # Errors
+/// The not-found refusal for text that is not an id.
+pub fn session_in_path(text: &str) -> Result<SessionId, ApiError> {
+    text.parse::<u64>()
+        .ok()
+        .and_then(record_id)
+        .map(SessionId)
+        .ok_or_else(|| not_found_text(&format!("there is no session '{text}'")))
+}
+
 /// The message a path names; text that is not an id names no message.
 ///
 /// # Errors
@@ -247,6 +259,9 @@ mod tests {
         assert_eq!(thread_in_path("5").unwrap(), ThreadId(5));
         assert_eq!(thread_in_path("x").unwrap_err().code(), "not_found");
         assert_eq!(message_in_path("9").unwrap(), MessageId(9));
+        assert_eq!(session_in_path("4").unwrap(), SessionId(4));
+        assert_eq!(session_in_path("0").unwrap_err().code(), "not_found");
+        assert_eq!(session_in_path("me").unwrap_err().code(), "not_found");
         assert_eq!(message_in_path("0").unwrap_err().code(), "not_found");
     }
 

@@ -40,6 +40,7 @@ use dibs_domain::session::{AgentLabel, HostName};
 use crate::error::ApiError;
 
 pub mod slots;
+pub mod worktrees;
 
 /// A JSON answer of this status. A value that cannot be written answers the internal error.
 pub fn reply<T: Serialize>(status: StatusCode, value: &T) -> Response {

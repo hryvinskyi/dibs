@@ -36,6 +36,17 @@
   </li>
 {% endfor %}</ul>
 </section>
+{% endif %}{% if !board.worktrees.is_empty() %}<section class="section" aria-labelledby="b-worktrees">
+  <div class="section-head"><h2 id="b-worktrees">Worktrees</h2><p class="section-head__hint">Checkouts members' machines lend, one holder each; only held ones are listed</p></div>
+  <ul class="worktrees">
+{% for card in board.worktrees %}<li class="worktree-card" data-worktrees="{{ card.member }}">
+    <p class="worktree-card__head"><span class="member">{{ card.member }}</span> on {{ card.host }}</p>
+    <ul class="worktree-card__holds">
+{% for hold in card.holds %}      <li class="worktree-card__hold" data-worktree="{{ hold.worktree }}"><span class="worktree-card__name">{{ hold.worktree }}</span> — <span class="member">{{ hold.holder }}</span>{% if hold.by_agent %}'s agent{% endif %} · {{ hold.purpose }}{% match hold.item %}{% when Some with (item) %} · for {% call ui::item_ref(item) %}{% endcall %}{% when None %}{% endmatch %} · since {% call ui::time(hold.since) %}{% endcall %}</li>
+{% endfor %}    </ul>
+  </li>
+{% endfor %}</ul>
+</section>
 {% endif %}{% if !board.wide.is_empty() %}<section class="section" aria-labelledby="b-wide">
   <div class="section-head"><h2 id="b-wide">Wide claims</h2><p class="section-head__hint">Changes across many areas, and which holders have acknowledged them</p></div>
   {% call ui::wide_claims(board.wide) %}{% endcall %}
