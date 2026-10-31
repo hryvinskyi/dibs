@@ -1,14 +1,22 @@
-//! The guard's outcome, written as the JSON output Claude Code reads from a command hook.
+//! The guard's outcome, written as the output Claude Code reads from a command hook: a JSON object
+//! for most events, a directory's path for the event that asks for a worktree.
+
+use std::path::Path;
 
 use serde::Serialize;
 
 use dibs_agent_host::adapter::HostReply;
 use dibs_agent_host::outcome::GuardOutcome;
+use dibs_agent_host::text::Text;
 
-use crate::event::HookEvent;
+use crate::event::{HookEvent, ReplyShape};
 
 /// The only permission decision this adapter writes.
 const DENY: &str = "deny";
+
+/// The exit status that fails the creation of a worktree. Claude Code reads any status but `0` as
+/// a failed creation, and `2` as a block, which no reply uses.
+const NOT_MADE: u8 = 1;
 
 /// A hook's output: the event's own fields and the line for the person.
 #[derive(Serialize)]
@@ -46,9 +54,19 @@ impl<'a> Specific<'a> {
     }
 }
 
-/// The reply carrying `outcome` for `event`, `None` when the event is not one Claude Code sends
-/// to dibs. Such a reply carries only what every event accepts: the line for the person.
+/// The reply carrying `outcome` for `event`, in the shape Claude Code reads for it; `None` when
+/// the event is not one Claude Code sends to dibs. Such a reply is a JSON object carrying only what
+/// every event accepts: the line for the person.
 pub fn render(event: Option<HookEvent>, outcome: &GuardOutcome) -> HostReply {
+    match event.map_or(ReplyShape::Json, |event| event.reply) {
+        ReplyShape::Json => json(event, outcome),
+        ReplyShape::Path => path(outcome),
+    }
+}
+
+/// The JSON object carrying `outcome` for `event`. A worktree or its refusal, which no event of
+/// this shape asks for, is only its line for the person.
+fn json(event: Option<HookEvent>, outcome: &GuardOutcome) -> HostReply {
     let output = match outcome {
         GuardOutcome::Deny { reason } => match event.filter(|event| event.can_deny()) {
             Some(event) => Output {
@@ -91,4 +109,43 @@ pub fn render(event: Option<HookEvent>, outcome: &GuardOutcome) -> HostReply {
         stdout.push(b'\n');
     }
     HostReply::stdout(stdout)
+}
+
+/// The reply to a worktree wanted: the directory as the only line of standard output and exit `0`,
+/// with the line for the person on standard error. A refusal is its reason on standard error and
+/// a failing status, which fails the creation. No objection names no directory: it exits `0` with
+/// nothing on standard output, its line for the person on standard error, and so leaves the
+/// worktree to whoever runs the hook, as a hook that answers nothing does.
+fn path(outcome: &GuardOutcome) -> HostReply {
+    match outcome {
+        GuardOutcome::Worktree { path, notice } => HostReply {
+            stdout: line_of(path),
+            stderr: notice.as_ref().map(said).unwrap_or_default(),
+            exit: 0,
+        },
+        GuardOutcome::NoWorktree { reason } | GuardOutcome::Deny { reason } => HostReply {
+            stdout: Vec::new(),
+            stderr: said(reason),
+            exit: NOT_MADE,
+        },
+        GuardOutcome::NoObjection { notice, .. } => HostReply {
+            stdout: Vec::new(),
+            stderr: notice.as_ref().map(said).unwrap_or_default(),
+            exit: 0,
+        },
+    }
+}
+
+/// The path as one line.
+fn line_of(path: &Path) -> Vec<u8> {
+    let mut line = path.as_os_str().as_encoded_bytes().to_vec();
+    line.push(b'\n');
+    line
+}
+
+/// The text as one line for the person.
+fn said(text: &Text) -> Vec<u8> {
+    let mut line = text.one_line().into_bytes();
+    line.push(b'\n');
+    line
 }

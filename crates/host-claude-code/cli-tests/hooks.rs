@@ -1,7 +1,10 @@
 //! `dibs hook claude-code <event>`: the guard's verdicts in Claude Code's hook output, the cache
-//! and the circuit that keep a hook off the network, and every failure answered without a
-//! decision.
+//! and the circuit that keep a hook off the network, every failure answered without a decision,
+//! and the worktrees Claude Code asks for: lent from the pool, kept alive by the tools run in them,
+//! let go of when they are given back, their agent stops or their session ends, and made as Claude
+//! Code would make them where no pool lends one.
 
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Output, Stdio};
@@ -10,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::support::{SESSION, Setup, hook_input, reply, text, write_of};
+use crate::support::{
+    SESSION, Setup, canonical, git, hook_input, last_line, reply, text, write_of,
+};
 
 impl Setup {
     /// `dibs hook claude-code <event>` as `handle` in `cwd`, with `stdin`.
@@ -493,4 +498,177 @@ fn doctor_lists_claude_code_with_what_it_carries() {
         host["capabilities"]["push_to_idle"], true,
         "through its channel, once a session opts in"
     );
+}
+
+/// The answer to a `WorktreeCreate` asking for the worktree `name`, from `cwd`, by `handle`.
+fn worktree_create(setup: &Setup, handle: &str, cwd: &Path, name: &str) -> Output {
+    setup.hook(
+        handle,
+        cwd,
+        "worktree-create",
+        &hook_input("WorktreeCreate", cwd, json!({"name": name})),
+    )
+}
+
+#[test]
+fn a_subagents_worktree_comes_from_the_pool_beats_with_its_tools_and_is_let_go_of_when_it_stops() {
+    let setup = Setup::new();
+    let widgets = setup.pool(2);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "worktree1"]);
+
+    let created = worktree_create(&setup, "bob", &widgets, "agent-x");
+    assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
+    let worktree = setup.pool_worktree("worktree1");
+    assert_eq!(last_line(&created), worktree);
+    assert_eq!(
+        text(&created.stdout).lines().count(),
+        1,
+        "the directory alone: {}",
+        text(&created.stdout)
+    );
+    let held = setup.worktrees("bob", &widgets)[0]["held"].clone();
+    assert_eq!(
+        held["agent"], "x",
+        "held for the agent the name carries: {held}"
+    );
+
+    let beat = setup.worktree_state("bob", "worktree1", "beat");
+    let _ = fs::remove_file(&beat);
+    let after = setup.hook(
+        "bob",
+        &worktree,
+        "post-tool-use",
+        &hook_input(
+            "PostToolUse",
+            &worktree,
+            json!({"tool_name": "Read", "tool_input": {}, "agent_id": "x", "agent_type": "general-purpose"}),
+        ),
+    );
+    assert_eq!(after.status.code(), Some(0), "{}", text(&after.stderr));
+    assert!(
+        beat.exists(),
+        "a tool the agent ran in it is its sign of life"
+    );
+
+    let stopped = setup.hook(
+        "bob",
+        &worktree,
+        "subagent-stop",
+        &hook_input(
+            "SubagentStop",
+            &worktree,
+            json!({"agent_id": "x", "agent_type": "general-purpose", "stop_hook_active": false}),
+        ),
+    );
+    assert_eq!(reply(&stopped), Value::Null);
+    assert_eq!(
+        setup.worktrees("bob", &widgets)[0]["held"],
+        Value::Null,
+        "the agent's end let go of it"
+    );
+    assert!(worktree.exists(), "its directory stays for the next take");
+}
+
+#[test]
+fn a_sessions_worktree_is_let_go_of_when_it_is_given_back_and_when_the_session_ends() {
+    let setup = Setup::new();
+    let widgets = setup.pool(1);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "worktree1"]);
+    let worktree = setup.pool_worktree("worktree1");
+    let held = || setup.worktrees("bob", &widgets)[0]["held"].clone();
+
+    let created = worktree_create(&setup, "bob", &widgets, "fix-totals");
+    assert_eq!(created.status.code(), Some(0), "{}", text(&created.stderr));
+    assert_eq!(last_line(&created), worktree);
+    let hold = held();
+    assert_eq!(hold["agent"], Value::Null, "the session holds it: {hold}");
+    assert!(
+        hold["session"].as_str().unwrap().contains(&SESSION[..8]),
+        "{hold}"
+    );
+
+    let given_back = setup.hook(
+        "bob",
+        &worktree,
+        "worktree-remove",
+        &hook_input(
+            "WorktreeRemove",
+            &worktree,
+            json!({"worktree_path": worktree.to_string_lossy()}),
+        ),
+    );
+    assert_eq!(reply(&given_back), Value::Null);
+    assert_eq!(held(), Value::Null);
+    assert!(
+        worktree.exists(),
+        "a pool worktree given back is never deleted"
+    );
+
+    let again = worktree_create(&setup, "bob", &widgets, "fix-totals");
+    assert_eq!(again.status.code(), Some(0), "{}", text(&again.stderr));
+    assert_eq!(last_line(&again), worktree);
+    assert_ne!(held(), Value::Null);
+    let ended = setup.hook(
+        "bob",
+        &worktree,
+        "session-end",
+        &hook_input("SessionEnd", &worktree, json!({"reason": "clear"})),
+    );
+    assert_eq!(reply(&ended), Value::Null);
+    assert_eq!(held(), Value::Null, "the session's end let go of it");
+}
+
+#[test]
+fn where_no_pool_lends_a_worktree_dibs_makes_claude_codes_own_and_says_why() {
+    let setup = Setup::new();
+    let api = setup.api();
+    let plain = setup.root.path().join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &[
+            "-c",
+            "user.name=Bob",
+            "-c",
+            "user.email=bob@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "start",
+        ],
+    ] {
+        git(&plain, args);
+    }
+    for (checkout, because) in [
+        (&api, "no [worktrees] table"),
+        (&plain, "no .dibs.toml governs this directory"),
+    ] {
+        let made = worktree_create(&setup, "bob", checkout, "agent-y");
+        assert_eq!(made.status.code(), Some(0), "{}", text(&made.stderr));
+        let own = canonical(&checkout.join(".claude/worktrees/agent-y"));
+        assert_eq!(last_line(&made), own);
+        assert!(own.join(".git").is_file(), "a linked worktree");
+        assert_eq!(
+            git(&own, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+            "worktree-agent-y",
+            "on a new branch, as Claude Code names it"
+        );
+        let said = text(&made.stderr);
+        assert!(said.contains("pool of worktrees was not used"), "{said}");
+        assert!(said.contains(because), "{said}");
+
+        let given_back = setup.hook(
+            "bob",
+            &own,
+            "worktree-remove",
+            &hook_input(
+                "WorktreeRemove",
+                &own,
+                json!({"worktree_path": own.to_string_lossy()}),
+            ),
+        );
+        assert_eq!(reply(&given_back), Value::Null);
+        assert!(!own.exists(), "removed as git removes a clean worktree");
+    }
 }

@@ -1,6 +1,6 @@
 //! A server with the project `acme` over the repositories `api` and `web`, the admin `alice` and
-//! the member `bob`, each signed in with directories of their own, git checkouts to run in, and the
-//! Claude Code hook input of each event.
+//! the member `bob`, each signed in with directories of their own, git checkouts to run in, one of
+//! them lending a pool of worktrees, and the Claude Code hook input of each event.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -132,10 +132,81 @@ impl Setup {
     pub fn api(&self) -> PathBuf {
         self.checkout_on("api", &self.server.url(), Some("api"))
     }
+
+    /// A checkout `widgets` of `api` lending a pool of `count` worktrees beside it, its
+    /// `.dibs.toml` kept out of git as a pool's checkout keeps it, and the scripts its pool's
+    /// commands run: a preparation that adds the worktree, and a reset that checks out the base and
+    /// cleans it.
+    pub fn pool(&self, count: u8) -> PathBuf {
+        let checkout = self.checkout_on("widgets", &self.server.url(), Some("api"));
+        git(&checkout, &["rm", "-q", "--cached", ".dibs.toml"]);
+        let exclude = checkout.join(".git/info/exclude");
+        let mut excluded = fs::read_to_string(&exclude).unwrap_or_default();
+        excluded.push_str("\n.dibs.toml\n.claude/\n");
+        fs::write(&exclude, excluded).unwrap();
+        git(
+            &checkout,
+            &["commit", "-q", "-m", "keep the configuration local"],
+        );
+        let kit = self.root.path().join("kit");
+        fs::create_dir_all(&kit).unwrap();
+        for (name, script) in [("prepare.sh", PREPARE), ("reset.sh", RESET)] {
+            fs::write(kit.join(name), script).unwrap();
+        }
+        let mut config = fs::read_to_string(checkout.join(".dibs.toml")).unwrap();
+        config.push_str(&format!(
+            "\n[worktrees]\ncount = {count}\nbase = \"main\"\nprepare = \"sh '{}'\"\nreset = \"sh '{}'\"\n",
+            kit.join("prepare.sh").display(),
+            kit.join("reset.sh").display(),
+        ));
+        fs::write(checkout.join(".dibs.toml"), config).unwrap();
+        checkout
+    }
+
+    /// The directory of the worktree `name` of the pool beside `widgets`, as the file system
+    /// resolves it.
+    pub fn pool_worktree(&self, name: &str) -> PathBuf {
+        canonical(&self.root.path().join("widgets-worktrees").join(name))
+    }
+
+    /// This machine's file of `what` for the worktree `name` of the person's pool
+    /// (`worktree1.beat`), wherever the pool's state lies.
+    pub fn worktree_state(&self, handle: &str, name: &str, what: &str) -> PathBuf {
+        let base = self.home(handle).join("state/worktrees");
+        for scope in fs::read_dir(&base).unwrap() {
+            for pool in fs::read_dir(scope.unwrap().path()).unwrap() {
+                let dir = pool.unwrap().path();
+                if dir.is_dir() {
+                    return dir.join(format!("{name}.{what}"));
+                }
+            }
+        }
+        panic!("no pool state under {}", base.display());
+    }
+
+    /// `dibs worktree list --json` as `handle` in `cwd`: the pool's worktrees, their holds and
+    /// what this machine remembers of them.
+    pub fn worktrees(&self, handle: &str, cwd: &Path) -> Vec<Value> {
+        let out = self.ok(handle, cwd, &["worktree", "list", "--json"]);
+        let listed: Value = serde_json::from_slice(&out.stdout).unwrap();
+        listed["worktrees"].as_array().unwrap().clone()
+    }
 }
 
-/// Runs git in `dir`.
-fn git(dir: &Path, args: &[&str]) {
+/// The preparation of a pool worktree: a detached worktree of the checkout at the base.
+const PREPARE: &str = r#"#!/bin/sh
+if [ ! -e "$DIBS_WORKTREE_PATH/.git" ]; then
+  git -C "$DIBS_CHECKOUT" worktree add -q --detach "$DIBS_WORKTREE_PATH" "$DIBS_WORKTREE_BASE" || exit 6
+fi
+"#;
+
+/// The reset of a pool worktree: the base checked out and everything git does not ignore cleaned.
+const RESET: &str = r#"#!/bin/sh
+cd "$DIBS_WORKTREE_PATH" && git checkout -q --detach "$DIBS_WORKTREE_BASE" && git clean -ffdq
+"#;
+
+/// Runs git in `dir`; answers what it printed.
+pub fn git(dir: &Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -147,6 +218,18 @@ fn git(dir: &Path, args: &[&str]) {
         "git {args:?}: {}",
         text(&output.stderr)
     );
+    text(&output.stdout)
+}
+
+/// The path as the file system resolves it, or as it is when it does not exist.
+pub fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The last line a command printed on standard output, as a path the file system resolves.
+pub fn last_line(output: &Output) -> PathBuf {
+    let stdout = text(&output.stdout);
+    canonical(Path::new(stdout.lines().last().unwrap_or_default()))
 }
 
 pub fn text(bytes: &[u8]) -> String {

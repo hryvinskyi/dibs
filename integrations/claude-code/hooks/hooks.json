@@ -1,5 +1,5 @@
 {
-  "description": "dibs: the brief at the start of a session, a check before each file edit and each shell command, heartbeats after tools run, a teammate's pressing message or a slot offered to you between tool calls and with your prompt, and a note of when a turn ends, so that a message pushed while the session waits is not pushed while it works.",
+  "description": "dibs: the brief at the start of a session, a check before each file edit and each shell command, heartbeats after tools run, a teammate's pressing message or a slot offered to you between tool calls and with your prompt, a note of when a turn ends, so that a message pushed while the session waits is not pushed while it works, and the worktrees your sessions and subagents ask for, lent from your machine's pool and let go of when a subagent or the session ends.",
   "hooks": {
     "SessionStart": [
       {
@@ -62,6 +62,53 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" user-prompt-submit",
+            "timeout": 5,
+            "onFailure": "continue"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" worktree-create",
+            "timeout": 900
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" worktree-remove",
+            "timeout": 5,
+            "onFailure": "continue"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" subagent-stop",
+            "timeout": 5,
+            "onFailure": "continue"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/dibs-hook\" session-end",
             "timeout": 5,
             "onFailure": "continue"
           }

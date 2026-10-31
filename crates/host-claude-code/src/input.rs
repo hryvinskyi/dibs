@@ -6,7 +6,9 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use dibs_agent_host::adapter::ParseError;
-use dibs_agent_host::event::{AgentKey, EventKind, HostEvent, SessionKey, Thread, ToolCall};
+use dibs_agent_host::event::{
+    AgentKey, EventKind, HostEvent, SessionKey, Thread, ToolCall, WorktreeLabel,
+};
 
 use crate::event::HookEvent;
 
@@ -23,7 +25,15 @@ struct Input {
     tool_name: Option<String>,
     #[serde(default)]
     tool_input: Option<Value>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    worktree_path: Option<String>,
 }
+
+/// What the name of a worktree Claude Code wants for a subagent starts with; the subagent's
+/// `agent_id` follows it.
+const AGENT_WORKTREE: &str = "agent-";
 
 /// What a tool does, as far as the guard tells tools apart.
 enum Shape {
@@ -96,13 +106,53 @@ pub fn parse(hook: HookEvent, input: &[u8]) -> Result<HostEvent, ParseError> {
             thread,
         },
         EventKind::Stopped => HostEvent::Stopped { session_key, cwd },
-        EventKind::WorktreeWanted
-        | EventKind::WorktreeReturned
-        | EventKind::AgentEnded
-        | EventKind::SessionEnded => {
-            return Err(ParseError::UnknownEvent(hook.argument.to_owned()));
+        EventKind::WorktreeWanted => {
+            let (label, agent) = wanted(input.name.as_deref())?;
+            HostEvent::WorktreeWanted {
+                session_key,
+                cwd,
+                label,
+                agent,
+            }
         }
+        EventKind::WorktreeReturned => HostEvent::WorktreeReturned {
+            session_key,
+            cwd,
+            path: input
+                .worktree_path
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| malformed("worktree_path is missing"))?,
+        },
+        EventKind::AgentEnded => HostEvent::AgentEnded {
+            session_key,
+            cwd,
+            agent: agent_id
+                .and_then(|id| AgentKey::parse(id).ok())
+                .ok_or_else(|| {
+                    malformed("agent_id is 1 to 64 printable characters with no whitespace")
+                })?,
+        },
+        EventKind::SessionEnded => HostEvent::SessionEnded { session_key, cwd },
     })
+}
+
+/// The label of a worktree wanted under `name`, and the agent it is for: the subagent whose
+/// `agent_id` follows `agent-`, or the main agent for any other name.
+fn wanted(name: Option<&str>) -> Result<(WorktreeLabel, Option<AgentKey>), ParseError> {
+    let name = name
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| malformed("name is missing"))?;
+    let label = WorktreeLabel::parse(name).ok_or_else(|| {
+        malformed(format!(
+            "name is 1 to {} of a-z, A-Z, 0-9, '.', '_' and '-', starting with a letter or digit",
+            WorktreeLabel::MAX_CHARS
+        ))
+    })?;
+    let agent = name
+        .strip_prefix(AGENT_WORKTREE)
+        .and_then(|id| AgentKey::parse(id).ok());
+    Ok((label, agent))
 }
 
 /// The tool about to run.

@@ -3,17 +3,33 @@
 # to `dibs hook claude-code <event>` and prints its reply.
 #
 # A hook must never stop the person's work because dibs is missing, outdated or broken, and Claude
-# Code reads exit status 2 as a refusal. So this script always exits 0:
+# Code reads exit status 2 as a refusal. So this script exits 0 for every event but the one that
+# asks for a worktree:
 #   - without a dibs on the PATH it gives the install hint: as a line for the person for the
 #     `check-binary` event, on standard error for every other event;
 #   - when dibs ends with any status but 0, its output is dropped and one warning is printed in
 #     its place;
 #   - `check-binary`, an event of this script alone, compares the plugin's `metadata.min_binary`
 #     with `dibs --version` and prints the update hint when the installed dibs is older.
+#
+# dibs is usable for the events that came with worktrees when it is on the PATH, not switched off
+# and at least `min_binary`; an older dibs does not know them.
+#   - `worktree-create` replaces Claude Code's own `git worktree add`, and Claude Code takes the
+#     last line of standard output as the worktree's directory. A usable dibs answers it; its
+#     answer is passed on when it exits 0 with an existing absolute directory as the last line, or
+#     exits 1, which is its refusal: every worktree of the pool held. In every other case this
+#     script makes the worktree Claude Code would have made, `.claude/worktrees/<name>` at the top
+#     of the repository on a new branch `worktree-<name>` from the commit checked out, prints its
+#     directory and says why on standard error. Making a worktree never fails because of dibs: it
+#     exits 1 only for dibs's refusal and when git cannot make that worktree either.
+#   - `worktree-remove` without a usable dibs removes a worktree under `.claude/worktrees/` of its
+#     repository as git removes one, never by force, and leaves any other directory alone.
+#   - `subagent-stop` and `session-end` without a usable dibs are skipped without a word.
 # dibs runs as a child of this script, never in its place, so the script sees how it ended.
 
 event=${1-}
 install_url='https://github.com/hryvinskyi/dibs#install'
+manifest="$(dirname -- "$0")/../.claude-plugin/plugin.json"
 
 # message <text>: prints the text as the line Claude Code shows the person. The texts are this
 # script's own sentences and version numbers, which hold no character JSON would need escaped.
@@ -51,19 +67,140 @@ older() {
   return 1
 }
 
+# needed_version: the plugin's `metadata.min_binary`, or nothing.
+needed_version() {
+  sed -n 's/.*"min_binary"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' "$manifest" 2>/dev/null | head -n 1
+}
+
+# installed_version: the version `dibs --version` names, or nothing.
+installed_version() {
+  dibs --version 2>/dev/null | version_in
+}
+
 check_binary() {
   if switched_off; then
     return
   fi
-  manifest="$(dirname -- "$0")/../.claude-plugin/plugin.json"
-  needed=$(sed -n 's/.*"min_binary"[[:space:]]*:[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' "$manifest" 2>/dev/null | head -n 1)
-  installed=$(dibs --version 2>/dev/null | version_in)
+  needed=$(needed_version)
+  installed=$(installed_version)
   if [ -z "$installed" ]; then
     message "dibs: dibs --version did not name a version, so this plugin cannot tell whether dibs is recent enough. Run dibs doctor."
   elif [ -n "$needed" ] && older "$installed" "$needed"; then
     message "dibs: this plugin needs dibs $needed or newer, and dibs $installed is installed; until it is updated, some of its hooks do nothing. Update it with dibs self-update in a terminal, or install the latest release: $install_url"
   fi
 }
+
+# usable: whether dibs can answer the events that came with worktrees: on the PATH, not switched
+# off, and at least `min_binary`. When it cannot, `why` says why.
+usable() {
+  if ! command -v dibs >/dev/null 2>&1; then
+    why='dibs is not installed or not on the PATH'
+    return 1
+  fi
+  if switched_off; then
+    why='dibs is switched off on this machine'
+    return 1
+  fi
+  needed=$(needed_version)
+  installed=$(installed_version)
+  if [ -z "$installed" ]; then
+    why='dibs --version did not name a version'
+    return 1
+  fi
+  if [ -n "$needed" ] && older "$installed" "$needed"; then
+    why="dibs $installed is older than the $needed this plugin needs"
+    return 1
+  fi
+  return 0
+}
+
+# field <name>: the text of the string field <name> of the hook's input, held in `input`; paths
+# with a double quote in them are not read.
+field() {
+  printf '%s\n' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
+}
+
+# directory <line>: whether the line is an absolute path to an existing directory.
+directory() {
+  case $1 in
+    /* | [A-Za-z]:[\\/]*) [ -d "$1" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# own_worktree <why>: makes the worktree Claude Code would have made for the hook's input, prints
+# its directory and says on standard error that the pool was not used, and why; exits.
+own_worktree() {
+  cwd=$(field cwd)
+  name=$(field name)
+  case $name in
+    '' | /* | .. | ../* | */.. | */../*)
+      printf 'dibs: the pool of worktrees was not used (%s), and no worktree could be made: the hook input names no worktree that can be made.\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+  if ! top=$(git -C "${cwd:-.}" rev-parse --show-toplevel 2>/dev/null) || [ -z "$top" ]; then
+    printf 'dibs: the pool of worktrees was not used (%s), and no worktree could be made: %s lies in no git repository.\n' "$1" "${cwd:-the working directory}" >&2
+    exit 1
+  fi
+  dir="$top/.claude/worktrees/$name"
+  if [ ! -e "$dir/.git" ]; then
+    if ! said=$(git -C "$top" worktree add -q -b "worktree-$name" "$dir" HEAD 2>&1) &&
+      ! said=$(git -C "$top" worktree add -q "$dir" "worktree-$name" 2>&1); then
+      printf 'dibs: the pool of worktrees was not used (%s), and a plain git worktree could not be made either: %s\n' "$1" "$said" >&2
+      exit 1
+    fi
+  fi
+  printf 'dibs: the pool of worktrees was not used (%s); this is a plain git worktree, without an environment of its own.\n' "$1" >&2
+  printf '%s\n' "$dir"
+  exit 0
+}
+
+if [ "$event" = worktree-create ]; then
+  input=$(cat)
+  if usable; then
+    reply=$(printf '%s\n' "$input" | dibs hook claude-code worktree-create)
+    status=$?
+    last=$(printf '%s\n' "$reply" | sed -n '$p')
+    if [ "$status" -eq 0 ] && directory "$last"; then
+      printf '%s\n' "$reply"
+      exit 0
+    fi
+    if [ "$status" -eq 1 ]; then
+      exit 1
+    fi
+    if [ "$status" -eq 0 ]; then
+      why='dibs answered without a worktree'
+    else
+      why="dibs ended with status $status"
+    fi
+  fi
+  own_worktree "$why"
+fi
+
+case $event in
+  worktree-remove)
+    if ! usable; then
+      input=$(cat)
+      path=$(field worktree_path)
+      case $path in
+        */.claude/worktrees/?*)
+          top=${path%%/.claude/worktrees/*}
+          if [ -e "$path" ] && ! said=$(git -C "$top" worktree remove "$path" 2>&1); then
+            printf 'dibs: the worktree %s was kept: %s\n' "$path" "$said" >&2
+          fi
+          ;;
+      esac
+      exit 0
+    fi
+    ;;
+  subagent-stop | session-end)
+    if ! usable; then
+      cat >/dev/null
+      exit 0
+    fi
+    ;;
+esac
 
 if ! command -v dibs >/dev/null 2>&1; then
   hint="dibs: the dibs command is not installed or not on the PATH, so this session is not coordinated. Install it: $install_url"
