@@ -32,3 +32,11 @@ panic = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+
+# Full debug info made every test binary tens of megabytes, and each rebuild
+# leaves its predecessor in target/. Line tables keep backtraces readable.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
