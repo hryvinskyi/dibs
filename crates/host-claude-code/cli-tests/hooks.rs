@@ -1090,6 +1090,9 @@ fn a_worktree_taken_from_the_sessions_shell_or_tool_server_is_the_sessions_own()
     );
 }
 
+// A tool server finds its host process as its parent, which the platform says only on Unix; on
+// Windows it keeps the session it was started for.
+#[cfg(unix)]
 #[test]
 fn after_a_clear_the_tool_server_acts_as_the_session_the_host_process_runs_now() {
     let setup = Setup::new();
