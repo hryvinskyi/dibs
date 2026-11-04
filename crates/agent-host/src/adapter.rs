@@ -181,6 +181,14 @@ pub trait HostAdapter: Send + Sync {
         Vec::new()
     }
 
+    /// The environment variable through which the host gives a process it starts — a tool server,
+    /// a shell command — its id of the session that process runs in, the same id its hooks are
+    /// given; by default the one its push extension names, and none without one.
+    fn session_var(&self) -> Option<&'static str> {
+        self.push_extension()
+            .and_then(|extension| extension.session_var())
+    }
+
     /// What the host adds to the tool server to wake a session waiting for its person: present
     /// exactly when [`Capabilities::push_to_idle`] is set. None by default.
     fn push_extension(&self) -> Option<Box<dyn McpExtension>> {

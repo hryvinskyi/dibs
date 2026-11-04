@@ -43,7 +43,6 @@ use dibs_domain::handle::Handle;
 
 use crate::failure::Failure;
 use crate::guard::ledger::SessionLedgers;
-use crate::guard::remote::short_name;
 use crate::guard::views;
 use crate::mcp::link::Link;
 use crate::mcp::tools::Tools;
@@ -84,12 +83,6 @@ impl Pusher {
     /// The extension the tool server adds itself.
     pub fn extension(&self) -> Arc<dyn McpExtension> {
         self.extension.clone()
-    }
-
-    /// The name the tool server's session is registered under, after the machine's: the one the
-    /// paired session's hooks use, when the host names that session.
-    pub fn session_name(&self) -> Option<String> {
-        self.pairing.as_ref().map(short_name)
     }
 
     /// The kind of agent its session reports: the host's id, as the hooks of its session report.
@@ -152,10 +145,7 @@ pub fn chosen(
     let Some(extension) = adapter.push_extension() else {
         return Ok(None);
     };
-    let pairing = extension
-        .session_var()
-        .and_then(var)
-        .and_then(|id| SessionKey::parse(&id));
+    let pairing = crate::hosts::session_named(Some(host), registry, var).map(|session| session.key);
     Ok(Some(Pusher {
         host: adapter.id(),
         extension: Arc::from(extension),
