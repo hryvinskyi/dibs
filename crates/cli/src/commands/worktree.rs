@@ -102,7 +102,7 @@ fn beat(args: &WorktreeBeatArgs, ctx: &Context) -> Result<(), Failure> {
     let (pool, _, _) = locate(ctx)?;
     let name = pool.known(&args.worktree)?;
     pool.files()
-        .touch_beat(&name, SystemClock.now())
+        .touch_beat(&name, SystemClock.now(), None)
         .map_err(|error| {
             tracing::debug!(error = %error, "a sign of life could not be left");
             Failure::config(

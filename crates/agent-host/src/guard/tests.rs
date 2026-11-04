@@ -113,6 +113,8 @@ struct State {
     ended: Result<(), PortError>,
     rescued: Option<String>,
     touched: Vec<String>,
+    /// The holder each sign of life was left for: the session's key and the agent.
+    beaten_by: Vec<(String, Option<String>)>,
     freed_left: Vec<String>,
     made: Result<std::path::PathBuf, String>,
     removal: Removal,
@@ -200,6 +202,7 @@ impl State {
             ended: Ok(()),
             rescued: None,
             touched: Vec::new(),
+            beaten_by: Vec::new(),
             freed_left: Vec::new(),
             made: Ok(std::path::PathBuf::from("/work/tool/worktrees/agent-a1b2")),
             removal: Removal::Removed,
@@ -349,8 +352,19 @@ impl WorktreePool for World {
         self.0.borrow().rescued.clone()
     }
 
-    fn touch(&self, name: &WorktreeName, _at: OffsetDateTime) {
-        self.0.borrow_mut().touched.push(name.to_string());
+    fn touch(
+        &self,
+        name: &WorktreeName,
+        session: &SessionRef,
+        agent: Option<&AgentKey>,
+        _at: OffsetDateTime,
+    ) {
+        let mut state = self.0.borrow_mut();
+        state.touched.push(name.to_string());
+        state.beaten_by.push((
+            session.key.as_str().to_owned(),
+            agent.map(|agent| agent.as_str().to_owned()),
+        ));
     }
 
     fn free_left(&self, session: &SessionRef) {
@@ -3601,6 +3615,35 @@ fn signs_of_life_are_left_where_a_tool_works_and_ask_the_server_nothing() {
         "../pool from /work is no pool worktree; each worktree once per call"
     );
     assert!(world.calls().is_empty(), "{:?}", world.calls());
+}
+
+#[test]
+fn a_sign_of_life_names_the_session_and_the_agent_that_left_it() {
+    let world = World::new().with(|state| state.records = vec![record("s-1", "worktree2", None)]);
+    run(
+        &world,
+        "neutral",
+        "before-tool",
+        &worktree_input(json!({
+            "agent": "a1b2",
+            "thread": "subagent",
+            "tool": {"kind": "edit", "paths": ["/pool/worktree3/src/a.rs"]}
+        })),
+    );
+    run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["/pool/worktree1/src/a.rs"]),
+    );
+    assert_eq!(
+        world.0.borrow().beaten_by,
+        [
+            ("s-1".to_owned(), Some("a1b2".to_owned())),
+            ("s-1".to_owned(), None)
+        ],
+        "a take reads whose work a beat stands for, so an agent's beat is not the session's own"
+    );
 }
 
 /// An edit by the session `s-1`, or by its agent, in the pool worktree `worktree2`.

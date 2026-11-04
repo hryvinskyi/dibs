@@ -269,14 +269,31 @@ impl Pool {
             .files
             .hold(name)
             .is_some_and(|record| record.is_of(session, agent));
+        let worked_in = !own && self.in_use(name, now);
+        let by_taker = worked_in && self.beat_is_of(name, session, agent);
         Facts {
             name: name.clone(),
             prepared: self.is_prepared(name),
             stopped: self.files.stopped_at(name).is_some(),
             broken: self.files.broken(name).is_some(),
-            in_use: !own && self.in_use(name, now),
+            in_use: worked_in && !by_taker,
+            worked_in_by_taker: by_taker,
             locked: self.is_locked(name),
         }
+    }
+
+    /// Whether the last sign of life in `name` was left by the holder `session` and `agent` name,
+    /// or by `session` itself: a session's own work in a tree is no other holder's. A beat that
+    /// names nobody is another's.
+    fn beat_is_of(
+        &self,
+        name: &WorktreeName,
+        session: SessionId,
+        agent: Option<&AgentKey>,
+    ) -> bool {
+        self.files.beat_by(name).is_some_and(|by| {
+            by.session_id == session && by.agent.as_ref().is_none_or(|left| Some(left) == agent)
+        })
     }
 
     /// Whether somebody still works in `name` by this machine's beats: a sign of life newer than
@@ -384,6 +401,7 @@ mod tests {
     use std::process::Command;
 
     use dibs_client::checkout::FILE_NAME;
+    use dibs_client::state::BeatBy;
 
     use super::*;
 
@@ -484,6 +502,76 @@ mod tests {
             main.join(".git/worktrees/worktree1/dibs/pool-worktree.toml")
                 .is_file(),
             "the mark lies in the worktree's git directory"
+        );
+    }
+
+    #[test]
+    fn a_sign_of_life_keeps_a_worktree_from_other_sessions_but_not_from_the_one_that_left_it() {
+        let home = tempfile::tempdir().unwrap();
+        let main = repository(home.path());
+        fs::create_dir_all(main.join(".git/dibs")).unwrap();
+        fs::write(main.join(".git/dibs/worktrees.toml"), POOL).unwrap();
+        let here = Checkout::discover(&main).unwrap().unwrap();
+        let (pool, _) = Pool::locate(&here, &home.path().join("state")).unwrap();
+        let name = pool.names()[0].clone();
+        let now = OffsetDateTime::now_utc();
+        let mine = SessionId(1);
+        let theirs = SessionId(2);
+        let agent = |key: &str| AgentKey::parse(key).unwrap();
+        let (fresh, minted) = (agent("cli-0123456789ab"), agent("a1b2"));
+        let facts = |session, taker: &AgentKey| pool.facts(&name, session, Some(taker), now);
+        let beat = |by: Option<BeatBy>, ago: i64| {
+            pool.files()
+                .touch_beat(&name, now - time::Duration::minutes(ago), by.as_ref())
+                .unwrap();
+        };
+        let session_itself = |session_id| BeatBy {
+            session_id,
+            agent: None,
+        };
+
+        pool.files()
+            .mark_free(&name, now - time::Duration::hours(1))
+            .unwrap();
+        beat(Some(session_itself(mine)), 1);
+        let own = facts(mine, &fresh);
+        assert!(
+            !own.in_use && own.worked_in_by_taker,
+            "the session that went on working in it after its hold ended takes it back"
+        );
+        let other = facts(theirs, &fresh);
+        assert!(
+            other.in_use && !other.worked_in_by_taker,
+            "another session is kept from resetting over that work"
+        );
+
+        beat(
+            Some(BeatBy {
+                session_id: mine,
+                agent: Some(minted.clone()),
+            }),
+            1,
+        );
+        assert!(
+            facts(mine, &fresh).in_use,
+            "a tree an agent works in is kept from the session's other agents"
+        );
+        assert!(
+            facts(mine, &minted).worked_in_by_taker,
+            "but not from that agent"
+        );
+
+        beat(None, 1);
+        assert!(
+            facts(mine, &fresh).in_use,
+            "a beat that names nobody counts as another's"
+        );
+
+        beat(Some(session_itself(theirs)), 30);
+        let silent = facts(mine, &fresh);
+        assert!(
+            !silent.in_use && !silent.worked_in_by_taker,
+            "a silence longer than an agent's ends it"
         );
     }
 

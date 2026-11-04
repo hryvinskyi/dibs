@@ -4,7 +4,9 @@
 //! machine's beats — a sign of life newer than its last release, younger than an agent's silence —
 //! whatever the server says of it, nor one being prepared right now. Of the rest, a prepared one
 //! whose environment runs comes first, then a prepared one whose environment was stopped, then,
-//! where the take may prepare one, one not prepared yet; within each, the pool's own order.
+//! where the take may prepare one, one not prepared yet; within each, the pool's own order. One
+//! the taker's own session still works in by those beats comes after every other, so that a take
+//! hands it over, rescued and reset, only when the pool has nothing else.
 //!
 //! A preparation in the background builds a whole environment, so one runs at a time: none is
 //! started while any worktree of the pool is being prepared, reset or stopped.
@@ -24,6 +26,8 @@ pub struct Facts {
     pub broken: bool,
     /// Whether somebody other than the taker still works in it by this machine's beats.
     pub in_use: bool,
+    /// Whether the taker, or its session itself, still works in it by this machine's beats.
+    pub worked_in_by_taker: bool,
     /// Whether another run holds its lock: it is being prepared, reset or stopped.
     pub locked: bool,
 }
@@ -33,12 +37,17 @@ fn rank(facts: &Facts, may_prepare: bool) -> Option<u8> {
     if facts.broken || facts.in_use {
         return None;
     }
-    match (facts.prepared, facts.stopped) {
-        (true, false) => Some(0),
-        (true, true) => Some(1),
-        (false, _) if may_prepare && !facts.locked => Some(2),
-        (false, _) => None,
-    }
+    let rank = match (facts.prepared, facts.stopped) {
+        (true, false) => 0,
+        (true, true) => 1,
+        (false, _) if may_prepare && !facts.locked => 2,
+        (false, _) => return None,
+    };
+    Some(if facts.worked_in_by_taker {
+        rank + 3
+    } else {
+        rank
+    })
 }
 
 /// The worktrees a take offers the server, best first; unprepared ones only when `may_prepare`.
@@ -56,23 +65,32 @@ pub fn candidates(facts: &[Facts], may_prepare: bool) -> Vec<WorktreeName> {
 }
 
 /// The first worktree a take under a deadline may have prepared in the background: not prepared,
-/// not broken and not in use; none while any worktree of `facts` is locked.
+/// not broken and worked in by nobody, the taker included; none while any worktree of `facts` is
+/// locked.
 pub fn to_prepare(facts: &[Facts]) -> Option<WorktreeName> {
     if facts.iter().any(|facts| facts.locked) {
         return None;
     }
     facts
         .iter()
-        .find(|facts| !facts.prepared && !facts.broken && !facts.in_use && !facts.locked)
+        .find(|facts| {
+            !facts.prepared
+                && !facts.broken
+                && !facts.in_use
+                && !facts.worked_in_by_taker
+                && !facts.locked
+        })
         .map(|facts| facts.name.clone())
 }
 
 /// The worktrees not prepared yet that a take under a deadline is waiting on rather than refused
-/// by: neither broken nor in use, whether a preparation of them runs already or not.
+/// by: neither broken nor worked in, whether a preparation of them runs already or not.
 pub fn unprepared(facts: &[Facts]) -> Vec<&Facts> {
     facts
         .iter()
-        .filter(|facts| !facts.prepared && !facts.broken && !facts.in_use)
+        .filter(|facts| {
+            !facts.prepared && !facts.broken && !facts.in_use && !facts.worked_in_by_taker
+        })
         .collect()
 }
 
@@ -87,6 +105,7 @@ mod tests {
             stopped: false,
             broken: false,
             in_use: false,
+            worked_in_by_taker: false,
             locked: false,
         }
     }
@@ -128,6 +147,40 @@ mod tests {
             ["worktree3", "worktree5", "worktree2", "worktree4"],
             "a take that may not prepare offers prepared worktrees only"
         );
+    }
+
+    #[test]
+    fn one_the_takers_own_session_works_in_is_offered_after_every_other_and_never_prepared() {
+        let facts = [
+            Facts {
+                worked_in_by_taker: true,
+                ..worktree("worktree1")
+            },
+            Facts {
+                prepared: false,
+                ..worktree("worktree2")
+            },
+            Facts {
+                stopped: true,
+                ..worktree("worktree3")
+            },
+        ];
+        assert_eq!(
+            names(&candidates(&facts, true)),
+            ["worktree3", "worktree2", "worktree1"]
+        );
+        assert_eq!(
+            names(&candidates(&facts[..1], false)),
+            ["worktree1"],
+            "offered when the pool has nothing else, so the session is never shut out of its own work"
+        );
+        let unprepared_own = [Facts {
+            prepared: false,
+            worked_in_by_taker: true,
+            ..worktree("worktree4")
+        }];
+        assert_eq!(to_prepare(&unprepared_own), None);
+        assert!(unprepared(&unprepared_own).is_empty());
     }
 
     #[test]

@@ -725,9 +725,16 @@ pub trait WorktreePool {
     /// The newest branch the work found in `name` was rescued onto, when there is one.
     fn rescued(&self, name: &WorktreeName) -> Option<String>;
 
-    /// Leaves a sign of life of the holder working in `name` at `at`, on this machine only. A sign
-    /// that cannot be left is lost.
-    fn touch(&self, name: &WorktreeName, at: OffsetDateTime);
+    /// Leaves a sign of life of `session`, or of its `agent`, working in `name` at `at`, on this
+    /// machine only, naming that holder when this machine knows the session. A sign that cannot be
+    /// left is lost.
+    fn touch(
+        &self,
+        name: &WorktreeName,
+        session: &SessionRef,
+        agent: Option<&AgentKey>,
+        at: OffsetDateTime,
+    );
 
     /// Lets go, on this machine, of every worktree an agent of `session` ended in and left in use:
     /// each is free from now on. Read and written on this machine alone; what cannot be written is

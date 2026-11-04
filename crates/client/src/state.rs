@@ -96,6 +96,16 @@ pub struct WorktreeHoldRecord {
     pub reset_done: bool,
 }
 
+/// Who left the last sign of life in a worktree: a session, and its agent when an agent did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeatBy {
+    /// The session.
+    pub session_id: SessionId,
+    /// The agent of the session; `None` for the session itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentKey>,
+}
+
 impl WorktreeHoldRecord {
     /// Whether it records this holder: the session and, for an agent, its key.
     pub fn is_of(&self, session: SessionId, agent: Option<&AgentKey>) -> bool {
@@ -693,19 +703,34 @@ impl WorktreeState {
         Some(OffsetDateTime::from(modified))
     }
 
-    /// Leaves a sign of life in `name` at `at`: its beat file, made when missing, last changed
-    /// then.
+    /// Leaves a sign of life in `name` at `at`, left by the holder `by` when it is known: its beat
+    /// file, made when missing, naming that holder and last changed then.
     ///
     /// # Errors
     /// The file system's failure.
-    pub fn touch_beat(&self, name: &WorktreeName, at: OffsetDateTime) -> io::Result<()> {
+    pub fn touch_beat(
+        &self,
+        name: &WorktreeName,
+        at: OffsetDateTime,
+        by: Option<&BeatBy>,
+    ) -> io::Result<()> {
         fs::create_dir_all(&self.dir)?;
-        let file = fs::OpenOptions::new()
+        let text = match by {
+            Some(by) => serde_json::to_vec(by).map_err(io::Error::other)?,
+            None => Vec::new(),
+        };
+        let mut file = fs::OpenOptions::new()
             .create(true)
-            .truncate(false)
+            .truncate(true)
             .write(true)
             .open(self.beat_file(name))?;
+        file.write_all(&text)?;
         file.set_modified(at.into())
+    }
+
+    /// The holder that left the last sign of life in `name`, when the beat file names one.
+    pub fn beat_by(&self, name: &WorktreeName) -> Option<BeatBy> {
+        read_json(&self.beat_file(name))
     }
 
     /// The newest sign of life left in any worktree of the pool.
@@ -1224,12 +1249,25 @@ mod tests {
         fs::write(worktrees.beat_file(&name), b"").unwrap();
         assert!(worktrees.beat_at(&name).is_some());
         let beat = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
-        worktrees.touch_beat(&name, beat).unwrap();
+        assert_eq!(worktrees.beat_by(&name), None, "an empty beat names nobody");
+        let by = BeatBy {
+            session_id: SessionId(7),
+            agent: Some(AgentKey::parse("a1b2").unwrap()),
+        };
+        worktrees.touch_beat(&name, beat, Some(&by)).unwrap();
         let earlier = WorktreeName::parse("worktree1").unwrap();
         other
-            .touch_beat(&earlier, beat - Duration::hours(1))
+            .touch_beat(&earlier, beat - Duration::hours(1), None)
             .unwrap();
         assert_eq!(worktrees.beat_at(&name), Some(beat));
+        assert_eq!(worktrees.beat_by(&name), Some(by));
+        assert_eq!(other.beat_by(&earlier), None);
+        worktrees.touch_beat(&name, beat, None).unwrap();
+        assert_eq!(
+            worktrees.beat_by(&name),
+            None,
+            "a sign of life of nobody known forgets the session of the one before"
+        );
         assert_eq!(worktrees.newest_beat(), Some(beat));
         assert_eq!(
             state.newest_worktree_beat(),
