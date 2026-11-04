@@ -3,7 +3,9 @@
 
 use dibs_agent_host::neutral::Neutral;
 use dibs_agent_host::{HostId, HostRegistry, SessionKey};
+use dibs_client::host_process::HostProcesses;
 use dibs_host_claude_code::ClaudeCode;
+use time::OffsetDateTime;
 
 use crate::guard::remote::short_name;
 
@@ -31,6 +33,99 @@ impl HostSession {
     /// The kind of agent the session reports: the host's id, as its hooks report it.
     pub const fn agent(&self) -> &'static str {
         self.host.as_str()
+    }
+
+    /// The session the host process `pid` runs now: the one its hooks reported last, when they did
+    /// so at `since` or later (at any time without `since`), and this one otherwise. A host that
+    /// starts a new session in the same process, as on `/clear`, leaves a tool server and a shell
+    /// with the earlier one in their environment.
+    #[must_use]
+    pub fn following(
+        self,
+        processes: &HostProcesses,
+        pid: Option<u32>,
+        since: Option<OffsetDateTime>,
+    ) -> Self {
+        let Some(known) = pid.and_then(|pid| processes.session(self.host.as_str(), pid)) else {
+            return self;
+        };
+        if since.is_some_and(|since| known.since < since) {
+            return self;
+        }
+        match SessionKey::parse(&known.key) {
+            Some(key) => Self { key, ..self },
+            None => self,
+        }
+    }
+}
+
+/// A host session a long-running process acts as, followed to the one its host process runs now:
+/// a tool server the host started for one session, which the host may replace by another in the
+/// same process.
+#[derive(Debug, Clone)]
+pub struct FollowedSession {
+    named: HostSession,
+    process: Option<u32>,
+    processes: Option<HostProcesses>,
+    since: OffsetDateTime,
+}
+
+impl FollowedSession {
+    /// The session `named`, followed through what the hooks of the host process `process` report,
+    /// as written down in `processes`, from `since` on: what was written before belongs to an
+    /// earlier process or session.
+    pub const fn new(
+        named: HostSession,
+        process: Option<u32>,
+        processes: Option<HostProcesses>,
+        since: OffsetDateTime,
+    ) -> Self {
+        Self {
+            named,
+            process,
+            processes,
+            since,
+        }
+    }
+
+    /// The session to act as now.
+    pub fn current(&self) -> HostSession {
+        match &self.processes {
+            Some(processes) => {
+                self.named
+                    .clone()
+                    .following(processes, self.process, Some(self.since))
+            }
+            None => self.named.clone(),
+        }
+    }
+}
+
+/// The process of `host` a process runs under: the one the environment, read through `var`, names
+/// in the host's process variable, or else `parent`, for a tool server the host started directly.
+pub fn host_process(
+    host: HostId,
+    registry: &HostRegistry,
+    var: impl Fn(&str) -> Option<String>,
+    parent: Option<u32>,
+) -> Option<u32> {
+    let named = registry
+        .get(host.as_str())
+        .and_then(|adapter| adapter.process_var())
+        .and_then(var)
+        .and_then(|value| value.trim().parse().ok());
+    named.or(parent)
+}
+
+/// The id of this process's parent, where the platform says it.
+pub fn parent_process() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        Some(std::os::unix::process::parent_id())
+    }
+    #[cfg(not(unix))]
+    {
+        None
     }
 }
 
@@ -102,6 +197,77 @@ mod tests {
             session_named(None, &registry, |_: &str| Some(String::new())),
             None,
             "an id that is no valid key"
+        );
+    }
+
+    #[test]
+    fn a_session_follows_what_the_hooks_of_its_host_process_reported_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let processes = HostProcesses::new(dir.path());
+        let registry = registry();
+        let started = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        let named = HostSession {
+            host: dibs_agent_host::HostId::new("claude-code"),
+            key: SessionKey::parse("first-session").unwrap(),
+        };
+        let pid = host_process(
+            named.host,
+            &registry,
+            |name| (name == "CLAUDE_PID").then(|| "11724".to_owned()),
+            Some(1),
+        );
+        assert_eq!(pid, Some(11724), "the host's variable before the parent");
+        assert_eq!(
+            host_process(named.host, &registry, |_: &str| None, Some(42)),
+            Some(42),
+            "the parent of a tool server the host started"
+        );
+        assert_eq!(
+            named.clone().following(&processes, pid, Some(started)),
+            named,
+            "nothing reported: the session it was given"
+        );
+        processes
+            .remember(
+                "claude-code",
+                11724,
+                "first-session",
+                started - time::Duration::minutes(5),
+            )
+            .unwrap();
+        processes
+            .remember(
+                "claude-code",
+                11724,
+                "earlier-process",
+                started - time::Duration::minutes(1),
+            )
+            .unwrap();
+        assert_eq!(
+            named.clone().following(&processes, pid, Some(started)),
+            named,
+            "a report from before the tool server started, perhaps of another process with the same id"
+        );
+        processes
+            .remember(
+                "claude-code",
+                11724,
+                "after-clear",
+                started + time::Duration::minutes(1),
+            )
+            .unwrap();
+        let followed = named.clone().following(&processes, pid, Some(started));
+        assert_eq!(followed.key.as_str(), "after-clear");
+        assert_eq!(followed.name(), "after-cl");
+        assert_eq!(
+            named.clone().following(&processes, pid, None).key.as_str(),
+            "after-clear",
+            "a shell follows whatever the process's hooks reported last"
+        );
+        assert_eq!(
+            named.clone().following(&processes, None, None),
+            named,
+            "no process known"
         );
     }
 }

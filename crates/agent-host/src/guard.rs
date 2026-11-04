@@ -53,7 +53,7 @@ use dibs_domain::slot::{
 use crate::adapter::{HostAdapter, HostReply};
 use crate::capabilities::Capabilities;
 use crate::delivery;
-use crate::event::{AgentKey, EventKind, HostEvent, Thread, ToolCall};
+use crate::event::{AgentKey, EventKind, HostEvent, SessionKey, Thread, ToolCall};
 use crate::outcome::GuardOutcome;
 use crate::ports::{
     Activity, Cached, Clock, CoordinationGateway, KnownSettings, PathAnswer, PortError, Seen,
@@ -92,6 +92,8 @@ pub struct HookAnswer {
     pub diagnostic: Option<Text>,
     /// The kind of the event, when the input could be read.
     pub kind: Option<EventKind>,
+    /// The session the event is of, when the input could be read.
+    pub session: Option<SessionKey>,
 }
 
 /// Why the guard could not decide.
@@ -134,10 +136,12 @@ impl<'a> Guard<'a> {
                 reply: HostReply::empty(),
                 diagnostic,
                 kind: None,
+                session: None,
             };
         };
         let event = adapter.parse(request.event, request.input);
         let kind = event.as_ref().ok().map(HostEvent::kind);
+        let session = event.as_ref().ok().map(|event| event.session_key().clone());
         let outcome = match event {
             Ok(event) if request.switched_off => self
                 .worktree_event(adapter, &event, true)
@@ -153,6 +157,7 @@ impl<'a> Guard<'a> {
             reply: adapter.render(request.event, &outcome),
             diagnostic: None,
             kind,
+            session,
         }
     }
 

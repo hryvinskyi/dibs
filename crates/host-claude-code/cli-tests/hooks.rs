@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::support::{
-    SESSION, SESSION_VAR, Setup, canonical, git, hook_input, last_line, reply, text, write_of,
+    PROCESS_VAR, SESSION, SESSION_VAR, Setup, canonical, git, hook_input, last_line, reply, text,
+    write_of,
 };
 
 impl Setup {
@@ -1086,6 +1087,103 @@ fn a_worktree_taken_from_the_sessions_shell_or_tool_server_is_the_sessions_own()
         decision(&refused),
         Some("deny"),
         "a take from outside the session is another session's: {refused}"
+    );
+}
+
+#[test]
+fn after_a_clear_the_tool_server_acts_as_the_session_the_host_process_runs_now() {
+    let setup = Setup::new();
+    let widgets = setup.pool(2);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "--all"]);
+    // The tool server is started for SESSION by this process, which stands in for Claude Code.
+    let mut mcp = Mcp::start_for_the_session(&setup, "bob", &widgets);
+    let first = mcp.tool("dibs_worktree_take", json!({"purpose": "before the clear"}));
+    let before = std::path::PathBuf::from(first["path"].as_str().unwrap());
+    assert_eq!(sessions_command_in(&setup, &before), Value::Null);
+
+    let cleared = "7d1e2f30-9a8b-4c6d-8e5f-1a2b3c4d5e6f";
+    let started = setup
+        .dibs("bob", &widgets)
+        .env(PROCESS_VAR, std::process::id().to_string())
+        .args(["hook", "claude-code", "session-start"])
+        .write_stdin(hook_input(
+            "SessionStart",
+            &widgets,
+            json!({"session_id": cleared, "source": "clear"}),
+        ))
+        .output()
+        .unwrap();
+    assert_eq!(started.status.code(), Some(0), "{}", text(&started.stderr));
+
+    let second = mcp.tool("dibs_worktree_take", json!({"purpose": "after the clear"}));
+    let after = std::path::PathBuf::from(second["path"].as_str().unwrap());
+    let input = hook_input(
+        "PreToolUse",
+        &after,
+        json!({
+            "session_id": cleared,
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_use_id": "toolu_01CMD"
+        }),
+    );
+    let new_sessions = reply(&setup.hook("bob", &after, "pre-tool-use", &input));
+    assert_eq!(
+        new_sessions,
+        Value::Null,
+        "the session that runs now works in what the tool server took after the clear"
+    );
+    let earlier = sessions_command_in(&setup, &after);
+    assert_eq!(
+        decision(&earlier),
+        Some("deny"),
+        "and the session before the clear does not: {earlier}"
+    );
+}
+
+#[test]
+fn after_a_clear_a_take_from_the_shell_is_the_session_the_host_process_runs_now() {
+    let setup = Setup::new();
+    let widgets = setup.pool(2);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "--all"]);
+    let host = "424242";
+    let cleared = "7d1e2f30-9a8b-4c6d-8e5f-1a2b3c4d5e6f";
+    let started = setup
+        .dibs("bob", &widgets)
+        .env(PROCESS_VAR, host)
+        .args(["hook", "claude-code", "session-start"])
+        .write_stdin(hook_input(
+            "SessionStart",
+            &widgets,
+            json!({"session_id": cleared, "source": "clear"}),
+        ))
+        .output()
+        .unwrap();
+    assert_eq!(started.status.code(), Some(0), "{}", text(&started.stderr));
+    // A shell started before the clear still names the earlier session.
+    let taken = setup
+        .dibs("bob", &widgets)
+        .env(SESSION_VAR, SESSION)
+        .env(PROCESS_VAR, host)
+        .args(["worktree", "take"])
+        .output()
+        .unwrap();
+    assert_eq!(taken.status.code(), Some(0), "{}", text(&taken.stderr));
+    let worktree = last_line(&taken);
+    let input = hook_input(
+        "PreToolUse",
+        &worktree,
+        json!({
+            "session_id": cleared,
+            "tool_name": "Bash",
+            "tool_input": {"command": "ls"},
+            "tool_use_id": "toolu_01CMD"
+        }),
+    );
+    assert_eq!(
+        reply(&setup.hook("bob", &worktree, "pre-tool-use", &input)),
+        Value::Null,
+        "the take is the session the host process runs now"
     );
 }
 

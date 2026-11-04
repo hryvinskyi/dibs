@@ -18,6 +18,7 @@ use std::time::Instant;
 use time::{Duration, OffsetDateTime};
 
 use dibs_agent_host::{Guard, HookRequest};
+use dibs_client::host_process::HostProcesses;
 use dibs_client::locations::Locations;
 
 use crate::guard::workspace::ClientWorkspaces;
@@ -67,10 +68,39 @@ pub fn hook(host: &str, event: &str, env: &HashMap<String, String>, started: Ins
     if let Some(diagnostic) = &answer.diagnostic {
         eprintln!("{}", diagnostic.one_line());
     }
+    if let (Some(session), false) = (&answer.session, off) {
+        remember_host_process(env, &registry, host, session);
+    }
     if let Some(kind) = answer.kind.filter(|kind| !off && kind.timed()) {
         record(env, host, kind, started);
     }
     ExitCode::from(exit_status(answer.reply.exit))
+}
+
+/// Writes down, on this machine, that the host process the environment names runs `session`, when
+/// that is news: a tool server or a shell of the same process then acts as that session, also
+/// after the host started a new one in the process it already runs.
+fn remember_host_process(
+    env: &HashMap<String, String>,
+    registry: &dibs_agent_host::HostRegistry,
+    host: &str,
+    session: &dibs_agent_host::SessionKey,
+) {
+    let Some(pid) = registry
+        .get(host)
+        .and_then(|adapter| adapter.process_var())
+        .and_then(|var| env.get(var))
+        .and_then(|value| value.trim().parse::<u32>().ok())
+    else {
+        return;
+    };
+    let Ok(locations) = Locations::from_env(&|name| env.get(name).cloned()) else {
+        return;
+    };
+    let processes = HostProcesses::new(locations.state_dir());
+    if let Err(error) = processes.remember(host, pid, session.as_str(), OffsetDateTime::now_utc()) {
+        tracing::debug!(error = %error, "the host process's session could not be written down");
+    }
 }
 
 /// The status a hook exits with: the adapter's, except that `2` — which hosts read as a block —

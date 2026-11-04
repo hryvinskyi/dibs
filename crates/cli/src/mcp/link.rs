@@ -156,6 +156,11 @@ impl Link {
         &self.label
     }
 
+    /// How its session was registered.
+    pub const fn registration(&self) -> &Registration {
+        &self.registration
+    }
+
     /// The live and stale claims and the areas held.
     ///
     /// # Errors

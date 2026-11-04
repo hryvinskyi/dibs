@@ -12,7 +12,7 @@ use rmcp::model::{
     CallToolResult, Implementation, ProtocolVersion, ServerCapabilities, ServerConfig,
 };
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 
 use dibs_agent_host::ports::Seen;
 use dibs_agent_host::push::McpExtension;
@@ -20,7 +20,7 @@ use dibs_agent_host::push::McpExtension;
 use crate::context::Context;
 use crate::failure::Failure;
 use crate::guard::ledger::SessionLedgers;
-use crate::hosts::HostSession;
+use crate::hosts::{FollowedSession, HostSession};
 use crate::mcp::answer;
 use crate::mcp::inputs::{
     AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, FeedbackInput, GrantInput,
@@ -37,20 +37,20 @@ const INSTRUCTIONS: &str = "dibs coordinates who works on what, so that people a
 #[derive(Clone)]
 pub struct Tools {
     ctx: Arc<Context>,
-    link: Arc<OnceCell<Arc<Link>>>,
+    link: Arc<Mutex<Option<Arc<Link>>>>,
     tool_router: ToolRouter<Self>,
     push: Option<Arc<dyn McpExtension>>,
     pusher: Option<Pusher>,
-    paired: Option<HostSession>,
+    paired: Option<FollowedSession>,
 }
 
 impl Tools {
     /// A tool server that signs in as `ctx` says, acts as the host session `paired` when the host
     /// names one, and pushes to a session waiting for its person as `pusher` says, when it does.
-    pub fn new(ctx: Context, pusher: Option<Pusher>, paired: Option<HostSession>) -> Self {
+    pub fn new(ctx: Context, pusher: Option<Pusher>, paired: Option<FollowedSession>) -> Self {
         Self {
             ctx: Arc::new(ctx),
-            link: Arc::new(OnceCell::new()),
+            link: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
             push: pusher.as_ref().map(Pusher::extension),
             pusher,
@@ -58,11 +58,12 @@ impl Tools {
         }
     }
 
-    /// How the session is registered: under the label of the session the host names, as its
+    /// How the session is registered: under the label of the session the host runs now, as its
     /// host, so the tool server and the session's hooks are one session; as a session of its own
     /// when the host names none. It can be woken while idle only when it pushes.
     fn registration(&self) -> Registration {
-        registration(self.paired.as_ref(), self.pusher.as_ref())
+        let current = self.paired.as_ref().map(FollowedSession::current);
+        registration(current.as_ref(), self.pusher.as_ref())
     }
 
     /// Signs in and registers the session now, so that the first call finds both done. A failure
@@ -73,19 +74,20 @@ impl Tools {
         }
     }
 
-    /// The connection and session, opened now if they are not yet.
+    /// The connection and session, opened now if they are not yet, and opened again under the
+    /// session the host runs now when that is no longer the one registered.
     ///
     /// # Errors
     /// The [`Failure`] of signing in or of registering.
     pub async fn link(&self) -> Result<Arc<Link>, Failure> {
-        self.link
-            .get_or_try_init(|| async {
-                Link::open(&self.ctx, self.registration())
-                    .await
-                    .map(Arc::new)
-            })
-            .await
-            .cloned()
+        let wanted = self.registration();
+        let mut slot = self.link.lock().await;
+        if let Some(link) = slot.as_ref().filter(|link| *link.registration() == wanted) {
+            return Ok(link.clone());
+        }
+        let link = Arc::new(Link::open(&self.ctx, wanted).await?);
+        *slot = Some(link.clone());
+        Ok(link)
     }
 
     async fn perform<T, Fut>(&self, operation: impl FnOnce(Arc<Link>) -> Fut) -> CallToolResult

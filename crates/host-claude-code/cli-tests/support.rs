@@ -23,6 +23,10 @@ pub const SESSION: &str = "5b9c0e1a-7f3d-4c2e-9a61-0d4e8f2b7c19";
 /// cleared on every command a test runs, so that a test run inside a session is not that session.
 pub const SESSION_VAR: &str = "CLAUDE_CODE_SESSION_ID";
 
+/// The variable through which Claude Code gives its hooks and shells the id of its own process;
+/// cleared like the session's.
+pub const PROCESS_VAR: &str = "CLAUDE_PID";
+
 pub struct Setup {
     pub server: TestServer,
     pub root: TempDir,
@@ -84,7 +88,8 @@ impl Setup {
             .env("DIBS_STATE_DIR", home.join("state"))
             .env_remove("DIBS_TOKEN")
             .env_remove("DIBS_LOG")
-            .env_remove(SESSION_VAR);
+            .env_remove(SESSION_VAR)
+            .env_remove(PROCESS_VAR);
     }
 
     /// `dibs` as a plain process whose standard streams the test wires itself.
@@ -98,7 +103,8 @@ impl Setup {
             .env_remove("DIBS_TOKEN")
             .env_remove("DIBS_LOG")
             .env_remove("DIBS_OFF")
-            .env_remove(SESSION_VAR);
+            .env_remove(SESSION_VAR)
+            .env_remove(PROCESS_VAR);
         command
     }
 

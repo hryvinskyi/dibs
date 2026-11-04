@@ -395,9 +395,11 @@ session or one of its agents: another holder may be working in it. `dibs worktre
 releases whoever holds it. When the agent host names the session a process runs in (Claude Code's
 `CLAUDE_CODE_SESSION_ID`), `dibs mcp --host <host>` and `dibs worktree take`/`release` run from that session's shell
 act as that session, under the label its hooks register, so what they take is the session's own as its hooks see it;
-without it they are sessions of their own, `<machine>/mcp-<pid>` and `<machine>/cli`. The tool server keeps the session
-it was started for: after `/clear` the hooks report a new one, and a worktree the tool server takes is the earlier
-session's to them; take it from the session's shell, or through the host's own worktree request, instead.
+without it they are sessions of their own, `<machine>/mcp-<pid>` and `<machine>/cli`. A host can start a new session in
+the process it already runs (Claude Code's `/clear`): its hooks write the new session down on this machine beside the
+host's process (`CLAUDE_PID`, in `host-processes/` of the state directory), and the tool server (by its parent process)
+and the shell (by that variable) act as the session the process runs now. On Windows the tool server cannot read its
+parent process, and keeps the session it was started for.
 
 `dibs worktree prepare` runs the project's `prepare` on a worktree that is not held on this machine, prepared already or
 not: that is how a worktree set aside as broken, or one whose environment went wrong, is taken back. A worktree somebody
