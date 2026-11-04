@@ -642,6 +642,7 @@ mod tests {
             stopped: false,
             broken: false,
             in_use: false,
+            worked_in_by_taker: false,
             locked,
         }
     }

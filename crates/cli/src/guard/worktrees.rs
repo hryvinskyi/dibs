@@ -35,13 +35,13 @@ use dibs_client::api::{
 use dibs_client::checkout::Checkout;
 use dibs_client::git_dirs::GitDirs;
 use dibs_client::paths::{plain, resolved};
-use dibs_client::state::WorktreeHoldRecord;
+use dibs_client::state::{BeatBy, WorktreeHoldRecord};
 use dibs_client::worktree_pool::read_marker;
 use dibs_client::{Client, ClientError, ClientOptions};
 use dibs_domain::ids::SessionId;
 use dibs_domain::report::MachineId;
 use dibs_domain::slot::Purpose;
-use dibs_domain::worktree::WorktreeName;
+use dibs_domain::worktree::{AgentKey, WorktreeName};
 
 use crate::commands::worktree::DEFAULT_PURPOSE;
 use crate::commands::worktree::pool::Pool;
@@ -360,8 +360,18 @@ impl WorktreePool for ClientWorktreePool {
             .max()
     }
 
-    fn touch(&self, name: &WorktreeName, at: OffsetDateTime) {
-        if let Err(error) = self.pool.files().touch_beat(name, at) {
+    fn touch(
+        &self,
+        name: &WorktreeName,
+        session: &SessionRef,
+        agent: Option<&AgentKey>,
+        at: OffsetDateTime,
+    ) {
+        let by = self.known_session(session).map(|session_id| BeatBy {
+            session_id,
+            agent: agent.cloned(),
+        });
+        if let Err(error) = self.pool.files().touch_beat(name, at, by.as_ref()) {
             tracing::debug!(error = %error, "a sign of life could not be left");
         }
     }

@@ -340,14 +340,19 @@ impl Run<'_> {
         let records = pool.records(&self.session);
         let record = records.iter().find(|record| record.worktree == name);
         if standing(record, agent) == Standing::Held {
-            pool.touch(&name, self.now);
+            pool.touch(&name, &self.session, agent, self.now);
         }
     }
 
     /// Leaves a sign of life in each pool worktree a tool about to run works in by name: the files
     /// an edit writes, the directories a command line changes to or runs git in. Left only for a
     /// call the guard lets through.
-    pub(super) fn leave_beats(&self, cwd: &Path, call: &crate::event::ToolCall) {
+    pub(super) fn leave_beats(
+        &self,
+        cwd: &Path,
+        call: &crate::event::ToolCall,
+        agent: Option<&AgentKey>,
+    ) {
         let paths: Vec<PathBuf> = match call {
             crate::event::ToolCall::Edit { paths } => paths.clone(),
             crate::event::ToolCall::Shell { command } => {
@@ -360,7 +365,7 @@ impl Run<'_> {
             if let Some((pool, name)) = self.pool_worktree(cwd, &path)
                 && !touched.contains(&name)
             {
-                pool.touch(&name, self.now);
+                pool.touch(&name, &self.session, agent, self.now);
                 touched.push(name);
             }
         }

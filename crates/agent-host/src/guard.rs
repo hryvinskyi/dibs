@@ -387,7 +387,7 @@ impl Run<'_> {
                 reason: Text::new(refusal),
             }));
         }
-        self.leave_beats(cwd, call);
+        self.leave_beats(cwd, call, agent);
         judged
     }
 

@@ -374,7 +374,9 @@ last line (`--json` prints the worktree, path, agent, whether it was prepared fo
 work was rescued on). Prepared worktrees whose environment runs are offered first, then prepared ones whose environment
 was stopped, then ones never prepared, which `take` prepares itself. A worktree set aside as broken is not offered, nor
 one that somebody still works in by this machine's records: a sign of life left in it after its last release, younger than
-20 minutes. Without `--agent`, every take makes an agent key of its own (`cli-…`), prints it, and holds the worktree for
+20 minutes, by another holder. A sign of life names the session that left it and its agent; one left by the taker, or by
+the taker's session itself, as when a session goes on working in a worktree by its path after its hold ended, does not
+keep the worktree from that take, but the worktree is offered after every other, and rescued and reset as any other. Without `--agent`, every take makes an agent key of its own (`cli-…`), prints it, and holds the worktree for
 that agent, so two takes of one session are two holders; the same `--agent` taking again gets the same worktree, untouched,
 unless the previous reset never finished. `--wait` (at most 14 minutes) asks again every 5 seconds while every worktree is
 held; the exit status is 1 when none could be had, and the answer names who holds them. `--deadline` is for a caller that
@@ -436,7 +438,7 @@ leaves a locked worktree for its next run.
 | File | Holds |
 |---|---|
 | `worktrees/<scope>/<pool>/<name>.hold.json` | the holder this machine took the worktree for (session id and agent key), the purpose, the item, when, and whether its reset finished; written on a take, removed on a release |
-| `worktrees/<scope>/<pool>/<name>.beat` | its modification time is the holder's last sign of life; hooks and `dibs worktree beat` touch it, with no network |
+| `worktrees/<scope>/<pool>/<name>.beat` | its modification time is the holder's last sign of life, and it names the session and agent that left it when a hook knows them; hooks and `dibs worktree beat` touch it, with no network |
 | `worktrees/<scope>/<pool>/<name>.free-since` | when the worktree was first seen free |
 | `worktrees/<scope>/<pool>/<name>.left` | the session whose agent ended in the worktree, which keeps it from other holders for 20 minutes or until that session ends |
 | `worktrees/<scope>/<pool>/<name>.stopped` | when its environment was stopped for being left idle |
