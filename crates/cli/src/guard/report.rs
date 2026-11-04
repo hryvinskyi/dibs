@@ -1044,7 +1044,7 @@ mod tests {
         );
         tallies.switched_off(ReportDay::of(NOW), &session("s-9"));
         assert!(
-            started.elapsed() < StdDuration::from_millis(500),
+            started.elapsed() < LOCK_PATIENCE / 2,
             "no count waits for the lock"
         );
         assert_eq!(spooled(&state), 2);

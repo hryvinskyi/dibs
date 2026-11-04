@@ -222,11 +222,24 @@ mod tests {
         }
     }
 
+    /// The ledger of `key`, opened while nobody holds it. A process another test starts at that
+    /// moment can briefly share the lock file it inherited, so a free lock may answer busy for a
+    /// moment; this waits that out, and fails when the lock stays busy.
+    fn reopened<'a>(ledgers: &'a SessionLedgers, key: &str) -> Box<dyn LedgerEntry + 'a> {
+        for _ in 0..200 {
+            if let Some(entry) = ledgers.open(&session(key)) {
+                return entry;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the ledger of {key} stayed locked for two seconds");
+    }
+
     #[test]
     fn a_ledger_is_written_in_one_step_and_read_back_per_session() {
         let dir = tempfile::tempdir().unwrap();
         let ledgers = ledgers(dir.path());
-        let entry = ledgers.open(&session("s-1")).unwrap();
+        let entry = reopened(&ledgers, "s-1");
         assert_eq!(entry.read(), SessionLedger::default());
         let shown = SessionLedger {
             last_injection: Some(OffsetDateTime::UNIX_EPOCH),
@@ -248,25 +261,19 @@ mod tests {
         };
         assert!(entry.write(&shown));
         drop(entry);
-        assert_eq!(ledgers.open(&session("s-1")).unwrap().read(), shown);
-        assert_eq!(
-            ledgers.open(&session("s-2")).unwrap().read(),
-            SessionLedger::default()
-        );
+        assert_eq!(reopened(&ledgers, "s-1").read(), shown);
+        assert_eq!(reopened(&ledgers, "s-2").read(), SessionLedger::default());
     }
 
     #[test]
     fn while_one_holds_a_sessions_ledger_another_gets_none() {
         let dir = tempfile::tempdir().unwrap();
         let ledgers = ledgers(dir.path());
-        let held = ledgers.open(&session("s-1")).unwrap();
+        let held = reopened(&ledgers, "s-1");
         assert!(ledgers.open(&session("s-1")).is_none());
-        assert!(
-            ledgers.open(&session("s-2")).is_some(),
-            "another session's is free"
-        );
+        drop(reopened(&ledgers, "s-2"));
         drop(held);
-        assert!(ledgers.open(&session("s-1")).is_some());
+        drop(reopened(&ledgers, "s-1"));
     }
 
     #[test]
