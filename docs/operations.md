@@ -682,6 +682,16 @@ scheduled job starts without the person's shell, so it must be given the `PATH` 
 (`DOCKER_HOST` or `DOCKER_CONTEXT`) that the `idle` command needs; without them the environment is not stopped, and
 `upkeep` says which worktree it could not stop. Worktrees are prepared on the first take that finds none prepared.
 
+**0.1.10, a session's own work, shell and tool server are that session's.** No migration and no new route: every
+change is in the client. A worktree's sign of life names the session and agent that left it, so a take is kept out
+only by another holder's work, and a worktree the taker's own session works in is offered last instead of never. When
+the agent host names the session a process runs in, `dibs mcp --host <host>` and `dibs worktree take`/`release` from
+the session's shell act as that session, and after the host starts a new session in the same process (`/clear`) they
+follow it, through a record the hooks write in `host-processes/` of the state directory (on Windows the tool server
+keeps the session it was started for). On deploy: upgrade the server as for every release (nothing changes on it),
+then, once the 0.1.10 client binaries are published, set `DIBS_LATEST_CLIENT` to 0.1.10. The plugin stays at
+`min_binary` 0.1.9: its hooks ask nothing new.
+
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
 snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
