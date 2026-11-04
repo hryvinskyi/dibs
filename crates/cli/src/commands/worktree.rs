@@ -26,6 +26,7 @@ use dibs_client::ClientError;
 use dibs_client::api::{
     OwnWorktreeHold, ReleaseWorktreeRequest, WorktreeRelease, WorktreeReleased,
 };
+use dibs_client::host_process::HostProcesses;
 use dibs_client::locations::Locations;
 use dibs_client::state::{BrokenWorktree, WorktreeHoldRecord};
 use dibs_domain::ids::SessionId;
@@ -261,9 +262,16 @@ async fn release(args: WorktreeReleaseArgs, ctx: &Context) -> Result<(), Failure
 
 /// The agent host session this command runs in, when the environment names one: a take or a
 /// release from a shell the host started is that session's, as its hooks see it, and not the
-/// machine's command-line session.
+/// machine's command-line session. It is the session the host process runs now, as its hooks last
+/// reported it, which after a `/clear` is no longer the one the shell was started in.
 fn host_session(ctx: &Context) -> Option<HostSession> {
-    hosts::session_named(None, &hosts::registry(), |name| ctx.var(name))
+    let registry = hosts::registry();
+    let named = hosts::session_named(None, &registry, |name| ctx.var(name))?;
+    let pid = hosts::host_process(named.host, &registry, |name| ctx.var(name), None);
+    let Ok(locations) = ctx.locations() else {
+        return Some(named);
+    };
+    Some(named.following(&HostProcesses::new(locations.state_dir()), pid, None))
 }
 
 /// Ends a hold of the pool for the caller's `session`, and forgets what this machine kept of it:

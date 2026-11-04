@@ -2,7 +2,9 @@
 //! standard input and output, and every claim it takes belongs to the member who signed in.
 //! Started for a host that names the session it serves (`--host` and the host's session variable),
 //! it registers under that session's label, so its takes, releases and claims are the session's,
-//! as its hooks see them; otherwise it registers one session of its own, `<host>/mcp-<pid>`.
+//! as its hooks see them; otherwise it registers one session of its own, `<host>/mcp-<pid>`. When
+//! the host starts another session in the same process (a `/clear`), the hooks write the new one
+//! down beside the host's process, and the next call registers under it.
 //! Started for a host that can wake a session waiting for its person, and opted in for the
 //! session, it also pushes what would otherwise wait for the session's next tool call.
 
@@ -14,8 +16,10 @@ mod tools;
 
 pub use push::{PUSH_VAR, opted_in};
 
+use dibs_client::host_process::HostProcesses;
 use futures_util::future::{self, Either};
 use rmcp::ServiceExt;
+use time::OffsetDateTime;
 
 use crate::cli::McpArgs;
 use crate::context::Context;
@@ -39,7 +43,20 @@ pub async fn serve(args: McpArgs, ctx: &Context) -> Result<(), Failure> {
     let paired = args
         .host
         .as_deref()
-        .and_then(|host| hosts::session_named(Some(host), &registry, |name| ctx.var(name)));
+        .and_then(|host| hosts::session_named(Some(host), &registry, |name| ctx.var(name)))
+        .map(|named| {
+            let process = hosts::host_process(
+                named.host,
+                &registry,
+                |name| ctx.var(name),
+                hosts::parent_process(),
+            );
+            let processes = ctx
+                .locations()
+                .ok()
+                .map(|locations| HostProcesses::new(locations.state_dir()));
+            hosts::FollowedSession::new(named, process, processes, OffsetDateTime::now_utc())
+        });
     let tools = Tools::new(ctx.clone(), pusher.clone(), paired);
     let opening = tools.clone();
     tokio::spawn(async move { opening.open().await });

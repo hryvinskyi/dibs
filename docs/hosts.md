@@ -145,7 +145,10 @@ only. Claude Code gives a stdio server the session in `CLAUDE_CODE_SESSION_ID`, 
 and the same variable to the shell commands the session runs. Whether it pushes or not, the tool server registers under
 that session's label, and `dibs worktree take`/`release` from the session's shell do too, so a worktree either takes is
 the session's own to its hooks; an adapter names its variable through `HostAdapter::session_var` (by default the push
-extension's). The server keeps the id it was started with, so after `/clear` (or `--continue`) the push and the hooks are two
+extension's). `/clear` starts a new session in the same process: the hooks write the session they report down beside
+the host's process, which an adapter names through `HostAdapter::process_var` (`CLAUDE_PID`, given to hooks and shell
+commands), and the tool server, whose parent that process is, and the shell follow it to the session that runs now (on
+Windows the tool server cannot read its parent and keeps its own). For pushes, the server keeps the id it was started with, so after `/clear` (or `--continue`) the push and the hooks are two
 sessions again, each with its own rate and stamps, while the server still delivers each item once. The plugin's
 `Stop` hook (`dibs hook claude-code stop`) stamps the end of a turn and answers nothing: `Stop` reads text for the
 agent as feedback that keeps the turn going, so none is ever put there. `Stop` does not run when the person

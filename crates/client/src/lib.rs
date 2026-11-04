@@ -10,6 +10,7 @@ pub mod client;
 pub mod credentials;
 pub mod error;
 pub mod git_dirs;
+pub mod host_process;
 pub mod locations;
 pub mod paths;
 pub mod private_file;

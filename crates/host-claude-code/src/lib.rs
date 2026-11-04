@@ -81,6 +81,10 @@ impl ClaudeCode {
     /// The host's id.
     pub const ID: HostId = HostId::new("claude-code");
 
+    /// The variable Claude Code gives its hooks and the session's commands: the id of its own
+    /// process, which `/clear` keeps while it starts a new session.
+    pub const PROCESS_VAR: &'static str = "CLAUDE_PID";
+
     /// How long Claude Code waits for the hook that answers a wanted worktree: the `timeout` the
     /// plugin's hook configuration gives `WorktreeCreate`, which `cargo xtask integrations` writes
     /// there from the same constant.
@@ -137,6 +141,10 @@ impl HostAdapter for ClaudeCode {
 
     fn push_extension(&self) -> Option<Box<dyn McpExtension>> {
         Some(Box::new(ClaudeChannel))
+    }
+
+    fn process_var(&self) -> Option<&'static str> {
+        Some(Self::PROCESS_VAR)
     }
 
     fn worktree_terms(&self) -> Option<WorktreeTerms> {
