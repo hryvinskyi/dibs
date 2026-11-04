@@ -44,6 +44,7 @@ use crate::context::{Connection, Context};
 use crate::failure::{Failure, Kind, sentence};
 use crate::guard::SystemClock;
 use crate::guard::machine::machine_id;
+use crate::hosts::{self, HostSession};
 
 /// The purpose of a take that names none.
 pub const DEFAULT_PURPOSE: &str = "work in a worktree";
@@ -157,7 +158,7 @@ async fn take(args: WorktreeTakeArgs, ctx: &Context, ids: &dyn IdGen) -> Result<
     let (pool, _, locations) = locate(ctx)?;
     let connection = ctx.connect().await?;
     let machine = machine(&locations)?;
-    let session = connection.session().await?;
+    let session = connection.session_as(host_session(ctx).as_ref()).await?;
     let (agent, minted) = match args.agent {
         Some(agent) => (agent, false),
         None => (minted(ids)?, true),
@@ -244,7 +245,7 @@ async fn release(args: WorktreeReleaseArgs, ctx: &Context) -> Result<(), Failure
     };
     let connection = ctx.connect().await?;
     let machine = machine(&locations)?;
-    let session = connection.session().await?;
+    let session = connection.session_as(host_session(ctx).as_ref()).await?;
     let release = match (named, args.agent) {
         (Some(worktree), _) => WorktreeRelease::Worktree { worktree },
         (None, agent) => WorktreeRelease::Holder {
@@ -256,6 +257,13 @@ async fn release(args: WorktreeReleaseArgs, ctx: &Context) -> Result<(), Failure
     let name = &released.released.worktree;
     ctx.printer.show(&released, || format!("Released {name}."));
     Ok(())
+}
+
+/// The agent host session this command runs in, when the environment names one: a take or a
+/// release from a shell the host started is that session's, as its hooks see it, and not the
+/// machine's command-line session.
+fn host_session(ctx: &Context) -> Option<HostSession> {
+    hosts::session_named(None, &hosts::registry(), |name| ctx.var(name))
 }
 
 /// Ends a hold of the pool for the caller's `session`, and forgets what this machine kept of it:

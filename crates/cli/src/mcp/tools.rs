@@ -20,6 +20,7 @@ use dibs_agent_host::push::McpExtension;
 use crate::context::Context;
 use crate::failure::Failure;
 use crate::guard::ledger::SessionLedgers;
+use crate::hosts::HostSession;
 use crate::mcp::answer;
 use crate::mcp::inputs::{
     AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, FeedbackInput, GrantInput,
@@ -40,34 +41,28 @@ pub struct Tools {
     tool_router: ToolRouter<Self>,
     push: Option<Arc<dyn McpExtension>>,
     pusher: Option<Pusher>,
+    paired: Option<HostSession>,
 }
 
 impl Tools {
-    /// A tool server that signs in as `ctx` says, and pushes to a session waiting for its person
-    /// as `pusher` says, when it does.
-    pub fn new(ctx: Context, pusher: Option<Pusher>) -> Self {
+    /// A tool server that signs in as `ctx` says, acts as the host session `paired` when the host
+    /// names one, and pushes to a session waiting for its person as `pusher` says, when it does.
+    pub fn new(ctx: Context, pusher: Option<Pusher>, paired: Option<HostSession>) -> Self {
         Self {
             ctx: Arc::new(ctx),
             link: Arc::new(OnceCell::new()),
             tool_router: Self::tool_router(),
             push: pusher.as_ref().map(Pusher::extension),
             pusher,
+            paired,
         }
     }
 
-    /// How the session is registered: under the paired session's label, as its host, when it
-    /// pushes for a session the host names; as a session of its own otherwise.
+    /// How the session is registered: under the label of the session the host names, as its
+    /// host, so the tool server and the session's hooks are one session; as a session of its own
+    /// when the host names none. It can be woken while idle only when it pushes.
     fn registration(&self) -> Registration {
-        match &self.pusher {
-            Some(pusher) => Registration {
-                name: pusher
-                    .session_name()
-                    .unwrap_or_else(|| Registration::own().name),
-                agent: pusher.agent(),
-                push: true,
-            },
-            None => Registration::own(),
-        }
+        registration(self.paired.as_ref(), self.pusher.as_ref())
     }
 
     /// Signs in and registers the session now, so that the first call finds both done. A failure
@@ -430,6 +425,23 @@ fn protocol_versions(push: Option<&dyn McpExtension>) -> Vec<ProtocolVersion> {
         .collect()
 }
 
+/// The registration of a tool server serving the host session `paired`, pushing with `pusher`.
+fn registration(paired: Option<&HostSession>, pusher: Option<&Pusher>) -> Registration {
+    match (paired, pusher) {
+        (Some(paired), pusher) => Registration {
+            name: paired.name(),
+            agent: paired.agent(),
+            push: pusher.is_some(),
+        },
+        (None, Some(pusher)) => Registration {
+            agent: pusher.agent(),
+            push: true,
+            ..Registration::own()
+        },
+        (None, None) => Registration::own(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -439,6 +451,22 @@ mod tests {
     fn names_in(text: &str) -> impl Iterator<Item = &str> {
         text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .filter(|word| word.starts_with("dibs_"))
+    }
+
+    #[test]
+    fn a_tool_server_the_host_names_a_session_for_is_that_session() {
+        let paired = HostSession {
+            host: dibs_agent_host::HostId::new("some-host"),
+            key: dibs_agent_host::SessionKey::parse("33738ac7-61b0-44ca").unwrap(),
+        };
+        let session = registration(Some(&paired), None);
+        assert_eq!(
+            session.name, "33738ac7",
+            "the label its hooks register under"
+        );
+        assert_eq!(session.agent, "some-host");
+        assert!(!session.push, "woken only when it pushes");
+        assert_eq!(registration(None, None), Registration::own());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::support::{
-    SESSION, Setup, canonical, git, hook_input, last_line, reply, text, write_of,
+    SESSION, SESSION_VAR, Setup, canonical, git, hook_input, last_line, reply, text, write_of,
 };
 
 impl Setup {
@@ -154,9 +154,28 @@ struct Mcp {
 
 impl Mcp {
     fn start(setup: &Setup, handle: &str, cwd: &Path) -> Self {
-        let mut child = setup
-            .process(handle, cwd)
-            .arg("mcp")
+        Self::start_with(setup, handle, cwd, |_| {})
+    }
+
+    /// The tool server as Claude Code starts it for the session [`SESSION`].
+    fn start_for_the_session(setup: &Setup, handle: &str, cwd: &Path) -> Self {
+        Self::start_with(setup, handle, cwd, |command| {
+            command
+                .args(["--host", "claude-code"])
+                .env(SESSION_VAR, SESSION);
+        })
+    }
+
+    fn start_with(
+        setup: &Setup,
+        handle: &str,
+        cwd: &Path,
+        configure: impl FnOnce(&mut std::process::Command),
+    ) -> Self {
+        let mut command = setup.process(handle, cwd);
+        command.arg("mcp");
+        configure(&mut command);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -1010,6 +1029,63 @@ fn a_continued_agent_whose_worktree_went_to_another_agent_is_told_so_and_refused
         held(&setup, &widgets, "worktree1")["agent"],
         "b",
         "the hold stays with the agent that took it"
+    );
+}
+
+/// A command run in `worktree` by the session [`SESSION`] itself, as the hook judges it.
+fn sessions_command_in(setup: &Setup, worktree: &Path) -> Value {
+    let input = hook_input(
+        "PreToolUse",
+        worktree,
+        json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_use_id": "toolu_01CMD"}),
+    );
+    reply(&setup.hook("bob", worktree, "pre-tool-use", &input))
+}
+
+#[test]
+fn a_worktree_taken_from_the_sessions_shell_or_tool_server_is_the_sessions_own() {
+    let setup = Setup::new();
+    let widgets = setup.pool(3);
+    setup.ok("bob", &widgets, &["worktree", "prepare", "--all"]);
+
+    let from_shell = setup
+        .dibs("bob", &widgets)
+        .env(SESSION_VAR, SESSION)
+        .args(["worktree", "take"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        from_shell.status.code(),
+        Some(0),
+        "{}",
+        text(&from_shell.stderr)
+    );
+    let shells = last_line(&from_shell);
+    assert_eq!(
+        sessions_command_in(&setup, &shells),
+        Value::Null,
+        "the session works in what its shell took"
+    );
+
+    let mut mcp = Mcp::start_for_the_session(&setup, "bob", &widgets);
+    let taken = mcp.tool("dibs_worktree_take", json!({"purpose": "fix totals"}));
+    let tools = std::path::PathBuf::from(taken["path"].as_str().unwrap());
+    assert_eq!(
+        sessions_command_in(&setup, &tools),
+        Value::Null,
+        "and in what its tool server took"
+    );
+    let name = taken["worktree"].as_str().unwrap();
+    let released = mcp.tool("dibs_worktree_release", json!({"name": name}));
+    assert_eq!(released["released"]["worktree"], name, "{released}");
+
+    let plain = setup.ok("bob", &widgets, &["worktree", "take"]);
+    let others = last_line(&plain);
+    let refused = sessions_command_in(&setup, &others);
+    assert_eq!(
+        decision(&refused),
+        Some("deny"),
+        "a take from outside the session is another session's: {refused}"
     );
 }
 

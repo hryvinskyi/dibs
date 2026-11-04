@@ -22,6 +22,7 @@ use dibs_domain::message::SessionLabel;
 use dibs_domain::session::{AgentLabel, HostName};
 
 use crate::failure::Failure;
+use crate::hosts::HostSession;
 use crate::output::Printer;
 
 /// The agent label of the sessions the command line registers.
@@ -211,6 +212,23 @@ impl Connection {
     /// The [`Failure`] of the call.
     pub async fn session(&self) -> Result<SessionId, Failure> {
         let session = self.register(AGENT, AGENT, false).await?;
+        if let Err(error) = self.state.remember_session(&session) {
+            tracing::debug!(error = %error, "the session could not be remembered");
+        }
+        Ok(session.session_id)
+    }
+
+    /// Registers the session a command acts as, and remembers it: the agent host session `host`
+    /// names, under the label its hooks register, so that what the command takes or lets go of is
+    /// that session's; this machine's command-line session without one.
+    ///
+    /// # Errors
+    /// The [`Failure`] of the call.
+    pub async fn session_as(&self, host: Option<&HostSession>) -> Result<SessionId, Failure> {
+        let Some(host) = host else {
+            return self.session().await;
+        };
+        let session = self.register(host.agent(), &host.name(), false).await?;
         if let Err(error) = self.state.remember_session(&session) {
             tracing::debug!(error = %error, "the session could not be remembered");
         }

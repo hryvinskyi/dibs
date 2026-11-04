@@ -392,7 +392,12 @@ the worktree's log in the state directory (below), and a failure names that log.
 `dibs_worktree_release` and `dibs_worktrees` are the same operations as tools of `dibs mcp`; every tool take is an agent of
 its own as well, and `dibs_worktree_release` by name lets go only of a worktree this machine took for the tool server's
 session or one of its agents: another holder may be working in it. `dibs worktree release NAME` is the person's, and
-releases whoever holds it.
+releases whoever holds it. When the agent host names the session a process runs in (Claude Code's
+`CLAUDE_CODE_SESSION_ID`), `dibs mcp --host <host>` and `dibs worktree take`/`release` run from that session's shell
+act as that session, under the label its hooks register, so what they take is the session's own as its hooks see it;
+without it they are sessions of their own, `<machine>/mcp-<pid>` and `<machine>/cli`. The tool server keeps the session
+it was started for: after `/clear` the hooks report a new one, and a worktree the tool server takes is the earlier
+session's to them; take it from the session's shell, or through the host's own worktree request, instead.
 
 `dibs worktree prepare` runs the project's `prepare` on a worktree that is not held on this machine, prepared already or
 not: that is how a worktree set aside as broken, or one whose environment went wrong, is taken back. A worktree somebody

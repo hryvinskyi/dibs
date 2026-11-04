@@ -1,8 +1,10 @@
 //! `dibs mcp`: the operations of the command line as tools of a Model Context Protocol server on
-//! standard input and output. The server is neutral about who calls it; it registers one session
-//! of its own, labelled `<host>/mcp-<pid>`, and every claim it takes belongs to the member who
-//! signed in. Started for a host that can wake a session waiting for its person, and opted in for
-//! the session, it also pushes what would otherwise wait for the session's next tool call.
+//! standard input and output, and every claim it takes belongs to the member who signed in.
+//! Started for a host that names the session it serves (`--host` and the host's session variable),
+//! it registers under that session's label, so its takes, releases and claims are the session's,
+//! as its hooks see them; otherwise it registers one session of its own, `<host>/mcp-<pid>`.
+//! Started for a host that can wake a session waiting for its person, and opted in for the
+//! session, it also pushes what would otherwise wait for the session's next tool call.
 
 mod answer;
 mod inputs;
@@ -32,10 +34,13 @@ use crate::{guard, hosts};
 pub async fn serve(args: McpArgs, ctx: &Context) -> Result<(), Failure> {
     let opted = push::opted_in(ctx.var(push::PUSH_VAR).as_deref())
         && !guard::switched_off(ctx.var(guard::OFF_VAR).as_deref());
-    let pusher = push::chosen(args.host.as_deref(), &hosts::registry(), opted, |name| {
-        ctx.var(name)
-    })?;
-    let tools = Tools::new(ctx.clone(), pusher.clone());
+    let registry = hosts::registry();
+    let pusher = push::chosen(args.host.as_deref(), &registry, opted, |name| ctx.var(name))?;
+    let paired = args
+        .host
+        .as_deref()
+        .and_then(|host| hosts::session_named(Some(host), &registry, |name| ctx.var(name)));
+    let tools = Tools::new(ctx.clone(), pusher.clone(), paired);
     let opening = tools.clone();
     tokio::spawn(async move { opening.open().await });
     let service = tools

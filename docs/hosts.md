@@ -141,8 +141,11 @@ values are kept to identifier characters). Claude Code shows the model `<channel
 starts a turn even when the session is idle. The server never declares `claude/channel/permission`, which would let
 whoever can post through the channel approve the session's tool calls. Claude Code's v2 MCP client registers no
 channel whose server negotiates protocol revision 2026-07-28, so a pushing server offers revisions up to 2025-11-25
-only. Claude Code gives a stdio server the session in `CLAUDE_CODE_SESSION_ID`, the id its hooks get as `session_id`;
-the server keeps the id it was started with, so after `/clear` (or `--continue`) the push and the hooks are two
+only. Claude Code gives a stdio server the session in `CLAUDE_CODE_SESSION_ID`, the id its hooks get as `session_id`,
+and the same variable to the shell commands the session runs. Whether it pushes or not, the tool server registers under
+that session's label, and `dibs worktree take`/`release` from the session's shell do too, so a worktree either takes is
+the session's own to its hooks; an adapter names its variable through `HostAdapter::session_var` (by default the push
+extension's). The server keeps the id it was started with, so after `/clear` (or `--continue`) the push and the hooks are two
 sessions again, each with its own rate and stamps, while the server still delivers each item once. The plugin's
 `Stop` hook (`dibs hook claude-code stop`) stamps the end of a turn and answers nothing: `Stop` reads text for the
 agent as feedback that keeps the turn going, so none is ever put there. `Stop` does not run when the person
