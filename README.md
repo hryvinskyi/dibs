@@ -178,7 +178,10 @@ revokes their tokens and releases everything they held at once. With the Claude 
 - **Hot-file rules.** Policies for files many people touch, matched by glob: `regenerate` (anyone may change it, nobody
   merges it by hand), `owner` (only the holder of a named area), `warn-shared` (anyone, with the other editors named) and
   `free`.
-- **Grant.** A holder lets another member edit inside an area they hold, for that member's own live claim.
+- **Grant.** A holder lets another member edit inside an area they hold, for that member's own live claim. The holder's
+  agent decides a request itself, without asking its person: it gives the grant when the work under the claim that holds
+  the area changes no file there, or that claim is in review, and otherwise answers when the area will be free. It
+  decides a wide claim's announcement the same way.
 - **Wide claim.** A claim announced over many areas for a change that cuts across them (an upgrade, a rename). It holds
   none of them, so it is in nobody's way. Each member holding one of its areas is sent an announcement that asks to be
   acknowledged, and acknowledging it is their grant: until then the wide claim's edits in their area are refused. One
@@ -589,7 +592,8 @@ DIBS_PUSH_TO_IDLE=1 claude --dangerously-load-development-channels plugin:dibs@d
   twice, once across all your sessions), and it never asks the agent to acknowledge anything: that is yours to do.
   The tool server never offers to relay Claude Code's permission prompts, so nothing a teammate writes can approve a
   tool call. A session woken by a message says you are away, answers only when a decision is needed, never agrees or
-  commits to anything for you, and goes on only with work you already asked for; a permission prompt waits for you.
+  commits to anything for you, and goes on only with work you already asked for; a permission prompt waits for you. A
+  grant asked of you is the exception: the woken session decides it at once, as a session at work does.
 - **Nothing is lost.** When nothing shows a push was seen within five minutes — the agent did not read it, you did not
   type — the session's hooks show it at the next tool call or prompt. When `DIBS_PUSH_TO_IDLE` is set, the brief at the
   start of a session reminds you that pushes need the flag above.

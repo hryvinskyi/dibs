@@ -268,7 +268,7 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
                 Some(message) => {
                     let _ = write!(
                         text,
-                        "; read message {message} and acknowledge it (dibs ack {message}) to let {} edit there.",
+                        "; read message {message}: acknowledging it (dibs ack {message}) lets {} edit there, so decide it as you decide a grant.",
                         inside.holder
                     );
                 }

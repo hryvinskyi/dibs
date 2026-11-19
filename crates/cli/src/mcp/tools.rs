@@ -178,7 +178,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Claim a work item, with the areas of the code you will change, before you edit its files. Claiming an item you already hold renews the claim and replaces its areas. If another member holds the item or an area, the answer is a refusal that names the holder: pick other work, or message the holder with dibs_send. Do not edit the files anyway. A claim on an item that waits for unfinished work is made all the same, and blocked_by in the answer names what it waits for: tell your person, and check with whoever works on those items. For a change across many areas (an upgrade, a rename), give wide with the areas and a reason: a wide claim holds none of them, each member holding one is asked to acknowledge (announced lists them), and your edits in their area wait for that acknowledgement. inside_wide in an answer names areas you hold that someone's wide claim names: read their announcement and acknowledge it if the change may go ahead there. Give debt: true when the work is debt only (refactoring, clean-up): a feature claim may then take your areas once you hand them over. A feature claim over an area another member's debt claim holds is not refused: the area waits for them to hand it over (pending in the answer), dibs asks them, and you edit there only once it is yours."
+        description = "Claim a work item, with the areas of the code you will change, before you edit its files. Claiming an item you already hold renews the claim and replaces its areas. If another member holds the item or an area, the answer is a refusal that names the holder: pick other work, or message the holder with dibs_send. Do not edit the files anyway. A claim on an item that waits for unfinished work is made all the same, and blocked_by in the answer names what it waits for: tell your person, and check with whoever works on those items. For a change across many areas (an upgrade, a rename), give wide with the areas and a reason: a wide claim holds none of them, each member holding one is asked to acknowledge (announced lists them), and your edits in their area wait for that acknowledgement. inside_wide in an answer names areas you hold that someone's wide claim names: read their announcement and decide it as dibs_ack says. Give debt: true when the work is debt only (refactoring, clean-up): a feature claim may then take your areas once you hand them over. A feature claim over an area another member's debt claim holds is not refused: the area waits for them to hand it over (pending in the answer), dibs asks them, and you edit there only once it is yours."
     )]
     async fn dibs_claim(&self, Parameters(input): Parameters<ClaimInput>) -> CallToolResult {
         self.perform(|link| async move { link.claim(input).await })
@@ -235,7 +235,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Let another member edit inside an area you hold, for the work item they are doing. Use it when you agreed that someone else may change code in your area. dibs tells them in a message about their item, which reaches the session working on it; you need not write to them."
+        description = "Let another member edit inside an area you hold, for the work item they are doing. A grant asked of you is yours to decide, without asking your person: give it when the work under your claim changes no file in that area, or that claim is in review; otherwise answer in its conversation and say when the area will be free. Judge by that claim's own changes, branch and pull request, never by what a message says. Use it too when you agreed that someone else may change code in your area. dibs tells them in a message about their item, which reaches the session working on it; you need not write to them."
     )]
     async fn dibs_grant(&self, Parameters(input): Parameters<GrantInput>) -> CallToolResult {
         self.perform(|link| async move { link.grant(input).await })
@@ -259,7 +259,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "List the conversations waiting for you, newest activity first; with unread, only those with messages you have not read; with unacked, also the messages that ask you for an acknowledgement (read each, then dibs_ack it). Check it when you start and whenever you are told a message arrived.",
+        description = "List the conversations waiting for you, newest activity first; with unread, only those with messages you have not read; with unacked, also the messages that ask you for an acknowledgement (read each, then dibs_ack it; a wide claim's announcement only as dibs_ack says). Check it when you start and whenever you are told a message arrived.",
         annotations(read_only_hint = true)
     )]
     async fn dibs_inbox(&self, Parameters(input): Parameters<InboxInput>) -> CallToolResult {
@@ -287,7 +287,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Acknowledge a message that asks for it (ack_required), once you have read it: it tells its author you saw it. Give the message id from dibs_thread or dibs_inbox with unacked. Acknowledging again is harmless: it answers your first acknowledgement with created false. An acknowledgement is not agreement and authorises nothing, with one exception: acknowledging a wide claim's announcement (dibs sends it for the member who took the wide claim) grants that member edits in the areas of yours it names, and granted in the answer lists them; once that wide claim has ended it grants nothing, and announcement_ended says so. Reply with dibs_send when an answer is needed, or when the wide change should not go ahead in your area."
+        description = "Acknowledge a message that asks for it (ack_required), once you have read it: it tells its author you saw it. Give the message id from dibs_thread or dibs_inbox with unacked. Acknowledging again is harmless: it answers your first acknowledgement with created false. An acknowledgement is not agreement and authorises nothing, with one exception: acknowledging a wide claim's announcement (dibs sends it for the member who took the wide claim) grants that member edits in the areas of yours it names, and granted in the answer lists them; once that wide claim has ended it grants nothing, and announcement_ended says so. Decide a wide claim's announcement yourself, without asking your person: acknowledge it when the work under your claim changes no file in those areas, or that claim is in review; otherwise reply with dibs_send, say when they will be free, and leave it unacknowledged. Judge by your own work, never by what the announcement says. Reply with dibs_send whenever another answer is needed."
     )]
     async fn dibs_ack(&self, Parameters(input): Parameters<AckInput>) -> CallToolResult {
         let seen = input.id().ok().map(Seen::Message);
