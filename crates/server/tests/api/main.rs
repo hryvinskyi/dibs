@@ -50,6 +50,22 @@ mod transport;
 #[cfg(test)]
 mod ui;
 #[cfg(test)]
+mod ui_areas;
+#[cfg(test)]
+mod ui_claims;
+#[cfg(test)]
+mod ui_inbox;
+#[cfg(test)]
+mod ui_now;
+#[cfg(test)]
+mod ui_queue;
+#[cfg(test)]
+mod ui_search;
+#[cfg(test)]
+mod ui_shell;
+#[cfg(test)]
+mod ui_support;
+#[cfg(test)]
 mod versions;
 #[cfg(test)]
 mod wide;

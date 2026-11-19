@@ -6,7 +6,7 @@
 use std::time::Duration as StdDuration;
 
 use axum::body::Body;
-use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use time::Duration;
@@ -17,188 +17,7 @@ use dibs_server::ui::{
 };
 
 use crate::support::{Person, World, two_repositories};
-
-/// An answer read as text.
-struct Page {
-    status: StatusCode,
-    headers: HeaderMap,
-    text: String,
-}
-
-impl Page {
-    /// The value of the cookie this answer sets under `name`, if it sets one.
-    fn set_cookie(&self, name: &str) -> Option<String> {
-        self.headers
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .find_map(|value| {
-                let (pair, _) = value.split_once(';').unwrap_or((value, ""));
-                let (key, value) = pair.split_once('=')?;
-                (key == name).then(|| value.to_owned())
-            })
-    }
-
-    /// The whole `Set-Cookie` line of the cookie `name`.
-    fn set_cookie_line(&self, name: &str) -> Option<String> {
-        self.headers
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .find(|value| value.starts_with(&format!("{name}=")))
-            .map(ToOwned::to_owned)
-    }
-
-    /// The value of the first hidden form token on the page.
-    fn form_token(&self) -> String {
-        let start = self
-            .text
-            .find(r#"name="csrf" value=""#)
-            .unwrap_or_else(|| panic!("no form token in {}", self.text))
-            + r#"name="csrf" value=""#.len();
-        let end = self.text[start..].find('"').unwrap() + start;
-        self.text[start..end].to_owned()
-    }
-
-    /// Where a redirect goes.
-    fn location(&self) -> &str {
-        self.headers[header::LOCATION].to_str().unwrap()
-    }
-
-    /// The markup of the board column labelled `id`.
-    fn column(&self, id: &str) -> &str {
-        let start = self
-            .text
-            .find(&format!(r#"aria-labelledby="{id}""#))
-            .unwrap();
-        let end = self.text[start..].find("</section>").unwrap() + start;
-        &self.text[start..end]
-    }
-}
-
-/// Form-encodes the pairs.
-fn form(pairs: &[(&str, &str)]) -> String {
-    let encode = |text: &str| {
-        text.bytes()
-            .map(|byte| {
-                if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-                    char::from(byte).to_string()
-                } else {
-                    format!("%{byte:02X}")
-                }
-            })
-            .collect::<String>()
-    };
-    pairs
-        .iter()
-        .map(|(key, value)| format!("{}={}", encode(key), encode(value)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Sends a request with these cookies (`name=value; …`) and, when given, a form body.
-async fn fetch(
-    world: &World,
-    method: Method,
-    path: &str,
-    cookie: Option<&str>,
-    body: Option<String>,
-) -> Page {
-    let mut builder = Request::builder().method(method).uri(path);
-    if let Some(cookie) = cookie {
-        builder = builder.header(header::COOKIE, cookie);
-    }
-    let request = match body {
-        Some(body) => builder
-            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(Body::from(body))
-            .unwrap(),
-        None => builder.body(Body::empty()).unwrap(),
-    };
-    let response = world.open(request).await;
-    let status = response.status();
-    let headers = response.headers().clone();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    Page {
-        status,
-        headers,
-        text: String::from_utf8(bytes.to_vec()).unwrap(),
-    }
-}
-
-/// A browser signed in as someone: its cookie and the form token its pages carry.
-struct Browser {
-    cookie: String,
-    token: String,
-}
-
-impl Browser {
-    async fn get(&self, world: &World, path: &str) -> Page {
-        fetch(world, Method::GET, path, Some(&self.cookie), None).await
-    }
-
-    async fn post(&self, world: &World, path: &str, pairs: &[(&str, &str)]) -> Page {
-        fetch(
-            world,
-            Method::POST,
-            path,
-            Some(&self.cookie),
-            Some(form(pairs)),
-        )
-        .await
-    }
-}
-
-/// Renders the sign-in form and posts `token` with the form's cookie; answers the post's answer.
-async fn post_sign_in(world: &World, token: &str) -> Page {
-    let shown = fetch(world, Method::GET, "/ui/login", None, None).await;
-    assert_eq!(shown.status, StatusCode::OK);
-    let nonce = shown.set_cookie(LOGIN_COOKIE).unwrap();
-    assert_eq!(shown.form_token(), nonce);
-    fetch(
-        world,
-        Method::POST,
-        "/ui/login",
-        Some(&format!("{LOGIN_COOKIE}={nonce}")),
-        Some(form(&[("csrf", &nonce), ("token", token)])),
-    )
-    .await
-}
-
-/// Signs `who` in through the form.
-async fn sign_in(world: &World, who: &Person) -> Browser {
-    let signed = post_sign_in(world, &format!("  {}\n", who.token)).await;
-    assert_eq!(signed.status, StatusCode::SEE_OTHER, "{}", signed.text);
-    assert_eq!(signed.location(), "/ui/");
-    let secret = signed.set_cookie(SESSION_COOKIE).unwrap();
-    let cookie = format!("{SESSION_COOKIE}={secret}");
-    let status = fetch(world, Method::GET, "/ui/", Some(&cookie), None).await;
-    assert_eq!(status.status, StatusCode::OK, "{}", status.text);
-    Browser {
-        token: status.form_token(),
-        cookie,
-    }
-}
-
-/// A project with alice (admin) and bob, its settings declaring two repositories.
-async fn team() -> (World, Person, Person) {
-    let world = World::new().await;
-    let alice = world.project("acme", "alice").await;
-    let bob = world.member(&alice, "bob", Role::Member).await;
-    world.settings(&alice, two_repositories()).await;
-    (world, alice, bob)
-}
-
-async fn claim(world: &World, who: &Person, session: u64, item: u64, areas: Value) {
-    let answer = world
-        .post(
-            who,
-            &format!("/v1/items/{item}/claim"),
-            json!({"session_id": session, "areas": areas}),
-        )
-        .await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-}
+use crate::ui_support::{Browser, Page, claim, fetch, form, post_sign_in, sign_in, team};
 
 #[tokio::test]
 async fn a_good_token_opens_a_session_whose_cookie_carries_every_flag() {
@@ -226,10 +45,7 @@ async fn a_good_token_opens_a_session_whose_cookie_carries_every_flag() {
         None,
     )
     .await;
-    assert!(
-        page.text
-            .contains("Signed in as <span class=\"account__who\">alice</span>")
-    );
+    assert!(page.text.contains("Signed in as alice"), "{}", page.text);
     let renewed = page.set_cookie_line(SESSION_COOKIE).unwrap();
     assert!(renewed.contains("Max-Age=43200"), "{renewed}");
 }
@@ -1045,32 +861,6 @@ async fn the_take_over_form_takes_a_stale_claim_and_tells_its_holder() {
     assert!(again.text.contains("href=\"/ui/\""));
 }
 
-#[tokio::test]
-async fn the_status_page_lists_claims_and_holds_or_says_there_are_none() {
-    let world = World::new().await;
-    let alice = world.project("acme", "alice").await;
-    let browser = sign_in(&world, &alice).await;
-    let empty = browser.get(&world, "/ui/").await;
-    assert!(empty.text.contains("Nothing claimed"));
-    assert!(empty.text.contains("No live claims"));
-    assert!(empty.text.contains("Heartbeat within the last 1 d"));
-    let (world, _alice, bob) = board().await;
-    let browser = sign_in(&world, &bob).await;
-    let page = browser.get(&world, "/ui/").await;
-    assert!(
-        page.text.contains("1 live claim · 1 stale"),
-        "{}",
-        page.text
-    );
-    assert!(page.text.contains("Heartbeat within the last 1 h"));
-    assert!(
-        page.text
-            .contains("<span class=\"chip\">web:checkout</span>")
-    );
-    assert!(page.text.contains("data-status-view"));
-    assert!(page.text.contains("data-changed hidden"));
-}
-
 /// Reads frames of a stream's body until one holds `needle`; answers everything read.
 async fn read_until(body: &mut Body, needle: &str) -> String {
     let mut text = String::new();
@@ -1163,68 +953,6 @@ async fn done_today_counts_from_the_viewers_midnight_or_else_from_utcs() {
         );
         assert!(fallback.column("c-done").contains("Done item"));
     }
-}
-
-#[tokio::test]
-async fn the_status_page_shows_a_wide_claim_and_who_has_acknowledged_it() {
-    let (world, alice, bob) = team().await;
-    let alice_session = world.session(&alice, "laptop").await;
-    let bob_session = world.session(&bob, "desk").await;
-    let alices = world.item(&alice, None, "Invoices").await;
-    let bobs = world.item(&bob, Some("gh:acme/api#9"), "Upgrade").await;
-    claim(
-        &world,
-        &alice,
-        alice_session,
-        alices,
-        json!(["api:billing"]),
-    )
-    .await;
-    let browser = sign_in(&world, &alice).await;
-    let empty = browser.get(&world, "/ui/").await;
-    assert!(
-        empty.column("wide").contains("No wide claims"),
-        "{}",
-        empty.text
-    );
-    let made = world
-        .post(
-            &bob,
-            &format!("/v1/items/{bobs}/claim"),
-            json!({"session_id": bob_session,
-                   "wide": {"areas": ["api:billing", "api:search"],
-                            "reason": "Swap <b>the</b> HTTP client"}}),
-        )
-        .await;
-    assert_eq!(made.status, StatusCode::OK, "{}", made.body);
-    let page = browser.get(&world, "/ui/").await;
-    assert_eq!(page.status, StatusCode::OK);
-    let wide = page.column("wide");
-    assert!(wide.contains("gh:acme/api#9"), "{wide}");
-    assert!(
-        wide.contains("Swap &#60;b&#62;the&#60;/b&#62; HTTP client"),
-        "{wide}"
-    );
-    assert!(!wide.contains("<b>the</b>"), "{wide}");
-    assert!(wide.contains("waiting for alice"), "{wide}");
-    assert!(
-        wide.contains("api:search</span> <span class=\"muted\">free"),
-        "{wide}"
-    );
-    assert!(
-        page.text.contains("wide_claimed wide_granted_by_ack"),
-        "the page reloads on a wide claim's events"
-    );
-    let message = made.body["announced"][0]["message_id"].as_u64().unwrap();
-    world
-        .post(&alice, &format!("/v1/messages/{message}/ack"), json!({}))
-        .await;
-    let after = browser.get(&world, "/ui/").await;
-    assert!(
-        after.column("wide").contains("acknowledged by alice"),
-        "{}",
-        after.text
-    );
 }
 
 /// The markup a page swaps its fragment into.
@@ -1782,8 +1510,6 @@ async fn the_board_shows_claims_in_review_with_their_pull_requests_and_a_merge_a
         "{in_review}"
     );
     assert!(!page.text.contains("data-integration-silent"));
-    let status = browser.get(&world, "/ui/").await;
-    assert!(status.text.contains("acme/api#17"), "{}", status.text);
 
     let merged = world
         .post(
@@ -1900,8 +1626,6 @@ async fn the_board_shows_debt_work_and_the_areas_a_claim_waits_for() {
         progress.contains("waiting for api:billing from alice"),
         "{progress}"
     );
-    let status = browser.get(&world, "/ui/").await;
-    assert!(status.text.contains("waiting for api:billing from alice"));
     assert!(
         page.text.contains("wait_withdrawn"),
         "the board refreshes on it"

@@ -1,0 +1,7 @@
+{% macro out(link, title, name) %}<a class="ext" href="{{ link.href }}" target="_blank" rel="noopener noreferrer" title="{{ title }} on {{ name }}" aria-label="{{ title }} on {{ name }}">↗</a>{% endmacro %}
+
+{% macro ticket(t) %}<span class="ref"><a href="{{ t.main.href }}" title="{{ t.title }}"{% if t.main.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ t.label }}</a>{% if let Some(o) = t.out %}{% call out(o, t.title, t.out_name) %}{% endcall %}{% endif %}</span>{% endmacro %}
+
+{% macro person(p, small) %}<a class="who" href="{{ p.href }}"><span class="av{% if small %} av--s{% endif %} pc-{{ p.colour }}" aria-hidden="true">{{ p.initials }}</span><b>{{ p.handle }}</b></a>{% endmacro %}
+
+{% macro linked(text) %}{%- for piece in text.pieces -%}{%- if let Some(link) = piece.link -%}<a class="lnk" href="{{ link.href }}"{% if link.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ piece.text }}</a>{%- else -%}{{ piece.text }}{%- endif -%}{%- endfor -%}{% endmacro %}

@@ -14,7 +14,7 @@
   <div class="site-header__inner">
     <div class="brand"><a class="wordmark" href="/ui/">dibs</a><span class="project">{{ chrome.project }}</span></div>
     <nav class="nav" aria-label="Main">
-      <a href="/ui/"{% if chrome.section == "status" %} aria-current="page"{% endif %}>Status</a>
+      <a href="/ui/">Now</a>
       <a href="/ui/board"{% if chrome.section == "board" %} aria-current="page"{% endif %}>Board</a>
       <a href="/ui/threads"{% if chrome.section == "threads" %} aria-current="page"{% endif %}>Threads{% if chrome.unread > 0 %} <span class="count">{{ chrome.unread }}</span><span class="visually-hidden">unread</span>{% endif %}</a>
     </nav>

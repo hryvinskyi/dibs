@@ -58,8 +58,19 @@ pub enum ServeError {
     Serve(#[source] std::io::Error),
 }
 
-/// The use cases over a store, with the production adapters of every other port.
+/// The use cases over a store, with the production adapters of every other port and the reference
+/// schemes this crate ships.
 pub fn use_cases(store: Arc<SqliteStore>, notifier: Arc<BroadcastNotifier>) -> UseCases {
+    use_cases_with_schemes(store, notifier, Arc::new(RefSchemeRegistry::standard()))
+}
+
+/// The use cases over a store, with the production adapters of every other port, reading
+/// references through `ref_schemes`.
+pub fn use_cases_with_schemes(
+    store: Arc<SqliteStore>,
+    notifier: Arc<BroadcastNotifier>,
+    ref_schemes: Arc<RefSchemeRegistry>,
+) -> UseCases {
     let deps = Dependencies {
         store,
         clock: Arc::new(SystemClock),
@@ -68,7 +79,7 @@ pub fn use_cases(store: Arc<SqliteStore>, notifier: Arc<BroadcastNotifier>) -> U
         hasher: Arc::new(Sha256Hasher),
         notifier,
         hot_rules: Arc::new(HotRuleRegistry::standard()),
-        ref_schemes: Arc::new(RefSchemeRegistry::standard()),
+        ref_schemes,
     };
     UseCases::new(&deps)
 }
@@ -93,7 +104,12 @@ pub async fn serve(
             .map_err(ServeError::Database)?,
     );
     let notifier = Arc::new(BroadcastNotifier::new(WAKEUP_BACKLOG));
-    let app = Arc::new(use_cases(store.clone(), notifier.clone()));
+    let ref_schemes = Arc::new(RefSchemeRegistry::standard());
+    let app = Arc::new(use_cases_with_schemes(
+        store.clone(),
+        notifier.clone(),
+        ref_schemes.clone(),
+    ));
     let stopping = Shutdown::new();
     let sweeper = tokio::spawn(run_sweeper(app.clone(), SWEEP_EVERY, stopping.signal()));
     let retention = tokio::spawn(run_retention(app.clone(), RETAIN_EVERY, stopping.signal()));
@@ -120,6 +136,7 @@ pub async fn serve(
     let options = HttpOptions {
         client_ip: ClientIpPolicy::new(config.proxy),
         versions: config.versions,
+        ref_schemes,
         ..HttpOptions::default()
     };
     let listener = TcpListener::bind(config.listen)

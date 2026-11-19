@@ -13,8 +13,6 @@ use crate::ui::session::UiSession;
 /// The page's place in the navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
-    /// The status page.
-    Status,
     /// The board.
     Board,
     /// The threads and a thread.
@@ -27,7 +25,6 @@ impl Section {
     /// The name the templates compare against.
     const fn name(self) -> &'static str {
         match self {
-            Self::Status => "status",
             Self::Board => "board",
             Self::Threads => "threads",
             Self::Other => "",
@@ -48,7 +45,7 @@ pub struct Chrome {
     pub unread: u64,
     /// The session's form token.
     pub csrf: String,
-    /// The navigation entry of the page: `status`, `board`, `threads` or empty.
+    /// The navigation entry of the page: `board`, `threads` or empty.
     pub section: &'static str,
 }
 

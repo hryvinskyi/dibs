@@ -1,5 +1,8 @@
-//! The browser pages for people: sign-in with a token, the status page, the board, the threads and
-//! a thread with its reply form, the event stream over the session cookie, and the static bundle.
+//! The browser pages for people: sign-in with a token; the frame every screen is drawn in — a rail
+//! with the screens, the people, the slots and the worktrees held — around the five screens (Now,
+//! Claims, Queue, Areas, Inbox), each of the last four with an inspector of the object selected, and
+//! the search; the board, the threads and a thread with its reply form, in a frame of their own; the
+//! event stream over the session cookie; and the static bundle.
 //!
 //! Pages are rendered on the server from the templates, which hold every word a page shows; the
 //! scripts only enhance them. Every answer carries a content security policy that allows nothing but
@@ -7,19 +10,26 @@
 //! runs. Every form posts a token of the session it was rendered for, and the session cookie is
 //! `SameSite=Strict`. Every text a person or an agent wrote is escaped by the templates.
 
+mod areas;
 mod assets;
 mod board;
 mod chrome;
+mod claims;
 mod cookies;
+mod inbox;
+mod links;
 mod live;
 mod moments;
 mod notice;
+mod now;
+mod queue;
 mod render;
 mod rows;
+mod search;
 mod session;
+mod shell;
 mod sign_in;
 mod slots;
-mod status;
 mod takeover;
 mod threads;
 mod worktrees;
@@ -46,8 +56,17 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'
 /// The routes of the pages, with the headers every answer of theirs carries.
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/ui", get(to_status))
-        .route("/ui/", get(status::page))
+        .route("/ui", get(to_now))
+        .route("/ui/", get(now::page))
+        .route("/ui/claims", get(claims::list))
+        .route("/ui/claims/{item}", get(claims::inspect))
+        .route("/ui/queue", get(queue::list))
+        .route("/ui/queue/{item}", get(queue::inspect))
+        .route("/ui/areas", get(areas::list))
+        .route("/ui/areas/{area}", get(areas::inspect))
+        .route("/ui/inbox", get(inbox::list))
+        .route("/ui/inbox/{thread}", get(inbox::inspect))
+        .route("/ui/search", get(search::page))
         .route("/ui/login", get(sign_in::form).post(sign_in::sign_in))
         .route("/ui/logout", post(sign_in::sign_out))
         .route("/ui/board", get(board::page))
@@ -77,8 +96,8 @@ pub fn routes() -> Router<AppState> {
         ))
 }
 
-/// `GET /ui`: the status page lives at `/ui/`.
-async fn to_status() -> Redirect {
+/// `GET /ui`: Now lives at `/ui/`.
+async fn to_now() -> Redirect {
     Redirect::permanent("/ui/")
 }
 

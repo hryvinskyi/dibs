@@ -4,9 +4,7 @@
 use time::OffsetDateTime;
 
 use dibs_app::named::ItemName;
-use dibs_app::use_cases::{
-    AreaHold, ExcludedEntry, HeldItem, NamedNotReady, ReadyEntry, WideClaimStatus,
-};
+use dibs_app::use_cases::{ExcludedEntry, HeldItem, NamedNotReady, ReadyEntry, WideClaimStatus};
 use dibs_domain::handover::ClaimKind;
 use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::item::ExternalRef;
@@ -110,32 +108,6 @@ impl ClaimRow {
                 .review()
                 .map(|review| review.prs().iter().map(ToString::to_string).collect())
                 .unwrap_or_default(),
-        }
-    }
-}
-
-/// An area and who holds it for which item.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HoldRow {
-    /// The area, as `repo:area`.
-    pub area: String,
-    /// The holder's handle.
-    pub holder: String,
-    /// How the item is named.
-    pub reference: String,
-}
-
-impl HoldRow {
-    /// The row of a hold; the item is named from the live claims it belongs to.
-    pub fn of(hold: &AreaHold, live: &[HeldItem]) -> Self {
-        let external = live
-            .iter()
-            .find(|held| held.item.item.id == hold.item)
-            .and_then(|held| held.item.item.external_ref.as_ref());
-        Self {
-            area: hold.area.to_string(),
-            holder: hold.holder.to_string(),
-            reference: reference(hold.item, external),
         }
     }
 }

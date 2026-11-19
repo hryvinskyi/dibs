@@ -28,6 +28,8 @@ use tracing::Level;
 
 use dibs_app::ports::{Clock, TokenGenerator};
 use dibs_app::use_cases::UseCases;
+use dibs_domain::forge::ForgeRegistry;
+use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use crate::adapters::{OsTokens, SystemClock};
 use crate::client_ip::ClientIpPolicy;
@@ -65,6 +67,12 @@ pub struct HttpOptions {
     pub tokens: Arc<dyn TokenGenerator>,
     /// The oldest client served and the client recommended.
     pub versions: ClientVersions,
+    /// The reference schemes the pages name tickets and trackers' pages by: the same registry the
+    /// use cases hold, so a page and an answer of the API read a reference alike.
+    pub ref_schemes: Arc<RefSchemeRegistry>,
+    /// The forges whose pages the pages link a repository's issues, branches, files and commits
+    /// to.
+    pub forges: Arc<ForgeRegistry>,
 }
 
 impl Default for HttpOptions {
@@ -76,6 +84,8 @@ impl Default for HttpOptions {
             clock: Arc::new(SystemClock),
             tokens: Arc::new(OsTokens),
             versions: ClientVersions::default(),
+            ref_schemes: Arc::new(RefSchemeRegistry::standard()),
+            forges: Arc::new(ForgeRegistry::standard()),
         }
     }
 }
@@ -108,6 +118,10 @@ pub struct AppState {
     pub(crate) tokens: Arc<dyn TokenGenerator>,
     /// The oldest client served and the client recommended.
     pub(crate) versions: Arc<ClientVersions>,
+    /// The reference schemes the pages read references by.
+    pub(crate) ref_schemes: Arc<RefSchemeRegistry>,
+    /// The forges the pages link a repository's pages to.
+    pub(crate) forges: Arc<ForgeRegistry>,
 }
 
 /// The router over these use cases, its event streams woken and ended through `streams`.
@@ -121,6 +135,8 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
         clock: options.clock,
         tokens: options.tokens,
         versions: versions.clone(),
+        ref_schemes: options.ref_schemes,
+        forges: options.forges,
     };
     let api = Router::new()
         .route("/health", get(routes::health))

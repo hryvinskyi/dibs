@@ -1,0 +1,43 @@
+{% import "links.html" as links %}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{% block title %}{% endblock %} · {{ shell.project }} · dibs</title>
+<link rel="stylesheet" href="/ui/static/{{ shell.assets }}/dibs.css">
+<script type="module" src="/ui/static/{{ shell.assets }}/main.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="app" data-screen="{{ shell.screen.name() }}" data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-login-url="/ui/login" data-after="{{ shell.after }}" data-changed-kinds="{{ shell.screen.changed_kinds() }}">
+<aside id="rail" class="rail" data-region="rail" aria-label="Project">
+  <div class="brand"><span><a href="/ui/"><b>dibs</b></a> <span>{{ shell.project }}</span></span><button class="btn btn--small" type="button" data-rail-toggle aria-controls="rail" aria-expanded="false" hidden>Menu</button></div>
+  <form data-search method="get" action="/ui/search" role="search"><input class="searchbtn" name="q" type="search" aria-label="Search everything" placeholder="Search everything"><kbd>⌘K</kbd></form>
+  <nav class="nav" aria-label="Main"><ul>
+    {% for entry in shell.rail.nav %}<li><a href="{{ entry.screen.path() }}"{% if entry.current %} aria-current="page"{% endif %}>{{ entry.screen.label() }}{% match entry.count %}{% when Some(crate::ui::shell::NavCount::Plain(n)) %}<span class="k">{{ n }}</span>{% when Some(crate::ui::shell::NavCount::Held(n)) %}<span class="k">{{ n }} held</span>{% when Some(crate::ui::shell::NavCount::Unread(n)) %}<span class="k{% if *n > 0 %} k--hot{% endif %}">{{ n }}</span><span class="visually-hidden">unread</span>{% when None %}{% endmatch %}</a></li>
+    {% endfor %}</ul></nav>
+  <section class="ppl" aria-labelledby="rail-people"><h3 class="label" id="rail-people">People</h3><ul>
+    {% for row in shell.rail.people %}<li><a href="{{ row.person.href }}"><span class="av pc-{{ row.person.colour }}" aria-hidden="true">{{ row.person.initials }}</span><span>{{ row.person.handle }}{% if let Some(host) = row.host %}<small>{{ host }}</small>{% endif %}</span><span class="k">{{ row.claims }}{% if row.silent > 0 %} · {{ row.silent }} silent{% endif %}</span></a></li>
+    {% endfor %}</ul></section>
+  {% if !shell.rail.slots.is_empty() %}<section aria-labelledby="rail-slots"><h3 class="label" id="rail-slots">Slots</h3><ul class="slots">
+    {% for slot in shell.rail.slots %}<li{% if slot.holder.is_some() %} class="held"{% endif %}><details id="slot-{{ slot.name }}"{% if slot.open %} open{% endif %}><summary><span>{{ slot.name }}</span><span>{% if let Some(holder) = slot.holder %}{{ holder }}{% else %}free{% endif %}</span></summary><p>{% if let Some(note) = slot.note %}{% call links::linked(note) %}{% endcall %}<br>{% endif %}<span class="faint">Held for at most {% if slot.max_hold.days > 0 %}{{ slot.max_hold.days }} d{% endif %}{% if slot.max_hold.hours > 0 %}{% if slot.max_hold.days > 0 %} {% endif %}{{ slot.max_hold.hours }} h{% endif %}{% if slot.max_hold.minutes > 0 %}{% if slot.max_hold.days > 0 || slot.max_hold.hours > 0 %} {% endif %}{{ slot.max_hold.minutes }} min{% endif %}{% if let Some(group) = slot.group %} · group {{ group }}{% endif %}</span></p></details></li>
+    {% endfor %}</ul></section>{% endif %}
+  <section aria-labelledby="rail-worktrees"><h3 class="label" id="rail-worktrees">Worktrees held</h3><ul class="wts">
+    {% for hold in shell.rail.worktrees %}<li><span><b>{{ hold.worktree }}</b> · {% call links::person(hold.holder, true) %}{% endcall %}{% if hold.by_agent %}'s agent{% endif %} · {% match hold.age %}{% when crate::ui::moments::Ago::JustNow %}just now{% when crate::ui::moments::Ago::Minutes(n) %}{{ n }} min{% when crate::ui::moments::Ago::HoursMinutes(h, _) %}{{ h }} h{% when crate::ui::moments::Ago::Hours(h) %}{{ h }} h{% when crate::ui::moments::Ago::Days(d) %}{{ d }} d{% endmatch %}</span><span>{% call links::linked(hold.purpose) %}{% endcall %}{% if let Some(ticket) = hold.ticket %} · for {% call links::ticket(ticket) %}{% endcall %}{% endif %}</span></li>
+    {% else %}<li class="faint">None right now</li>
+    {% endfor %}</ul></section>
+  <form class="rail__foot" method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{{ shell.csrf }}"><span>Signed in as {{ shell.handle }}</span><button class="btn btn--small" type="submit">Sign out</button></form>
+</aside>
+<main id="main" class="main{% if shell.screen.has_inspector() %} split{% endif %}">
+<div class="pane" data-region="list">{% block list %}{% endblock %}</div>
+{% block inspector %}{% endblock %}
+</main>
+</div>
+<div class="notices">
+  <div class="banner banner--warn" role="status" data-changed hidden><span class="banner__icon" aria-hidden="true">↻</span><p class="banner__text">Something changed.</p><a class="banner__action" href="{{ shell.address }}">Reload</a></div>
+  <div class="banner banner--danger" role="alert" data-session-ended hidden><span class="banner__icon" aria-hidden="true">▲</span><p class="banner__text">Your session ended.</p><a class="banner__action" href="/ui/login">Sign in</a></div>
+</div>
+<div class="toast-region" data-toast role="status" aria-live="polite" data-copied="Copied" data-copy-failed="Copy failed"></div>
+</body>
+</html>

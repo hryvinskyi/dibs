@@ -49,9 +49,9 @@ use crate::ui::moments::{Ago, Moment, moment, start_of_day};
 use crate::ui::render::html;
 use crate::ui::rows::{ClaimRow, NotReadyRow, PriorityMark, ReadyCard, WideRow, reference};
 use crate::ui::session::{PageSession, ScriptSession, UiSession};
+use crate::ui::shell::{BOARD_CHANGES, STATUS_CHANGES};
 use crate::ui::signed_page;
 use crate::ui::slots::{SlotRow, SlotState};
-use crate::ui::status::STATUS_CHANGES;
 use crate::ui::worktrees::{ItemMarks, WorktreeCard};
 use crate::ui::zone::viewer_offset;
 
@@ -150,14 +150,6 @@ struct DoneCard {
 /// The header naming what a fragment answer holds, and its value for the board's columns.
 const FRAGMENT_HEADER: HeaderName = HeaderName::from_static("x-dibs-fragment");
 const BOARD_FRAGMENT: HeaderValue = HeaderValue::from_static("board");
-
-/// The kinds of event after which the board's columns are rendered again.
-const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependency_removed \
-     settings_changed slot_taken slot_renewed slot_queued slot_left slot_offered \
-     slot_offer_lapsed slot_released slot_expired slot_force_released slot_stalled slot_resumed \
-     slot_stall_taken_over escalated acked thread_started member_removed overlap_found \
-     footprint_changed yield_requested area_handed_over wait_withdrawn claim_narrowed \
-     item_reopened worktree_taken worktree_released";
 
 /// An escalation waiting for an arbiter, as the board's banner shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
