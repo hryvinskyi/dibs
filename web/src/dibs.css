@@ -326,6 +326,11 @@ a.sq:hover { transform: scale(1.2); }
 /* End of screen: now */
 
 /* Screen: claims */
+.claims-filter { margin-left: auto; max-width: 100%; }
+.claims-filter .search { margin-left: 0; }
+.kv .claims-wide { flex-basis: 100%; }
+.claims-overlap { flex-wrap: wrap; }
+.claims-files { display: grid; gap: 1px; flex-basis: 100%; min-width: 0; }
 /* End of screen: claims */
 
 /* Screen: queue */

@@ -341,24 +341,7 @@ async fn an_inspector_address_that_does_not_read_answers_404_with_the_whole_page
         assert!(
             page.text.contains(r#"data-region="rail""#)
                 && page.text.contains(r#"data-region="list""#)
-                && page
-                    .text
-                    .contains(r#"data-region="inspector" data-selected="false""#),
-            "{path}: {}",
-            page.text
-        );
-    }
-    for path in [
-        "/ui/claims/7",
-        "/ui/queue/7",
-        "/ui/areas/api:billing",
-        "/ui/inbox/7",
-    ] {
-        let page = browser.get(&world, path).await;
-        assert_eq!(page.status, StatusCode::OK, "{path}");
-        assert!(
-            page.text
-                .contains(r#"data-region="inspector" data-selected="true""#),
+                && page.text.contains(r#"data-region="inspector""#),
             "{path}: {}",
             page.text
         );

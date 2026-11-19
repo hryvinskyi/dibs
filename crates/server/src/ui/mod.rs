@@ -19,6 +19,7 @@ mod cookies;
 mod inbox;
 mod links;
 mod live;
+mod matching;
 mod moments;
 mod notice;
 mod now;

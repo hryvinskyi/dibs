@@ -5,3 +5,13 @@
 {% macro person(p, small) %}<a class="who" href="{{ p.href }}"><span class="av{% if small %} av--s{% endif %} pc-{{ p.colour }}" aria-hidden="true">{{ p.initials }}</span><b>{{ p.handle }}</b></a>{% endmacro %}
 
 {% macro linked(text) %}{%- for piece in text.pieces -%}{%- if let Some(link) = piece.link -%}<a class="lnk" href="{{ link.href }}"{% if link.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ piece.text }}</a>{%- else -%}{{ piece.text }}{%- endif -%}{%- endfor -%}{% endmacro %}
+
+{% macro area(a, full) %}<a class="area" href="{{ a.href }}" title="{{ a.full }}">{% if full %}{{ a.full }}{% else %}{{ a.label }}{% endif %}</a>{% endmacro %}
+
+{% macro pull_request(p) %}<span class="ref"><a href="{{ p.main.href }}" title="{{ p.title }}"{% if p.main.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ p.label }}</a>{% if let Some(o) = p.out %}{% call out(o.link, p.title, o.name) %}{% endcall %}{% endif %}</span>{% endmacro %}
+
+{% macro branch(b) %}<span class="br"><a href="{{ b.main.href }}" title="{{ b.label }}"{% if b.main.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ b.label }}</a></span>{% endmacro %}
+
+{% macro file(f) %}<a class="file" href="{{ f.main.href }}" title="{{ f.title }}"{% if f.main.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ f.label }}</a>{% endmacro %}
+
+{% macro conversation(c) %}<span class="t">{%- for piece in c.subject.pieces -%}{%- if let Some(link) = piece.link -%}<a class="lnk" href="{{ link.href }}"{% if link.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ piece.text }}</a>{%- else -%}<a class="lnk" href="{{ c.href }}">{{ piece.text }}</a>{%- endif -%}{%- endfor -%}</span>{% endmacro %}

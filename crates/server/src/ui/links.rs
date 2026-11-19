@@ -1,6 +1,7 @@
-//! The link views the pages print references with: a ticket, a person, and a member's free text with
-//! the references found in it. Each view is plain data the templates print — a label, a title, an
-//! address in this service, an address outside it — and never markup.
+//! The link views the pages print references with: a ticket, a pull request, a branch, a file, an
+//! area, a person, a conversation, and a member's free text with the references found in it. Each
+//! view is plain data the templates print — a label, a title, an address in this service, an
+//! address outside it — and never markup.
 //!
 //! An item has a place in this service while a live or stale claim holds it (Claims), or while it
 //! waits in the queue: in the ready list, or left out of it for another reason than a claim
@@ -16,12 +17,15 @@ use std::sync::Arc;
 
 use dibs_app::use_cases::{NamedNotReady, StatusView};
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::forge::{Forge, ForgeRegistry};
+use dibs_domain::forge::{Forge, ForgeRegistry, Revision};
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::ItemId;
+use dibs_domain::ids::{ItemId, ThreadId};
 use dibs_domain::item::ExternalRef;
+use dibs_domain::paths::RepoPath;
+use dibs_domain::radar::BranchName;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::repo::{RemoteUrl, RepoId};
+use dibs_domain::review::PrRef;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::text_refs::{RefContext, TextRef, scan};
 
@@ -159,6 +163,18 @@ impl LinkContext {
         Link::outside(page(forge, remote))
     }
 
+    /// The repository a reference names, when its scheme names one.
+    pub fn repository_of(&self, external: &ExternalRef) -> Option<RemoteUrl> {
+        self.schemes.repository_of(external)
+    }
+
+    /// Where `#{number}` of a repository of the project leads, as it is linked in a text about that
+    /// repository: the forge's page of that issue, else the search for `#{number}`.
+    pub fn numbered(&self, repo: &RepoId, number: u64) -> Link {
+        self.forge_page(repo, |forge, remote| forge.issue(remote, number))
+            .unwrap_or_else(|| Link::search(&format!("#{number}")))
+    }
+
     /// Where a reference found in a text leads, when anywhere.
     fn found(&self, found: &TextRef) -> Option<Link> {
         match found {
@@ -217,8 +233,9 @@ fn is_web_address(address: &str) -> bool {
     })
 }
 
-/// A query-string value with every byte outside the unreserved set percent-encoded.
-fn query_value(value: &str) -> String {
+/// A query-string value with every byte outside the unreserved set percent-encoded, so an address
+/// built with it is visible ASCII.
+pub fn query_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
@@ -321,6 +338,163 @@ impl PersonView {
             initials: initials(handle),
             colour: colour(handle),
             href: format!("/ui/claims?who={}", query_value(handle)),
+        }
+    }
+}
+
+/// An area of a repository of the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AreaView {
+    /// Its name, as a row shows it.
+    pub label: String,
+    /// `repo:name`, as it is shown alone.
+    pub full: String,
+    /// The address of its page.
+    pub href: String,
+}
+
+impl AreaView {
+    /// The view of an area.
+    pub fn of(area: &QualifiedArea) -> Self {
+        Self {
+            label: area.name.to_string(),
+            full: area.to_string(),
+            href: area_href(area),
+        }
+    }
+}
+
+/// A page outside this service shown beside an in-app link, and what that page is called.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Beside {
+    /// Where it leads.
+    pub link: Link,
+    /// What the page is called, such as the forge's name.
+    pub name: &'static str,
+}
+
+/// A pull request of a forge repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestView {
+    /// `{name}#{number}`: the repository's last path segment and the number.
+    pub label: String,
+    /// Its full name, `{owner}/{name}#{number}`.
+    pub title: String,
+    /// Where its name leads.
+    pub main: Link,
+    /// The forge's page, beside an in-app main link.
+    pub out: Option<Beside>,
+}
+
+impl PullRequestView {
+    /// The view of `pr`. Its name leads to `here` when given — the claim in review with it —
+    /// else to the forge's page of the pull request, else to the search for it.
+    ///
+    /// The forge's page is that of the project's repository whose remote's path is the pull
+    /// request's; when the settings name no such remote, that of `item_repo` — the repository the
+    /// reference of the claim's item names — when its path is the pull request's. A forge is
+    /// never assumed from the pull request's text alone.
+    pub fn of(
+        pr: &PrRef,
+        here: Option<String>,
+        item_repo: Option<&RemoteUrl>,
+        context: &LinkContext,
+    ) -> Self {
+        let path = pr.repo_path();
+        let remote = context
+            .settings
+            .repo_of_pr(pr)
+            .and_then(|spec| spec.remote.as_ref())
+            .filter(|remote| remote.path() == path)
+            .or_else(|| item_repo.filter(|remote| remote.path() == path));
+        let forge = remote.and_then(|remote| {
+            let forge = context.forges.of(remote)?;
+            let link = Link::outside(forge.pull_request(remote, pr.number()))?;
+            Some(Beside {
+                link,
+                name: forge.name(),
+            })
+        });
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let title = pr.to_string();
+        let (main, out) = match (here, forge) {
+            (Some(here), forge) => (Link::inside(here), forge),
+            (None, Some(forge)) => (forge.link, None),
+            (None, None) => (Link::search(&title), None),
+        };
+        Self {
+            label: format!("{name}#{}", pr.number()),
+            title,
+            main,
+            out,
+        }
+    }
+}
+
+/// A branch of a repository of the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchView {
+    /// The branch's name.
+    pub label: String,
+    /// Where it leads.
+    pub main: Link,
+}
+
+impl BranchView {
+    /// The view of `branch` in `repo`: the forge's page of the branch, else the claims on it.
+    pub fn of(repo: &RepoId, branch: &BranchName, context: &LinkContext) -> Self {
+        let label = branch.to_string();
+        let main = context
+            .forge_page(repo, |forge, remote| forge.branch(remote, branch))
+            .unwrap_or_else(|| Link::inside(format!("/ui/claims?q={}", query_value(&label))));
+        Self { label, main }
+    }
+}
+
+/// A file of a repository of the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileView {
+    /// The path inside its repository.
+    pub label: String,
+    /// Its full name, `repo:path`.
+    pub title: String,
+    /// Where it leads.
+    pub main: Link,
+}
+
+impl FileView {
+    /// The view of a file at a revision: the forge's page of the file there, else the search for
+    /// its full name.
+    pub fn of(file: &RepoPath, at: Revision<'_>, context: &LinkContext) -> Self {
+        let title = file.to_string();
+        let main = context
+            .forge_page(&file.repo, |forge, remote| {
+                forge.file(remote, at, file.path.as_str())
+            })
+            .unwrap_or_else(|| Link::search(&title));
+        Self {
+            label: file.path.to_string(),
+            title,
+            main,
+        }
+    }
+}
+
+/// A conversation: its subject, and the address of its page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationView {
+    /// The subject, with the references in it linked.
+    pub subject: LinkedText,
+    /// The address of the conversation.
+    pub href: String,
+}
+
+impl ConversationView {
+    /// The view of the conversation `thread` with this subject.
+    pub fn of(thread: ThreadId, subject: &str, context: &LinkContext) -> Self {
+        Self {
+            subject: LinkedText::of(subject, None, context),
+            href: format!("/ui/inbox/{thread}"),
         }
     }
 }
@@ -667,6 +841,155 @@ mod tests {
             .map(|piece| piece.text.as_str())
             .collect();
         assert_eq!(joined, text);
+    }
+
+    fn area(text: &str) -> QualifiedArea {
+        QualifiedArea::parse(text).unwrap()
+    }
+
+    fn pr(text: &str) -> PrRef {
+        PrRef::parse(text).unwrap()
+    }
+
+    fn remote(text: &str) -> RemoteUrl {
+        RemoteUrl::parse(text).unwrap()
+    }
+
+    fn branch(name: &str) -> BranchName {
+        BranchName::parse(name).unwrap()
+    }
+
+    #[test]
+    fn an_area_is_named_short_in_a_row_and_whole_alone_and_leads_to_its_page() {
+        let view = AreaView::of(&area("api:billing"));
+        assert_eq!(
+            view,
+            AreaView {
+                label: "billing".to_owned(),
+                full: "api:billing".to_owned(),
+                href: "/ui/areas/api:billing".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_pull_request_of_a_project_repository_leads_to_the_forge_or_here_with_the_forge_beside() {
+        let none = context(Vec::new());
+        let twelve = pr("Acme/Widgets#12");
+        let view = PullRequestView::of(&twelve, None, None, &none);
+        assert_eq!(view.label, "widgets#12");
+        assert_eq!(view.title, "acme/widgets#12");
+        assert_eq!(
+            (view.main, view.out),
+            (outside("https://github.com/acme/widgets/pull/12"), None)
+        );
+        let here = PullRequestView::of(&twelve, Some("/ui/claims/3".to_owned()), None, &none);
+        assert_eq!(here.main, inside("/ui/claims/3"));
+        assert_eq!(
+            here.out,
+            Some(Beside {
+                link: outside("https://github.com/acme/widgets/pull/12"),
+                name: "GitHub",
+            })
+        );
+    }
+
+    #[test]
+    fn a_pull_request_of_no_listed_remote_leads_through_its_items_repository_when_the_paths_agree()
+    {
+        let none = context(Vec::new());
+        let gadgets = pr("acme/gadgets#5");
+        let theirs = remote("https://github.com/acme/gadgets");
+        assert_eq!(
+            PullRequestView::of(&gadgets, None, Some(&theirs), &none).main,
+            outside("https://github.com/acme/gadgets/pull/5")
+        );
+        let elsewhere = remote("https://github.com/acme/other");
+        assert_eq!(
+            PullRequestView::of(&gadgets, None, Some(&elsewhere), &none).main,
+            inside("/ui/search?q=acme%2Fgadgets%235")
+        );
+        let here = PullRequestView::of(&gadgets, Some("/ui/claims/3".to_owned()), None, &none);
+        assert_eq!((here.main, here.out), (inside("/ui/claims/3"), None));
+    }
+
+    #[test]
+    fn a_pull_request_of_a_listed_remote_on_an_unknown_forge_leads_to_the_search() {
+        let none = context(Vec::new());
+        let docs = pr("acme/docs#4");
+        let theirs = remote("https://github.com/acme/docs");
+        let view = PullRequestView::of(&docs, None, Some(&theirs), &none);
+        assert_eq!(
+            (view.label.as_str(), view.main, view.out),
+            ("docs#4", inside("/ui/search?q=acme%2Fdocs%234"), None)
+        );
+    }
+
+    #[test]
+    fn a_branch_leads_to_the_forges_page_else_to_the_claims_on_it() {
+        let none = context(Vec::new());
+        let api = RepoId::parse("api").unwrap();
+        let docs = RepoId::parse("docs").unwrap();
+        let fix = branch("alice/42-fix+now");
+        let view = BranchView::of(&api, &fix, &none);
+        assert_eq!(view.label, "alice/42-fix+now");
+        assert_eq!(
+            view.main,
+            outside("https://github.com/acme/widgets/tree/alice/42-fix%2Bnow")
+        );
+        assert_eq!(
+            BranchView::of(&docs, &fix, &none).main,
+            inside("/ui/claims?q=alice%2F42-fix%2Bnow")
+        );
+    }
+
+    #[test]
+    fn a_file_leads_to_the_forges_page_at_its_revision_else_to_the_search() {
+        let none = context(Vec::new());
+        let file = RepoPath::parse("api:src/billing/a b.rs").unwrap();
+        let fix = branch("alice/42-fix");
+        let at_branch = FileView::of(&file, Revision::Branch(&fix), &none);
+        assert_eq!(at_branch.label, "src/billing/a b.rs");
+        assert_eq!(at_branch.title, "api:src/billing/a b.rs");
+        assert_eq!(
+            at_branch.main,
+            outside("https://github.com/acme/widgets/blob/alice/42-fix/src/billing/a%20b.rs")
+        );
+        assert_eq!(
+            FileView::of(&file, Revision::DefaultBranch, &none).main,
+            outside("https://github.com/acme/widgets/blob/HEAD/src/billing/a%20b.rs")
+        );
+        let guide = RepoPath::parse("docs:guide/intro.md").unwrap();
+        assert_eq!(
+            FileView::of(&guide, Revision::DefaultBranch, &none).main,
+            inside("/ui/search?q=docs%3Aguide%2Fintro.md")
+        );
+    }
+
+    #[test]
+    fn a_conversation_leads_to_its_page_and_links_the_references_in_its_subject() {
+        let none = context(Vec::new());
+        let view = ConversationView::of(ThreadId(9), "About api:billing", &none);
+        assert_eq!(view.href, "/ui/inbox/9");
+        assert_eq!(
+            view.subject.pieces,
+            vec![
+                piece("About ", None),
+                piece("api:billing", Some(inside("/ui/areas/api:billing"))),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_numbered_reference_of_a_repository_leads_to_the_forges_issue_else_to_the_search() {
+        let none = context(Vec::new());
+        let api = RepoId::parse("api").unwrap();
+        let docs = RepoId::parse("docs").unwrap();
+        assert_eq!(
+            none.numbered(&api, 77),
+            outside("https://github.com/acme/widgets/issues/77")
+        );
+        assert_eq!(none.numbered(&docs, 77), inside("/ui/search?q=%2377"));
     }
 
     #[test]
