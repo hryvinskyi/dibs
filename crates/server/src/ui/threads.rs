@@ -4,7 +4,8 @@
 //! with its messages, oldest first, which opening marks read, each message's importance shown and,
 //! for one that asks to be acknowledged, who has and a button for a recipient who has not; a reply,
 //! signed by the person with the session label `web`, that may ask everyone to acknowledge it; and
-//! the person's acknowledgement of a message.
+//! the person's acknowledgement of a message. A reply and an acknowledgement land on the message in
+//! Inbox; a reply refused for its text is shown again there, in the conversation's reply form.
 //!
 //! A message's text is shown exactly as written, escaped, its line breaks kept by the stylesheet. A
 //! thread the person may not read is answered as one that does not exist.
@@ -18,17 +19,19 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::Deserialize;
-use time::OffsetDateTime;
 
-use dibs_app::named::{NamedMessage, NamedSummary, NamedThread};
-use dibs_app::use_cases::{ItemQuery, PostMessageInput, RecipientAck};
-use dibs_domain::ids::{ItemId, MemberId, MessageId, ThreadId};
-use dibs_domain::message::{Body, BodyError, Importance, Recipients, SessionLabel};
+use dibs_app::named::NamedSummary;
+use dibs_app::use_cases::{ItemQuery, PostMessageInput};
+use dibs_domain::ids::{ItemId, MessageId, ThreadId};
+use dibs_domain::message::{Body, Importance, SessionLabel};
 
 use crate::error::ApiError;
 use crate::fields::{message_in_path, thread_in_path};
 use crate::http::AppState;
 use crate::ui::chrome::{self, Chrome, Section};
+use crate::ui::conversation::{Conversation, Draft, MessageRow, ReplyProblem, item_of, people};
+use crate::ui::inbox;
+use crate::ui::links::LinkContext;
 use crate::ui::live::latest_event;
 use crate::ui::moments::{Ago, Moment, moment};
 use crate::ui::notice::{Problem, notice, refused};
@@ -61,20 +64,6 @@ struct ThreadsPage {
     rows: Vec<ThreadRow>,
     /// How many threads hold a message awaiting the person's acknowledgement.
     awaiting: usize,
-}
-
-/// Who a thread is between: its author, then the members it is addressed to.
-fn people(thread: &NamedThread) -> (Vec<String>, bool) {
-    let mut people = vec![thread.author.to_string()];
-    people.extend(
-        thread
-            .recipients
-            .iter()
-            .filter(|handle| thread.author.handle() != Some(*handle))
-            .map(ToString::to_string),
-    );
-    let to_project = matches!(thread.record.recipients, Recipients::Project);
-    (people, to_project)
 }
 
 /// `GET /ui/threads`: the threads the person may read, newest activity first.
@@ -131,102 +120,6 @@ pub async fn list(
     Ok(signed_page(&session, html(StatusCode::OK, &page)))
 }
 
-/// One recipient of a message that asks to be acknowledged, as the thread page lists them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AckEntry {
-    handle: String,
-    you: bool,
-    acked: Option<Moment>,
-}
-
-/// The acknowledgements of a message that asks for them: who has and who has not, and whether the
-/// person may acknowledge it now.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AckBlock {
-    entries: Vec<AckEntry>,
-    may_ack: bool,
-}
-
-impl AckBlock {
-    /// The block of a message; `asking` says whether it still asks for an acknowledgement, which a
-    /// wide claim's announcement does only while its wide claim stands.
-    fn of(acks: &[RecipientAck], viewer: MemberId, asking: bool, now: OffsetDateTime) -> Self {
-        Self {
-            entries: acks
-                .iter()
-                .map(|ack| AckEntry {
-                    handle: ack.handle.to_string(),
-                    you: ack.member == viewer,
-                    acked: ack.acked_at.map(|at| moment(at, now)),
-                })
-                .collect(),
-            may_ack: asking
-                && acks
-                    .iter()
-                    .any(|ack| ack.member == viewer && ack.acked_at.is_none()),
-        }
-    }
-}
-
-/// A message on the thread page.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MessageRow {
-    id: u64,
-    author: String,
-    label: String,
-    body: String,
-    at: Moment,
-    mine: bool,
-    /// Whether dibs wrote it, in the project's name.
-    system: bool,
-    importance: Importance,
-    ack: Option<AckBlock>,
-}
-
-impl MessageRow {
-    fn of(
-        named: &NamedMessage,
-        acks: Option<&Vec<RecipientAck>>,
-        asking: bool,
-        viewer: MemberId,
-        now: OffsetDateTime,
-    ) -> Self {
-        let message = &named.record;
-        Self {
-            id: message.id.0,
-            author: named.author.to_string(),
-            label: message.label.to_string(),
-            body: message.body.to_string(),
-            at: moment(message.created_at, now),
-            mine: message.author.is(viewer),
-            system: named.author.is_dibs(),
-            importance: message.importance,
-            ack: acks.map(|acks| AckBlock::of(acks, viewer, asking, now)),
-        }
-    }
-}
-
-/// Why a reply was not sent. The wording of each is the template's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplyProblem {
-    /// Nothing but whitespace.
-    Empty,
-    /// More than a message may hold.
-    TooLong,
-    /// A character no message may hold.
-    Nul,
-}
-
-impl ReplyProblem {
-    const fn of(error: &BodyError) -> Self {
-        match error {
-            BodyError::Empty => Self::Empty,
-            BodyError::TooLong => Self::TooLong,
-            BodyError::Nul => Self::Nul,
-        }
-    }
-}
-
 #[derive(Template)]
 #[template(path = "thread.html")]
 struct ThreadPage {
@@ -250,78 +143,56 @@ struct ThreadPage {
     draft_asks_ack: bool,
 }
 
-/// A reply that was not sent, shown again in the form.
-struct Draft {
-    text: String,
-    asks_ack: bool,
-    problem: ReplyProblem,
-}
-
-/// The thread page, marking the thread read; with a draft, its text and the reason it was not sent.
+/// The thread page, marking the thread read.
 async fn thread_page(
     state: &AppState,
     session: &UiSession,
     thread: ThreadId,
-    draft: Option<Draft>,
 ) -> Result<Response, ApiError> {
     let actor = session.actor();
     let after = latest_event(state, actor).await?;
     let view = state.app.read_thread.execute(actor, thread).await?;
     state.app.mark_read.execute(actor, thread).await?;
-    let item_reference = match view.thread.record.item {
-        Some(id) => {
-            let item = state.app.get_item.execute(actor, id).await?;
-            Some(reference(id, item.item.item.external_ref.as_ref()))
-        }
-        None => None,
-    };
+    let item = item_of(state, session, &view).await?;
     let signed = chrome::load(state, session, Section::Threads).await?;
+    let links = LinkContext::new(
+        signed.settings,
+        state.ref_schemes.clone(),
+        state.forges.clone(),
+        Vec::new(),
+    );
     let now = state.clock.now();
-    let (people, to_project) = people(&view.thread);
-    let (status, problem, draft, draft_asks_ack) = match draft {
-        Some(draft) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Some(draft.problem),
-            draft.text,
-            draft.asks_ack,
-        ),
-        None => (StatusCode::OK, None, String::new(), false),
-    };
-    let page = ThreadPage {
-        chrome: signed.chrome,
-        id: view.thread.record.id.0,
-        subject: view.thread.record.subject.to_string(),
-        reference: item_reference,
+    let Conversation {
+        id,
+        subject,
+        reference,
         people,
         to_project,
-        importance: view
-            .messages
-            .iter()
-            .map(|message| message.record.importance)
-            .max()
-            .unwrap_or_default(),
-        messages: view
-            .messages
-            .iter()
-            .map(|message| {
-                let acks = view.acks.get(&message.record.id);
-                let asking = view.asking.contains(&message.record.id);
-                MessageRow::of(message, acks, asking, actor.member, now)
-            })
-            .collect(),
-        sender: view
-            .thread
-            .author
-            .handle()
-            .map(ToString::to_string)
-            .unwrap_or_default(),
+        importance,
+        messages,
+        sender,
+        problem,
+        draft,
+        draft_asks_ack,
+        ..
+    } = Conversation::of(&view, item.as_ref(), actor.member, now, &links, None);
+    let page = ThreadPage {
+        chrome: signed.chrome,
+        id,
+        subject,
+        reference,
+        people,
+        to_project,
+        importance,
+        messages,
+        sender,
         after,
         rendered: moment(now, now),
         problem,
         draft,
         draft_asks_ack,
     };
-    Ok(signed_page(session, html(status, &page)))
+    Ok(signed_page(session, html(StatusCode::OK, &page)))
 }
 
 /// `GET /ui/threads/{id}`: one thread and its messages, oldest first. Opening it marks it read.
@@ -337,7 +208,7 @@ pub async fn page(
         Ok(thread) => thread,
         Err(error) => return refused(&state, &session, &error, "/ui/threads").await,
     };
-    match thread_page(&state, &session, thread, None).await {
+    match thread_page(&state, &session, thread).await {
         Ok(response) => response,
         Err(error) => refused(&state, &session, &error, "/ui/threads").await,
     }
@@ -351,8 +222,9 @@ pub struct ReplyForm {
     require_ack: Option<String>,
 }
 
-/// `POST /ui/threads/{id}/messages`: posts the person's reply and shows it in the thread. A reply
-/// the rules refuse is shown again in the form with the reason.
+/// `POST /ui/threads/{id}/messages`: posts the person's reply and shows it in its conversation in
+/// Inbox. A reply whose text the rules refuse is shown again in that conversation's form with the
+/// reason.
 pub async fn reply(
     State(state): State<AppState>,
     PageSession(session): PageSession,
@@ -388,7 +260,7 @@ pub async fn reply(
                 asks_ack,
                 problem: ReplyProblem::of(&error),
             };
-            thread_page(&state, &session, thread, Some(draft)).await
+            inbox::refused_reply(&state, &session, thread, draft).await
         }
     };
     match answer {
@@ -422,7 +294,7 @@ async fn post(
         .await?;
     Ok(signed_page(
         session,
-        see_other(&format!("/ui/threads/{thread}#m-{}", message.record.id)),
+        see_other(&format!("/ui/inbox/{thread}#m-{}", message.record.id)),
     ))
 }
 
@@ -433,8 +305,8 @@ pub struct AckForm {
 }
 
 /// `POST /ui/threads/{id}/messages/{message}/ack`: records the person's acknowledgement of a
-/// message and shows it in its thread. An acknowledgement given already, from another tab or a
-/// second click, changes nothing and shows the thread the same way.
+/// message and shows it in its conversation in Inbox. An acknowledgement given already, from another
+/// tab or a second click, changes nothing and shows the conversation the same way.
 pub async fn ack(
     State(state): State<AppState>,
     PageSession(session): PageSession,
@@ -470,7 +342,7 @@ pub async fn ack(
     }
 }
 
-/// Acknowledges the message and answers the way to it in its thread.
+/// Acknowledges the message and answers the way to it in its conversation.
 async fn acknowledge(
     state: &AppState,
     session: &UiSession,
@@ -480,18 +352,6 @@ async fn acknowledge(
     let thread = acknowledged.thread;
     Ok(signed_page(
         session,
-        see_other(&format!("/ui/threads/{thread}#m-{message}")),
+        see_other(&format!("/ui/inbox/{thread}#m-{message}")),
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_refusal_of_a_body_has_its_reason() {
-        assert_eq!(ReplyProblem::of(&BodyError::Empty), ReplyProblem::Empty);
-        assert_eq!(ReplyProblem::of(&BodyError::TooLong), ReplyProblem::TooLong);
-        assert_eq!(ReplyProblem::of(&BodyError::Nul), ReplyProblem::Nul);
-    }
 }

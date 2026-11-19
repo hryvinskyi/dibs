@@ -192,6 +192,46 @@ async fn the_rail_counts_the_claims_the_queue_the_held_areas_and_the_unread_conv
 }
 
 #[tokio::test]
+async fn a_grant_request_waiting_for_the_viewer_does_not_raise_the_rails_inbox_count() {
+    let (world, alice, bob) = team().await;
+    let laptop = world.session(&alice, "laptop").await;
+    let desk = world.session(&bob, "desk").await;
+    let billing = world.item(&alice, Some("gh:acme/api#1"), "Billing").await;
+    let search = world.item(&bob, Some("gh:acme/api#2"), "Search").await;
+    claim(&world, &alice, laptop, billing, json!(["api:billing"])).await;
+    claim(&world, &bob, desk, search, json!([])).await;
+    let asked = world
+        .post(
+            &bob,
+            "/v1/grant-requests",
+            json!({"item": search, "area": "api:billing"}),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::CREATED, "{}", asked.body);
+    let browser = sign_in(&world, &alice).await;
+    let entry = |n: usize| {
+        let hot = if n > 0 { " k--hot" } else { "" };
+        format!(r#"<a href="/ui/inbox">Inbox<span class="k{hot}">{n}</span>"#)
+    };
+    let waiting = browser.get(&world, "/ui/").await;
+    assert!(waiting.text.contains(&entry(0)), "{}", waiting.text);
+    let given = world
+        .post(
+            &alice,
+            "/v1/grants",
+            json!({"item": search, "area": "api:billing", "to": "bob"}),
+        )
+        .await;
+    assert_eq!(given.status, StatusCode::CREATED, "{}", given.body);
+    let decided = browser.get(&world, "/ui/").await;
+    assert!(
+        decided.text.contains(&entry(1)),
+        "once decided it is a message from a person: {}",
+        decided.text
+    );
+}
+
+#[tokio::test]
 async fn the_rail_counts_no_unread_conversation_as_none_and_lists_the_viewer_without_claims() {
     let (world, alice, _) = team().await;
     let browser = sign_in(&world, &alice).await;

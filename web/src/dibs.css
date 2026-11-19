@@ -364,6 +364,18 @@ a.sq:hover { transform: scale(1.2); }
 /* End of screen: areas */
 
 /* Screen: inbox */
+.inbox-filter { margin-left: auto; max-width: 100%; }
+.inbox-filter .search { margin-left: 0; }
+.inbox-newest { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+.talk { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.talk__messages { display: grid; gap: 16px; }
+.msg__in { min-width: 0; }
+.msg__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.msg__head time { margin-left: 0; }
+.msg__body { white-space: pre-wrap; }
+.msg--system .msg__head b { color: var(--text-3); font-weight: 500; }
+.talk__ack { display: grid; gap: 6px; margin-top: 8px; }
+.talk .field-error { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--danger); }
 /* End of screen: inbox */
 
 /* Screen: search */

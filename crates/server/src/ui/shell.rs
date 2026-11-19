@@ -14,13 +14,13 @@ use axum::http::request::Parts;
 use serde::Deserialize;
 use time::OffsetDateTime;
 
-use dibs_app::named::AuthorName;
 use dibs_app::use_cases::{HeldItem, InboxQuery, InboxView, MeView, StatusView, WorktreesView};
 use dibs_domain::worktree::HolderKind;
 
 use crate::error::ApiError;
 use crate::http::AppState;
 use crate::ui::assets::BUNDLE_HASH;
+use crate::ui::inbox::summary::{unread_from_people, waiting_grants};
 use crate::ui::links::{LinkContext, LinkedText, PersonView, TicketView, places};
 use crate::ui::live::latest_event;
 use crate::ui::moments::{Ago, Span, moment, span};
@@ -133,6 +133,17 @@ pub struct Here {
 #[derive(Debug, Deserialize)]
 struct SlotQuery {
     slot: Option<String>,
+}
+
+impl Here {
+    /// The page at `address`, a path of this service with its query, with no slot opened: the page a
+    /// form's answer renders in place of the one that posted it.
+    pub fn at(address: String) -> Self {
+        Self {
+            address,
+            slot: None,
+        }
+    }
 }
 
 impl<S: Send + Sync> FromRequestParts<S> for Here {
@@ -330,14 +341,7 @@ impl RailView {
     fn of(loaded: &Loaded, links: &LinkContext, screen: Screen, slot: Option<&str>) -> Self {
         let status = &loaded.status;
         let held_areas: BTreeSet<_> = status.holds.iter().map(|hold| &hold.area).collect();
-        let unread = loaded
-            .unread
-            .threads
-            .iter()
-            .filter(|summary| {
-                summary.unread > 0 && matches!(summary.thread.author, AuthorName::Member(_))
-            })
-            .count();
+        let unread = unread_from_people(&loaded.unread.threads, &waiting_grants(&loaded.unread));
         let entry = |shown: Screen, count: Option<NavCount>| NavEntry {
             screen: shown,
             current: shown == screen,

@@ -1,5 +1,39 @@
 {% extends "shell.html" %}
+{% import "links.html" as links %}
+{% import "moments.html" as moments %}
+{% macro raised(importance) %}{% match importance %}{% when Importance::Urgent %}<span class="tag tag--warn">urgent</span>{% when Importance::High %}<span class="tag tag--warn">high</span>{% when Importance::Normal %}{% endmatch %}{% endmacro %}
+{% macro subject(s) %}{%- for piece in s.subject.subject.pieces -%}{{ piece.text }}{%- endfor -%}{% endmacro %}
+{% macro talk(row) %}<div class="row" data-row{% if row.current %} aria-current="true"{% endif %}><span{% if row.summary.unread > 0 %} class="s s--review"{% endif %} aria-hidden="true"></span>
+<div><a class="row__t" data-inspect href="{{ row.href }}">{% call subject(row.summary) %}{% endcall %}</a><div class="row__m">{% if let Some(author) = row.summary.author %}{% call links::person(author, true) %}{% endcall %}{% else %}<span class="tag">dibs</span>{% endif %}<span>to {% match row.summary.recipients %}{% when Some(people) %}{% for person in people %}{% if !loop.first %}, {% endif %}<a class="lnk" href="{{ person.href }}">{{ person.handle }}</a>{% endfor %}{% when None %}everyone{% endmatch %}</span>{% if let Some(ticket) = row.summary.ticket %}{% call links::ticket(ticket) %}{% endcall %}{% endif %}<span>{{ row.summary.messages }} message{% if row.summary.messages != 1 %}s{% endif %}</span></div></div>
+<div class="row__e">{% call raised(row.summary.importance) %}{% endcall %}<span class="age" title="Last message {{ row.last.clock }} UTC">{% call moments::ago(row.last.ago) %}{% endcall %}</span></div></div>
+{% endmacro %}
 {% block title %}Inbox{% endblock %}
-{% block list %}<div class="bar-top"><h1 tabindex="-1">Inbox</h1></div>
-<p class="note">Nothing is shown here yet.</p>{% endblock %}
-{% block inspector %}<aside class="insp" data-region="inspector" data-selected="{{ selected }}">{% if selected %}<div class="insp__in"><p class="faint">Nothing is shown here yet.</p></div>{% endif %}</aside>{% endblock %}
+{% block list %}<div class="bar-top"><h1 tabindex="-1">Inbox</h1>
+<nav class="seg" aria-label="Conversations">{% for tab in list.tabs %}<a href="{{ tab.href }}"{% if tab.current %} aria-current="true"{% endif %}>{% match tab.code %}{% when "grants" %}Grants{% when "dibs" %}From dibs{% else %}People{% endmatch %}<span class="k">{{ tab.count }}</span></a>{% endfor %}</nav>
+<form class="inbox-filter" method="get" action="/ui/inbox" role="search">{% if let Some(code) = list.tab %}<input type="hidden" name="tab" value="{{ code }}">{% endif %}<input class="search" type="search" name="q" value="{{ list.q }}" placeholder="Subject, person, ticket" aria-label="Filter conversations"></form></div>
+{% match list.body %}{% when Body::People(rows) %}{% for row in rows %}{% call talk(row) %}{% endcall %}{% endfor %}
+{% when Body::Grants(rows) %}{% for row in rows %}<div class="row" data-row{% if row.current %} aria-current="true"{% endif %}><span aria-hidden="true"></span>
+<div><a class="row__t" data-inspect href="{{ row.href }}">{% if let Some(subject) = row.subject %}{{ subject }}{% else %}A grant request{% endif %}</a><div class="row__m">{% call links::person(row.asker, true) %}{% endcall %}<span>asks for {% call links::area(row.area, true) %}{% endcall %} for {% call links::ticket(row.ticket) %}{% endcall %} · your claim {% call links::ticket(row.holder) %}{% endcall %}</span></div></div>
+<div class="row__e"><span class="age" title="Asked {{ row.asked.clock }} UTC">{% call moments::ago(row.asked.ago) %}{% endcall %}</span></div></div>
+{% endfor %}
+{% when Body::Notices(folded, loose) %}{% for row in folded %}<div class="row" data-row{% if row.current %} aria-current="true"{% endif %}><span{% if let Some(mark) = row.item.mark %} class="s s--{{ mark }}"{% endif %} aria-hidden="true"></span>
+<div><a class="row__t" href="{{ row.item.ticket.main.href }}"{% if row.item.ticket.main.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{% if let Some(title) = row.item.title %}{{ title }}{% else %}{{ row.item.ticket.label }}{% endif %}</a><div class="row__m">{% call links::ticket(row.item.ticket) %}{% endcall %}<span>{{ row.count }} notice{% if row.count != 1 %}s{% endif %} · {{ row.unread }} unread</span><a class="lnk inbox-newest" data-inspect href="{{ row.href }}">{% call subject(row.newest) %}{% endcall %}</a></div></div>
+<div class="row__e"><span class="age" title="Last notice {{ row.last.clock }} UTC">{% call moments::ago(row.last.ago) %}{% endcall %}</span></div></div>
+{% endfor %}{% for row in loose %}{% call talk(row) %}{% endcall %}{% endfor %}{% if !list.body.is_empty() %}<p class="note">A notice from dibs also shows on its claim.</p>{% endif %}
+{% endmatch %}{% if list.body.is_empty() %}<p class="note">Nothing here.</p>{% endif %}{% endblock %}
+{% block inspector %}{% match inspector %}{% when Inspector::Hint %}<aside class="insp" data-region="inspector" data-selected="false" aria-label="Conversation"><div class="empty"><p>Pick a conversation. Messages from people come first; what dibs reports is folded onto each claim.</p></div></aside>
+{% when Inspector::Gone %}<aside class="insp" data-region="inspector" data-selected="true" aria-label="Conversation"><div class="insp__in">
+<div class="insp__top"><span class="r"><a class="x" data-inspect href="{{ list.close }}" aria-label="Close">×</a></span></div>
+<h2 data-inspector-heading tabindex="-1">That conversation is not one you can read.</h2>
+</div></aside>
+{% when Inspector::Open(view) %}<aside class="insp" data-region="inspector" data-selected="true" data-live="own" aria-label="Conversation"><div class="insp__in">
+<div class="insp__top">{% if let Some(ticket) = view.conversation.ticket %}{% call links::ticket(ticket) %}{% endcall %}{% else %}<span class="faint">no ticket</span>{% endif %}{% call raised(view.conversation.importance) %}{% endcall %}<span class="r"><button class="mini" type="button" data-copy-link hidden>Copy link</button><a class="x" data-inspect href="{{ list.close }}" aria-label="Close">×</a></span></div>
+<h2 data-inspector-heading tabindex="-1">{% call links::linked(view.conversation.title) %}{% endcall %}</h2>
+<dl class="kv">
+<dt>From</dt><dd>{% if let Some(author) = view.summary.author %}{% call links::person(author, false) %}{% endcall %}{% else %}dibs{% endif %}</dd>
+<dt>To</dt><dd>{% match view.summary.recipients %}{% when Some(people) %}{% for person in people %}{% call links::person(person, false) %}{% endcall %}{% endfor %}{% when None %}everyone{% endmatch %}</dd>
+<dt>Last message</dt><dd>{% call moments::since(view.last) %}{% endcall %}</dd>
+</dl>
+{% include "conversation.html" %}
+</div></aside>
+{% endmatch %}{% endblock %}

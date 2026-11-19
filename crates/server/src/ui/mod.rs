@@ -15,6 +15,7 @@ mod assets;
 mod board;
 mod chrome;
 mod claims;
+mod conversation;
 mod cookies;
 mod inbox;
 mod links;

@@ -225,7 +225,7 @@ async fn a_thread_shows_a_script_as_text_and_a_reply_is_signed_from_the_web() {
     assert!(
         reply
             .location()
-            .starts_with(&format!("/ui/threads/{thread}#m-"))
+            .starts_with(&format!("/ui/inbox/{thread}#m-"))
     );
     let api = world.get(&alice, &format!("/v1/threads/{thread}")).await;
     let last = api.body["messages"]
@@ -300,10 +300,7 @@ async fn a_thread_shows_importance_and_acks_and_a_recipient_acks_through_the_for
         .post(&world, &path, &[("csrf", &browser.token)])
         .await;
     assert_eq!(acked.status, StatusCode::SEE_OTHER, "{}", acked.text);
-    assert_eq!(
-        acked.location(),
-        format!("/ui/threads/{thread}#m-{message}")
-    );
+    assert_eq!(acked.location(), format!("/ui/inbox/{thread}#m-{message}"));
     assert_eq!(status().await, "2026-03-02T09:02:00Z");
     let after = browser.get(&world, &format!("/ui/threads/{thread}")).await;
     assert!(
@@ -322,10 +319,7 @@ async fn a_thread_shows_importance_and_acks_and_a_recipient_acks_through_the_for
         StatusCode::SEE_OTHER,
         "a second click shows the thread"
     );
-    assert_eq!(
-        twice.location(),
-        format!("/ui/threads/{thread}#m-{message}")
-    );
+    assert_eq!(twice.location(), format!("/ui/inbox/{thread}#m-{message}"));
     assert_eq!(
         status().await,
         "2026-03-02T09:02:00Z",
