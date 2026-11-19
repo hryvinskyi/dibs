@@ -281,8 +281,8 @@ pub fn decide_grant_ask(
 
 /// A grant asked of the holder of its area, in the conversation the message `message` started.
 ///
-/// It is the holder's person's decision, so it is put in front of them until it is decided —
-/// granted, answered in its conversation — or lapses: see [`AskedGrant::waits_on`].
+/// It is the holder's to decide, so it is put in front of the holder's sessions until it is
+/// decided — granted, answered in its conversation — or lapses: see [`AskedGrant::waits_on`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AskedGrant {
     /// The message that asked.

@@ -1685,7 +1685,7 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
         .to_owned();
     assert!(context.contains("Unread conversations: 1"), "{context}");
     assert!(
-        context.contains("Grant requests waiting for your person's decision (1):\n- alice asks for api:billing for 4 \"Refunds\""),
+        context.contains("Grant requests waiting for your decision (1):\n- alice asks for api:billing for 4 \"Refunds\""),
         "{context}"
     );
     assert!(
@@ -2242,7 +2242,11 @@ fn a_notice_from_dibs_is_delivered_framed_as_from_dibs_and_asks_for_no_reply() {
         !text.contains("no member typed it"),
         "it may quote one: {text}"
     );
-    assert!(text.ends_with(crate::wording::DELIVERY_RULE));
+    assert!(text.ends_with(&format!(
+        "{} {}",
+        crate::wording::DELIVERY_RULE,
+        crate::wording::GRANT_RULE
+    )));
 }
 
 #[test]
@@ -2270,7 +2274,11 @@ fn a_won_urgent_message_is_delivered_once_framed_as_a_teammates_data() {
         !text.contains(&"x".repeat(301)),
         "cut at 300 characters: {text}"
     );
-    assert!(text.ends_with(crate::wording::DELIVERY_RULE));
+    assert!(text.ends_with(&format!(
+        "{} {}",
+        crate::wording::DELIVERY_RULE,
+        crate::wording::GRANT_RULE
+    )));
     world.set(|state| state.now = at(120));
     assert_eq!(
         context(&run(&world, "neutral", "after-tool", &thread_input("main"))),

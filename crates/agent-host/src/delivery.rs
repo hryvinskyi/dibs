@@ -12,8 +12,9 @@
 //! A session that waits for its person can be pushed to, on a host that can wake one:
 //! - only while it waits — a session at work hears from its hooks — and, when its hooks left no
 //!   stamp that says which, only after the hooks had a head start;
-//! - only a high or urgent message whose acknowledgement grants nothing, or a slot offer: an
-//!   acknowledgement is the person's to give, and a normal message waits for the hooks;
+//! - only a high or urgent message whose acknowledgement grants nothing, or a slot offer: a session
+//!   that waits acknowledges nothing, so a wide claim's announcement waits for a session at work,
+//!   and a normal message waits for the hooks;
 //! - at most a few wakes per sender within a window, beyond which the hooks deliver;
 //! - what was pushed is shown by the session's hooks once, later, unless something shows it was
 //!   seen: the agent read the conversation, acknowledged the message or looked at the slot, or the

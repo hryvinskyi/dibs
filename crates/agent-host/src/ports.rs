@@ -232,7 +232,7 @@ pub struct InboxView {
     pub deliverable: Vec<PendingMessage>,
     /// The deliveries this machine claimed, for any of its sessions, won or lost.
     pub claims: Vec<ClaimedDelivery>,
-    /// The grants asked of the member that wait for their person's decision, newest first.
+    /// The grants asked of the member that wait for their decision, newest first.
     pub grant_asks: Vec<GrantAskLine>,
 }
 

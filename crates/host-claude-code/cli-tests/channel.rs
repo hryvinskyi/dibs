@@ -1,10 +1,11 @@
 //! `dibs mcp --host claude-code` as the channel of a session, run as a child process against the
 //! in-process server, beside the hooks of the same session: what it declares, an urgent message to
 //! a session that waits pushed once as a `notifications/claude/channel` event and never with an
-//! instruction to acknowledge, a session at work left to its hooks, a wide claim's announcement and
-//! a normal message never pushed, a push nobody saw shown by the hooks once its window passed,
-//! nothing pushed without the opt-in or with `DIBS_OFF`, and the event stream followed across a
-//! restart of the server without missing what happened meanwhile.
+//! instruction to acknowledge, a grant asked of a session that waits pushed with how to decide it,
+//! a session at work left to its hooks, a wide claim's announcement and a normal message never
+//! pushed, a push nobody saw shown by the hooks once its window passed, nothing pushed without the
+//! opt-in or with `DIBS_OFF`, and the event stream followed across a restart of the server without
+//! missing what happened meanwhile.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use dibs_agent_host::wording::GRANT_RULE;
 use dibs_domain::message::Importance;
 
 use crate::between::{after_for, context};
@@ -282,6 +284,11 @@ fn an_urgent_message_to_a_waiting_session_is_pushed_once_and_never_asks_for_an_a
         "{init}"
     );
     assert!(!instructions.contains("dibs_ack"), "{instructions}");
+    assert!(
+        instructions.chars().count() < 2048,
+        "the host cuts the instructions past 2048 characters: {}",
+        instructions.chars().count()
+    );
     streams_opened(&setup, 1);
     setup.turn_ends(&api);
 
@@ -299,6 +306,7 @@ fn an_urgent_message_to_a_waiting_session_is_pushed_once_and_never_asks_for_an_a
             && content.contains("Leave its acknowledgement to your person"),
         "{content}"
     );
+    assert!(content.ends_with(GRANT_RULE), "{content}");
     assert!(!content.contains("dibs_ack"), "{content}");
     assert_eq!(
         channel.pushes_until(Instant::now() + Duration::from_secs(3)),
@@ -400,6 +408,49 @@ fn a_wide_claims_announcement_and_a_normal_message_are_left_to_the_hooks() {
         shown.contains("From dibs") && shown.contains("Lunch at noon?"),
         "{shown}"
     );
+    assert!(
+        shown.contains("Acknowledging it grants the edits it asks for, so decide it yourself"),
+        "{shown}"
+    );
+    assert!(shown.ends_with(GRANT_RULE), "{shown}");
+}
+
+#[test]
+fn a_grant_asked_of_a_waiting_session_is_pushed_with_how_to_decide_it() {
+    let setup = Setup::new();
+    let api = setup.api();
+    setup.ok(
+        "alice",
+        &api,
+        &["new", "gh:acme/api#1", "--title", "Refunds"],
+    );
+    setup.ok(
+        "alice",
+        &api,
+        &["new", "gh:acme/api#2", "--title", "Upgrade"],
+    );
+    setup.ok(
+        "bob",
+        &api,
+        &["claim", "gh:acme/api#1", "--area", "billing"],
+    );
+    let mut channel = channel_for(&setup, &api, OPTED_IN);
+    streams_opened(&setup, 1);
+    setup.turn_ends(&api);
+
+    setup.ok("alice", &api, &["claim", "gh:acme/api#2"]);
+    setup.ok(
+        "alice",
+        &api,
+        &["ask-grant", "gh:acme/api#2", "--area", "billing"],
+    );
+    let pushed = channel.first_push();
+    let params = &pushed["params"];
+    assert_eq!(params["meta"]["from"], "alice", "{pushed}");
+    let content = params["content"].as_str().unwrap();
+    assert!(content.contains("alice asks you for a grant"), "{content}");
+    assert!(content.ends_with(GRANT_RULE), "{content}");
+    assert!(!content.contains("dibs_ack"), "{content}");
 }
 
 #[test]

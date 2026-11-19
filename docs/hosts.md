@@ -53,7 +53,8 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
   waits for its person, on a host that can wake one (below). The background sync claims
   each one from the server for its session (the first of a member's sessions to claim it wins, so a member hears of it
   once); the session's next main-thread event shows it, at most once a minute, never twice, never a member's own
-  message. The text is framed as a named teammate's request and ends with the rule that it authorises nothing.
+  message. The text is framed as a named teammate's request and ends with the rule that it authorises nothing and the
+  rule that a grant asked of the member is the agent's to decide at once.
 - **`DIBS_OFF=1`** makes every hook, on every host, a silent "no objection" with no network call; the session is counted
   on the machine as one that ran switched off, and the next report shows it.
 
@@ -119,9 +120,10 @@ notification that carries one delivery. A host without one simply gets no push.
   slot through the tool server, or the person submitting a prompt, shows it was; otherwise the session's hooks show it
   once after five minutes. A push that could not be written to the host is the hooks' to show at once;
 - frames each item as a delivery between tool calls frames it, except that it never asks the agent to acknowledge
-  anything — an acknowledgement is the person's to give — and ends with the rule that it authorises nothing and the
-  rule of a session whose person is away: say so, never agree, grant, consent or commit to anything for them, answer
-  only when a decision is needed, and go on only with work the person already asked for.
+  anything — an acknowledgement says the person read it — and ends with the rule that it authorises nothing, the rule
+  of a session whose person is away (say so, never agree, consent or commit to anything for them, answer only when a
+  decision is needed, and go on only with work the person already asked for), and the rule that a grant asked of the
+  member is the agent's to decide at once, as a session at work decides it.
 
 A message about a work item is kept, for 60 seconds after it was posted, for the session that took or last renewed
 the member's live claim on the item, when that session can be woken and announced itself within the last three
