@@ -1,5 +1,32 @@
 {% extends "shell.html" %}
+{% import "links.html" as links %}
+{% macro reason(r) %}{% match r %}{% when crate::ui::queue::view::ReasonView::BlockedBy { items } %}waits for {% for ticket in items %}{% if !loop.first %}, {% endif %}{% call links::ticket(ticket) %}{% endcall %}{% endfor %}{% when crate::ui::queue::view::ReasonView::AreaHeld { area, holder, item, finished } %}{% call links::area(area, true) %}{% endcall %} is held by {% call links::person(holder, true) %}{% endcall %} for {% call links::ticket(item) %}{% endcall %}{% if *finished %} <span class="tag tag--bad">ticket closed</span>{% endif %}{% endmatch %}{% endmacro %}
 {% block title %}Queue{% endblock %}
-{% block list %}<div class="bar-top"><h1 tabindex="-1">Queue</h1></div>
-<p class="note">Nothing is shown here yet.</p>{% endblock %}
-{% block inspector %}<aside class="insp" data-region="inspector" data-selected="{{ selected }}">{% if selected %}<div class="insp__in"><p class="faint">Nothing is shown here yet.</p></div>{% endif %}</aside>{% endblock %}
+{% block list %}<div class="bar-top"><h1 tabindex="-1">Queue</h1><span class="dim">{{ list.ready }} ready · {{ list.waiting }} not ready</span>
+<form class="queue-filter" method="get" action="/ui/queue" role="search">{% if list.all %}<input type="hidden" name="all" value="1">{% endif %}<input class="search" type="search" name="q" value="{{ list.q }}" placeholder="Title, number, area, holder" aria-label="Filter the queue"></form></div>
+{% for group in list.groups %}<div class="grp">{% match group.heading %}{% when Heading::Ready(p) %}<span class="pri pri--{{ p }}">P{{ p }}</span><b>Ready</b>{% when Heading::NotReady %}<b>Not ready</b>{% endmatch %}<span class="r">{{ group.total }}</span></div>
+{% for row in group.rows %}<div class="row row--queue" data-row{% if row.current %} aria-current="true"{% endif %}><span class="pri pri--{{ row.item.priority }}">P{{ row.item.priority }}</span>
+<div><a class="row__t" data-inspect href="{{ row.href }}">{%- for piece in row.item.title.pieces -%}{{ piece.text }}{%- endfor -%}</a><div class="row__m"><span class="ref"><a href="{{ row.tracker.href }}" title="{{ row.item.ticket.title }}"{% if row.tracker.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ row.item.ticket.label }}</a></span>{% for area in row.item.areas %}{% call links::area(area, false) %}{% endcall %}{% else %}<span>no areas named</span>{% endfor %}</div></div>
+<div class="row__e">{% match row.item.readiness %}{% when crate::ui::queue::view::Readiness::Ready { was_held_by } %}{% if let Some(person) = was_held_by %}<span>was held by {% call links::person(person, true) %}{% endcall %}</span>{% else %}<span class="tag">ready</span>{% endif %}{% when crate::ui::queue::view::Readiness::NotReady { reasons } %}{% if reasons.len() == 1 %}{% for r in reasons %}<span>{% call reason(r) %}{% endcall %}</span>{% endfor %}{% else %}<span>{{ reasons.len() }} reasons</span>{% endif %}{% endmatch %}</div></div>
+{% endfor %}{% if let Some(more) = group.more %}<a class="more" href="{{ more }}">Show all {{ group.total }}</a>
+{% endif %}{% endfor %}{% if list.groups.is_empty() %}<p class="note">No ticket matches.</p>{% endif %}{% endblock %}
+{% block inspector %}{% match inspector %}{% when Inspector::Hint %}<aside class="insp" data-region="inspector" data-selected="false" aria-label="Ticket"><div class="empty"><p>Pick a ticket to see which areas it will touch, who holds them and how to claim it.</p></div></aside>
+{% when Inspector::Gone(gone) %}<aside class="insp" data-region="inspector" data-selected="true" aria-label="Ticket"><div class="insp__in">
+<div class="insp__top"><span class="r"><a class="x" data-inspect href="{{ list.close }}" aria-label="Close">×</a></span></div>
+<h2 data-inspector-heading tabindex="-1">That ticket is not in the queue.</h2>
+{% if let Some(claim) = gone.claim %}<p><a class="lnk" href="{{ claim }}">See its claim</a></p>{% endif %}
+</div></aside>
+{% when Inspector::Ticket(view) %}<aside class="insp" data-region="inspector" data-selected="true" aria-label="Ticket {{ view.item.ticket.title }}"><div class="insp__in">
+<div class="insp__top">{% call links::ticket(view.item.ticket) %}{% endcall %}<span class="pri pri--{{ view.item.priority }}">P{{ view.item.priority }}</span>{% if view.item.is_ready() %}<span class="tag">Ready</span>{% else %}<span class="tag tag--warn">Not ready</span>{% endif %}<span class="r"><button class="mini" type="button" data-copy-link hidden>Copy link</button><a class="x" data-inspect href="{{ list.close }}" aria-label="Close">×</a></span></div>
+<h2 data-inspector-heading tabindex="-1">{% call links::linked(view.item.title) %}{% endcall %}</h2>
+<dl class="kv">
+<dt>Ticket</dt><dd>{% call links::ticket(view.item.ticket) %}{% endcall %}{% if let Some(source) = view.item.tracker_status %}<span class="tag">{{ source }}</span>{% else %}<span class="faint">no tracker status</span>{% endif %}</dd>
+{% if let crate::ui::queue::view::Readiness::Ready { was_held_by: Some(person) } = view.item.readiness %}<dt>Was held by</dt><dd>{% call links::person(person, false) %}{% endcall %}<span class="faint">a silent claim, open to a take-over</span></dd>{% endif %}
+</dl>
+{% if let crate::ui::queue::view::Readiness::NotReady { reasons } = view.item.readiness %}<section class="blk"><h3 class="label">Why it waits</h3><ul class="rowlist">{% for r in reasons %}<li><span>{% call reason(r) %}{% endcall %}</span></li>{% endfor %}</ul></section>{% endif %}
+<section class="blk"><h3 class="label">Areas it will probably touch · {{ view.areas.len() }}</h3>
+{% if view.areas.is_empty() %}<p class="faint">The tracker names no area for it.</p>{% else %}<ul class="rowlist">{% for standing in view.areas %}<li>{% call links::area(standing.area, true) %}{% endcall %}<span class="r">{% if let Some(holding) = standing.held %}held by {% call links::person(holding.holder, true) %}{% endcall %} for {% call links::ticket(holding.ticket) %}{% endcall %}{% else %}free{% endif %}</span></li>{% endfor %}</ul>{% endif %}
+</section>
+<section class="blk"><h3 class="label">To pick it up</h3><div class="cmd"><span>dibs claim {% call links::ticket(view.item.command.reference) %}{% endcall %}{% for area in view.item.command.areas %} --area {% call links::area(area, true) %}{% endcall %}{% endfor %}</span><button type="button" hidden data-copy="{{ view.item.command.text }}">Copy</button></div></section>
+</div></aside>
+{% endmatch %}{% endblock %}

@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use dibs_app::use_cases::{NamedNotReady, StatusView};
+use dibs_app::use_cases::StatusView;
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::forge::{Forge, ForgeRegistry, Revision};
 use dibs_domain::handle::Handle;
@@ -29,6 +29,7 @@ use dibs_domain::review::PrRef;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::text_refs::{RefContext, TextRef, scan};
 
+use crate::ui::queue::listing::waits;
 use crate::ui::rows::reference;
 
 /// How the arrow beside a ticket names the page it leads to.
@@ -76,12 +77,7 @@ pub fn places(status: &StatusView) -> Vec<(ItemId, Option<ExternalRef>, Place)> 
         .ready
         .excluded
         .iter()
-        .filter(|entry| {
-            !entry
-                .reasons
-                .iter()
-                .any(|reason| matches!(reason, NamedNotReady::Claimed { .. }))
-        })
+        .filter(|entry| waits(entry))
         .map(|entry| (&entry.item.item, Place::Queue));
     claimed
         .chain(ready)

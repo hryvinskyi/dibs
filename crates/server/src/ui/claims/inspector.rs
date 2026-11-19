@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use dibs_app::named::{AuthorName, NamedSummary};
 use dibs_app::records::ItemRecord;
-use dibs_app::use_cases::{HeldItem, NamedNotReady, StatusView};
+use dibs_app::use_cases::{HeldItem, NamedNotReady};
 use dibs_domain::forge::Revision;
 use dibs_domain::ids::ItemId;
 use dibs_domain::paths::RepoPath;
@@ -19,6 +19,7 @@ use crate::ui::links::{
     AreaView, ConversationView, FileView, PersonView, PullRequestView, TicketView, query_value,
 };
 use crate::ui::moments::{Moment, moment};
+use crate::ui::queue::listing::{Listed, listed};
 
 /// How many files of a collision with another claim are listed.
 const COLLISION_FILES: usize = 5;
@@ -129,7 +130,7 @@ impl InspectorView {
     ) -> Self {
         let id = claim.id;
         let status = scene.status;
-        let queue = queue_entries(status);
+        let queue: Vec<Listed<'_>> = listed(status).collect();
         let kept = queue
             .iter()
             .filter(|entry| {
@@ -174,44 +175,12 @@ impl GoneView {
     /// What became of the item `id`: `item` when it exists, its place in the queue when it waits
     /// there.
     pub fn of(id: ItemId, item: Option<&ItemRecord>, scene: &Scene<'_>) -> Self {
-        let waits = queue_entries(scene.status)
-            .iter()
-            .any(|entry| entry.item.id == id);
+        let waits = listed(scene.status).any(|entry| entry.item.id == id);
         Self {
             ticket: item.map(|item| TicketView::of(id, item.external_ref.as_ref(), scene.links)),
             queue: (item.is_some() && waits).then(|| format!("/ui/queue/{id}")),
         }
     }
-}
-
-/// An item of the queue and why it is not ready, when it is not.
-struct QueueEntry<'a> {
-    item: &'a ItemRecord,
-    reasons: &'a [NamedNotReady],
-}
-
-/// The queue: the ready items, then those left out of the ready list for another reason than a
-/// claim.
-fn queue_entries(status: &StatusView) -> Vec<QueueEntry<'_>> {
-    let ready = status.ready.ready.iter().map(|entry| QueueEntry {
-        item: &entry.item.item,
-        reasons: &[],
-    });
-    let waiting = status
-        .ready
-        .excluded
-        .iter()
-        .filter(|entry| {
-            !entry
-                .reasons
-                .iter()
-                .any(|reason| matches!(reason, NamedNotReady::Claimed { .. }))
-        })
-        .map(|entry| QueueEntry {
-            item: &entry.item.item,
-            reasons: &entry.reasons,
-        });
-    ready.chain(waiting).collect()
 }
 
 /// The address of the queue filtered by `text`.

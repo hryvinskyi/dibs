@@ -334,6 +334,13 @@ a.sq:hover { transform: scale(1.2); }
 /* End of screen: claims */
 
 /* Screen: queue */
+.queue-filter { margin-left: auto; max-width: 100%; }
+.queue-filter .search { margin-left: 0; }
+.row--queue { grid-template-columns: 26px minmax(0, 1fr) auto; }
+.pri--0 { background: var(--danger-soft); color: var(--danger); }
+@media (max-width: 760px) {
+  .row--queue { grid-template-columns: 26px minmax(0, 1fr); }
+}
 /* End of screen: queue */
 
 /* Screen: areas */
