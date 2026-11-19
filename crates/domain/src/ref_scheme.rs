@@ -78,6 +78,11 @@ impl RefSchemeRegistry {
         self
     }
 
+    /// Whether the registry knows the scheme `name`.
+    pub fn knows(&self, name: &str) -> bool {
+        self.schemes.contains_key(name)
+    }
+
     /// The repository a reference names, through its scheme.
     pub fn repository_of(&self, reference: &ExternalRef) -> Option<RemoteUrl> {
         self.schemes
@@ -243,6 +248,19 @@ mod tests {
         let empty = RefSchemeRegistry::empty();
         assert_eq!(empty.repository_of(&reference("gh:acme/web#1")), None);
         assert_eq!(empty.link(&reference("gh:acme/web#1")), None);
+    }
+
+    #[test]
+    fn the_registry_says_which_schemes_it_knows() {
+        assert!(RefSchemeRegistry::standard().knows("gh"));
+        assert!(!RefSchemeRegistry::standard().knows("jira"));
+        assert!(!RefSchemeRegistry::standard().knows("GH"));
+        assert!(!RefSchemeRegistry::empty().knows("gh"));
+        assert!(
+            RefSchemeRegistry::empty()
+                .with("tracker", Box::new(Fixed))
+                .knows("tracker")
+        );
     }
 
     #[derive(Debug)]

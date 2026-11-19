@@ -55,6 +55,12 @@ pub enum ExternalRefError {
 }
 
 impl ExternalRef {
+    /// The most characters a scheme has; a scheme is ASCII, so it is also its length in bytes.
+    pub const LONGEST_SCHEME: usize = 16;
+
+    /// The most characters a value has.
+    pub const LONGEST_VALUE: usize = 200;
+
     /// Parses `scheme:value`, splitting at the first `:`, and writes the value of a shipped scheme
     /// in its canonical form.
     ///
@@ -66,14 +72,14 @@ impl ExternalRef {
             .ok_or(ExternalRefError::MissingScheme)?;
         let mut scheme_chars = scheme.chars();
         let scheme_ok = scheme_chars.next().is_some_and(|c| c.is_ascii_lowercase())
-            && scheme.len() <= 16
+            && scheme.len() <= Self::LONGEST_SCHEME
             && scheme_chars
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "+.-".contains(c));
         if !scheme_ok {
             return Err(ExternalRefError::InvalidScheme);
         }
         let value_ok = !value.is_empty()
-            && value.chars().count() <= 200
+            && value.chars().count() <= Self::LONGEST_VALUE
             && !has_control(value)
             && value.trim() == value;
         if !value_ok {

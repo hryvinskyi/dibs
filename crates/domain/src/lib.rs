@@ -11,6 +11,7 @@ pub mod dependency;
 pub mod edit;
 pub mod escalation;
 pub mod event;
+pub mod forge;
 pub mod grant;
 pub mod handle;
 pub mod handover;
@@ -38,6 +39,7 @@ pub mod session;
 pub mod settings;
 pub mod slot;
 mod text;
+pub mod text_refs;
 pub mod wide;
 pub mod worktree;
 
