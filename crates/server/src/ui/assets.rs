@@ -1,7 +1,7 @@
-//! The browser bundle: the scripts and the stylesheet of `web/src`, embedded at build time and served
-//! under one directory named by the hash of the whole set, so a module's relative imports resolve
-//! beside it. A file is cached for a year: a change to any file moves the whole set to a new
-//! directory.
+//! The browser bundle: the scripts and the stylesheet of `web/src` and the fonts of `web/fonts`,
+//! embedded at build time and served under one directory named by the hash of the whole set, so a
+//! module's relative imports and the stylesheet's font addresses resolve beside it. A file is cached
+//! for a year: a change to any file moves the whole set to a new directory.
 
 use axum::extract::Path;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -20,6 +20,7 @@ pub fn content_type(name: &str) -> Option<&'static str> {
     match extension {
         "js" => Some("text/javascript; charset=utf-8"),
         "css" => Some("text/css; charset=utf-8"),
+        "woff2" => Some("font/woff2"),
         _ => None,
     }
 }
@@ -54,21 +55,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scripts_and_stylesheets_have_their_types_and_nothing_else_is_served() {
+    fn scripts_stylesheets_and_fonts_have_their_types_and_nothing_else_is_served() {
         assert_eq!(
             content_type("main.js"),
             Some("text/javascript; charset=utf-8")
         );
         assert_eq!(content_type("dibs.css"), Some("text/css; charset=utf-8"));
+        assert_eq!(content_type("x.woff2"), Some("font/woff2"));
         assert_eq!(content_type("notes.txt"), None);
         assert_eq!(content_type("js"), None);
     }
 
     #[test]
-    fn the_bundle_holds_the_entry_point_and_the_stylesheet() {
+    fn the_bundle_holds_the_entry_point_the_stylesheet_and_the_fonts() {
         let names: Vec<&str> = BUNDLE.iter().map(|(name, _)| *name).collect();
         assert!(names.contains(&"main.js"), "{names:?}");
         assert!(names.contains(&"dibs.css"), "{names:?}");
+        assert!(
+            names.contains(&"IBMPlexSans-Regular-Latin1.woff2"),
+            "{names:?}"
+        );
         assert_eq!(BUNDLE_HASH.len(), 16);
     }
 }

@@ -304,7 +304,7 @@ async fn every_page_answer_carries_the_security_headers() {
     for page in answers {
         assert_eq!(
             page.headers[header::CONTENT_SECURITY_POLICY],
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
         );
         assert_eq!(
             page.headers[header::CONTENT_SECURITY_POLICY],
@@ -772,6 +772,22 @@ async fn the_bundle_is_served_under_its_directory_and_its_imports_resolve_there(
     )
     .await;
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_bundle_serves_its_fonts_for_a_year() {
+    let world = World::new().await;
+    let path = format!("/ui/static/{BUNDLE_HASH}/IBMPlexSans-Regular-Latin1.woff2");
+    let request = Request::builder().uri(path).body(Body::empty()).unwrap();
+    let response = world.open(request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "font/woff2");
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(bytes.starts_with(b"wOF2"));
 }
 
 /// A board with one item in each column: open, claimed live by bob, claimed by alice and gone

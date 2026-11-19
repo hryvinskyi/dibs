@@ -1,8 +1,10 @@
-//! Embeds the browser bundle: every `.js` and `.css` file of `web/src`, under one directory hash.
+//! Embeds the browser bundle: every `.js` and `.css` file of `web/src` and every `.woff2` font of
+//! `web/fonts`, under one directory hash.
 //!
 //! The hash is taken over the names and contents of the whole set, so a change to any file moves
-//! every file to a new directory, and a module's relative imports still resolve beside it. The
-//! generated `bundle.rs` holds the hash and each file's name and bytes.
+//! every file to a new directory, and a module's relative imports and the stylesheet's relative
+//! font addresses still resolve beside it. The generated `bundle.rs` holds the hash and each
+//! file's name and bytes.
 
 use std::error::Error;
 use std::fmt::Write as _;
@@ -17,8 +19,12 @@ const HASH_CHARS: usize = 16;
 fn main() -> Result<(), Box<dyn Error>> {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?);
     let source = manifest.join("../../web/src");
+    let fonts = manifest.join("../../web/fonts");
     println!("cargo:rerun-if-changed={}", source.display());
-    let files = bundle_files(&source)?;
+    println!("cargo:rerun-if-changed={}", fonts.display());
+    let mut files = bundle_files(&source, &[".js", ".css"])?;
+    files.extend(bundle_files(&fonts, &[".woff2"])?);
+    files.sort();
     let mut hasher = Sha256::new();
     for (name, path) in &files {
         println!("cargo:rerun-if-changed={}", path.display());
@@ -52,8 +58,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The `.js` and `.css` files directly inside `dir`, sorted by name; hidden files are skipped.
-fn bundle_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
+/// The files directly inside `dir` whose names end in one of `suffixes`, sorted by name; hidden
+/// files are skipped.
+fn bundle_files(dir: &Path, suffixes: &[&str]) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -63,7 +70,7 @@ fn bundle_files(dir: &Path) -> Result<Vec<(String, PathBuf)>, Box<dyn Error>> {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let served = !name.starts_with('.') && (name.ends_with(".js") || name.ends_with(".css"));
+        let served = !name.starts_with('.') && suffixes.iter().any(|suffix| name.ends_with(suffix));
         if served {
             files.push((name, entry.path()));
         }

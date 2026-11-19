@@ -3,8 +3,8 @@
 //!
 //! Pages are rendered on the server from the templates, which hold every word a page shows; the
 //! scripts only enhance them. Every answer carries a content security policy that allows nothing but
-//! this service's own scripts, styles and connections, so no inline script, style or handler runs.
-//! Every form posts a token of the session it was rendered for, and the session cookie is
+//! this service's own scripts, styles, fonts and connections, so no inline script, style or handler
+//! runs. Every form posts a token of the session it was rendered for, and the session cookie is
 //! `SameSite=Strict`. Every text a person or an agent wrote is escaped by the templates.
 
 mod assets;
@@ -41,7 +41,7 @@ pub use zone::ZONE_COOKIE;
 use session::UiSession;
 
 /// The content security policy of every page answer.
-pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 /// The routes of the pages, with the headers every answer of theirs carries.
 pub fn routes() -> Router<AppState> {
