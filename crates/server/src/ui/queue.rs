@@ -9,7 +9,6 @@
 
 mod inspector;
 pub(crate) mod listing;
-mod query;
 pub(crate) mod view;
 
 use std::collections::BTreeMap;
@@ -27,12 +26,12 @@ use crate::fields::item_in_path;
 use crate::http::AppState;
 use crate::ui::links::Link;
 use crate::ui::queue::inspector::{GoneView, InspectorView};
-use crate::ui::queue::query::{ListQuery, RawQuery};
 use crate::ui::queue::view::{QueueItemView, queue_items};
 use crate::ui::render::html;
 use crate::ui::session::{PageSession, UiSession};
 use crate::ui::shell::{self, Here, Screen, ShellView};
 use crate::ui::signed_page;
+use crate::ui::text_query::{RawQuery, TextQuery};
 
 /// How many rows of a group the list shows before it offers all of them.
 const GROUP_ROWS: usize = 25;
@@ -150,8 +149,11 @@ pub async fn inspect(
 }
 
 /// The list's state from the address's query; a query that does not read is the default state.
-fn state_of(query: Result<Query<RawQuery>, QueryRejection>) -> ListQuery {
-    ListQuery::of(query.map(|Query(raw)| raw).unwrap_or_default())
+fn state_of(query: Result<Query<RawQuery>, QueryRejection>) -> TextQuery {
+    TextQuery::of(
+        Screen::Queue,
+        query.map(|Query(raw)| raw).unwrap_or_default(),
+    )
 }
 
 /// The page in its frame: `200`, or `404` when the address selects no ticket of the queue.
@@ -159,7 +161,7 @@ async fn render(
     state: &AppState,
     session: &UiSession,
     here: &Here,
-    query: ListQuery,
+    query: TextQuery,
     selected: Selected,
 ) -> Result<Response, ApiError> {
     let (shell, loaded, links) = shell::load(state, session, Screen::Queue, here).await?;
@@ -193,10 +195,10 @@ async fn render(
 
 impl ListView {
     /// The list of `items` in the state `query`, the ticket on `current` marked.
-    fn of(items: Vec<QueueItemView>, query: &ListQuery, current: Option<ItemId>) -> Self {
+    fn of(items: Vec<QueueItemView>, query: &TextQuery, current: Option<ItemId>) -> Self {
         let mut ready: BTreeMap<u8, Vec<Row>> = BTreeMap::new();
         let mut waiting = Vec::new();
-        for item in items.into_iter().filter(|item| query.leaves(item)) {
+        for item in items.into_iter().filter(|item| query.leaves(&item.text())) {
             let priority = item.priority;
             let is_ready = item.is_ready();
             let row = Row::of(item, query, current);
@@ -233,14 +235,18 @@ impl Group {
     fn of(
         heading: Heading,
         mut rows: Vec<Row>,
-        query: &ListQuery,
+        query: &TextQuery,
         current: Option<ItemId>,
     ) -> Self {
         let total = rows.len();
-        if !query.shows_every_row() {
+        if !query.shows_all() {
             rows.truncate(GROUP_ROWS);
         }
-        let more = (rows.len() < total).then(|| query.with_all().address(current));
+        let more = (rows.len() < total).then(|| {
+            query
+                .with_all()
+                .address(current.map(|id| id.to_string()).as_deref())
+        });
         Self {
             heading,
             total,
@@ -252,9 +258,9 @@ impl Group {
 
 impl Row {
     /// The row of a ticket.
-    fn of(item: QueueItemView, query: &ListQuery, current: Option<ItemId>) -> Self {
+    fn of(item: QueueItemView, query: &TextQuery, current: Option<ItemId>) -> Self {
         Self {
-            href: query.address(Some(item.id)),
+            href: query.address(Some(&item.id.to_string())),
             tracker: item
                 .ticket
                 .out

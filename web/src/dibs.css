@@ -344,6 +344,8 @@ a.sq:hover { transform: scale(1.2); }
 /* End of screen: queue */
 
 /* Screen: areas */
+.areas-filter { margin-left: auto; max-width: 100%; }
+.areas-filter .search { margin-left: 0; }
 .map { padding: 12px 24px 40px; display: grid; gap: 26px; }
 .map h2 { font-size: 13px; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
 .seats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }

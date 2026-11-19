@@ -476,6 +476,36 @@ impl FileView {
     }
 }
 
+/// A directory of a repository of the project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryView {
+    /// The directory as written, or `/` for the repository's root.
+    pub label: String,
+    /// Its full name, `repo:directory`, or `repo:/` for the root.
+    pub title: String,
+    /// Where it leads.
+    pub main: Link,
+}
+
+impl DirectoryView {
+    /// The view of `directory` of `repo` at its default branch: the forge's page of the directory
+    /// there, else the search for its full name. An empty `directory` is the repository's root.
+    pub fn of(repo: &RepoId, directory: &str, context: &LinkContext) -> Self {
+        let label = if directory.is_empty() { "/" } else { directory };
+        let title = format!("{repo}:{label}");
+        let main = context
+            .forge_page(repo, |forge, remote| {
+                forge.directory(remote, Revision::DefaultBranch, directory)
+            })
+            .unwrap_or_else(|| Link::search(&title));
+        Self {
+            label: label.to_owned(),
+            title,
+            main,
+        }
+    }
+}
+
 /// A conversation: its subject, and the address of its page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationView {
@@ -959,6 +989,106 @@ mod tests {
         assert_eq!(
             FileView::of(&guide, Revision::DefaultBranch, &none).main,
             inside("/ui/search?q=docs%3Aguide%2Fintro.md")
+        );
+    }
+
+    /// A forge whose pages are at addresses that are not web addresses.
+    #[derive(Debug)]
+    struct HostileForge;
+
+    impl Forge for HostileForge {
+        fn name(&self) -> &'static str {
+            "Hostile"
+        }
+
+        fn issue(&self, _: &RemoteUrl, _: u64) -> String {
+            "javascript:alert(1)".to_owned()
+        }
+
+        fn pull_request(&self, _: &RemoteUrl, _: u64) -> String {
+            "javascript:alert(1)".to_owned()
+        }
+
+        fn branch(&self, _: &RemoteUrl, _: &BranchName) -> String {
+            "javascript:alert(1)".to_owned()
+        }
+
+        fn file(&self, _: &RemoteUrl, _: Revision<'_>, _: &str) -> String {
+            "javascript:alert(1)".to_owned()
+        }
+
+        fn directory(&self, _: &RemoteUrl, _: Revision<'_>, _: &str) -> String {
+            "javascript:alert(1)".to_owned()
+        }
+
+        fn commit(&self, _: &RemoteUrl, _: &str) -> String {
+            "javascript:alert(1)".to_owned()
+        }
+    }
+
+    #[test]
+    fn a_directory_leads_to_the_forges_page_at_the_default_branch() {
+        let none = context(Vec::new());
+        let api = RepoId::parse("api").unwrap();
+        let view = DirectoryView::of(&api, "src/billing", &none);
+        assert_eq!(view.label, "src/billing");
+        assert_eq!(view.title, "api:src/billing");
+        assert_eq!(
+            view.main,
+            outside("https://github.com/acme/widgets/tree/HEAD/src/billing")
+        );
+    }
+
+    #[test]
+    fn the_root_directory_is_named_by_a_slash_and_leads_to_the_repositorys_tree() {
+        let none = context(Vec::new());
+        let api = RepoId::parse("api").unwrap();
+        let view = DirectoryView::of(&api, "", &none);
+        assert_eq!((view.label.as_str(), view.title.as_str()), ("/", "api:/"));
+        assert_eq!(
+            view.main,
+            outside("https://github.com/acme/widgets/tree/HEAD")
+        );
+    }
+
+    #[test]
+    fn a_directory_of_a_repository_with_no_remote_or_no_known_forge_leads_to_the_search() {
+        let document: SettingsDocument = serde_json::from_value(serde_json::json!({
+            "areas": [{"name": "billing", "paths": ["src/billing/**"]}]
+        }))
+        .unwrap();
+        let local = LinkContext::new(
+            ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+            Arc::new(RefSchemeRegistry::standard()),
+            Arc::new(ForgeRegistry::standard()),
+            Vec::new(),
+        );
+        let view = DirectoryView::of(&RepoId::implicit(), "src/billing", &local);
+        assert_eq!(view.main, inside("/ui/search?q=default%3Asrc%2Fbilling"));
+        let none = context(Vec::new());
+        let docs = RepoId::parse("docs").unwrap();
+        assert_eq!(
+            DirectoryView::of(&docs, "guide", &none).main,
+            inside("/ui/search?q=docs%3Aguide")
+        );
+        assert_eq!(
+            DirectoryView::of(&docs, "", &none).main,
+            inside("/ui/search?q=docs%3A%2F")
+        );
+    }
+
+    #[test]
+    fn a_directory_page_that_is_no_web_address_is_no_link() {
+        let hostile = LinkContext::new(
+            settings(),
+            Arc::new(RefSchemeRegistry::standard()),
+            Arc::new(ForgeRegistry::standard().with("github.com", Box::new(HostileForge))),
+            Vec::new(),
+        );
+        let api = RepoId::parse("api").unwrap();
+        assert_eq!(
+            DirectoryView::of(&api, "src/billing", &hostile).main,
+            inside("/ui/search?q=api%3Asrc%2Fbilling")
         );
     }
 

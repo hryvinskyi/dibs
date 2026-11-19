@@ -1,0 +1,3 @@
+{% macro ago(a) %}{% match a %}{% when crate::ui::moments::Ago::JustNow %}just now{% when crate::ui::moments::Ago::Minutes(n) %}{{ n }} min{% when crate::ui::moments::Ago::HoursMinutes(h, _) %}{{ h }} h{% when crate::ui::moments::Ago::Hours(h) %}{{ h }} h{% when crate::ui::moments::Ago::Days(d) %}{{ d }} d{% endmatch %}{% endmacro %}
+
+{% macro since(m) %}<time datetime="{{ m.iso }}" data-clock>{{ m.clock }}</time> <span class="faint">· {% match m.ago %}{% when crate::ui::moments::Ago::JustNow %}just now{% else %}{% call ago(m.ago) %}{% endcall %} ago{% endmatch %}</span>{% endmacro %}

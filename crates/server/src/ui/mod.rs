@@ -32,6 +32,7 @@ mod shell;
 mod sign_in;
 mod slots;
 mod takeover;
+mod text_query;
 mod threads;
 mod worktrees;
 mod zone;

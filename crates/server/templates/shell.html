@@ -1,4 +1,4 @@
-{% import "links.html" as links %}<!doctype html>
+{% import "links.html" as links %}{% import "moments.html" as moments %}<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -24,7 +24,7 @@
     {% for slot in shell.rail.slots %}<li{% if slot.holder.is_some() %} class="held"{% endif %}><details id="slot-{{ slot.name }}"{% if slot.open %} open{% endif %}><summary><span>{{ slot.name }}</span><span>{% if let Some(holder) = slot.holder %}{{ holder }}{% else %}free{% endif %}</span></summary><p>{% if let Some(note) = slot.note %}{% call links::linked(note) %}{% endcall %}<br>{% endif %}<span class="faint">Held for at most {% if slot.max_hold.days > 0 %}{{ slot.max_hold.days }} d{% endif %}{% if slot.max_hold.hours > 0 %}{% if slot.max_hold.days > 0 %} {% endif %}{{ slot.max_hold.hours }} h{% endif %}{% if slot.max_hold.minutes > 0 %}{% if slot.max_hold.days > 0 || slot.max_hold.hours > 0 %} {% endif %}{{ slot.max_hold.minutes }} min{% endif %}{% if let Some(group) = slot.group %} · group {{ group }}{% endif %}</span></p></details></li>
     {% endfor %}</ul></section>{% endif %}
   <section aria-labelledby="rail-worktrees"><h3 class="label" id="rail-worktrees">Worktrees held</h3><ul class="wts">
-    {% for hold in shell.rail.worktrees %}<li><span><b>{{ hold.worktree }}</b> · {% call links::person(hold.holder, true) %}{% endcall %}{% if hold.by_agent %}'s agent{% endif %} · {% match hold.age %}{% when crate::ui::moments::Ago::JustNow %}just now{% when crate::ui::moments::Ago::Minutes(n) %}{{ n }} min{% when crate::ui::moments::Ago::HoursMinutes(h, _) %}{{ h }} h{% when crate::ui::moments::Ago::Hours(h) %}{{ h }} h{% when crate::ui::moments::Ago::Days(d) %}{{ d }} d{% endmatch %}</span><span>{% call links::linked(hold.purpose) %}{% endcall %}{% if let Some(ticket) = hold.ticket %} · for {% call links::ticket(ticket) %}{% endcall %}{% endif %}</span></li>
+    {% for hold in shell.rail.worktrees %}<li><span><b>{{ hold.worktree }}</b> · {% call links::person(hold.holder, true) %}{% endcall %}{% if hold.by_agent %}'s agent{% endif %} · {% call moments::ago(hold.age) %}{% endcall %}</span><span>{% call links::linked(hold.purpose) %}{% endcall %}{% if let Some(ticket) = hold.ticket %} · for {% call links::ticket(ticket) %}{% endcall %}{% endif %}</span></li>
     {% else %}<li class="faint">None right now</li>
     {% endfor %}</ul></section>
   <form class="rail__foot" method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{{ shell.csrf }}"><span>Signed in as {{ shell.handle }}</span><button class="btn btn--small" type="submit">Sign out</button></form>

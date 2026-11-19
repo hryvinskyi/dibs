@@ -1,5 +1,29 @@
 {% extends "shell.html" %}
+{% import "links.html" as links %}
+{% import "moments.html" as moments %}
 {% block title %}Areas{% endblock %}
-{% block list %}<div class="bar-top"><h1 tabindex="-1">Areas</h1></div>
-<p class="note">Nothing is shown here yet.</p>{% endblock %}
-{% block inspector %}<aside class="insp" data-region="inspector" data-selected="{{ selected }}">{% if selected %}<div class="insp__in"><p class="faint">Nothing is shown here yet.</p></div>{% endif %}</aside>{% endblock %}
+{% block list %}<div class="bar-top"><h1 tabindex="-1">Areas</h1><span class="dim">{{ list.held }} of {{ list.total }} held</span>
+<form class="areas-filter" method="get" action="/ui/areas" role="search">{% if list.all %}<input type="hidden" name="all" value="1">{% endif %}<input class="search" type="search" name="q" value="{{ list.q }}" placeholder="Find an area" aria-label="Find an area"></form></div>
+{% if !list.sections.is_empty() %}<div class="map">
+<div class="legend">{% for person in list.holders %}<span>{% call links::person(person, true) %}{% endcall %}</span>{% endfor %}<span><i class="seat seat--fin"></i>held for a finished ticket</span><span><i class="seat seat--held seat--parked pc-1"></i>held over a week</span><span><i class="seat"></i>free</span></div>
+{% for section in list.sections %}<section><h2>{{ section.repo }}<span class="faint">{{ section.held }} held · {{ section.free }} free</span></h2>
+<div class="seats">{% for seat in section.seats %}<a class="seat{{ seat.state.modifiers() }}{% if let Some(colour) = seat.colour %} pc-{{ colour }}{% endif %}" data-row data-inspect href="{{ seat.href }}" title="{{ seat.title }}"{% if seat.current %} aria-current="true"{% endif %}>{{ seat.area.label }}{% if seat.claims > 1 %}<span class="k">{{ seat.claims }}</span>{% endif %}</a>{% endfor %}{% if let Some(more) = section.more %}<a class="seat" href="{{ more }}">+{{ section.free }} free</a>{% endif %}</div></section>
+{% endfor %}</div>{% else if list.total == 0 %}<p class="note">The project declares no areas.</p>{% else %}<p class="note">No area matches.</p>{% endif %}{% endblock %}
+{% block inspector %}{% match inspector %}{% when Inspector::Hint %}<aside class="insp" data-region="inspector" data-selected="false" aria-label="Area"><div class="empty"><p>Pick an area to see who holds it, for which tickets, and which tickets wait for it.</p></div></aside>
+{% when Inspector::Gone %}<aside class="insp" data-region="inspector" data-selected="true" aria-label="Area"><div class="insp__in">
+<div class="insp__top"><span class="r"><a class="x" data-inspect href="{{ list.close }}" aria-label="Close">×</a></span></div>
+<h2 data-inspector-heading tabindex="-1">The project declares no such area.</h2>
+</div></aside>
+{% when Inspector::Area(view) %}{% let held = view.entry.holders.len() %}<aside class="insp" data-region="inspector" data-selected="true" aria-label="Area {{ view.entry.area.full }}"><div class="insp__in">
+<div class="insp__top"><span class="ref">{{ view.entry.area.full }}</span>{% if view.entry.state.is_held() %}<span class="tag">Held</span>{% else %}<span class="tag">Free</span>{% endif %}<span class="r"><button class="mini" type="button" data-copy-link hidden>Copy link</button><a class="x" data-inspect href="{{ list.close }}" aria-label="Close">×</a></span></div>
+<h2 data-inspector-heading tabindex="-1">{% if held == 0 %}{{ view.entry.area.label }} is free to claim{% else if held == 1 %}{% for claim in view.entry.holders %}{% call links::person(claim.holder, false) %}{% endcall %}{% endfor %} holds {{ view.entry.area.label }}{% else %}{{ view.entry.area.label }} is held by {{ held }} claims{% endif %}</h2>
+<dl class="kv">
+<dt>Paths</dt><dd>{% for path in view.paths %}{% call links::directory(path) %}{% endcall %}{% endfor %}</dd>
+{% if !view.entry.depends_on.is_empty() %}<dt>Depends on</dt><dd>{% for area in view.entry.depends_on %}{% call links::area(area, true) %}{% endcall %}{% endfor %}</dd>{% endif %}
+</dl>
+{% if held > 0 %}<section class="blk"><h3 class="label">Held for</h3><ul class="rowlist">{% for claim in view.entry.holders %}<li>{% if held > 1 %}{% call links::person(claim.holder, true) %}{% endcall %}{% endif %}{% call links::ticket(claim.ticket) %}{% endcall %}<span class="t">{% call links::linked(claim.title) %}{% endcall %}</span><a class="mini" href="/ui/claims/{{ claim.id }}">See the claim</a><span class="r">{% if claim.finished %}<span class="tag tag--bad">ticket closed</span>{% else if claim.held_over_a_week %}<span class="tag tag--warn">held over a week</span>{% else %}held {% call moments::ago(claim.held) %}{% endcall %}{% endif %}</span></li>{% endfor %}</ul></section>{% endif %}
+<section class="blk"><h3 class="label">Tickets that will probably touch it · {{ view.wanted_total }}</h3>
+{% if view.wanted.is_empty() %}<p class="faint">No open ticket names it.</p>{% else %}<ul class="rowlist">{% for item in view.wanted %}<li>{% call links::ticket(item.ticket) %}{% endcall %}<span class="t">{% call links::linked(item.title) %}{% endcall %}</span><span class="r">P{{ item.priority }}</span></li>{% endfor %}</ul>{% if view.wanted_total > view.wanted.len() %}<a class="mini" href="{{ view.queue }}">See all {{ view.wanted_total }} in the queue</a>{% endif %}{% endif %}
+</section>
+</div></aside>
+{% endmatch %}{% endblock %}

@@ -14,4 +14,6 @@
 
 {% macro file(f) %}<a class="file" href="{{ f.main.href }}" title="{{ f.title }}"{% if f.main.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ f.label }}</a>{% endmacro %}
 
+{% macro directory(d) %}<span class="file"><a href="{{ d.main.href }}" title="{{ d.title }}"{% if d.main.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ d.label }}</a></span>{% endmacro %}
+
 {% macro conversation(c) %}<span class="t">{%- for piece in c.subject.pieces -%}{%- if let Some(link) = piece.link -%}<a class="lnk" href="{{ link.href }}"{% if link.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ piece.text }}</a>{%- else -%}<a class="lnk" href="{{ c.href }}">{{ piece.text }}</a>{%- endif -%}{%- endfor -%}</span>{% endmacro %}
