@@ -443,3 +443,64 @@ async fn an_admin_reads_the_pilots_figures_and_nobody_else_does() {
         assert_error(&refused, StatusCode::FORBIDDEN, "forbidden");
     }
 }
+
+#[tokio::test]
+async fn a_reported_head_is_recorded_on_the_claim_in_review_that_records_the_pull_request() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let board = world.member(&alice, "board", Role::Importer).await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    let session = world.session(&bob, "laptop").await;
+    let item = world.item(&bob, None, "Refunds").await;
+    for (path, body) in [
+        (
+            format!("/v1/items/{item}/claim"),
+            json!({"session_id": session}),
+        ),
+        (
+            format!("/v1/items/{item}/review"),
+            json!({"pr": "acme/widgets#7"}),
+        ),
+    ] {
+        let answer = world.post(&bob, &path, body).await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    }
+    let malformed = world
+        .post(
+            &board,
+            "/v1/prs/state",
+            json!({"pr": "acme/widgets#7", "mergeable": true, "head": "bob/7..x"}),
+        )
+        .await;
+    assert_error(
+        &malformed,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_request",
+    );
+    assert_eq!(malformed.body["error"]["details"]["field"], "head");
+    for (pr, head) in [
+        ("acme/widgets#9", "bob/9-head"),
+        ("acme/widgets#7", "bob/7-head"),
+    ] {
+        let answer = world
+            .post(
+                &board,
+                "/v1/prs/state",
+                json!({"pr": pr, "mergeable": true, "head": head}),
+            )
+            .await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        assert_eq!(
+            answer.body,
+            json!({"recorded": false}),
+            "the answer is unchanged"
+        );
+    }
+    let watched = world.get(&board, "/v1/review-claims").await;
+    assert_eq!(
+        watched.body["claims"][0]["branches"],
+        json!({"default": "bob/7-head"}),
+        "{}",
+        watched.body
+    );
+}

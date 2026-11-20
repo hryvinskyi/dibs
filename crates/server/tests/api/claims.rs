@@ -389,3 +389,103 @@ async fn status_shows_live_and_stale_claims_and_holds() {
         ])
     );
 }
+
+#[tokio::test]
+async fn a_claim_naming_its_branches_answers_them_with_their_sources_and_the_list_names_them() {
+    let team = Team::new().await;
+    let worker = team
+        .world
+        .member(&team.alice, "worker", Role::Importer)
+        .await;
+    let item = team
+        .world
+        .item(&team.bob, Some("gh:acme/api#42"), "Rounding")
+        .await;
+    let path = format!("/v1/items/{item}/claim");
+    let claimed = team
+        .world
+        .post(
+            &team.bob,
+            &path,
+            json!({
+                "session_id": team.bob_session,
+                "branches": {"api": "bob/42-refunds", "acme/web": "bob/42-refunds-ui"}
+            }),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    assert_eq!(
+        claimed.body["claim"]["branches"],
+        json!({"api": "bob/42-refunds", "web": "bob/42-refunds-ui"})
+    );
+    assert_eq!(
+        claimed.body["claim"]["branch_sources"],
+        json!({"api": "named", "web": "named"})
+    );
+    let listed = team.world.get(&worker, "/v1/claims").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(
+        listed.body["claims"][0]["branches"],
+        json!({"api": "bob/42-refunds", "web": "bob/42-refunds-ui"}),
+        "the integration's list names the branches and nothing more: {}",
+        listed.body
+    );
+    assert_eq!(
+        listed.body["claims"][0]
+            .as_object()
+            .map(|claim| claim.contains_key("branch_sources")),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn malformed_branches_or_an_unlisted_repository_refuse_the_claim_and_name_why() {
+    let team = Team::new().await;
+    let item = team
+        .world
+        .item(&team.bob, Some("gh:acme/api#42"), "Rounding")
+        .await;
+    let path = format!("/v1/items/{item}/claim");
+    for branches in [
+        json!({"api": "bob/42..refunds"}),
+        json!({"api": 42}),
+        json!(["bob/42-refunds"]),
+        json!({"api": "bob/42-refunds", "acme/api": "bob/42-rounding"}),
+    ] {
+        let refused = team
+            .world
+            .post(
+                &team.bob,
+                &path,
+                json!({"session_id": team.bob_session, "branches": branches}),
+            )
+            .await;
+        assert_error(
+            &refused,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+        );
+        assert_eq!(refused.body["error"]["details"]["field"], "branches");
+    }
+    let unlisted = team
+        .world
+        .post(
+            &team.bob,
+            &path,
+            json!({"session_id": team.bob_session, "branches": {"acme/elsewhere": "bob/42"}}),
+        )
+        .await;
+    assert_error(
+        &unlisted,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "unlisted_repository",
+    );
+    assert_eq!(unlisted.body["error"]["details"]["repo"], "acme/elsewhere");
+    let status = team.world.get(&team.bob, "/v1/status").await;
+    assert_eq!(
+        status.body["live"],
+        json!([]),
+        "no claim was made: {}",
+        status.body
+    );
+}

@@ -604,6 +604,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item,
                     session: who.session,
@@ -817,6 +818,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 StartReviewInput {
+                    head: None,
                     item: reviewed,
                     pr: PrRef::parse("acme/web#7").unwrap(),
                     more: true,

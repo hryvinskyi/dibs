@@ -158,6 +158,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item,
                     session: env.bob.session,
                     areas: Vec::new(),
@@ -195,8 +196,11 @@ mod tests {
         ReportPrState::new(&env.deps)
             .execute(
                 &env.importer,
-                dibs_domain::review::PrRef::parse("acme/widgets#4").unwrap(),
-                false,
+                crate::use_cases::PrStateReport {
+                    pr: dibs_domain::review::PrRef::parse("acme/widgets#4").unwrap(),
+                    mergeable: false,
+                    head: None,
+                },
             )
             .await
             .unwrap();

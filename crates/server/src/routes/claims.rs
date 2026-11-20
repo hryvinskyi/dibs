@@ -1,7 +1,7 @@
 //! `POST /v1/items/{id}/claim`, `/claim/narrow`, `/takeover`, `/release` and `/done`: taking,
 //! narrowing, taking over and ending a claim on a work item.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -9,6 +9,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use dibs_app::named::{EndedClaim, NamedClaim};
 use dibs_app::use_cases::{
@@ -20,6 +21,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::handover::ClaimKind;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::message::Body;
+use dibs_domain::radar::BranchName;
 use dibs_domain::wide::WideReason;
 
 use crate::auth::Authed;
@@ -35,6 +37,7 @@ pub struct ClaimBody {
     areas: Option<Vec<String>>,
     wide: Option<WideBody>,
     kind: Option<String>,
+    branches: Option<Value>,
 }
 
 /// The `wide` object of a claim's body.
@@ -152,14 +155,18 @@ impl PendingNoteView {
 /// acknowledge, which `announced` lists; a renewal adds to the scope it had. `kind` is `feature`
 /// (the default) or `debt`, for a new claim; a renewal keeps the kind it has. A feature claim over
 /// an area other members hold only under debt claims waits for it, which `pending` lists; a
-/// renewal naming another kind than the claim has is refused.
+/// renewal naming another kind than the claim has is refused. `branches`, an object from a
+/// repository (its id, `api`, or its remote's path, `acme/api`) to a branch name, names the branch
+/// the claim's work is on there: it replaces a branch learned from a checkout or named before, and
+/// waits while a pull request's head or a pool worktree's branch the claim recorded still holds.
 ///
 /// # Errors
 /// `held`, `stale`, `area_held` or `wide_overlap` (`409`, naming the member in the way; an area
 /// another claim waits for is `area_held` with `waiting`); `kind_fixed` (`409`);
 /// `wide_and_held`, `invalid_wide`, `item_closed`, `unknown_area`, `invalid_area`,
-/// `ambiguous_area`, `not_found`, `forbidden` for an integration; `invalid_request` for a malformed
-/// body.
+/// `ambiguous_area`, `unlisted_repository` (naming the repository of `branches` as given),
+/// `not_found`, `forbidden` for an integration; `invalid_request` for a malformed body, a
+/// malformed branch or two names of one repository with two branches (naming `branches`).
 pub async fn claim(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -176,6 +183,7 @@ pub async fn claim(
         areas: body.areas.unwrap_or_default(),
         wide: body.wide.map(WideBody::input).transpose()?,
         kind: kind_in_body(body.kind.as_deref())?,
+        branches: branches_in_body(body.branches)?,
     };
     let made = state.app.claim_item.execute(&actor, input).await?;
     let (name, claim, dropped_areas) = match made.outcome {
@@ -204,6 +212,26 @@ pub async fn claim(
     };
     Ok(reply(StatusCode::OK, &answer))
 }
+
+/// The branches a claim's body names: an object from a repository, as the person names it, to a
+/// branch name, each branch name checked. The repositories are resolved by the use case.
+fn branches_in_body(branches: Option<Value>) -> Result<BTreeMap<String, BranchName>, ApiError> {
+    let entries = match branches {
+        None | Some(Value::Null) => return Ok(BTreeMap::new()),
+        Some(Value::Object(entries)) => entries,
+        Some(_) => return Err(ApiError::invalid_field("branches", &NOT_BRANCHES)),
+    };
+    entries
+        .into_iter()
+        .map(|(repo, branch)| match branch {
+            Value::String(text) => Ok((repo, parse("branches", &text, BranchName::parse)?)),
+            _ => Err(ApiError::invalid_field("branches", &NOT_BRANCHES)),
+        })
+        .collect()
+}
+
+/// What `branches` must be.
+const NOT_BRANCHES: &str = "it is an object from a repository to the name of a branch";
 
 /// The body of `POST /v1/items/{id}/claim/narrow`.
 #[derive(Deserialize)]

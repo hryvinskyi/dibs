@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use dibs_app::use_cases::{FeedbackAbout, FeedbackInput, StatsView};
+use dibs_app::use_cases::{FeedbackAbout, FeedbackInput, PrStateReport, StatsView};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::MemberId;
 use dibs_domain::paths::{RelPath, RepoPath};
+use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
 use dibs_domain::report::stats::{DurationFigure, StatsRange};
 use dibs_domain::report::{
@@ -204,6 +205,7 @@ pub async fn feedback(
 pub struct PrStateBody {
     pr: Option<String>,
     mergeable: Option<bool>,
+    head: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -216,11 +218,14 @@ struct PrStateAnswer {
 /// (`mergeable`). A pull request reported as not merging cleanly, or as merging cleanly again
 /// after that, appends `pr_state_reported`; the same report again appends nothing, and one first
 /// reported as merging cleanly is only remembered. Any pull request may be reported, not only one a
-/// claim recorded.
+/// claim recorded. `head`, the pull request's head branch (`bob/42-refunds` or
+/// `refs/heads/bob/42-refunds`), is recorded on the claim in review that records the pull request,
+/// as its branch in the pull request's repository; a pull request no claim in review records, or
+/// one of a repository the project does not list, records nothing.
 ///
 /// # Errors
-/// `forbidden` for a member who is not an admin; `invalid_request` for a missing or malformed `pr`
-/// or a missing `mergeable`.
+/// `forbidden` for a member who is not an admin; `invalid_request` for a missing or malformed `pr`,
+/// a missing `mergeable` or a malformed `head`.
 pub async fn pr_state(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -230,11 +235,17 @@ pub async fn pr_state(
     let Json(body) = body?;
     let pr = parse_required("pr", body.pr.as_deref(), PrRef::parse)?;
     let mergeable = required("mergeable", body.mergeable)?;
-    let recorded = state
-        .app
-        .report_pr_state
-        .execute(&actor, pr, mergeable)
-        .await?;
+    let head = body
+        .head
+        .as_deref()
+        .map(|text| parse("head", text, BranchName::parse_ref))
+        .transpose()?;
+    let report = PrStateReport {
+        pr,
+        mergeable,
+        head,
+    };
+    let recorded = state.app.report_pr_state.execute(&actor, report).await?;
     Ok(reply(StatusCode::OK, &PrStateAnswer { recorded }))
 }
 

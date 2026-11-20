@@ -130,6 +130,7 @@ mod concurrency {
             for n in 0..RACERS {
                 let race = self.clone();
                 let input = ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item: items(n),
                     session: race.racers[n].session,
@@ -254,6 +255,7 @@ mod concurrency {
             .execute(
                 &race.racers[0].actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item,
                     session: race.racers[0].session,

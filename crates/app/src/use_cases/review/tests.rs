@@ -10,6 +10,7 @@ use dibs_domain::event::{
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
 use dibs_domain::message::{Author, Importance};
+use dibs_domain::radar::{BranchName, BranchSource};
 use dibs_domain::review::{ClaimState, PrRef};
 use dibs_domain::slot::{Purpose, SlotName};
 
@@ -53,6 +54,7 @@ async fn claim(env: &Env, who: &Person, item: ItemId, areas: &[&str]) {
         .execute(
             &who.actor,
             ClaimItemInput {
+                branches: Default::default(),
                 wide: None,
                 item,
                 session: who.session,
@@ -75,6 +77,7 @@ async fn review(
         .execute(
             &who.actor,
             StartReviewInput {
+                head: None,
                 item,
                 pr: pr(text),
                 more,
@@ -200,6 +203,7 @@ async fn only_the_holder_asks_for_review_and_an_integration_cannot() {
         .execute(
             &env.importer,
             StartReviewInput {
+                head: None,
                 item,
                 pr: pr("acme/widgets#7"),
                 more: false,
@@ -402,6 +406,7 @@ async fn a_holder_in_review_is_asked_by_a_wide_claim_once_back_at_work() {
         .execute(
             &env.alice.actor,
             ClaimItemInput {
+                branches: Default::default(),
                 item: wide,
                 session: env.alice.session,
                 areas: Vec::new(),
@@ -771,4 +776,207 @@ async fn a_pull_request_another_claim_recorded_is_refused_naming_its_holder_and_
             .as_deref(),
         Some("gh:acme/widgets#42")
     );
+}
+
+/// `who` records `text` on their claim of `item`, with its head branch `head`.
+async fn review_head(
+    env: &Env,
+    who: &Person,
+    item: ItemId,
+    text: &str,
+    more: bool,
+    head: &str,
+) -> ReviewedClaim {
+    StartReview::new(&env.deps)
+        .execute(
+            &who.actor,
+            StartReviewInput {
+                item,
+                pr: pr(text),
+                more,
+                head: Some(BranchName::parse(head).unwrap()),
+            },
+        )
+        .await
+        .unwrap()
+}
+
+/// `who` renews their claim of `item`, naming `branch` in the project's one repository.
+async fn name_branch(env: &Env, who: &Person, item: ItemId, branch: &str) {
+    ClaimItem::new(&env.deps)
+        .execute(
+            &who.actor,
+            ClaimItemInput {
+                branches: [("default".to_owned(), BranchName::parse(branch).unwrap())].into(),
+                item,
+                session: who.session,
+                areas: Vec::new(),
+                wide: None,
+                kind: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The branch `item`'s claim records in the project's one repository, and where it was learned.
+async fn branch_of(env: &Env, item: ItemId) -> Option<(String, BranchSource)> {
+    let claim = stored(env, item).await?;
+    let recorded = claim.branches.get(&dibs_domain::repo::RepoId::implicit())?;
+    Some((recorded.branch.to_string(), recorded.source.clone()))
+}
+
+/// The branches the log recorded after the first `skip` events, with their sources.
+async fn recordings(env: &Env, skip: usize) -> Vec<(String, dibs_domain::radar::BranchSourceKind)> {
+    env.kinds_after(skip)
+        .await
+        .into_iter()
+        .filter_map(|kind| match kind {
+            EventKind::BranchRecorded(recorded) => {
+                Some((recorded.branch.to_string(), recorded.source))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn from_pr(branch: &str, text: &str) -> Option<(String, BranchSource)> {
+    Some((branch.to_owned(), BranchSource::PullRequest(pr(text))))
+}
+
+#[tokio::test]
+async fn a_head_named_with_a_pull_request_is_kept_against_weaker_recordings_while_in_review() {
+    use crate::use_cases::Heartbeat;
+    use crate::use_cases::testing::in_checkout;
+    use dibs_domain::radar::BranchSourceKind;
+
+    let env = Env::with_settings(SETTINGS).await;
+    let item = env.item("gh:acme/widgets#42").await;
+    claim(&env, &env.bob, item, &[]).await;
+    let before = env.events().await.len();
+    let reviewed = review_head(
+        &env,
+        &env.bob,
+        item,
+        "acme/widgets#7",
+        false,
+        "bob/42-refunds",
+    )
+    .await;
+    let names: Vec<&str> = env
+        .kinds_after(before)
+        .await
+        .iter()
+        .map(EventKind::name)
+        .collect();
+    assert_eq!(names, ["review_started", "branch_recorded"]);
+    assert_eq!(
+        recordings(&env, before).await,
+        [("bob/42-refunds".to_owned(), BranchSourceKind::PullRequest)]
+    );
+    assert_eq!(
+        reviewed
+            .claim
+            .claim
+            .branch_source(&dibs_domain::repo::RepoId::implicit()),
+        Some(&BranchSource::PullRequest(pr("acme/widgets#7"))),
+        "the answer shows the claim as it stands after"
+    );
+
+    let later = env.events().await.len();
+    Heartbeat::new(&env.deps)
+        .execute(
+            &env.bob.actor,
+            env.bob.session,
+            Some(&in_checkout('a', Some("bob/42-checkout"))),
+        )
+        .await
+        .unwrap();
+    name_branch(&env, &env.bob, item, "bob/42-named").await;
+    assert!(recordings(&env, later).await.is_empty());
+    assert_eq!(
+        branch_of(&env, item).await,
+        from_pr("bob/42-refunds", "acme/widgets#7")
+    );
+
+    review_head(
+        &env,
+        &env.bob,
+        item,
+        "acme/widgets#7",
+        false,
+        "bob/42-refunds-2",
+    )
+    .await;
+    assert_eq!(
+        branch_of(&env, item).await,
+        from_pr("bob/42-refunds-2", "acme/widgets#7"),
+        "a new head of the same pull request moves the branch"
+    );
+}
+
+#[tokio::test]
+async fn another_pull_requests_head_waits_while_the_first_is_recorded_and_takes_over_once_merged() {
+    let env = Env::with_settings(SETTINGS).await;
+    let item = env.item("gh:acme/widgets#42").await;
+    claim(&env, &env.bob, item, &[]).await;
+    review_head(&env, &env.bob, item, "acme/widgets#7", true, "bob/42-first").await;
+    let before = env.events().await.len();
+    review_head(
+        &env,
+        &env.bob,
+        item,
+        "acme/widgets#8",
+        true,
+        "bob/42-second",
+    )
+    .await;
+    assert!(recordings(&env, before).await.is_empty());
+    assert_eq!(
+        branch_of(&env, item).await,
+        from_pr("bob/42-first", "acme/widgets#7")
+    );
+    assert_eq!(
+        report(&env, "acme/widgets#7", merged()).await,
+        PrReportOutcome::StillInReview(item)
+    );
+    review_head(
+        &env,
+        &env.bob,
+        item,
+        "acme/widgets#8",
+        true,
+        "bob/42-second",
+    )
+    .await;
+    assert_eq!(
+        branch_of(&env, item).await,
+        from_pr("bob/42-second", "acme/widgets#8"),
+        "the claim no longer records the first pull request"
+    );
+}
+
+#[tokio::test]
+async fn once_a_claim_leaves_review_a_named_branch_replaces_the_pull_requests_head() {
+    let env = Env::with_settings(SETTINGS).await;
+    let closed = env.item("gh:acme/widgets#42").await;
+    let dropped = env.item("gh:acme/widgets#43").await;
+    for (item, text) in [(closed, "acme/widgets#7"), (dropped, "acme/widgets#9")] {
+        claim(&env, &env.bob, item, &[]).await;
+        review_head(&env, &env.bob, item, text, false, "bob/head").await;
+    }
+    assert_eq!(
+        report(&env, "acme/widgets#7", ReportedEnd::Closed).await,
+        PrReportOutcome::Working(closed)
+    );
+    drop_pr(&env, &env.bob, dropped, "acme/widgets#9")
+        .await
+        .unwrap();
+    for item in [closed, dropped] {
+        name_branch(&env, &env.bob, item, "bob/named").await;
+        assert_eq!(
+            branch_of(&env, item).await,
+            Some(("bob/named".to_owned(), BranchSource::Named))
+        );
+    }
 }

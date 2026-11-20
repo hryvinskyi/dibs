@@ -377,6 +377,8 @@ fn status_of(error: &AppError) -> StatusCode {
         | AppError::Wide(WideScopeError::NoAreas)
         | AppError::Grant(GrantRefused::SelfGrant | GrantRefused::UnknownArea { .. })
         | AppError::Create(CreateRefused::UnlistedRepository { .. })
+        | AppError::UnlistedRepository { .. }
+        | AppError::BranchNamedTwice { .. }
         | AppError::Review(Refusal {
             reason: ReviewRefused::UnknownRepository { .. },
             ..
@@ -515,6 +517,11 @@ fn details_of(error: &AppError) -> Map<String, Value> {
         }
         AppError::Create(CreateRefused::UnlistedRepository { remote }) => {
             details.put("remote", remote);
+        }
+        AppError::UnlistedRepository { repo } => details.put("repo", repo),
+        AppError::BranchNamedTwice { repo } => {
+            details.put("field", "branches");
+            details.put("repo", repo);
         }
         AppError::EditCheck(EditCheckRefused::UnknownRepo { repo }) => details.put("repo", repo),
         AppError::Slot(Refusal {
@@ -775,6 +782,20 @@ mod tests {
                 AppError::Worktree(WorktreeRefused::NotHeld),
                 StatusCode::CONFLICT,
                 "worktree_not_held",
+            ),
+            (
+                AppError::UnlistedRepository {
+                    repo: "acme/elsewhere".to_owned(),
+                },
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "unlisted_repository",
+            ),
+            (
+                AppError::BranchNamedTwice {
+                    repo: dibs_domain::repo::RepoId::parse("api").unwrap(),
+                },
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request",
             ),
         ];
         for (error, status, code) in cases {

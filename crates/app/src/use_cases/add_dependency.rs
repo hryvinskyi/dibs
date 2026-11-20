@@ -304,6 +304,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item: a,
                     session: env.bob.session,
@@ -323,6 +324,7 @@ mod tests {
             .execute(
                 &env.alice.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item: b,
                     session: env.alice.session,

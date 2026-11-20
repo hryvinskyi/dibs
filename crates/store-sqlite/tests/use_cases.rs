@@ -204,6 +204,7 @@ mod use_cases {
             for (n, item) in items.iter().copied().enumerate() {
                 let race = self.clone();
                 let input = ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item,
                     session: race.racers[n].session,
@@ -472,6 +473,7 @@ mod use_cases {
             .execute(
                 &race.admin,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item: debt,
                     session: admin_session,
                     areas: vec!["billing".to_owned()],
@@ -568,6 +570,7 @@ mod use_cases {
             .execute(
                 &race.racers[0].actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item,
                     session: race.racers[0].session,
@@ -629,6 +632,7 @@ mod use_cases {
             .execute(
                 &alice,
                 ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item,
                     session: alices_session,
@@ -670,6 +674,7 @@ mod use_cases {
                 .execute(
                     &dave,
                     ClaimItemInput {
+                        branches: Default::default(),
                         wide: None,
                         item,
                         session: daves_session,
@@ -882,6 +887,7 @@ mod use_cases {
             .execute(
                 &admin,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item,
                     session,
                     areas: Vec::new(),
@@ -898,6 +904,7 @@ mod use_cases {
             .execute(
                 &admin,
                 StartReviewInput {
+                    head: None,
                     item,
                     pr: pr.clone(),
                     more: false,
@@ -1002,6 +1009,7 @@ mod use_cases {
                 .execute(
                     person,
                     ClaimItemInput {
+                        branches: Default::default(),
                         item,
                         session,
                         areas: Vec::new(),
@@ -1101,6 +1109,7 @@ mod use_cases {
                 .execute(
                     &admin,
                     ClaimItemInput {
+                        branches: Default::default(),
                         item,
                         session: *session,
                         areas: Vec::new(),
@@ -1225,6 +1234,7 @@ mod use_cases {
                     .execute(
                         &person,
                         ClaimItemInput {
+                            branches: Default::default(),
                             item,
                             session,
                             areas: Vec::new(),
@@ -1585,6 +1595,7 @@ mod use_cases {
             .execute(
                 &alice,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item: open,
                     session,
                     areas: Vec::new(),
@@ -1672,6 +1683,7 @@ mod use_cases {
                     .execute(
                         &bob,
                         ClaimItemInput {
+                            branches: Default::default(),
                             item,
                             session,
                             areas: Vec::new(),

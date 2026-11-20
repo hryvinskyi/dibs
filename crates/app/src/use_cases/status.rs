@@ -289,6 +289,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item,
                     session: who.session,

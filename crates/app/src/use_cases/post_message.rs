@@ -303,6 +303,7 @@ mod tests {
                 .execute(
                     &env.alice.actor,
                     ClaimItemInput {
+                        branches: Default::default(),
                         item,
                         session: env.alice.session,
                         areas: vec![area.to_owned()],
@@ -318,6 +319,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item: wide,
                     session: env.bob.session,
                     areas: Vec::new(),

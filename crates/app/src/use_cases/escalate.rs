@@ -521,6 +521,7 @@ mod tests {
             .execute(
                 &carol.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item,
                     session: carol.session,
                     areas: vec!["billing".to_owned()],

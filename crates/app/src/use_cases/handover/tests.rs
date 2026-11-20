@@ -43,6 +43,7 @@ async fn claim(
         .execute(
             &who.actor,
             ClaimItemInput {
+                branches: Default::default(),
                 item,
                 session: who.session,
                 areas: areas.iter().map(|area| (*area).to_owned()).collect(),
@@ -312,6 +313,7 @@ async fn a_debt_claim_in_review_is_asked_only_once_it_is_worked_on_again() {
         .execute(
             &env.alice.actor,
             StartReviewInput {
+                head: None,
                 item: debt,
                 pr: pr.clone(),
                 more: false,
@@ -528,6 +530,7 @@ async fn review(env: &Env, item: ItemId, text: &str, more: bool) {
         .execute(
             &env.alice.actor,
             StartReviewInput {
+                head: None,
                 item,
                 pr: PrRef::parse(text).unwrap(),
                 more,

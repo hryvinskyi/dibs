@@ -636,6 +636,7 @@ mod tests {
             .execute(
                 &env.alice.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item: held,
                     session: env.alice.session,
                     areas: vec!["billing".to_owned()],
@@ -649,6 +650,7 @@ mod tests {
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item: wide,
                     session: env.bob.session,
                     areas: Vec::new(),
@@ -723,6 +725,7 @@ mod tests {
         let env = Env::new().await;
         let claim =
             |who: &crate::use_cases::testing::Person, item, areas: &[&str]| ClaimItemInput {
+                branches: Default::default(),
                 wide: None,
                 item,
                 session: who.session,
@@ -899,6 +902,7 @@ mod tests {
                 .execute(
                     &env.bob.actor,
                     ClaimItemInput {
+                        branches: Default::default(),
                         item,
                         session: env.bob.session,
                         areas: Vec::new(),

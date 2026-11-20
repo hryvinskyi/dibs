@@ -12,7 +12,7 @@ use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
 use dibs_domain::paths::RelPath;
 use dibs_domain::pr_status::{PrState, pr_status};
-use dibs_domain::radar::BranchName;
+use dibs_domain::radar::{BranchName, BranchSource};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::review::{
     DropRequest, PrEnd, PrRef, PrSettled, ReviewRequest, decide_drop_pr, decide_pr_end,
@@ -41,6 +41,8 @@ pub struct StartReviewInput {
     pub pr: PrRef,
     /// Whether more pull requests of the item follow this one.
     pub more: bool,
+    /// The pull request's head branch, when the holder names it.
+    pub head: Option<BranchName>,
 }
 
 /// A claim in review, with its item.
@@ -56,6 +58,12 @@ pub struct ReviewedClaim {
 /// no longer goes stale while the pull request is open. A request to hand one of its areas over
 /// asked before is no longer counted, in the same transaction, so that it is asked again once the
 /// claim is worked on again.
+///
+/// A head branch named with the pull request is recorded as the claim's branch in the pull
+/// request's repository, learned from that pull request: it replaces any branch learned another
+/// way, and a head of the same pull request, but not another pull request's head while the claim
+/// still records the pull request whose head it holds. A change of branch appends
+/// `BranchRecorded` and drops the claim's footprint of that repository.
 pub struct StartReview {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -125,6 +133,25 @@ impl StartReview {
             )
             .await?;
         }
+        let claim = match (input.head, settings.repo_of_pr(&request.pr)) {
+            (Some(head), Some(repo)) => {
+                Radar {
+                    ids: &*self.ids,
+                    schemes: &self.ref_schemes,
+                    settings: &settings,
+                    now,
+                }
+                .record_branch(
+                    &mut work,
+                    &started.claim,
+                    &repo.id,
+                    &head,
+                    BranchSource::PullRequest(request.pr.clone()),
+                )
+                .await?
+            }
+            _ => started.claim.clone(),
+        };
         Handovers {
             ids: &*self.ids,
             schemes: &self.ref_schemes,
@@ -134,7 +161,7 @@ impl StartReview {
         .settle(&mut work)
         .await?;
         let reviewed = ReviewedClaim {
-            claim: Names::load(&mut work).await?.claim(started.claim)?,
+            claim: Names::load(&mut work).await?.claim(claim)?,
             item: ItemName::of(&item, &self.ref_schemes),
         };
         work.commit(&*self.notifier).await?;

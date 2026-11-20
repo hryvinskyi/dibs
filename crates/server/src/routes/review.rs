@@ -39,6 +39,7 @@ pub const MAX_MERGED_FILES: usize = 3000;
 pub struct ReviewBody {
     pr: Option<String>,
     more: Option<bool>,
+    head: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -50,12 +51,16 @@ struct ReviewAnswer {
 /// Records the pull request `pr` (`<owner>/<name>#<number>`) on the caller's claim of the item: the
 /// claim is in review, keeps its areas and does not go stale while the pull request is open. With
 /// `more: true`, merging it returns the claim to work rather than completing it, for the next pull
-/// request of the item. Recording one the claim has changes at most `more`.
+/// request of the item. Recording one the claim has changes at most `more`. `head`, the pull
+/// request's head branch (`bob/42-refunds` or `refs/heads/bob/42-refunds`), is recorded as the
+/// claim's branch in the pull request's repository, learned from that pull request: it replaces a
+/// branch learned any other way, and waits while the claim still records another pull request
+/// whose head it holds there.
 ///
 /// # Errors
 /// `no_claim`, `claim_stale`, `pr_recorded` (`409`); `not_holder` (`403`, naming the holder);
 /// `unlisted_repository` (`422`); `not_found`; `forbidden` for an integration; `invalid_request`
-/// for a missing or malformed `pr`.
+/// for a missing or malformed `pr` or a malformed `head`.
 pub async fn start(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -70,6 +75,11 @@ pub async fn start(
         item,
         pr: parse_required("pr", body.pr.as_deref(), PrRef::parse)?,
         more: body.more.unwrap_or(false),
+        head: body
+            .head
+            .as_deref()
+            .map(|text| parse("head", text, BranchName::parse_ref))
+            .transpose()?,
     };
     let reviewed = state.app.start_review.execute(&actor, input).await?;
     Ok(reply(

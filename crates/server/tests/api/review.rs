@@ -594,3 +594,48 @@ async fn the_pr_status_of_a_release_branch_fails_while_a_slot_that_freezes_its_p
         assert_eq!(read(base).await.body["state"], "success", "{base}");
     }
 }
+
+#[tokio::test]
+async fn a_review_naming_its_head_shows_it_learned_from_the_pull_request() {
+    let team = Team::new().await;
+    let path = format!("/v1/items/{}/review", team.item);
+    let malformed = team
+        .world
+        .post(
+            &team.bob,
+            &path,
+            json!({"pr": "acme/api#7", "head": "bob/42 refunds"}),
+        )
+        .await;
+    assert_error(
+        &malformed,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_request",
+    );
+    assert_eq!(malformed.body["error"]["details"]["field"], "head");
+    let reviewed = team
+        .world
+        .post(
+            &team.bob,
+            &path,
+            json!({"pr": "acme/api#7", "head": "refs/heads/bob/42-refunds"}),
+        )
+        .await;
+    assert_eq!(reviewed.status, StatusCode::OK, "{}", reviewed.body);
+    assert_eq!(
+        reviewed.body["claim"]["branches"],
+        json!({"api": "bob/42-refunds"})
+    );
+    assert_eq!(
+        reviewed.body["claim"]["branch_sources"],
+        json!({"api": "pull_request"})
+    );
+    let watched = team.world.get(&team.worker, "/v1/review-claims").await;
+    assert_eq!(watched.status, StatusCode::OK, "{}", watched.body);
+    assert_eq!(
+        watched.body["claims"][0]["branches"],
+        json!({"api": "bob/42-refunds"}),
+        "{}",
+        watched.body
+    );
+}

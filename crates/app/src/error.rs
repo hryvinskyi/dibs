@@ -13,6 +13,7 @@ use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId}
 use dibs_domain::import::BatchRefused;
 use dibs_domain::item::{CreateRefused, ItemStatus};
 use dibs_domain::message::{AckRefused, ImportanceLimited, RecipientsError};
+use dibs_domain::repo::RepoId;
 use dibs_domain::review::{DropRefused, ReviewRefused};
 use dibs_domain::settings::{AreaLookupError, SettingsError};
 use dibs_domain::slot::{BeatRefused, SlotRefused};
@@ -159,6 +160,18 @@ pub enum AppError {
     /// The import batch is refused as a whole.
     #[error(transparent)]
     Batch(#[from] BatchRefused),
+    /// A branch was named in a repository the project does not list.
+    #[error("this project lists no repository '{repo}'; name a branch in one it lists")]
+    UnlistedRepository {
+        /// The repository as the request named it.
+        repo: String,
+    },
+    /// Two names of one repository were given two different branches.
+    #[error("the repository {repo} is named twice with two different branches; name one")]
+    BranchNamedTwice {
+        /// The repository both names resolve to.
+        repo: RepoId,
+    },
     /// An area named in the request does not resolve.
     #[error(transparent)]
     Area(#[from] AreaLookupError),
@@ -296,7 +309,9 @@ impl AppError {
             },
             Self::Revoke(RevokeRefused::NotGrantor) => "not_grantor",
             Self::AskGrant(AskRefused::NoLiveClaim) => "grantee_has_no_claim",
-            Self::Create(CreateRefused::UnlistedRepository { .. }) => "unlisted_repository",
+            Self::Create(CreateRefused::UnlistedRepository { .. })
+            | Self::UnlistedRepository { .. } => "unlisted_repository",
+            Self::BranchNamedTwice { .. } => "invalid_request",
             Self::Dependency(refused) => match refused {
                 DependencyRefused::SelfDependency => "self_dependency",
                 DependencyRefused::Cycle => "dependency_cycle",

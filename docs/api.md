@@ -99,7 +99,7 @@ cause of an internal failure and answers `internal`.
 | `410` | `cursor_expired` (details: `pruned_through`) |
 | `413` | `body_too_large` |
 | `415` | `unsupported_media_type` |
-| `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`; `pr` for a review), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`), `worktree_names_invalid` (`worktree`, for a name given twice) |
+| `422` | `invalid_request` (details: `field`), `unknown_area` (`area`), `invalid_area`, `ambiguous_area` (`candidates`), `unknown_repo` (`repo`), `unlisted_repository` (`remote`; `pr` for a review; `repo` for a claim's `branches`), `self_grant`, `not_a_recipient`, `no_recipients`, `invalid_settings`, `self_dependency`, `batch_too_large` (`max`), `invalid_batch`, `duplicate_ref` (`ref`), `worktree_names_invalid` (`worktree`, for a name given twice) |
 | `426` | `client_too_old` (details: `min_client`) |
 | `429` | `too_many_attempts` (details: `retry_after`), `importance_limited` (`limit`, `frees_at`) |
 | `500` | `internal` |
@@ -437,8 +437,11 @@ there. Refusals: `dependency_cycle` (`409`, the blocker already waits for the it
 
 ### Claims
 
-`POST /v1/items/{id}/claim`, body `{ "session_id": 7, "areas": ["billing"] }`. An area is written as a person writes
-it: `repo:area`, or a bare name that exactly one repository declares. Answers
+`POST /v1/items/{id}/claim`, body `{ "session_id": 7, "areas": ["billing"], "branches": { "api": "bob/42-refunds" } }`.
+An area is written as a person writes it: `repo:area`, or a bare name that exactly one repository declares. `branches`
+(optional) names the branch the claim's work is on in each repository, the repository by its id (`api`) or the path of
+its `remote` (`acme/api`; in a project that lists no repositories, `default`); each is recorded as `named` (see
+[Branches and overlaps](#branches-and-overlaps)) on the claim made or renewed, in the same transaction. Answers
 
 ```json
 { "outcome": "new", "claim": { "item": 12, "holder": "alice", "areas": ["default:billing"], "…": "…" }, "dropped_areas": [],
@@ -451,8 +454,11 @@ because another member holds them now, another live wide claim names them now, o
 `held` (another member's live claim holds the item), `stale` (their claim is stale: only a takeover may take it),
 `area_held` (another member's live claim holds an area, or another claim already waits for it to be handed over; see
 below), `kind_fixed`, `unknown_area`, `invalid_area`, `ambiguous_area`, `item_closed` (a dropped item, or a done one
-no tracker has open), `invalid_request` for a `kind` that is neither `feature` nor `debt`. A done item an importer lists
-and its tracker has not closed (`closed: false`) is claimed again: the work went on to be checked and came back, so the
+no tracker has open), `unlisted_repository` (`422`, `details.repo` the repository of `branches` as written) for a
+branch in a repository the project does not list, `invalid_request` for a `kind` that is neither `feature` nor `debt`,
+and for `branches` that is not an object from a repository to a branch name, names a malformed branch, or names one
+repository twice with two branches (`details.field` `branches`). A refused `branches` writes nothing. A done item an
+importer lists and its tracker has not closed (`closed: false`) is claimed again: the work went on to be checked and came back, so the
 claim is made as a new one, the item is `claimed` again, and the log appends `item_reopened` before `claimed`. A local
 item has no tracker to say so and stays done; a dropped item stays dropped. An area belongs to one member at a time. A claim on a blocked item is made all the same — dependent work
 is often started in parallel — and `blocked_by` lists, as item refs, the items it waits for that are neither done nor
@@ -612,7 +618,8 @@ A teammate works on a branch and opens a pull request; whoever the project lets 
 the claim alive through that wait and ends it with the merge, through these routes. dibs speaks no forge API: an
 integration watching the forge calls the `import` routes.
 
-`POST /v1/items/{id}/review`, body `{ "pr": "acme/api#12", "more": false }`, records a pull request on the caller's live
+`POST /v1/items/{id}/review`, body `{ "pr": "acme/api#12", "more": false, "head": "bob/42-refunds" }`, records a pull
+request on the caller's live
 claim of the item. A pull request is written `<owner>/<name>#<number>` and compared in one form (lowercased, no leading
 zeros); in a project that lists repositories it must belong to one of them, matched by the path of its `remote`. The
 claim is **in review**: it keeps its areas, so nobody else edits the files under review (their edits answer `held_by`
@@ -620,10 +627,13 @@ with `reason: "in_review"` and the pull requests); it never goes stale while it 
 and cannot be taken over; and its holder may go on editing its branch for review comments. A claim may record several
 pull requests — an API change and its client in two repositories, or a series — and `more: true` says more pull
 requests of the item follow the ones recorded: the latest request decides it. Recording one the claim has changes at most
-`more`. Answers `{ "claim": claim, "item": item ref }` and appends `review_started` with every pull request recorded.
+`more`. `head` (optional; `bob/42-refunds` or `refs/heads/bob/42-refunds`) is the pull request's head branch: it is
+recorded as the claim's branch in the pull request's repository, learned from that pull request (`pull_request`, see
+[Branches and overlaps](#branches-and-overlaps)). Answers `{ "claim": claim, "item": item ref }` and appends
+`review_started` with every pull request recorded, then `branch_recorded` when the head changed the claim's branch.
 Refusals: `no_claim` (`409`), `not_holder` (`403`, `details.holder`), `claim_stale` (`409`: claim the item again first),
 `pr_recorded` (`409`: another claim recorded it; `details` name its `item`, `item_ref` and `holder`),
-`unlisted_repository` (`422`, `details.pr`), `invalid_request`.
+`unlisted_repository` (`422`, `details.pr`), `invalid_request` (a missing or malformed `pr`, a malformed `head`).
 
 `POST /v1/items/{id}/review/drop`, body `{ "pr": "acme/api#12" }`, removes a pull request the holder recorded by mistake
 (`pr_dropped`). With others left the claim stays in review as it was; with none left it is worked on again, seen now
@@ -701,9 +711,11 @@ which branch each claim works on, keeps what each of those branches changes, and
 per repository (`branches` in the claim) and where it was learned from (`branch_sources`), and `branch_recorded`, which
 carries the `source`, marks each change of branch. What records it, strongest first:
 
-1. `pull_request`: the head branch of a pull request the claim recorded for review;
+1. `pull_request`: the head branch of a pull request the claim recorded for review, sent as `head` with the review
+   (`POST /v1/items/{id}/review`) or by an integration with the pull request's state (`POST /v1/prs/state`), recorded
+   in the repository the pull request belongs to; the head a merge report carries records nothing;
 2. `worktree`: the branch of a pool worktree the member holds for the claim's item;
-3. `named`: a branch the claim named when it was taken or renewed;
+3. `named`: a branch the claim named when it was taken or renewed (`branches` of `POST /v1/items/{id}/claim`);
 4. `checkout`: the branch of the checkout a session works in, sent by a heartbeat or an edit check that reserves, under
    three conditions judged within the project's `stale_after`: the session took or last renewed exactly one live claim
    it works on (a claim in review does not count), and for an edit check the edits were attributed to that claim; the
@@ -715,7 +727,10 @@ A weaker source never replaces a stronger one while the stronger one holds: a pu
 review and records that pull request, a worktree's branch while the worktree is held for the item by a hold that has
 not gone silent, a named branch until the claim names another or a stronger source replaces it. A checkout's branch
 holds against nothing. Two sources of one strength but another pull request or another worktree do not replace each
-other while the recorded one holds. The same branch learned from another source changes the source alone. When the
+other while the recorded one holds: while a claim records the pull request whose head it holds, another pull
+request's head in that repository waits, whichever route sends it, and takes over once the first is merged, closed or
+dropped. Once a claim leaves review, a pull request's head no longer holds, and a named branch, or even a checkout's,
+replaces it. The same branch learned from another source changes the source alone. When the
 branch changes, the claim's footprint of that repository goes with what it made: it measured the branch the claim left.
 The command line reads the branch from git's own files (`HEAD` of the directory `GIT_DIR` names, or of the nearest
 `.git`, in a linked worktree the one its `.git` file names), never by starting git, and sends none on a detached head
@@ -1189,7 +1204,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `review_ended` | `item`, `member` (the claim is worked on again) |
 | `completed_by_merge` | `item`, `member` (the merge of its last pull request completed the claim) |
 | `completed_by_close` | `item`, `member` (the tracker closed the claim's item; the server completed the claim) |
-| `branch_recorded` | `item`, `member`, `repo`, `branch` (the branch the claim's work is on there now) |
+| `branch_recorded` | `item`, `member`, `repo`, `branch` (the branch the claim's work is on there now), `source` (`pull_request`, `worktree`, `named` or `checkout`; `checkout` for an event stored before sources were kept) |
 | `footprint_changed` | `item`, `member`, `repo`, `branch`, `paths` (how many), `truncated` |
 | `overlap_found` | `kind` (`same_file`, `contract`, `main_moved`), `items`, `pr` (`main_moved`; else `null`), `paths` (the first 100) |
 | `yield_requested` | `area`, `from` (the debt claim's item), `to` (the item of the feature claim that waits for it) |
@@ -1469,12 +1484,18 @@ line or secret. `refusal` is 4 to 8 lowercase hexadecimal digits after `r-`, not
 `feedback_given`. Refusals: `invalid_request` naming `kind`, `refusal`, `repo`, `path` or `reason`; `unknown_repo` for a
 repository the project does not list.
 
-`POST /v1/prs/state` (import), body `{ "pr": "acme/widgets#7", "mergeable": false }`: whether the pull request merges
+`POST /v1/prs/state` (import), body `{ "pr": "acme/widgets#7", "mergeable": false, "head": "bob/42-refunds" }`: whether
+the pull request merges
 cleanly into its base, as the forge says. A pull request reported as not merging cleanly, or merging cleanly again after
 that, appends `pr_state_reported`; the same report again appends nothing, and one first reported as merging cleanly is
 only remembered. Every report, a repeat included, is kept as the integration's last word on the pull request, so the
 retention removes it 90 days after the integration last reported it. Any pull request may be reported, not only one a
-claim recorded. Answers `{ "recorded": true }` when it appended the event. Refusals: `invalid_request` for a missing or malformed `pr` or a missing `mergeable`.
+claim recorded. `head` (optional; `bob/42-refunds` or `refs/heads/bob/42-refunds`), the pull request's head branch, is
+recorded on the claim in review that records the pull request, as its branch in the pull request's repository learned
+from that pull request (`pull_request`, see [Branches and overlaps](#branches-and-overlaps)); a pull request no claim in
+review records, or one of a repository the project does not list, records nothing. Answers `{ "recorded": true }` when
+it appended `pr_state_reported`, whatever the head did. Refusals: `invalid_request` for a missing or malformed `pr`, a
+missing `mergeable` or a malformed `head`.
 
 `GET /v1/stats?from=2026-03-02&to=2026-03-08` (admin): the figures of the days from `from` to `to`, both included, at
 most 92; `to` is today (UTC) when absent, `from` six days before `to`. Answers

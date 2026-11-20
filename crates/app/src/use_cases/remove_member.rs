@@ -329,6 +329,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item,
                     session: who.session,
                     areas: vec!["billing".to_owned()],
@@ -447,6 +448,7 @@ mod tests {
             .execute(
                 &erin_person.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item: late,
                     session: erin_person.session,
                     areas: Vec::new(),
@@ -585,6 +587,7 @@ mod tests {
                 .execute(
                     &erin_person.actor,
                     ClaimItemInput {
+                        branches: Default::default(),
                         item,
                         session: erin_person.session,
                         areas: Vec::new(),

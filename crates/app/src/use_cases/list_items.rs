@@ -89,6 +89,7 @@ mod tests {
                 .execute(
                     &env.bob.actor,
                     ClaimItemInput {
+                        branches: Default::default(),
                         wide: None,
                         item,
                         session: env.bob.session,

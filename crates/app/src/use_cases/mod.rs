@@ -119,7 +119,7 @@ pub use register_session::{RegisterSession, RegisterSessionInput};
 pub use release::Release;
 pub use remove_dependency::RemoveDependency;
 pub use remove_member::{RemoveMember, RemovedMember};
-pub use report_pr_state::ReportPrState;
+pub use report_pr_state::{PrStateReport, ReportPrState};
 pub use resolve_ui_session::ResolveUiSession;
 pub use review::{
     DropPr, DropPrInput, PrReport, PrReportOutcome, PrStatusQuery, PrStatusView, ReadPrStatus,

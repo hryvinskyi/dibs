@@ -182,6 +182,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item,
                     session: who.session,
                     areas: Vec::new(),
@@ -404,7 +405,7 @@ mod tests {
         use dibs_domain::report::{DayCounts, DayReport, HeartbeatReports, Tally};
         use dibs_domain::review::PrRef;
 
-        use crate::use_cases::{Heartbeat, ReportPrState};
+        use crate::use_cases::{Heartbeat, PrStateReport, ReportPrState};
 
         let env = Env::new().await;
         env.advance(Duration::days(1));
@@ -424,7 +425,14 @@ mod tests {
             .unwrap();
         let pr = PrRef::parse("acme/widgets#3").unwrap();
         ReportPrState::new(&env.deps)
-            .execute(&env.importer, pr.clone(), false)
+            .execute(
+                &env.importer,
+                PrStateReport {
+                    pr: pr.clone(),
+                    mergeable: false,
+                    head: None,
+                },
+            )
             .await
             .unwrap();
         env.advance(Duration::days(91));

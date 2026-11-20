@@ -70,6 +70,7 @@ async fn claim(env: &Env, who: &Person, item: ItemId) {
         .execute(
             &who.actor,
             ClaimItemInput {
+                branches: Default::default(),
                 wide: None,
                 item,
                 session: who.session,
@@ -398,6 +399,7 @@ async fn one_members_two_claims_never_overlap() {
         .execute(
             &env.bob.actor,
             ClaimItemInput {
+                branches: Default::default(),
                 wide: None,
                 item: second,
                 session: other,
@@ -639,6 +641,7 @@ async fn review(env: &Env, who: &Person, item: ItemId, pr: &str, more: bool) {
         .execute(
             &who.actor,
             StartReviewInput {
+                head: None,
                 item,
                 pr: PrRef::parse(pr).unwrap(),
                 more,
@@ -669,6 +672,7 @@ async fn a_merge_moves_the_base_under_every_branch_behind_it_its_authors_other_w
         .execute(
             &env.alice.actor,
             ClaimItemInput {
+                branches: Default::default(),
                 wide: None,
                 item: alices_other,
                 session: second,
@@ -951,6 +955,7 @@ async fn two_sessions_of_one_machine_on_two_branches_never_move_each_others_clai
             .execute(
                 &env.bob.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     wide: None,
                     item,
                     session: at,

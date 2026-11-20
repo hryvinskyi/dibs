@@ -163,6 +163,7 @@ mod repositories {
                 .execute(
                     actor,
                     ClaimItemInput {
+                        branches: Default::default(),
                         wide: None,
                         item,
                         session,

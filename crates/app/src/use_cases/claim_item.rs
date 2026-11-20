@@ -12,7 +12,9 @@ use dibs_domain::handover::ClaimKind;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MessageId, SessionId};
 use dibs_domain::item::{ClaimOpening, ItemStatus};
+use dibs_domain::radar::{BranchName, BranchSource};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
+use dibs_domain::repo::RepoId;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::wide::{WideReason, WideScope, inside_wide};
 
@@ -25,6 +27,7 @@ use crate::records::ItemRecord;
 use crate::use_cases::common::{existing_item, own_session, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::use_cases::handover::{Handovers, save_claimed};
+use crate::use_cases::radar::Radar;
 use crate::use_cases::wide_asks::{Announced, Announcer};
 use crate::work::Work;
 
@@ -43,6 +46,9 @@ pub struct ClaimItemInput {
     /// The kind of a new claim; `None` for a feature. A renewal keeps the claim's kind, and one
     /// that names another is refused.
     pub kind: Option<ClaimKind>,
+    /// The branch the claim's work is on in each repository it names, the repository by its id
+    /// (`api`) or its remote's path (`acme/api`).
+    pub branches: BTreeMap<String, BranchName>,
 }
 
 /// The scope of a wide claim, as a person names it.
@@ -121,6 +127,12 @@ pub struct ClaimMade {
 /// A feature claim that declares an area another member's debt claim holds waits for that area
 /// instead of being refused, and in the same transaction the debt claim's holder is asked to hand
 /// it over — unless their claim is in review, when they are asked once it is worked on again.
+///
+/// The branches the claim names are recorded on it in the same transaction, each learned as named:
+/// one replaces a branch learned from a checkout or named before, and waits behind a pull
+/// request's head or a pool worktree's branch while that source still holds. A change of branch
+/// appends `BranchRecorded` and drops the claim's footprint of that repository. Every repository
+/// they name is resolved before anything is written.
 pub struct ClaimItem {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -151,8 +163,10 @@ impl ClaimItem {
     /// tracker has open;
     /// [`AppError::Area`] for an area that does not resolve; [`AppError::Wide`] for a wide scope
     /// naming no area; [`AppError::Claim`] when another member holds the item or a declared area,
-    /// or another wide claim names an area of the scope, naming that member; [`AppError::Store`]
-    /// when the store fails.
+    /// or another wide claim names an area of the scope, naming that member;
+    /// [`AppError::UnlistedRepository`] for a branch named in a repository the project does not
+    /// list; [`AppError::BranchNamedTwice`] when two names of one repository name two branches;
+    /// [`AppError::Store`] when the store fails.
     pub async fn execute(
         &self,
         actor: &Actor,
@@ -168,6 +182,7 @@ impl ClaimItem {
             status: shut.status,
         })?;
         let settings = work.project_settings(&self.hot_rules).await?;
+        let named = named_branches(&settings, &input.branches)?;
         let request = ClaimRequest {
             item: item.id,
             by: actor.member,
@@ -218,6 +233,18 @@ impl ClaimItem {
         work.record(now, event).await?;
         if let Some(widened) = widened(current.as_ref(), claim) {
             work.record(now, widened).await?;
+        }
+        let radar = Radar {
+            ids: &*self.ids,
+            schemes: &self.ref_schemes,
+            settings: &settings,
+            now,
+        };
+        let mut recorded = claim.clone();
+        for (repo, branch) in &named {
+            recorded = radar
+                .record_branch(&mut work, &recorded, repo, branch, BranchSource::Named)
+                .await?;
         }
         end_orphaned_grants(&mut work, now).await?;
         let sent = Announcer {
@@ -349,6 +376,30 @@ impl ClaimItem {
     }
 }
 
+/// The branches a claim names, each repository resolved from its id or its remote's path. Two
+/// names of one repository may name it only with one branch.
+///
+/// # Errors
+/// [`AppError::UnlistedRepository`] for a repository the settings do not list, naming it as
+/// given; [`AppError::BranchNamedTwice`] for two names of one repository with two branches.
+fn named_branches(
+    settings: &ProjectSettings,
+    named: &BTreeMap<String, BranchName>,
+) -> Result<BTreeMap<RepoId, BranchName>, AppError> {
+    let mut resolved: BTreeMap<RepoId, BranchName> = BTreeMap::new();
+    for (text, branch) in named {
+        let repo = settings
+            .repo_named(text)
+            .map(|repo| repo.id.clone())
+            .ok_or_else(|| AppError::UnlistedRepository { repo: text.clone() })?;
+        if resolved.get(&repo).is_some_and(|other| other != branch) {
+            return Err(AppError::BranchNamedTwice { repo });
+        }
+        resolved.insert(repo, branch.clone());
+    }
+    Ok(resolved)
+}
+
 /// The wide scope a person asked for, its areas resolved.
 pub(crate) fn wide_scope(
     settings: &ProjectSettings,
@@ -390,6 +441,8 @@ mod tests {
     use dibs_domain::import::{ImportBatch, Listing, ReportedItem};
     use dibs_domain::item::{ExternalRef, Priority, SourceId, Title};
 
+    use dibs_domain::radar::BranchSourceKind;
+
     use super::*;
     use crate::named::Refusal;
     use crate::use_cases::testing::Env;
@@ -430,6 +483,7 @@ mod tests {
 
     fn input(item: ItemId, session: SessionId, areas: &[&str]) -> ClaimItemInput {
         ClaimItemInput {
+            branches: Default::default(),
             item,
             session,
             areas: areas.iter().map(|a| (*a).to_owned()).collect(),
@@ -822,6 +876,187 @@ mod tests {
                 to: env.bob.actor.member,
                 cause: GrantEnd::GrantorLeft,
             })
+        );
+    }
+
+    /// A project of two repositories.
+    const TWO_REPOS: &str = r#"{"repos": [
+        {"id": "api", "remote": "github.com/acme/api"},
+        {"id": "web", "remote": "github.com/acme/web"}]}"#;
+
+    /// A claim of `item` with no area, naming `branches` as `(repository, branch)`.
+    fn naming(item: ItemId, session: SessionId, branches: &[(&str, &str)]) -> ClaimItemInput {
+        ClaimItemInput {
+            branches: branches
+                .iter()
+                .map(|(repo, name)| ((*repo).to_owned(), BranchName::parse(name).unwrap()))
+                .collect(),
+            ..input(item, session, &[])
+        }
+    }
+
+    /// The branch `item`'s claim records in `repo`, and where it was learned from.
+    async fn branch_of(env: &Env, item: ItemId, repo: &str) -> Option<(String, BranchSource)> {
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let stored = tx.claim(env.project, item).await.unwrap()?;
+        let recorded = stored.branches.get(&RepoId::parse(repo).unwrap())?;
+        Some((recorded.branch.to_string(), recorded.source.clone()))
+    }
+
+    /// The branches the log recorded after the first `skip` events: repository, branch, source.
+    async fn recordings(env: &Env, skip: usize) -> Vec<(String, String, BranchSourceKind)> {
+        env.kinds_after(skip)
+            .await
+            .into_iter()
+            .filter_map(|kind| match kind {
+                EventKind::BranchRecorded(recorded) => Some((
+                    recorded.repo.to_string(),
+                    recorded.branch.to_string(),
+                    recorded.source,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn named(repo: &str, branch: &str) -> (String, String, BranchSourceKind) {
+        (repo.to_owned(), branch.to_owned(), BranchSourceKind::Named)
+    }
+
+    #[tokio::test]
+    async fn a_branch_the_claim_names_is_recorded_as_named_and_a_renewal_replaces_it() {
+        let env = Env::with_settings(TWO_REPOS).await;
+        let item = env.item("gh:acme/api#42").await;
+        let claim = ClaimItem::new(&env.deps);
+        let before = env.events().await.len();
+        let made = claim
+            .execute(
+                &env.bob.actor,
+                naming(item, env.bob.session, &[("api", "bob/42-refunds")]),
+            )
+            .await
+            .unwrap();
+        let api = RepoId::parse("api").unwrap();
+        let answered = made.outcome.claim();
+        assert_eq!(answered.branch_source(&api), Some(&BranchSource::Named));
+        let names: Vec<&str> = env
+            .kinds_after(before)
+            .await
+            .iter()
+            .map(EventKind::name)
+            .collect();
+        assert_eq!(names, ["claimed", "branch_recorded"]);
+        assert_eq!(
+            recordings(&env, before).await,
+            [named("api", "bob/42-refunds")]
+        );
+
+        let renewed = env.events().await.len();
+        let by_remote = naming(item, env.bob.session, &[("acme/api", "bob/42-rounding")]);
+        claim.execute(&env.bob.actor, by_remote).await.unwrap();
+        assert_eq!(
+            recordings(&env, renewed).await,
+            [named("api", "bob/42-rounding")],
+            "a renewal naming the repository by its remote's path replaces the branch"
+        );
+        assert_eq!(
+            branch_of(&env, item, "api").await,
+            Some(("bob/42-rounding".to_owned(), BranchSource::Named))
+        );
+        assert_eq!(branch_of(&env, item, "web").await, None);
+
+        let again = env.events().await.len();
+        let same = naming(item, env.bob.session, &[("api", "bob/42-rounding")]);
+        claim.execute(&env.bob.actor, same).await.unwrap();
+        assert!(recordings(&env, again).await.is_empty(), "the same branch");
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_from_the_claiming_sessions_own_checkout_keeps_a_named_branch() {
+        use crate::use_cases::Heartbeat;
+        use crate::use_cases::testing::in_checkout;
+
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        ClaimItem::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                naming(item, env.bob.session, &[("default", "bob/1-named")]),
+            )
+            .await
+            .unwrap();
+        let before = env.events().await.len();
+        for name in ["bob/9-elsewhere", "bob/1-named-2"] {
+            Heartbeat::new(&env.deps)
+                .execute(
+                    &env.bob.actor,
+                    env.bob.session,
+                    Some(&in_checkout('a', Some(name))),
+                )
+                .await
+                .unwrap();
+        }
+        assert!(recordings(&env, before).await.is_empty());
+        assert_eq!(
+            branch_of(&env, item, "default").await,
+            Some(("bob/1-named".to_owned(), BranchSource::Named))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_branch_in_an_unlisted_repository_refuses_the_claim_before_anything_is_written() {
+        let env = Env::with_settings(TWO_REPOS).await;
+        let item = env.item("gh:acme/api#42").await;
+        let claim = ClaimItem::new(&env.deps);
+        let before = env.events().await.len();
+        let unlisted = claim
+            .execute(
+                &env.bob.actor,
+                naming(
+                    item,
+                    env.bob.session,
+                    &[("api", "bob/42-refunds"), ("elsewhere", "bob/42-refunds")],
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(unlisted.code(), "unlisted_repository");
+        assert!(
+            matches!(&unlisted, AppError::UnlistedRepository { repo } if repo == "elsewhere"),
+            "{unlisted:?}"
+        );
+        let twice = claim
+            .execute(
+                &env.bob.actor,
+                naming(
+                    item,
+                    env.bob.session,
+                    &[("api", "bob/42-refunds"), ("acme/api", "bob/42-rounding")],
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(twice.code(), "invalid_request");
+        assert_eq!(env.events().await.len(), before, "nothing appended");
+        let mut tx = env.deps.store.begin().await.unwrap();
+        assert_eq!(tx.claim(env.project, item).await.unwrap(), None);
+        drop(tx);
+
+        claim
+            .execute(
+                &env.bob.actor,
+                naming(
+                    item,
+                    env.bob.session,
+                    &[("api", "bob/42-refunds"), ("acme/api", "bob/42-refunds")],
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recordings(&env, before).await,
+            [named("api", "bob/42-refunds")],
+            "two names of one repository with one branch record it once"
         );
     }
 }

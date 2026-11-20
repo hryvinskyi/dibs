@@ -295,6 +295,7 @@ mod tests {
             .execute(
                 &who.actor,
                 ClaimItemInput {
+                    branches: Default::default(),
                     item,
                     session: who.session,
                     areas: areas.iter().map(|a| (*a).to_owned()).collect(),
@@ -308,6 +309,7 @@ mod tests {
 
     fn wide_input(item: ItemId, who: &Person, named: &[&str]) -> ClaimItemInput {
         ClaimItemInput {
+            branches: Default::default(),
             item,
             session: who.session,
             areas: Vec::new(),

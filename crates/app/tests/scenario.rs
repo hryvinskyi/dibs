@@ -222,6 +222,7 @@ mod scenario {
 
         // Alice takes billing; Bob takes search and cannot take billing as well.
         let claim = |item, session, areas: &[&str]| ClaimItemInput {
+            branches: Default::default(),
             wide: None,
             item,
             session,
