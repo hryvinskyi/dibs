@@ -1,4 +1,64 @@
 {% extends "shell.html" %}
+{% import "links.html" as links %}
+{% import "moments.html" as moments %}
+{% macro more(n) %}{% if n > 0 %}<li class="faint">and {{ n }} more</li>{% endif %}{% endmacro %}
+{% macro holder_counts(list) %}{% for holder in list %}{% if !loop.first %} · {% endif %}{% call links::person(holder.person, true) %}{% endcall %} {{ holder.claims }}{% endfor %}{% endmacro %}
+{% macro claim(c) %}{% call links::ticket(c.ticket) %}{% endcall %}<span class="t">{% call links::linked(c.title) %}{% endcall %}</span>{% endmacro %}
+{% macro area_count(n) %}{{ n }} area{% if n != 1 %}s{% endif %}{% endmacro %}
 {% block title %}Now{% endblock %}
-{% block list %}<div class="bar-top"><h1 tabindex="-1">Now</h1></div>
-<p class="note">Nothing is shown here yet.</p>{% endblock %}
+{% block list %}<div class="now">
+<header class="hello"><h1 tabindex="-1">{% if cards.is_empty() %}Nothing waits for a person{% else if cards.len() == 1 %}1 thing waits for a look{% else %}{{ cards.len() }} things wait for a look{% endif %}</h1><p><time datetime="{{ head.date }}">{{ head.date }}</time> · {{ head.claims }} claim{% if head.claims != 1 %}s{% endif %} by {{ head.people }} {% if head.people == 1 %}person{% else %}people{% endif %} · {{ head.ready }} ticket{% if head.ready != 1 %}s{% endif %} ready</p></header>
+{% block needs %}{% if !cards.is_empty() %}<div class="needs">{% for card in cards %}{% match card %}
+{% when crate::ui::now::cards::Card::Answer { total, lines } %}<article class="need"><span class="label k-accent">Answer</span><h2>{% if *total == 1 %}1 conversation from a person is unread{% else %}{{ total }} conversations from people are unread{% endif %}</h2>
+<ul class="lines">{% for line in lines.shown %}<li>{% if let Some(author) = line.summary.author %}{% call links::person(author, true) %}{% endcall %}{% endif %}{% call links::conversation(line.summary.subject) %}{% endcall %}<span class="e">{% call moments::since(line.last) %}{% endcall %}</span></li>{% endfor %}{% call more(lines.more) %}{% endcall %}</ul>
+<p class="sub">Notices from dibs fold onto their claims and are not counted here.</p>
+<p class="rule">A message to a member reaches the session working on its ticket, and its agent answers when a decision is needed.</p>
+<div class="need__foot"><a class="btn" href="/ui/inbox">Open the inbox</a></div></article>
+{% when crate::ui::now::cards::Card::Decide { total, lines } %}<article class="need"><span class="label k-warn">Decide</span><h2>{% if *total == 1 %}1 grant request has{% else %}{{ total }} grant requests have{% endif %} waited for your agent for more than ten minutes</h2>
+<ul class="lines">{% for line in lines.shown %}<li>{% call links::person(line.asker, true) %}{% endcall %}<span class="t"><a class="lnk" href="{{ line.href }}">asks for</a> {% call links::area(line.area, true) %}{% endcall %} for {% call links::ticket(line.ticket) %}{% endcall %}</span><span class="e">{% call moments::since(line.asked) %}{% endcall %}</span></li>{% endfor %}{% call more(lines.more) %}{% endcall %}</ul>
+<p class="sub">No session of yours has decided it yet.</p>
+<p class="rule">A grant asked of you is your agent's to decide: a session of yours working on the claim's ticket decides it when it next hears from dibs.</p>
+<div class="need__foot"><a class="btn" href="/ui/inbox?tab=grants">See them</a></div></article>
+{% when crate::ui::now::cards::Card::Arbitrate { total, lines, arbiters } %}<article class="need"><span class="label k-accent">Arbitrate</span><h2>{% if *total == 1 %}1 disagreement waits{% else %}{{ total }} disagreements wait{% endif %} for an arbiter</h2>
+<ul class="lines">{% for line in lines.shown %}<li>{% call links::person(line.by, true) %}{% endcall %}{% call links::conversation(line.about) %}{% endcall %}<span class="e">{% call moments::since(line.at) %}{% endcall %}</span></li>{% endfor %}{% call more(lines.more) %}{% endcall %}</ul>
+{% if !arbiters.is_empty() %}<p class="sub">Waiting for {% for arbiter in arbiters %}{% if !loop.first %}, {% endif %}{% call links::person(arbiter, true) %}{% endcall %}{% endfor %}.</p>{% endif %}
+<p class="rule">An arbiter decides it in its conversation; acknowledging the escalation closes it.</p></article>
+{% when crate::ui::now::cards::Card::Overlap { total, lines } %}<article class="need"><span class="label k-warn">Overlap</span><h2>{% if *total == 1 %}1 pair of claims touches{% else %}{{ total }} pairs of claims touch{% endif %} the same code</h2>
+<ul class="lines">{% for line in lines.shown %}<li><span class="t">{% for ticket in line.tickets %}{% if !loop.first %} and {% endif %}{% call links::ticket(ticket) %}{% endcall %}{% endfor %}</span><span class="e">{% if line.contract %}a contract{% else %}{{ line.files }} file{% if line.files != 1 %}s{% endif %}{% endif %}</span></li>{% endfor %}{% call more(lines.more) %}{% endcall %}</ul>
+<p class="rule">The second to merge rebases onto the first.</p></article>
+{% when crate::ui::now::cards::Card::Release { total, lines, holders, areas } %}<article class="need"><span class="label k-bad">Release</span><h2>{% if *total == 1 %}1 claim holds a ticket that is{% else %}{{ total }} claims hold tickets that are{% endif %} already finished</h2>
+<ul class="lines">{% for line in lines.shown %}<li>{% call claim(line) %}{% endcall %}<span class="e">{% call area_count(line.areas.len()) %}{% endcall %}</span></li>{% endfor %}{% call more(lines.more) %}{% endcall %}</ul>
+<p class="sub">{% call holder_counts(holders) %}{% endcall %}. They hold {{ areas }} area{% if *areas != 1 %}s{% endif %}.</p>
+<p class="rule">A claim ends when its holder completes or releases it; an admin can force-release one.</p>
+<div class="need__foot"><a class="btn" href="/ui/claims?filter=finished">See them</a></div></article>
+{% when crate::ui::now::cards::Card::TakeOver { total, lines, longest, holders } %}<article class="need"><span class="label k-warn">Take over</span><h2>{% if *total == 1 %}1 claim went silent {% call moments::ago(longest) %}{% endcall %} ago{% else %}{{ total }} claims went silent, the longest {% call moments::ago(longest) %}{% endcall %} ago{% endif %}</h2>
+<ul class="lines">{% for line in lines.shown %}<li>{% call claim(line) %}{% endcall %}<span class="e">{% if let Some(quiet) = line.silent %}{% call moments::ago(quiet) %}{% endcall %}{% endif %}</span></li>{% endfor %}{% call more(lines.more) %}{% endcall %}</ul>
+<p class="sub">{% call holder_counts(holders) %}{% endcall %}. A silent claim holds no area, but its ticket stays taken.</p>
+<p class="rule">Anyone may take a silent claim over with a reason, which its holder is sent.</p>
+<div class="need__foot"><a class="btn" href="/ui/claims?filter=silent">See them</a></div></article>
+{% when crate::ui::now::cards::Card::Narrow { total, lines, holders, areas } %}<article class="need"><span class="label k-warn">Narrow</span><h2>{% if *total == 1 %}1 claim has{% else %}{{ total }} claims have{% endif %} been held for more than a week</h2>
+<ul class="lines">{% for line in lines.shown %}<li>{% call claim(line) %}{% endcall %}<span class="e">{{ line.held_days }} d</span></li>{% endfor %}{% call more(lines.more) %}{% endcall %}</ul>
+<p class="sub">{% call holder_counts(holders) %}{% endcall %}. Together they hold {{ areas }} area{% if *areas != 1 %}s{% endif %}.</p>
+<p class="rule">Its holder gives back the areas the work no longer needs.</p>
+<div class="need__foot"><a class="btn" href="/ui/claims?filter=held">See them</a></div></article>
+{% when crate::ui::now::cards::Card::Check { total, lines } %}<article class="need"><span class="label k-warn">Check</span><h2>{% if *total == 1 %}1 claim records a branch{% else %}{{ total }} claims record branches{% endif %} named after another ticket</h2>
+<ul class="lines">{% for line in lines.shown %}<li>{% call links::ticket(line.ticket) %}{% endcall %}<span class="t">{% call links::branch(line.branch) %}{% endcall %}</span><span class="e">names <a class="lnk" href="{{ line.other.link.href }}"{% if line.other.link.outside %} target="_blank" rel="noopener noreferrer"{% endif %}>#{{ line.other.number }}</a></span></li>{% endfor %}{% call more(lines.more) %}{% endcall %}</ul>
+<p class="sub">Overlap notices on such a claim describe that branch.</p>
+<p class="rule">dibs records the branch of the checkout a session works in; a session in a worktree of its own records its own.</p>
+<div class="need__foot"><a class="btn" href="/ui/claims?filter=branch">See them</a></div></article>
+{% when crate::ui::now::cards::Card::Integration { since } %}<article class="need"><span class="label k-bad">Integration</span><h2>The pull request integration has been silent since {% call moments::since(since) %}{% endcall %}</h2>
+<p class="rule">While it is silent, a merge completes no claim and pull request statuses go stale.</p></article>
+{% endmatch %}{% endfor %}</div>{% endif %}{% endblock %}
+<div class="two">
+<section class="sec" aria-labelledby="now-ages"><div class="sec__head"><h2 id="now-ages">Claims by age</h2><p>How long each claim has been held.</p></div>
+<div class="hb"><div class="hb__row hb__head"><span></span>{% for age in crate::ui::now::ages::Age::ALL %}<span{% if age.old() %} class="old"{% endif %}>{% match age %}{% when crate::ui::now::ages::Age::Review %}In review{% when crate::ui::now::ages::Age::UnderADay %}Under a day{% when crate::ui::now::ages::Age::Days %}1–7 days{% when crate::ui::now::ages::Age::OneToTwoWeeks %}1–2 weeks{% when crate::ui::now::ages::Age::TwoToThreeWeeks %}2–3 weeks{% when crate::ui::now::ages::Age::OverThreeWeeks %}Over 3 weeks{% endmatch %}</span>{% endfor %}</div>
+{% for row in grid %}<div class="hb__row"><span>{% call links::person(row.person, false) %}{% endcall %}</span>{% for cell in row.cells %}<span class="dots{% if cell.age.old() %} old{% endif %}">{% for c in cell.claims %}<a class="sq{% match c.activity %}{% when crate::ui::claims::view::Activity::Review %} sq--review{% when crate::ui::claims::view::Activity::Silent %} sq--stale{% when crate::ui::claims::view::Activity::Working %}{% endmatch %}{% if c.finished %} sq--fin{% endif %}" href="/ui/claims/{{ c.id }}" title="{{ c.ticket.title }} · {% for piece in c.title.pieces %}{{ piece.text }}{% endfor %}" aria-label="{{ c.ticket.title }}: {% for piece in c.title.pieces %}{{ piece.text }}{% endfor %}, {% match c.activity %}{% when crate::ui::claims::view::Activity::Working %}working{% when crate::ui::claims::view::Activity::Review %}in review{% when crate::ui::claims::view::Activity::Silent %}silent{% endmatch %}, held {% call moments::ago(c.claimed.ago) %}{% endcall %}"></a>{% endfor %}</span>{% endfor %}</div>
+{% endfor %}</div>
+<div class="legend"><span><i class="sq" aria-hidden="true"></i>working</span><span><i class="sq sq--review" aria-hidden="true"></i>in review</span><span><i class="sq sq--stale" aria-hidden="true"></i>silent</span><span><i class="sq sq--fin" aria-hidden="true"></i>its ticket is finished</span></div>
+</section>
+<section class="sec" aria-labelledby="now-today"><div class="sec__head"><h2 id="now-today">Today</h2></div>
+<ul class="feed">{% for happening in today %}<li><time datetime="{{ happening.at.iso }}" data-clock>{{ happening.at.clock }}</time><span>{% call links::person(happening.person, true) %}{% endcall %} {% match happening.done %}{% when crate::ui::now::today::Done::Claimed %}claimed{% when crate::ui::now::today::Done::Finished %}finished{% endmatch %} {% call links::ticket(happening.ticket) %}{% endcall %}<span class="t">{% call links::linked(happening.title) %}{% endcall %}</span></span></li>
+{% else %}<li class="faint">Nothing yet today.</li>
+{% endfor %}</ul></section>
+</div>
+</div>{% endblock %}

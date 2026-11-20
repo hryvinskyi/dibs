@@ -24,6 +24,7 @@ use crate::ui::inbox::summary::{unread_from_people, waiting_grants};
 use crate::ui::links::{LinkContext, LinkedText, PersonView, TicketView, places};
 use crate::ui::live::latest_event;
 use crate::ui::moments::{Ago, Span, moment, span};
+use crate::ui::now;
 use crate::ui::session::UiSession;
 use crate::ui::slots::SlotRow;
 
@@ -232,6 +233,8 @@ pub enum NavCount {
     Held(usize),
     /// So many unread.
     Unread(usize),
+    /// So many waiting for a look.
+    Waiting(usize),
 }
 
 /// A member in the rail.
@@ -349,7 +352,7 @@ impl RailView {
         };
         Self {
             nav: vec![
-                entry(Screen::Now, None),
+                entry(Screen::Now, Some(NavCount::Waiting(now::count(loaded)))),
                 entry(
                     Screen::Claims,
                     Some(NavCount::Plain(status.live.len() + status.stale.len())),

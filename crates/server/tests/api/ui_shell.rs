@@ -171,7 +171,7 @@ async fn the_rail_counts_the_claims_the_queue_the_held_areas_and_the_unread_conv
     let page = browser.get(&world, "/ui/").await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.text);
     for entry in [
-        r#"<a href="/ui/" aria-current="page">Now</a>"#,
+        r#"<a href="/ui/" aria-current="page">Now<span class="k k--hot">2</span><span class="visually-hidden">waiting</span></a>"#,
         r#"<a href="/ui/claims">Claims<span class="k">3</span></a>"#,
         r#"<a href="/ui/queue">Queue<span class="k">3</span></a>"#,
         r#"<a href="/ui/areas">Areas<span class="k">2 held</span></a>"#,
