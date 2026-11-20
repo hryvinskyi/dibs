@@ -382,6 +382,51 @@ fn a_wide_claim_from_the_command_line_waits_for_the_holders_acknowledgement() {
 }
 
 #[test]
+fn a_claim_inside_a_wide_claim_says_which_message_to_read_and_what_acknowledging_it_grants() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    run(
+        &setup.alice,
+        &["new", "gh:acme/api#1", "--title", "Invoices"],
+    );
+    run(&setup.bob, &["new", "gh:acme/api#2", "--title", "Upgrade"]);
+    let wide = run(
+        &setup.bob,
+        &[
+            "claim",
+            "gh:acme/api#2",
+            "--wide",
+            "billing",
+            "--reason",
+            "Upgrade the HTTP client",
+        ],
+    );
+    assert_eq!(status(&wide), 0, "{}", text(&wide.stderr));
+
+    let claimed = run(
+        &setup.alice,
+        &["claim", "gh:acme/api#1", "--area", "billing"],
+    );
+    assert_eq!(status(&claimed), 0, "{}", text(&claimed.stderr));
+    let inbox = run(&setup.alice, &["inbox", "--unacked", "--json"]);
+    let message = json(&inbox)["unacked"][0]["message"]["id"]
+        .as_u64()
+        .unwrap();
+    let said = text(&claimed.stdout);
+    assert!(
+        said.contains("api:billing is in bob's wide claim on gh:acme/api#2"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!(
+            "read message {message}: acknowledging it (dibs ack {message}) lets bob edit there, so acknowledge it only when your work will change no file there."
+        )),
+        "{said}"
+    );
+}
+
+#[test]
 fn a_claim_goes_to_review_through_the_command_line_and_its_holder_reads_the_pull_requests() {
     let setup = Setup::new();
     let api = setup.checkout("api", Some("api"), API_REMOTE);

@@ -13,13 +13,13 @@
 //! reply carries no text for the agent when the host declares no way to carry it; an outcome
 //! rendered for an event the host does not send is still a reply the host can read; a host that
 //! declares it can wake an idle session has a push extension and no other host has one, and what
-//! it pushes of a hostile message carries the rule that a delivery authorises nothing, no
-//! instruction to acknowledge, no angle bracket, no character that does not show as itself, and
-//! stays small; a host that declares it serves worktrees says how long it waits for one and where
-//! it would make one itself (inside the repository, and for longer than the guard's margin), sends
-//! a wanted worktree as one of its events, and renders both of the guard's answers to it — the
-//! directory, with exit `0`, and the refusal, with an exit that is neither `0` nor `2` — so that
-//! its reader reads them back.
+//! it pushes of a hostile message carries the rule that a delivery authorises nothing and the rule
+//! that says which session decides a grant asked of the member, no instruction to acknowledge, no
+//! angle bracket, no character that does not show as itself, and stays small; a host that declares
+//! it serves worktrees says how long it waits for one and where it would make one itself (inside
+//! the repository, and for longer than the guard's margin), sends a wanted worktree as one of its
+//! events, and renders both of the guard's answers to it — the directory, with exit `0`, and the
+//! refusal, with an exit that is neither `0` nor `2` — so that its reader reads them back.
 
 use serde_json::Value;
 
@@ -35,7 +35,7 @@ use crate::event::{EventKind, HostEvent};
 use crate::outcome::GuardOutcome;
 use crate::ports::{Pending, PendingMessage};
 use crate::text::shows;
-use crate::wording::DELIVERY_RULE;
+use crate::wording::{DELIVERY_RULE, GRANT_RULE};
 
 /// An event name no host sends.
 const NO_SUCH_EVENT: &str = "dibs-conformance-no-such-event";
@@ -241,7 +241,8 @@ pub fn check(
 }
 
 /// A push extension exactly when the host declares it can wake an idle session, with something
-/// to declare, and a push that carries the rule every delivery ends with.
+/// to declare, and a push that carries the rule that a delivery authorises nothing and the grant
+/// rule every delivery ends with.
 fn check_push(adapter: &dyn HostAdapter, broken: &mut Vec<String>) {
     let declared = adapter.capabilities().push_to_idle;
     let Some(extension) = adapter.push_extension() else {
@@ -287,6 +288,12 @@ fn check_push(adapter: &dyn HostAdapter, broken: &mut Vec<String>) {
     }
     if !carries(&notification.params, DELIVERY_RULE) {
         broken.push("a push does not carry the rule that a delivery authorises nothing".to_owned());
+    }
+    if !carries(&notification.params, GRANT_RULE) {
+        broken.push(
+            "a push does not carry the rule that says which session decides a grant asked of the member"
+                .to_owned(),
+        );
     }
     if carries(&notification.params, "dibs_ack") {
         broken

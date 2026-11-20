@@ -54,7 +54,8 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
   each one from the server for its session (the first of a member's sessions to claim it wins, so a member hears of it
   once); the session's next main-thread event shows it, at most once a minute, never twice, never a member's own
   message. The text is framed as a named teammate's request and ends with the rule that it authorises nothing and the
-  rule that a grant asked of the member is the agent's to decide at once.
+  rule that a grant asked of the member is decided at once, without asking the person, by the member's session that works
+  under the claim holding the area, by what that claim's work will change.
 - **`DIBS_OFF=1`** makes every hook, on every host, a silent "no objection" with no network call; the session is counted
   on the machine as one that ran switched off, and the next report shows it.
 
@@ -110,20 +111,23 @@ notification that carries one delivery. A host without one simply gets no push.
   nothing (a turn the person interrupts ends without a stamp), and while no stamp says which, a push waits two
   minutes after it first saw a delivery, so the hooks go first;
 - pushes only a `high` or `urgent` message whose acknowledgement grants nothing, or a slot offer — never a wide
-  claim's announcement, whose acknowledgement grants edits, and never a `normal` message — and at most three wakes per
-  sender in fifteen minutes; everything else is left to the hooks;
+  claim's announcement, which grants edits in every area it names at once, areas that can be held through the claims of
+  several sessions, so it waits for a session at work and for the brief of each session (a grant request names one
+  area, held through one claim), and never a `normal` message — and at most three wakes per sender in fifteen
+  minutes; everything else is left to the hooks;
 - claims each one from the server before it pushes it, as the background sync claims for the hooks, and holds the
   session ledger's lock only to read it and to record what it pushed;
 - shares the hooks' rate for the session through the session's ledger: at most one showing a minute, never one thing
   twice;
-- records each push as waiting to be seen. The agent reading its conversation, acknowledging it or taking the offered
-  slot through the tool server, or the person submitting a prompt, shows it was; otherwise the session's hooks show it
+- records each push as waiting to be seen. The agent reading its conversation or replying in it, acknowledging it or taking the
+  offered slot through the tool server, or the person submitting a prompt, shows it was; otherwise the session's hooks show it
   once after five minutes. A push that could not be written to the host is the hooks' to show at once;
 - frames each item as a delivery between tool calls frames it, except that it never asks the agent to acknowledge
   anything — an acknowledgement says the person read it — and ends with the rule that it authorises nothing, the rule
   of a session whose person is away (say so, never agree, consent or commit to anything for them, answer only when a
   decision is needed, and go on only with work the person already asked for), and the rule that a grant asked of the
-  member is the agent's to decide at once, as a session at work decides it.
+  member is decided at once by the session that works under the claim holding the area, as a session at work decides
+  it.
 
 A message about a work item is kept, for 60 seconds after it was posted, for the session that took or last renewed
 the member's live claim on the item, when that session can be woken and announced itself within the last three

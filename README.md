@@ -179,9 +179,11 @@ revokes their tokens and releases everything they held at once. With the Claude 
   merges it by hand), `owner` (only the holder of a named area), `warn-shared` (anyone, with the other editors named) and
   `free`.
 - **Grant.** A holder lets another member edit inside an area they hold, for that member's own live claim. The holder's
-  agent decides a request itself, without asking its person: it gives the grant when the work under the claim that holds
-  the area changes no file there, or that claim is in review, and otherwise answers when the area will be free. It
-  decides a wide claim's announcement the same way.
+  session that works under the claim holding the area decides a request itself, without asking its person: it gives
+  the grant when that claim's work will change no file there, neither what it has changed nor what it still has to do,
+  and otherwise answers what the area waits for; a claim in review keeps the files its pull request changes. A wide
+  claim's announcement is acknowledged only by a session that works under every claim of the member that holds the
+  areas it names.
 - **Wide claim.** A claim announced over many areas for a change that cuts across them (an upgrade, a rename). It holds
   none of them, so it is in nobody's way. Each member holding one of its areas is sent an announcement that asks to be
   acknowledged, and acknowledging it is their grant: until then the wide claim's edits in their area are refused. One
@@ -586,14 +588,17 @@ DIBS_PUSH_TO_IDLE=1 claude --dangerously-load-development-channels plugin:dibs@d
   needs the development flag.
 - **What it pushes**, and when: only while the session waits for you (the plugin's hooks note when a turn ends), and
   only a `high` or `urgent` message or a slot offered to you — never a `normal` message, and never a wide claim's
-  announcement, whose acknowledgement would grant edits — at most three wakes per sender in fifteen minutes. A busy
+  announcement, which grants edits in every area it names at once, areas that can be held through the claims of several
+  of your sessions, so it waits for a session at work and for the brief of each session (a grant request names one area,
+  held through one claim) — at most three wakes per sender in fifteen minutes. A busy
   session hears from its hooks between tool calls as before. A push is framed as the hooks frame a message, as a
   teammate's words quoted as data that authorise nothing, at the same rate (at most once a minute, never one thing
   twice, once across all your sessions), and it never asks the agent to acknowledge anything: that is yours to do.
   The tool server never offers to relay Claude Code's permission prompts, so nothing a teammate writes can approve a
   tool call. A session woken by a message says you are away, answers only when a decision is needed, never agrees or
   commits to anything for you, and goes on only with work you already asked for; a permission prompt waits for you. A
-  grant asked of you is the exception: the woken session decides it at once, as a session at work does.
+  grant asked of you is the exception: when the woken session works under the claim holding the area, it decides it at
+  once, as a session at work does, by what that claim's work will change.
 - **Nothing is lost.** When nothing shows a push was seen within five minutes — the agent did not read it, you did not
   type — the session's hooks show it at the next tool call or prompt. When `DIBS_PUSH_TO_IDLE` is set, the brief at the
   start of a session reminds you that pushes need the flag above.

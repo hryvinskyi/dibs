@@ -430,6 +430,12 @@ pub enum Sending {
 }
 
 impl SendInput {
+    /// The conversation a reply is in, when the input names a valid one.
+    pub fn reply_thread(&self) -> Option<ThreadId> {
+        self.thread
+            .and_then(|thread| thread_id("thread", thread).ok())
+    }
+
     /// Decides what the input asks for.
     ///
     /// # Errors
@@ -1059,6 +1065,20 @@ mod tests {
         assert!(
             serde_json::from_value::<SendInput>(json!({"body": "b", "importance": "loud"}))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn only_a_reply_in_a_valid_conversation_names_the_one_it_is_in() {
+        let thread = |value| parse::<SendInput>(value).reply_thread();
+        assert_eq!(
+            thread(json!({"thread": 4, "body": "thanks"})),
+            Some(ThreadId(4))
+        );
+        assert_eq!(thread(json!({"thread": 0, "body": "thanks"})), None);
+        assert_eq!(
+            thread(json!({"to": ["bob"], "subject": "Rates", "body": "hi"})),
+            None
         );
     }
 

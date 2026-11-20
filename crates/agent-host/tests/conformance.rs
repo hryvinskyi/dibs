@@ -11,6 +11,7 @@ use dibs_agent_host::conformance::{
 use dibs_agent_host::event::HostEvent;
 use dibs_agent_host::neutral::{self, Neutral, NeutralReader};
 use dibs_agent_host::outcome::GuardOutcome;
+use dibs_agent_host::wording::DELIVERY_RULE;
 
 #[test]
 fn the_neutral_host_passes_the_conformance_kit() {
@@ -176,6 +177,7 @@ fn waking_an_idle_session_is_declared_exactly_by_an_adapter_whose_push_carries_t
         "declares no capability",
         "a push names no method",
         "a push does not carry the rule that a delivery authorises nothing",
+        "a push does not carry the rule that says which session decides a grant",
         "a push tells the agent to acknowledge",
         "a push carries an angle bracket",
         "does not show as itself",
@@ -184,6 +186,87 @@ fn waking_an_idle_session_is_declared_exactly_by_an_adapter_whose_push_carries_t
         assert!(bare.contains(expected), "missing '{expected}' in:\n{bare}");
     }
     assert!(check(false, true).contains("push_to_idle is not declared"));
+}
+
+/// A push extension whose push says that a delivery authorises nothing and leaves out which session
+/// decides a grant asked of the member.
+struct NoGrantRule;
+
+impl dibs_agent_host::push::McpExtension for NoGrantRule {
+    fn experimental(&self) -> Vec<(&'static str, serde_json::Map<String, serde_json::Value>)> {
+        vec![("example/push", serde_json::Map::new())]
+    }
+
+    fn instructions(&self) -> &'static str {
+        ""
+    }
+
+    fn newest_protocol(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn session_var(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn notification(
+        &self,
+        _pending: &dibs_agent_host::ports::Pending,
+    ) -> dibs_agent_host::push::PushNotification {
+        dibs_agent_host::push::PushNotification {
+            method: "notifications/example/push".to_owned(),
+            params: serde_json::json!({ "content": DELIVERY_RULE }),
+        }
+    }
+
+    fn opt_in_notice(&self) -> &'static str {
+        ""
+    }
+}
+
+/// The neutral host, declaring that it wakes an idle session and pushing without the grant rule.
+struct PushingWithoutGrantRule;
+
+impl HostAdapter for PushingWithoutGrantRule {
+    fn id(&self) -> HostId {
+        HostId::new("pushing")
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            push_to_idle: true,
+            ..Neutral.capabilities()
+        }
+    }
+
+    fn parse(&self, event: &str, input: &[u8]) -> Result<HostEvent, ParseError> {
+        Neutral.parse(event, input)
+    }
+
+    fn render(&self, event: &str, outcome: &GuardOutcome) -> HostReply {
+        Neutral.render(event, outcome)
+    }
+
+    fn push_extension(&self) -> Option<Box<dyn dibs_agent_host::push::McpExtension>> {
+        Some(Box::new(NoGrantRule))
+    }
+}
+
+#[test]
+fn a_push_that_says_a_delivery_authorises_nothing_but_not_who_decides_a_grant_is_refused() {
+    let broken = conformance::check(
+        &PushingWithoutGrantRule,
+        &neutral::fixtures(),
+        &NeutralReader,
+    )
+    .unwrap_err();
+    assert_eq!(
+        broken,
+        vec![
+            "a push does not carry the rule that says which session decides a grant asked of the member"
+                .to_owned()
+        ]
+    );
 }
 
 /// The neutral host, declaring or not that it serves worktrees, with terms or without, and

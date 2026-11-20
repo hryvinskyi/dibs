@@ -13,8 +13,10 @@
 //! - only while it waits — a session at work hears from its hooks — and, when its hooks left no
 //!   stamp that says which, only after the hooks had a head start;
 //! - only a high or urgent message whose acknowledgement grants nothing, or a slot offer: a session
-//!   that waits acknowledges nothing, so a wide claim's announcement waits for a session at work,
-//!   and a normal message waits for the hooks;
+//!   that waits leaves every acknowledgement to its person, so a wide claim's announcement, whose
+//!   acknowledgement grants edits, is never pushed and waits for the hooks of a session at work,
+//!   which acknowledges it only when it works under every claim of the member that holds the areas
+//!   it names; a normal message waits for the hooks;
 //! - at most a few wakes per sender within a window, beyond which the hooks deliver;
 //! - what was pushed is shown by the session's hooks once, later, unless something shows it was
 //!   seen: the agent read the conversation, acknowledged the message or looked at the slot, or the
