@@ -1168,6 +1168,99 @@ mod use_cases {
         assert_eq!(names.iter().filter(|n| **n == "branch_recorded").count(), 1);
     }
 
+    #[tokio::test]
+    async fn the_item_an_edit_teaches_a_worktree_hold_is_kept_on_the_file() {
+        use dibs_app::use_cases::{
+            EditCheckInput, FromCheckout, OnBranch, TakeWorktreeInput, TookWorktree,
+        };
+        use dibs_domain::paths::RepoPath;
+        use dibs_domain::radar::{BranchName, BranchSource, WorktreeRef};
+        use dibs_domain::repo::RepoId;
+        use dibs_domain::report::MachineId;
+        use dibs_domain::worktree::{AgentKey, PoolId, PoolKey, WorktreeName};
+
+        let world = World::new().await;
+        let app = &world.app;
+        let admin = project(app, "widgets", "alice").await;
+        let document: SettingsDocument =
+            serde_json::from_str(r#"{"areas":[{"name":"billing","paths":["billing/**"]}]}"#)
+                .unwrap();
+        app.apply_settings.execute(&admin, document).await.unwrap();
+        let session = register(app, &admin, 0).await;
+        let item = create_item(app, &admin, 1).await;
+        app.claim_item
+            .execute(
+                &admin,
+                ClaimItemInput {
+                    branches: Default::default(),
+                    item,
+                    session,
+                    areas: Vec::new(),
+                    wide: None,
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        let worktree = WorktreeRef {
+            machine: MachineId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            pool: PoolId::parse("c0ffee42").unwrap(),
+            worktree: WorktreeName::parse("worktree1").unwrap(),
+        };
+        let took = app
+            .take_worktree
+            .execute(
+                &admin,
+                TakeWorktreeInput {
+                    session,
+                    machine: worktree.machine.clone(),
+                    pool: worktree.pool.clone(),
+                    names: vec![worktree.worktree.clone()],
+                    agent: Some(AgentKey::parse("agent-1").unwrap()),
+                    purpose: Purpose::parse("fix the totals").unwrap(),
+                    item: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(took, TookWorktree::Took { again: false, .. }));
+        let branch = BranchName::parse("alice/1-totals").unwrap();
+        app.edit_check
+            .execute(
+                &admin,
+                EditCheckInput {
+                    session,
+                    paths: vec![RepoPath::parse("default:billing/totals.rs").unwrap()],
+                    reserve: true,
+                    checkout: Some(FromCheckout {
+                        token: checkout('a'),
+                        branch: Some(OnBranch {
+                            repo: RepoId::implicit(),
+                            branch: branch.clone(),
+                        }),
+                    }),
+                    worktree: Some(worktree.clone()),
+                },
+            )
+            .await
+            .unwrap();
+        let key = PoolKey {
+            member: admin.member,
+            machine: worktree.machine.clone(),
+            pool: worktree.pool.clone(),
+        };
+        let mut tx = world.store.begin().await.unwrap();
+        let pool = tx.worktree_pool(admin.project, &key).await.unwrap();
+        let hold = pool.hold(&worktree.worktree).unwrap();
+        assert_eq!(hold.item, Some(item), "read back from the file");
+        let claim = tx.claim(admin.project, item).await.unwrap().unwrap();
+        assert_eq!(claim.branch(&RepoId::implicit()), Some(&branch));
+        assert_eq!(
+            claim.branch_source(&RepoId::implicit()),
+            Some(&BranchSource::Worktree(worktree))
+        );
+    }
+
     /// A project whose settings declare `composer.lock` `regenerate`, with an integration and two
     /// members, bob and carol, each claiming an item with its work on a branch of its own.
     struct Regenerated {

@@ -355,6 +355,7 @@ mod tests {
                     paths: vec![RepoPath::parse(path).unwrap()],
                     reserve: true,
                     checkout: None,
+                    worktree: None,
                 },
             )
             .await

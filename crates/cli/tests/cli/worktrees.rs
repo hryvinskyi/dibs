@@ -20,7 +20,8 @@
 //! leaves a worktree another dibs is resetting alone, and names what lies beyond the pool's count;
 //! a server without the worktree routes has the signs of life dropped without a word, until it
 //! answers them again. A worktree taken for a work item gives the claim on it the branch the
-//! worktree is on, sent with its signs of life.
+//! worktree is on, sent with its signs of life; one the hooks took for no item learns the item of
+//! the claim its first edit falls under, and gives that claim its branch.
 //!
 //! Through the tools: a take mints an agent of its own for each call, rescues what the worktree
 //! held, and waits for a release; the listing and a release by agent or by name agree with the
@@ -1178,6 +1179,55 @@ fn a_worktree_taken_for_an_item_gives_its_claim_the_branch_it_is_on() {
         branches(),
         serde_json::json!({"api": "alice/7-totals"}),
         "the checkout's own branch, sent again by the heartbeat, does not replace the worktree's"
+    );
+}
+
+#[test]
+fn an_edit_in_a_worktree_the_hooks_took_for_no_item_gives_it_the_claims_item_and_branch() {
+    let pool = Pool::new(1);
+    let made = pool.dibs(&["new", "gh:acme/api#7", "--title", "Fix the totals"]);
+    assert_eq!(status(&made), 0, "{}", text(&made.stderr));
+    let claimed = pool.dibs(&["claim", "gh:acme/api#7"]);
+    assert_eq!(status(&claimed), 0, "{}", text(&claimed.stderr));
+    let worktree = pool.take("agent-1");
+    pool.release("worktree1");
+    git(&worktree, &["checkout", "-q", "-b", "alice/7-totals"]);
+    let command = serde_json::json!({"tool": {"kind": "shell", "command": "ls"}});
+    let taken = Pool::decided(&pool.hook(&worktree, "before-tool", command));
+    assert_eq!(taken["decision"], "no_objection", "{taken}");
+    let held = || pool.listed()["worktrees"][0]["held"].clone();
+    assert_eq!(
+        held()["item"],
+        serde_json::Value::Null,
+        "the hooks name no item"
+    );
+
+    let path = worktree.join("src/billing/totals.rs");
+    let edit = serde_json::json!({"tool": {"kind": "edit", "paths": [path.to_string_lossy()]}});
+    let edited = Pool::decided(&pool.hook(&worktree, "before-tool", edit));
+    assert_eq!(edited["decision"], "no_objection", "{edited}");
+    let state = pool.dibs(&["status", "--json"]);
+    assert_eq!(status(&state), 0, "{}", text(&state.stderr));
+    let claim = json(&state)["live"][0]["claim"].clone();
+    assert!(claim["item"].is_u64(), "{claim}");
+    assert_eq!(
+        held()["item"],
+        claim["item"],
+        "the hold learned the claim's item"
+    );
+    assert_eq!(
+        claim["branches"],
+        serde_json::json!({"api": "alice/7-totals"}),
+        "the worktree's branch is the claim's"
+    );
+    let log = pool.setup.server.request_log();
+    assert!(
+        log.iter().any(|request| {
+            request.contains("/v1/edit-check")
+                && request.contains(r#""worktree":{"machine":""#)
+                && request.contains(r#""name":"worktree1"}"#)
+        }),
+        "the check names the pool worktree it is made in: {log:?}"
     );
 }
 

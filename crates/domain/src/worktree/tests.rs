@@ -598,3 +598,143 @@ fn no_event_of_a_pool_names_its_machine_its_pool_or_an_agent() {
         );
     }
 }
+
+impl Run {
+    /// A take by `holder` of the first free worktree, for no work item.
+    fn take_for_nothing(&mut self, holder: &Holder, minute: i64) {
+        let ask = TakeWorktree {
+            item: None,
+            ..request(holder, &ALL)
+        };
+        self.pool = decide_take(&self.pool, &ask, at(minute)).unwrap().pool;
+    }
+
+    /// An edit from `session` in `worktree` at `minute`, attributed to `item` alone when one is
+    /// named; answers the item the hold names after it and keeps the pool it leaves.
+    fn edit(
+        &mut self,
+        worktree: &str,
+        session: u64,
+        item: Option<u64>,
+        minute: i64,
+    ) -> Option<u64> {
+        let edit = EditInWorktree {
+            worktree: name(worktree),
+            session: SessionId(session),
+            item: item.map(ItemId),
+        };
+        let done = decide_edit_in_worktree(&self.pool, &edit, at(minute), Silence::DEFAULT);
+        assert!(done.events.is_empty(), "learning an item records no event");
+        self.pool = done.pool;
+        done.answer.map(|item| item.0)
+    }
+
+    fn item_of(&self, worktree: &str) -> Option<u64> {
+        self.pool
+            .hold(&name(worktree))
+            .and_then(|hold| hold.item)
+            .map(|item| item.0)
+    }
+}
+
+#[test]
+fn a_hold_that_names_no_item_learns_the_item_of_an_edit_of_its_session() {
+    let mut run = Run::new();
+    run.take_for_nothing(&session(1), 0);
+    let before = run.pool.hold(&name("worktree1")).cloned().unwrap();
+    assert_eq!(run.edit("worktree1", 1, Some(3), 5), Some(3));
+    let after = run.pool.hold(&name("worktree1")).unwrap();
+    assert_eq!(after.item, Some(ItemId(3)));
+    assert_eq!(
+        WorktreeHold {
+            item: None,
+            ..after.clone()
+        },
+        before,
+        "nothing but the item changes"
+    );
+}
+
+#[test]
+fn an_agent_of_the_session_counts_as_the_session() {
+    let mut run = Run::new();
+    run.take_for_nothing(&agent(1, "a1"), 0);
+    assert_eq!(run.edit("worktree1", 1, Some(3), 5), Some(3));
+    assert_eq!(run.item_of("worktree1"), Some(3));
+}
+
+#[test]
+fn a_hold_that_names_an_item_keeps_it() {
+    let mut run = Run::new();
+    run.take(&session(1), 0);
+    let before = run.pool.clone();
+    assert_eq!(
+        run.edit("worktree1", 1, Some(3), 5),
+        Some(7),
+        "the item the take named"
+    );
+    assert_eq!(run.pool, before);
+    run.take_for_nothing(&agent(1, "a1"), 0);
+    run.edit("worktree2", 1, Some(3), 5);
+    assert_eq!(
+        run.edit("worktree2", 1, Some(4), 6),
+        Some(3),
+        "the first one"
+    );
+}
+
+#[test]
+fn an_edit_attributed_to_no_one_item_teaches_nothing() {
+    let mut run = Run::new();
+    run.take_for_nothing(&session(1), 0);
+    let before = run.pool.clone();
+    assert_eq!(run.edit("worktree1", 1, None, 5), None);
+    assert_eq!(run.pool, before);
+}
+
+#[test]
+fn another_sessions_hold_a_silent_hold_and_a_free_worktree_learn_nothing() {
+    let mut run = Run::new();
+    run.take_for_nothing(&agent(1, "a1"), 0);
+    run.take_for_nothing(&session(2), 0);
+    let before = run.pool.clone();
+    assert_eq!(
+        run.edit("worktree2", 1, Some(3), 5),
+        None,
+        "another session's"
+    );
+    assert_eq!(
+        run.edit("worktree3", 1, Some(3), 5),
+        None,
+        "a free worktree"
+    );
+    assert_eq!(
+        run.edit("worktree1", 1, Some(3), 21),
+        None,
+        "a silent agent"
+    );
+    assert_eq!(run.pool, before);
+    assert_eq!(
+        run.edit("worktree1", 1, Some(3), 20),
+        Some(3),
+        "silent exactly as long as it may be, the hold stands"
+    );
+}
+
+#[test]
+fn a_take_again_by_the_holder_keeps_the_item_its_hold_learned() {
+    let mut run = Run::new();
+    let holder = agent(1, "a1");
+    run.take_for_nothing(&holder, 0);
+    run.edit("worktree1", 1, Some(3), 5);
+    let (answer, events) = run.take(&holder, 6);
+    assert_eq!(answer, took("worktree1", true));
+    assert!(events.is_empty());
+    assert_eq!(
+        run.item_of("worktree1"),
+        Some(3),
+        "not the item the take names"
+    );
+    run.take_for_nothing(&holder, 7);
+    assert_eq!(run.item_of("worktree1"), Some(3), "nor none");
+}

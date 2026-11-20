@@ -715,9 +715,11 @@ carries the `source`, marks each change of branch. What records it, strongest fi
    (`POST /v1/items/{id}/review`) or by an integration with the pull request's state (`POST /v1/prs/state`), recorded
    in the repository the pull request belongs to; the head a merge report carries records nothing;
 2. `worktree`: the branch of a pool worktree the member holds for the claim's item, sent with the worktree's signs of
-   life (`branch` of `POST /v1/worktrees/beat`, see [Worktrees](#worktrees)) and recorded on the member's live claim
-   on the item the hold names. Only a hold taken for an item records: the holds the guard takes for a host's agents
-   and sessions name none, so their worktrees' branches record nothing;
+   life (`branch` of `POST /v1/worktrees/beat`, see [Worktrees](#worktrees)) or with an edit check that reserves and
+   names the worktree it is made in (`worktree` of `POST /v1/edit-check`), and recorded on the member's live claim on
+   the item the hold names. Only a hold that names an item records. The holds the guard takes for a host's agents and
+   sessions name none when they are taken; such a hold learns the item of the first edit made in it whose check
+   attributes the edits to the claims of exactly one item, and records from then on;
 3. `named`: a branch the claim named when it was taken or renewed (`branches` of `POST /v1/items/{id}/claim`);
 4. `checkout`: the branch of the checkout a session works in, sent by a heartbeat or an edit check that reserves, under
    three conditions judged within the project's `stale_after`: the session took or last renewed exactly one live claim
@@ -813,7 +815,18 @@ check writes nothing. An optional `checkout` names the checkout the edits are ma
 checkout stores that the session reported working there, and records the branch, learned from the checkout, on the
 session's one working claim when the edits were attributed to it and the checkout rule allows it (see
 [Branches and overlaps](#branches-and-overlaps)); one that names no checkout records no branch. A malformed `checkout`
-is `invalid_request`. Answers a verdict per path, in the order asked:
+is `invalid_request`.
+
+An optional `worktree`, `{ "machine": "…", "pool": "…", "name": "worktree2" }`, names the worktree of one of the
+caller's pools the edits are made in, its machine and pool spelled as a take spells them (see [Worktrees](#worktrees)).
+A check with `reserve: true` that names it teaches the worktree's hold the item its edits are for: when the hold is
+held under the check's session (the session itself or one of its agents), has not gone silent and names no item, and
+the check attributed the edits to the caller's claims of exactly one item, the hold takes that item. A hold that names
+an item keeps it, and a check attributed to claims of no item or of several teaches nothing; no event marks the
+learning. Then, whenever that hold names an item, `branch` is recorded on the caller's live claim on it, learned from
+that worktree (`worktree`), as the worktree's signs of life record it; the checkout's own branch then waits while the
+hold stands. A worktree held under another session, a silent hold or a free worktree changes nothing and records no
+branch. A malformed `worktree` is `invalid_request` naming it. Answers a verdict per path, in the order asked:
 
 ```json
 { "verdicts": [
@@ -1107,7 +1120,10 @@ board hold { member, host, worktree, holder: "session" | "agent", purpose, item 
 ```
 
 An *own hold* is a hold of the caller's own pool; a *board hold* is a hold as every member sees it, naming neither the
-machine, the pool, the session nor the agent.
+machine, the pool, the session nor the agent. A hold's `item` is the work item its take named. A hold taken with none
+learns one from the first edit check that reserves, names the worktree, comes from its session or an agent of it, and
+attributes its edits to the claims of exactly one item (see [Edit check](#edit-check)); a hold that names an item keeps
+it, through a take again too.
 
 `GET /v1/worktrees`, optionally `?machine=<id>`, answers `{ "pools": [own pool, …], "board": [board hold, …] }`: the
 caller's own pools with a hold (only those on `machine` when it is named), ordered by machine and pool, and every
@@ -1146,14 +1162,14 @@ holder has it, as when a hold ended while its beats could not reach the server. 
 applied, whenever they were sent.
 
 `repo` is the id of the repository the pool's worktrees are of, and a beat's `branch` the branch its worktree is on (the
-command line sends none on a detached head, and neither for a pool it took from before it kept the pool's repository).
-A kept beat with a branch, for a hold that names an item (`item` of the take), records that branch on the caller's live
-claim on the item, learned from that worktree of that pool (`worktree`, see [Branches and
-overlaps](#branches-and-overlaps)): the same worktree moves the branch it gave, and another worktree held for the same
-item waits until the first is no longer held. Nothing is recorded for a hold that names no item, an item the caller
-holds no live claim on, a beat without a branch, or a `repo` that is missing or not one the project lists. Refusals:
-`not_found` for a session, sending or named by a beat, that is not the caller's; `invalid_request` for a missing or
-invalid field, named by its place (`beats[0].seen_at`, `beats[0].branch`, `repo`).
+command line sends none on a detached head, and neither for a pool it took from before it kept the pool's repository). A
+kept beat with a branch, for a hold that names an item (`item` of the take, or the item it learned from an edit),
+records that branch on the caller's live claim on the item, learned from that worktree of that pool (`worktree`, see
+[Branches and overlaps](#branches-and-overlaps)): the same worktree moves the branch it gave, and another worktree held
+for the same item waits until the first is no longer held. Nothing is recorded for a hold that names no item, an item
+the caller holds no live claim on, a beat without a branch, or a `repo` that is missing or not one the project lists.
+Refusals: `not_found` for a session, sending or named by a beat, that is not the caller's; `invalid_request` for a
+missing or invalid field, named by its place (`beats[0].seen_at`, `beats[0].branch`, `repo`).
 
 `POST /v1/sessions/{id}/end` ends every hold of a session and its agents; see [Sessions](#sessions).
 

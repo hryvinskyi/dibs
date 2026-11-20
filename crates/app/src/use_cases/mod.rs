@@ -431,6 +431,7 @@ mod integration_refusals {
                         paths: vec![RepoPath::parse("default:packages/billing/a.rs").unwrap()],
                         reserve: false,
                         checkout: None,
+                        worktree: None,
                     },
                 )
                 .await

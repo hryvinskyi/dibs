@@ -16,9 +16,9 @@ mod state;
 mod tests;
 
 pub use decide::{
-    Beaten, Release, TakeAnswer, TakeWorktree, Transition, WorktreeBeat, WorktreeRefused,
-    decide_beat, decide_member_removed, decide_release, decide_session_ended, decide_take,
-    decide_tick,
+    Beaten, EditInWorktree, Release, TakeAnswer, TakeWorktree, Transition, WorktreeBeat,
+    WorktreeRefused, decide_beat, decide_edit_in_worktree, decide_member_removed, decide_release,
+    decide_session_ended, decide_take, decide_tick,
 };
 pub use name::{AgentKey, AgentKeyError, PoolId, PoolIdError, WorktreeName, WorktreeNameError};
 pub use state::{

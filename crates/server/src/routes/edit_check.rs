@@ -6,12 +6,15 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use dibs_app::use_cases::{EditCheckInput, FromCheckout, OnBranch};
 use dibs_domain::paths::{RelPath, RepoPath};
-use dibs_domain::radar::BranchName;
+use dibs_domain::radar::{BranchName, WorktreeRef};
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::MachineId;
 use dibs_domain::session::CheckoutToken;
+use dibs_domain::worktree::{PoolId, WorktreeName};
 
 use crate::auth::Authed;
 use crate::error::ApiError;
@@ -28,6 +31,7 @@ pub struct CheckBody {
     reserve: Option<bool>,
     checkout: Option<String>,
     branch: Option<String>,
+    worktree: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -44,12 +48,16 @@ struct CheckAnswer {
 /// on; a checkout on a detached head sends no branch. A check that reserves and names its checkout
 /// stores that the session works there, and records the branch on the session's one working claim
 /// when the edits were attributed to it and no other checkout of the session and no other session
-/// in this checkout stand in the way; one that names none records no branch.
+/// in this checkout stand in the way; one that names none records no branch. `worktree`,
+/// `{machine, pool, name}`, names the worktree of the caller's pool the edits are made in: a check
+/// that reserves gives its hold, when held under the check's session, not silent and naming no
+/// item, the item of the one claim the edits were attributed to, and records `branch` on the
+/// caller's live claim on the item the hold names, learned from that worktree.
 ///
 /// # Errors
 /// `forbidden` for an integration;
-/// `invalid_request` for a missing repository, session or path list, or an invalid path, checkout
-/// or branch;
+/// `invalid_request` for a missing repository, session or path list, or an invalid path, checkout,
+/// branch or worktree;
 /// `unknown_repo` for a repository the project does not list; `not_found` for a session not the
 /// caller's.
 pub async fn check(
@@ -90,6 +98,7 @@ pub async fn check(
         paths,
         reserve: body.reserve.unwrap_or(false),
         checkout,
+        worktree: worktree_in_body(body.worktree)?,
     };
     let check = state.app.edit_check.execute(&actor, input).await?;
     let answer = CheckAnswer {
@@ -101,3 +110,25 @@ pub async fn check(
     };
     Ok(reply(StatusCode::OK, &answer))
 }
+
+/// The pool worktree a check's body names: an object of the machine and the pool its client
+/// names the pool by, as a take names them, and the worktree's name.
+fn worktree_in_body(worktree: Option<Value>) -> Result<Option<WorktreeRef>, ApiError> {
+    let fields = match worktree {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Object(fields)) => fields,
+        Some(_) => return Err(ApiError::invalid_field("worktree", &NOT_WORKTREE)),
+    };
+    let text = |name: &str| match fields.get(name) {
+        Some(Value::String(text)) => Ok(text.as_str()),
+        _ => Err(ApiError::invalid_field("worktree", &NOT_WORKTREE)),
+    };
+    Ok(Some(WorktreeRef {
+        machine: parse("worktree", text("machine")?, MachineId::parse)?,
+        pool: parse("worktree", text("pool")?, PoolId::parse)?,
+        worktree: parse("worktree", text("name")?, WorktreeName::parse)?,
+    }))
+}
+
+/// What `worktree` must be.
+const NOT_WORKTREE: &str = "it is an object of the machine, the pool and the worktree's name";

@@ -133,6 +133,7 @@ impl Governed {
             reserve: false,
             checkout: None,
             branch: None,
+            worktree: None,
         };
         edit_verdicts(&connection.client, &self.settings, &request)
             .await

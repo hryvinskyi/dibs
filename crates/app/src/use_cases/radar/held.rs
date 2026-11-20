@@ -7,6 +7,7 @@ use time::OffsetDateTime;
 
 use dibs_domain::claim::Claim;
 use dibs_domain::event::EventKind;
+use dibs_domain::ids::{ItemId, MemberId};
 use dibs_domain::radar::{
     BranchName, BranchRecording, BranchSource, HeldWorktrees, WorktreeRef, record_branch,
 };
@@ -99,5 +100,34 @@ impl Radar<'_> {
                 Ok(changed)
             }
         }
+    }
+
+    /// Records `branch`, the branch of the pool worktree `worktree` held for `item`, on `member`'s
+    /// live claim on `item` as the claim's branch in `repo`, learned from that worktree; with no
+    /// such claim nothing is written.
+    ///
+    /// # Errors
+    /// [`AppError::Store`] when the store fails.
+    pub(crate) async fn record_worktree_branch(
+        &self,
+        work: &mut Work,
+        member: MemberId,
+        item: ItemId,
+        repo: &RepoId,
+        branch: &BranchName,
+        worktree: WorktreeRef,
+    ) -> Result<(), AppError> {
+        let project = work.project_id();
+        let stale_after = self.settings.stale_after();
+        let claim = work
+            .claim(project, item)
+            .await?
+            .filter(|claim| claim.member == member && claim.is_live(self.now, stale_after));
+        if let Some(claim) = claim {
+            let source = BranchSource::Worktree(worktree);
+            self.record_branch(work, &claim, repo, branch, source)
+                .await?;
+        }
+        Ok(())
     }
 }

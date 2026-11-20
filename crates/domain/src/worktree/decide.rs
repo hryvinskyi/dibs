@@ -115,6 +115,48 @@ pub struct Beaten {
     pub unknown: Vec<WorktreeHolder>,
 }
 
+/// An edit made in a worktree of a pool, which may teach the worktree's hold the work item it is
+/// for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditInWorktree {
+    /// The worktree the edit was made in.
+    pub worktree: WorktreeName,
+    /// The session the edit came from.
+    pub session: SessionId,
+    /// The one work item the edit was attributed to; `None` when it was attributed to none, or to
+    /// several.
+    pub item: Option<ItemId>,
+}
+
+/// Decides what an edit made in a worktree teaches its hold. When the worktree is held under the
+/// edit's session — by the session itself or by one of its agents — by a hold that is not silent
+/// at `now` under `silence`, a hold that names no item takes the edit's one item, and a hold that
+/// names one keeps it. Answers the item the hold names after the edit, which is `None` when the
+/// worktree is free, held under another session, or held by a silent hold, and then nothing
+/// changes. Learning an item records no event: a take records none of its item either.
+pub fn decide_edit_in_worktree(
+    pool: &WorktreePool,
+    edit: &EditInWorktree,
+    now: OffsetDateTime,
+    silence: Silence,
+) -> Transition<Option<ItemId>> {
+    let mut next = pool.clone();
+    let hold = next
+        .hold_mut(&edit.worktree)
+        .filter(|hold| hold.holder.session() == edit.session && !hold.is_silent(now, silence));
+    let item = hold.and_then(|hold| {
+        if hold.item.is_none() {
+            hold.item = edit.item;
+        }
+        hold.item
+    });
+    Transition {
+        pool: next,
+        events: Vec::new(),
+        answer: item,
+    }
+}
+
 /// Decides a take: the holder's own hold is answered again, seen now and otherwise unchanged;
 /// otherwise the first name in the order given that nobody holds becomes the holder's; otherwise
 /// the pool is busy.

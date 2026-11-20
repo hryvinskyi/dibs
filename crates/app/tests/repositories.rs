@@ -191,6 +191,7 @@ mod repositories {
                         paths: paths.iter().map(|p| RepoPath::parse(p).unwrap()).collect(),
                         reserve: true,
                         checkout: None,
+                        worktree: None,
                     },
                 )
                 .await
@@ -302,6 +303,7 @@ mod repositories {
                     paths: vec![RepoPath::parse("search:src/lib.rs").unwrap()],
                     reserve: false,
                     checkout: None,
+                    worktree: None,
                 },
             )
             .await

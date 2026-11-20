@@ -226,6 +226,7 @@ async fn an_edit_records_the_branch_its_claim_works_on_once_per_change() {
         paths: vec![path("packages/billing/a.php")],
         reserve: true,
         checkout: Some(in_checkout('a', branch)),
+        worktree: None,
     };
     let check = EditCheck::new(&env.deps);
     let before = env.events().await.len();
@@ -933,6 +934,7 @@ async fn a_branch_change_takes_the_old_branchs_footprint_and_what_it_made() {
                 paths: vec![path("packages/search/a.php")],
                 reserve: true,
                 checkout: Some(on("bob/2-again")),
+                worktree: None,
             },
         )
         .await

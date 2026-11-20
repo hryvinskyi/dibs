@@ -11,7 +11,7 @@ use dibs_domain::grant::Grant;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::paths::RepoPath;
-use dibs_domain::radar::BranchSource;
+use dibs_domain::radar::{BranchSource, WorktreeRef};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::reservation::ReservationPlan;
 
@@ -23,6 +23,7 @@ use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::common::own_session;
 use crate::use_cases::radar::{FromCheckout, Radar, fed_by_checkout, report_checkout};
 use crate::use_cases::wide_asks::Announcer;
+use crate::use_cases::worktrees::edit_in_worktree;
 use crate::work::Work;
 
 /// The paths to check.
@@ -39,6 +40,10 @@ pub struct EditCheckInput {
     /// that reserves stores that the session reported working there, and may record the branch
     /// on the one claim the checkout feeds.
     pub checkout: Option<FromCheckout>,
+    /// The worktree of one of the caller's pools the edits are made in, when they are made in
+    /// one. A check that reserves may teach its hold the item the edits are for, and records the
+    /// checkout's branch on the claim on the item the hold names.
+    pub worktree: Option<WorktreeRef>,
 }
 
 /// The verdicts of a check, each with the handles of the members it names, and what the check
@@ -108,6 +113,15 @@ impl EditVerdicts {
 /// from a stronger source that still holds is kept. A `BranchRecorded` event marks a change of
 /// branch, and the claim's footprint of the repository, which measured the branch before, goes
 /// with what it made.
+///
+/// A check that reserves and names a worktree of the caller's pool it is made in teaches the
+/// worktree's hold the item its edits are for: when the hold is held under the check's session, by
+/// the session or one of its agents, has not gone silent and names no item, and the edits were
+/// attributed to the claims of exactly one item, the hold takes that item; a hold that names one
+/// keeps it, and learning appends no event. Whenever that hold names an item, the checkout's branch
+/// is recorded on the caller's live claim on it, learned from that worktree of that pool, as a
+/// worktree's signs of life record it; that recording comes before the checkout's own, which then
+/// waits while the worktree holds.
 pub struct EditCheck {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -193,27 +207,36 @@ impl EditCheck {
                 .insert(share.path.clone());
         }
         let stale_after = settings.stale_after();
+        let on = input
+            .checkout
+            .as_ref()
+            .and_then(|from| from.branch.as_ref())
+            .filter(|on| settings.repo(&on.repo).is_some());
         let mut fed = None;
         if let Some(from) = &input.checkout {
             let reported =
                 report_checkout(&mut work, actor.member, input.session, &from.token, now).await?;
-            let on = from
-                .branch
-                .as_ref()
-                .filter(|on| settings.repo(&on.repo).is_some());
-            if let Some(on) = on {
+            if on.is_some() {
                 let touched = |claim: &Claim| check.touch.contains(&claim.item);
                 fed = fed_by_checkout(&mut work, &reported, &claims, stale_after, touched)
                     .await?
-                    .map(|claim| (claim.item, on));
+                    .map(|claim| claim.item);
             }
         }
-        let radar = Radar {
-            ids: &*self.ids,
-            schemes: &self.ref_schemes,
-            settings: &settings,
-            now,
-        };
+        let mut held_for = None;
+        if let Some(worktree) = &input.worktree {
+            let session = input.session;
+            held_for = edit_in_worktree(
+                &mut work,
+                actor.member,
+                session,
+                worktree,
+                &check.touch,
+                now,
+            )
+            .await?
+            .map(|item| (item, worktree.clone()));
+        }
         let changed = claims.into_iter().filter(|claim| {
             claim.member == actor.member
                 && (gains.contains_key(&claim.item) || check.touch.contains(&claim.item))
@@ -226,15 +249,34 @@ impl EditCheck {
                 claim.last_seen = now;
             }
             work.save_claim(project, &claim).await?;
-            if let Some((_, on)) = fed.filter(|(item, _)| *item == claim.item) {
+        }
+        if let Some(on) = on {
+            let radar = Radar {
+                ids: &*self.ids,
+                schemes: &self.ref_schemes,
+                settings: &settings,
+                now,
+            };
+            if let Some((item, worktree)) = held_for {
                 radar
-                    .record_branch(
+                    .record_worktree_branch(
                         &mut work,
-                        &claim,
+                        actor.member,
+                        item,
                         &on.repo,
                         &on.branch,
-                        BranchSource::Checkout,
+                        worktree,
                     )
+                    .await?;
+            }
+            let fed = match fed {
+                Some(item) => work.claim(project, item).await?,
+                None => None,
+            };
+            if let Some(claim) = fed {
+                let source = BranchSource::Checkout;
+                radar
+                    .record_branch(&mut work, &claim, &on.repo, &on.branch, source)
                     .await?;
             }
         }
@@ -312,6 +354,7 @@ mod tests {
                     paths: paths.iter().map(|p| path(p)).collect(),
                     reserve,
                     checkout: None,
+                    worktree: None,
                 },
             )
             .await
@@ -397,6 +440,7 @@ mod tests {
             paths: paths.iter().map(|p| path(p)).collect(),
             reserve,
             checkout: Some(in_checkout('a', Some(branch))),
+            worktree: None,
         };
         let check = EditCheck::new(&env.deps);
         let before = env.events().await.len();
@@ -573,6 +617,7 @@ mod tests {
                     paths: vec![path("web:src/a.rs")],
                     reserve: true,
                     checkout: None,
+                    worktree: None,
                 },
             )
             .await
@@ -586,6 +631,7 @@ mod tests {
                     paths: Vec::new(),
                     reserve: false,
                     checkout: None,
+                    worktree: None,
                 },
             )
             .await

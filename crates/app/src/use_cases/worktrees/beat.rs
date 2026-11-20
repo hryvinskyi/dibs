@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
-use dibs_domain::radar::{BranchName, BranchSource, WorktreeRef};
+use dibs_domain::radar::{BranchName, WorktreeRef};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::repo::RepoId;
 use dibs_domain::report::MachineId;
@@ -155,7 +155,6 @@ impl BeatWorktrees {
         if settings.repo(repo).is_none() {
             return Ok(());
         }
-        let stale_after = settings.stale_after();
         let radar = Radar {
             ids: &*self.ids,
             schemes: &self.ref_schemes,
@@ -163,16 +162,9 @@ impl BeatWorktrees {
             now,
         };
         for (worktree, (item, branch)) in worked {
-            let claim = work
-                .claim(actor.project, item)
-                .await?
-                .filter(|claim| claim.member == actor.member && claim.is_live(now, stale_after));
-            let Some(claim) = claim else {
-                continue;
-            };
-            let source = BranchSource::Worktree(WorktreeRef::of(key, &worktree));
+            let worktree = WorktreeRef::of(key, &worktree);
             radar
-                .record_branch(work, &claim, repo, &branch, source)
+                .record_worktree_branch(work, actor.member, item, repo, &branch, worktree)
                 .await?;
         }
         Ok(())

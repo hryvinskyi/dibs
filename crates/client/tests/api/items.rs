@@ -250,6 +250,7 @@ fn edit_checks_answer_per_path_and_ungoverned_paths_need_no_server() {
             reserve: false,
             checkout: None,
             branch: None,
+            worktree: None,
         };
         let verdicts = bob.edit_check(&request).await.unwrap().verdicts;
         assert_eq!(verdicts.len(), 3);
@@ -336,6 +337,7 @@ fn a_holder_grants_another_member_edits_for_their_item() {
                 reserve: false,
                 checkout: None,
                 branch: None,
+                worktree: None,
             })
             .await
             .unwrap();
@@ -565,6 +567,7 @@ fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
             reserve: true,
             checkout: None,
             branch: None,
+            worktree: None,
         };
         let held = bob.edit_check(&request).await.unwrap().verdicts;
         assert!(
@@ -651,6 +654,7 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
                 reserve: false,
                 checkout: None,
                 branch: None,
+                worktree: None,
             })
             .await
             .unwrap();
@@ -738,6 +742,7 @@ fn a_feature_claim_waits_for_a_debt_held_area_and_receives_it_when_it_is_narrowe
             reserve: true,
             checkout: None,
             branch: None,
+            worktree: None,
         };
         let verdicts = bob.edit_check(&request).await.unwrap().verdicts;
         assert!(
@@ -904,6 +909,7 @@ fn a_heartbeat_and_a_reserving_check_that_name_their_checkout_record_its_branch(
             reserve: true,
             checkout: Some(checkout),
             branch: Some(BranchName::parse("bob/8-refunds-next").unwrap()),
+            worktree: None,
         };
         bob.edit_check(&request).await.unwrap();
         assert_eq!(

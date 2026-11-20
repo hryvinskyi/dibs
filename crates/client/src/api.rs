@@ -20,11 +20,12 @@ use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::radar::{BranchName, OverlapKind};
 use dibs_domain::repo::{RemoteUrl, RepoId};
-use dibs_domain::report::{Feedback, FeedbackReason, RefusalId, ReportDay, Tally};
+use dibs_domain::report::{Feedback, FeedbackReason, MachineId, RefusalId, ReportDay, Tally};
 use dibs_domain::review::PrRef;
 use dibs_domain::session::{AgentLabel, CheckoutToken, HostName};
 use dibs_domain::settings::{ProjectSettings, SettingsDocument, SettingsError};
 use dibs_domain::slot::SlotName;
+use dibs_domain::worktree::{PoolId, WorktreeName};
 
 use crate::token::Token;
 
@@ -948,6 +949,21 @@ pub struct EditCheckRequest {
     /// The branch the checkout is on; none on a detached head.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<BranchName>,
+    /// The worktree of the caller's pool the edits are made in, when the checkout is one; none
+    /// for a check that only asks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<InWorktree>,
+}
+
+/// A worktree of one of the caller's pools, named as a take names its pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InWorktree {
+    /// The machine the pool lives on.
+    pub machine: MachineId,
+    /// The pool, on that machine.
+    pub pool: PoolId,
+    /// The worktree's name.
+    pub name: WorktreeName,
 }
 
 /// The checkout a request comes from and the branch it is on.

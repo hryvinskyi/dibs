@@ -1,9 +1,10 @@
 //! The use cases of worktree pools: taking a worktree for a session or one of its agents,
-//! releasing it, an admin's forced release, the holders' beats, the end of a session, reading the
-//! pools, and the sweep. Each runs in one transaction and ends the holds gone silent before it
-//! decides.
+//! releasing it, an admin's forced release, the holders' beats, the item an edit made in a worktree
+//! teaches its hold, the end of a session, reading the pools, and the sweep. Each runs in one
+//! transaction and ends the holds gone silent before it decides.
 
 mod beat;
+mod edit;
 mod end_session;
 mod list;
 mod release;
@@ -24,5 +25,6 @@ pub use release::{
 pub use take::{TakeWorktree, TakeWorktreeInput, TookWorktree};
 pub use view::{BoardHold, HeldWorktree, OwnPool, WorktreesView};
 
+pub(crate) use edit::edit_in_worktree;
 pub(crate) use scene::PoolScene;
 pub(crate) use view::own_pools;

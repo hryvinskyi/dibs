@@ -467,14 +467,17 @@ leaves a locked worktree for its next run.
 | `cache/<scope>/worktrees-unserved` | when the server was last found to serve no worktree pools |
 | `cache/<scope>/worktrees-served.json` | when the server answered a worktree route after it was found so |
 
-The signs of life are sent for the holder the hold record names, by the detached `dibs sync` and by `upkeep`, at most once
-a minute whatever `heartbeat_every` is. Each names the branch its worktree is on (read from the worktree's own `.git`),
-and a hold taken for an item (`--item`) records that branch on your claim on the item. A sign the server answers as
-unknown (it let go of the hold while the signs could not reach it) takes that same worktree again for the same holder,
-if it is still free. A server older than the client answers `404` on the worktree routes: signs of life are dropped
-without a word and that server is not asked for them again
-for a day, or until a take, a release or a listing of worktrees is answered (the server was upgraded), a session end it cannot serve has nothing to let go of, and a worktree a host asks for falls back to the host's
-own, as when the server cannot be reached.
+The signs of life are sent for the holder the hold record names, by the detached `dibs sync` and by `upkeep`, at most
+once a minute whatever `heartbeat_every` is. Each names the branch its worktree is on (read from the worktree's own
+`.git`), and a hold that names an item records that branch on your claim on the item. A hold names the item its take
+named (`--item`); one the hooks take for a host's agent or session names none, and learns the item of the first edit
+made in it that falls under your claims on exactly one item, whose edit check then records the worktree's branch on that
+claim too. A sign the server answers as unknown (it let go of the hold while the signs could not reach it) takes that
+same worktree again for the same holder, if it is still free. A server older than the client answers `404` on the
+worktree routes: signs of life are dropped without a word and that server is not asked for them again for a day, or
+until a take, a release or a listing of worktrees is answered (the server was upgraded), a session end it cannot serve
+has nothing to let go of, and a worktree a host asks for falls back to the host's own, as when the server cannot be
+reached.
 
 **`dibs worktree upkeep`** is meant for a schedule (launchd, systemd, cron) every few minutes in the checkout, with the
 docker and `PATH` settings the `idle` command needs. It sends the signs of life, asks the server which worktrees it holds

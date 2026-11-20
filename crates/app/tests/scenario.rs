@@ -160,6 +160,7 @@ mod scenario {
                         paths: paths.iter().map(|p| path(p)).collect(),
                         reserve: true,
                         checkout: None,
+                        worktree: None,
                     },
                 )
                 .await

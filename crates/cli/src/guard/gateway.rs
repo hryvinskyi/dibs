@@ -12,11 +12,14 @@ use dibs_agent_host::ports::{
     StatusView,
 };
 use dibs_client::Client;
-use dibs_client::api::EditCheckRequest;
+use dibs_client::api::{EditCheckRequest, InWorktree};
 use dibs_client::checkout::Checkout;
+use dibs_client::git_dirs::GitDirs;
+use dibs_client::worktree_pool::{pool_id, read_marker, read_settings};
 use dibs_domain::paths::RelPath;
 use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::MachineId;
 use dibs_domain::session::CheckoutToken;
 use dibs_domain::slot::SlotName;
 
@@ -32,7 +35,9 @@ pub struct HookGateway {
     state_base: PathBuf,
     runtime: OnceCell<Runtime>,
     client: OnceCell<Client>,
+    machine: OnceCell<Option<MachineId>>,
     token: OnceCell<Option<CheckoutToken>>,
+    worktree: OnceCell<Option<InWorktree>>,
 }
 
 impl HookGateway {
@@ -45,17 +50,42 @@ impl HookGateway {
             state_base,
             runtime: OnceCell::new(),
             client: OnceCell::new(),
+            machine: OnceCell::new(),
             token: OnceCell::new(),
+            worktree: OnceCell::new(),
         }
+    }
+
+    /// This machine's id, read or made once; none when it can be neither read nor kept.
+    fn machine(&self) -> Option<&MachineId> {
+        self.machine
+            .get_or_init(|| machine_id(&self.state_base))
+            .as_ref()
     }
 
     /// The token the checkout is named by on this machine, worked out once; none when the
     /// machine has no id.
     fn token(&self) -> Option<&CheckoutToken> {
         self.token
+            .get_or_init(|| self.checkout.token(self.machine()?))
+            .as_ref()
+    }
+
+    /// The pool worktree the checkout is, worked out once: its git directory's mark names the
+    /// checkout that lends it and its name, and the pool's settings, read for that checkout, give
+    /// the pool's id. None when the checkout bears no mark, the settings cannot be read, or the
+    /// machine has no id.
+    fn worktree(&self) -> Option<&InWorktree> {
+        self.worktree
             .get_or_init(|| {
-                let machine = machine_id(&self.state_base)?;
-                self.checkout.token(&machine)
+                let dirs = GitDirs::around(self.checkout.root())?;
+                let mark = read_marker(&dirs)?;
+                let settings = read_settings(&dirs, &mark.checkout).ok().flatten()?;
+                Some(InWorktree {
+                    machine: self.machine()?.clone(),
+                    pool: pool_id(&settings.root).ok()?,
+                    name: mark.name,
+                })
             })
             .as_ref()
     }
@@ -166,6 +196,7 @@ impl CoordinationGateway for HookGateway {
                 reserve: true,
                 checkout: self.token().cloned(),
                 branch: branch.cloned(),
+                worktree: self.worktree().cloned(),
             };
             Ok::<_, RemoteError>(client.edit_check(&request).await?)
         });

@@ -140,6 +140,7 @@ mod tests {
                     paths: vec![RepoPath::parse("default:config/app.yaml").unwrap()],
                     reserve: true,
                     checkout: None,
+                    worktree: None,
                 },
             )
             .await

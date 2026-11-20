@@ -1,8 +1,8 @@
 //! The worktree routes through the real router over a real SQLite file: taking, taking again,
 //! answering busy, releasing by worktree and by holder, beats, the end of a session, the admin's
 //! forced release, each refusal with its status and code, what other members see, the sweep
-//! that ends a silent agent's hold and keeps a session's, and the branch a beat records on the
-//! claim of the item its hold names.
+//! that ends a silent agent's hold and keeps a session's, the branch a beat records on the claim
+//! of the item its hold names, and the item an edit made in a worktree teaches its hold.
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -891,6 +891,85 @@ async fn a_beat_records_its_worktrees_branch_on_the_claim_of_the_item_its_hold_n
     );
     assert_eq!(
         claim["branch_sources"],
+        json!({"api": "worktree"}),
+        "{}",
+        status.body
+    );
+}
+
+/// The `worktree` field of an edit check: the worktree `name` of the pool `pool` on `machine`.
+fn in_worktree(machine: &str, pool: &str, name: &str) -> Value {
+    json!({"machine": machine, "pool": pool, "name": name})
+}
+
+#[tokio::test]
+async fn an_edit_in_a_worktree_taken_for_no_item_gives_its_hold_the_item_and_its_claim_the_branch()
+{
+    let team = team().await;
+    let world = &team.world;
+    let [hook, cli, _] = team.sessions;
+    world.settings(&team.alice, two_repositories()).await;
+    let item = world
+        .item(&team.alice, Some("gh:acme/api#7"), "Fix the totals")
+        .await;
+    let claimed = world
+        .post(
+            &team.alice,
+            &format!("/v1/items/{item}/claim"),
+            json!({"session_id": cli}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    took(&take(world, &team.alice, hook, json!({"agent": "agent-1"})).await);
+    let edit = |worktree: Value| {
+        json!({"session_id": hook, "repo": "api", "paths": ["src/billing/totals.rs"],
+               "reserve": true, "checkout": "ab".repeat(16), "branch": "alice/7-totals",
+               "worktree": worktree})
+    };
+    for worktree in [
+        json!("worktree1"),
+        json!({"machine": MACHINE, "pool": POOL}),
+        in_worktree("not a machine", POOL, "worktree1"),
+        in_worktree(MACHINE, "not a pool", "worktree1"),
+        in_worktree(MACHINE, POOL, "work tree"),
+    ] {
+        let refused = world
+            .post(&team.alice, "/v1/edit-check", edit(worktree.clone()))
+            .await;
+        assert_error(
+            &refused,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+        );
+        assert_eq!(
+            refused.body["error"]["details"]["field"], "worktree",
+            "{worktree}"
+        );
+    }
+    let checked = world
+        .post(
+            &team.alice,
+            "/v1/edit-check",
+            edit(in_worktree(MACHINE, POOL, "worktree1")),
+        )
+        .await;
+    assert_eq!(checked.status, StatusCode::OK, "{}", checked.body);
+    assert_eq!(checked.body["verdicts"][0]["verdict"], "allowed");
+
+    let pools = world.get(&team.alice, "/v1/worktrees").await;
+    let hold = &pools.body["pools"][0]["holds"][0];
+    assert_eq!(hold["worktree"], "worktree1", "{}", pools.body);
+    assert_eq!(hold["item"], item, "{}", pools.body);
+    let listed = world.get(&team.alice, "/v1/claims").await;
+    assert_eq!(
+        listed.body["claims"][0]["branches"],
+        json!({"api": "alice/7-totals"}),
+        "{}",
+        listed.body
+    );
+    let status = world.get(&team.alice, "/v1/status").await;
+    assert_eq!(
+        status.body["live"][0]["claim"]["branch_sources"],
         json!({"api": "worktree"}),
         "{}",
         status.body

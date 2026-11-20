@@ -431,6 +431,7 @@ mod tests {
                     paths: vec![RepoPath::parse("default:packages/billing/a.rs").unwrap()],
                     reserve: true,
                     checkout: Some(in_checkout('b', Some("bob/1-agent"))),
+                    worktree: None,
                 },
             )
             .await

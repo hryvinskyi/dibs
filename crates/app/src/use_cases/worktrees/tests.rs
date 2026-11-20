@@ -1262,3 +1262,216 @@ async fn a_checkouts_branch_waits_while_the_worktree_is_held_and_replaces_it_aft
         "a worktree no longer held no longer holds its branch"
     );
 }
+
+/// `who` claims `item` with `areas` from their session.
+async fn claim_areas(env: &Env, who: &Person, item: ItemId, areas: &[&str]) {
+    ClaimItem::new(&env.deps)
+        .execute(
+            &who.actor,
+            ClaimItemInput {
+                branches: Default::default(),
+                wide: None,
+                item,
+                session: who.session,
+                areas: areas.iter().map(|area| (*area).to_owned()).collect(),
+                kind: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// An edit check of alice's from `session` of `paths`, made in `worktree` of the pool the tests
+/// take from, in the checkout `a` on `branch`.
+async fn edit_in(
+    env: &Env,
+    session: SessionId,
+    paths: &[&str],
+    reserve: bool,
+    worktree: &str,
+    branch: &str,
+) -> crate::use_cases::EditVerdicts {
+    crate::use_cases::EditCheck::new(&env.deps)
+        .execute(
+            &env.alice.actor,
+            crate::use_cases::EditCheckInput {
+                session,
+                paths: paths
+                    .iter()
+                    .map(|path| dibs_domain::paths::RepoPath::parse(path).unwrap())
+                    .collect(),
+                reserve,
+                checkout: Some(in_checkout('a', Some(branch))),
+                worktree: Some(WorktreeRef {
+                    machine: machine(LAPTOP),
+                    pool: pool_id(CHECKOUT),
+                    worktree: name(worktree),
+                }),
+            },
+        )
+        .await
+        .unwrap()
+}
+
+/// The item alice's hold of `worktree` in the pool the tests take from names.
+async fn hold_item(env: &Env, worktree: &str) -> Option<ItemId> {
+    let key = dibs_domain::worktree::PoolKey {
+        member: env.alice.actor.member,
+        machine: machine(LAPTOP),
+        pool: pool_id(CHECKOUT),
+    };
+    let mut tx = env.deps.store.begin().await.unwrap();
+    let pool = tx.worktree_pool(env.project, &key).await.unwrap();
+    pool.hold(&name(worktree)).and_then(|hold| hold.item)
+}
+
+const BILLING: &str = "default:packages/billing/a.rs";
+const SEARCH: &str = "default:packages/search/a.rs";
+
+#[tokio::test]
+async fn an_edit_in_an_itemless_worktree_gives_the_hold_its_item_and_the_claim_its_branch() {
+    let env = Env::new().await;
+    let item = env.item("gh:acme/widgets#1").await;
+    claim(&env, &env.alice, item).await;
+    let alice = Ask::of(&env.alice).agent("agent-1");
+    alice.took(&env).await;
+    let before = env.events().await.len();
+    let session = env.alice.session;
+    let checked = edit_in(
+        &env,
+        session,
+        &[BILLING],
+        true,
+        "worktree1",
+        "alice/1-totals",
+    )
+    .await;
+    assert_eq!(checked.touch, [item].into());
+    assert_eq!(hold_item(&env, "worktree1").await, Some(item));
+    assert_eq!(
+        branch_of(&env, item).await,
+        Some(("alice/1-totals".to_owned(), from_worktree("worktree1"))),
+        "learned from the worktree, not from the checkout the check also names"
+    );
+    assert_eq!(
+        recorded_after(&env, before).await,
+        [BranchSourceKind::Worktree]
+    );
+    let now = env.now();
+    let on = beat_on("worktree1", session, Some("agent-1"), now, "alice/1-totals");
+    alice.beat(&env, vec![on]).await.unwrap();
+    edit_in(
+        &env,
+        session,
+        &[BILLING],
+        true,
+        "worktree1",
+        "alice/1-totals",
+    )
+    .await;
+    Heartbeat::new(&env.deps)
+        .execute(
+            &env.alice.actor,
+            session,
+            Some(&in_checkout('a', Some("main"))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_of(&env, item).await,
+        Some(("alice/1-totals".to_owned(), from_worktree("worktree1"))),
+        "a checkout's branch waits while the hold stands"
+    );
+    assert_eq!(
+        recorded_after(&env, before).await.len(),
+        1,
+        "a beat or an edit on the same branch appends nothing"
+    );
+    assert_eq!(
+        alice.took(&env).await,
+        ("worktree1".to_owned(), true),
+        "taken again"
+    );
+    assert_eq!(hold_item(&env, "worktree1").await, Some(item), "kept");
+}
+
+#[tokio::test]
+async fn an_edit_that_asks_spans_two_items_or_comes_from_another_session_teaches_nothing() {
+    let env = Env::new().await;
+    let billing = env.item("gh:acme/widgets#1").await;
+    let search = env.item("gh:acme/widgets#2").await;
+    claim_areas(&env, &env.alice, billing, &["billing"]).await;
+    claim_areas(&env, &env.alice, search, &["search"]).await;
+    Ask::of(&env.alice).agent("agent-1").took(&env).await;
+    let before = env.events().await.len();
+    let session = env.alice.session;
+    edit_in(&env, session, &[BILLING], false, "worktree1", "alice/1-x").await;
+    assert_eq!(
+        hold_item(&env, "worktree1").await,
+        None,
+        "a check that asks"
+    );
+    let both = edit_in(
+        &env,
+        session,
+        &[BILLING, SEARCH],
+        true,
+        "worktree1",
+        "alice/1-x",
+    )
+    .await;
+    assert_eq!(both.touch, [billing, search].into());
+    assert_eq!(hold_item(&env, "worktree1").await, None, "two items");
+    let other = session_of(&env, "laptop/other").await;
+    let elsewhere = edit_in(&env, other, &[BILLING], true, "worktree1", "alice/1-x").await;
+    assert_eq!(elsewhere.touch, [billing].into());
+    assert_eq!(hold_item(&env, "worktree1").await, None, "another session");
+    for item in [billing, search] {
+        assert_eq!(branch_of(&env, item).await, None);
+    }
+    assert_eq!(recorded_after(&env, before).await, []);
+}
+
+#[tokio::test]
+async fn a_hold_that_names_an_item_keeps_it_and_records_nothing_on_another_claim() {
+    let env = Env::new().await;
+    let billing = env.item("gh:acme/widgets#1").await;
+    let search = env.item("gh:acme/widgets#2").await;
+    claim_areas(&env, &env.alice, billing, &["billing"]).await;
+    claim_areas(&env, &env.alice, search, &["search"]).await;
+    Ask::of(&env.alice).agent("agent-1").took(&env).await;
+    let session = env.alice.session;
+    edit_in(
+        &env,
+        session,
+        &[BILLING],
+        true,
+        "worktree1",
+        "alice/1-totals",
+    )
+    .await;
+    assert_eq!(hold_item(&env, "worktree1").await, Some(billing));
+    let before = env.events().await.len();
+    let checked = edit_in(
+        &env,
+        session,
+        &[SEARCH],
+        true,
+        "worktree1",
+        "alice/1-totals",
+    )
+    .await;
+    assert_eq!(checked.touch, [search].into());
+    assert_eq!(hold_item(&env, "worktree1").await, Some(billing));
+    assert_eq!(
+        branch_of(&env, billing).await,
+        Some(("alice/1-totals".to_owned(), from_worktree("worktree1")))
+    );
+    assert_eq!(branch_of(&env, search).await, None);
+    assert_eq!(recorded_after(&env, before).await, []);
+}
+
+/// Another session of alice's on her laptop.
+async fn session_of(env: &Env, label: &str) -> SessionId {
+    session(&env.deps, &env.alice.actor, "laptop", label).await
+}
