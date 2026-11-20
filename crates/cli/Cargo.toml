@@ -29,7 +29,7 @@ gethostname = "1.1.0"
 tracing = "0.1.44"
 time = "0.3.55"
 tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
-rmcp = { version = "3.5.1", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "3.11.0", features = ["server", "transport-io", "macros"] }
 semver = "1.0.28"
 rand = "0.10.3"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
