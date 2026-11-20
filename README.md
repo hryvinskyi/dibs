@@ -149,8 +149,8 @@ revokes their tokens and releases everything they held at once. With the Claude 
   person agrees (`dibs claim narrow`), and it moves to the feature claim in the transaction that lets the last holder
   go — a narrowing, the debt claim's end, or its going stale. A debt claim in review is asked once it is worked on
   again; a request unanswered for the project's `yield_escalates_after` (30 minutes by default) goes to the arbiters.
-  Two features keep the plain refusal, and an area waits for one claim at a time. The board marks debt work and what
-  each claim waits for.
+  Two features keep the plain refusal, and an area waits for one claim at a time. The Claims screen marks debt work
+  and what each claim waits for.
 - **Review.** Work reaches a protected branch through pull requests. A member records the pull request of their claim
   (`dibs claim review`); the claim is then *in review*: it keeps its areas, so nobody edits the files under review, and
   never goes stale while it waits. The merge of its last recorded pull request completes it, reported by an integration
@@ -191,8 +191,8 @@ revokes their tokens and releases everything they held at once. With the Claude 
   shown as *from dibs* everywhere and never counted toward anyone's limit on raised messages.
 - **Arbiters and escalation.** The members a project names (`arbiters` in its settings) to settle what agents do not
   agree on. `dibs escalate` sends an urgent message, from dibs, to the arbiters and to whoever holds and whoever asked for
-  the item, slot or conversation in question; the board shows it until an arbiter acknowledges it. Agents do not settle
-  priority between people: they escalate and pick other work meanwhile.
+  the item, slot or conversation in question; the web pages' Now screen shows it until an arbiter acknowledges it.
+  Agents do not settle priority between people: they escalate and pick other work meanwhile.
 - **Importance and acknowledgement.** A message is `normal`, `high` or `urgent`, and may ask each recipient to
   acknowledge it. An acknowledgement is the recipient's own record that they read it; the message never changes, and its
   author sees who has acknowledged and who has not. An acknowledgement says "I read this"; it authorises nothing, except
@@ -686,30 +686,60 @@ often as it likes, and a view equal to what is stored changes nothing. The same 
 requests (`POST /v1/prs/merged`, `POST /v1/prs/closed`), lists the claims in review (`GET /v1/review-claims`) and reads
 the status to set on pull requests (`GET /v1/pr-status`), lists the live claims and their branches
 (`GET /v1/claims`), and reports what each claim's branch changes (`PUT /v1/items/{id}/footprint`); each report may
-be sent again. When no integration has called
-for 15 minutes while claims wait in review or pull requests get a status, the status, the brief and the board say so.
+be sent again. When no integration has called for 15 minutes while claims wait in review or pull requests get a
+status, the status, the brief and the Now screen say so.
 
 ## Web UI
 
-The server also serves pages for people at `/ui`, where you sign in with your token:
+The server also serves pages for people at `/ui`, where you sign in with your token. Every page is drawn in one frame:
 
-- **Status** (`/ui/`): live claims, stale claims with a take-over form, the areas held, and the wide claims with who
-  has acknowledged each of their areas.
-- **Board** (`/ui/board`): a banner for each escalation of yours, or to you, that waits for an arbiter; the slots with
-  who holds each and why, until when, a stalled run in red and who waits, the live wide claims with who has
-  acknowledged them, your ready list with priorities, likely
-  areas and links to the tracker, the open items that wait with their blockers, what is in progress and what waits in
-  review with its pull requests, what went stale and what was done today, filterable by area and member, a banner
-  for each overlap between live claims, and a banner while the project's integration is silent. The columns refresh by themselves when claims, items or slots change;
-  while you are typing a take-over reason they stay as they are and a banner offers a reload instead.
-- **Conversations** (`/ui/threads`): read the conversations between members and agents, and reply. Each conversation
-  shows its importance and whether a message in it awaits your acknowledgement; a message that asks for one lists who has
-  acknowledged it, updated as they do, and offers you an *Acknowledge* button while it still asks (an ended wide claim's
-  announcement no longer does), and a reply can ask everyone to acknowledge it. What dibs wrote itself is marked *from
-  dibs*.
+- **The rail**: the project, one search (`⌘K`, `Ctrl+K` or `/`), the five screens with their counts, the people with
+  their claims and how many of them are silent, the slots (each opens to show its note and how long a hold may last)
+  and the worktrees held with their purpose.
+- **The list and the inspector**: the screen's list, and beside it, on four screens, an inspector for the object you
+  select, with *Copy link*. A click on a row opens it in place; `Escape` closes it.
+- **Now** (`/ui/`): what waits for a person's look, as cards that show only while they have something: unread
+  conversations from people, grant requests your agent has left unanswered for ten minutes, disagreements waiting for
+  an arbiter, claims that touch the same code, claims whose ticket is already finished, claims gone silent, claims
+  held for more than a week, claims on a branch named after another ticket, and a silent integration. Below them,
+  every claim by who holds it and for how long, and what happened today.
+- **Claims** (`/ui/claims`): the live and silent claims by holder, yours first, filtered by how they stand (working,
+  in review, silent, held over a week, ticket finished, other ticket's branch), by holder and by words. The inspector
+  shows the ticket, the holder, the pull request and the branch, the areas held and the tickets that will touch them,
+  the overlaps with other claims, the conversations about it, and, for another member's silent claim, a form to take
+  it over with a reason its holder is sent.
+- **Queue** (`/ui/queue`): the tickets that wait to be claimed, the ready ones by priority, then those that are not and
+  why (a blocker, or an area someone holds). The inspector shows the areas a ticket will probably touch, who holds
+  them, and the `dibs claim` command to copy.
+- **Areas** (`/ui/areas`): the project's areas as a map by repository, the held ones first, each marked with its
+  holder, and set apart when it is held for a finished ticket or for more than a week. The inspector shows an area's
+  paths, the claims that hold it and the tickets that will probably touch it.
+- **Inbox** (`/ui/inbox`): the conversations. *People* lists what members wrote, *Grants* the requests waiting for your
+  agent's decision, *From dibs* what dibs reported, one row per ticket. The inspector shows the conversation and a
+  reply form; opening it marks it read. A message that asks for acknowledgement lists who has acknowledged, updated as
+  they do, and offers you an *Acknowledge* button while it still asks (an ended wide claim's announcement no longer
+  does), and a reply can ask everyone to acknowledge it. What dibs wrote itself is marked *from dibs*.
+- **Search** (`/ui/search`): finds claims, pull requests, tickets in the queue, branches, areas, people, conversations
+  and slots by words from their names, in any order; a number (`42` or `#42`) brings the tickets and pull requests of
+  that number first. The rail's search opens a palette: the arrow keys move between hits, Enter opens the hit here,
+  and `⌘Enter` (`Ctrl+Enter` elsewhere) opens its page outside, in a new tab.
+- **Links**: every ticket, pull request, branch and file links to the tracker or the forge (GitHub today), every area,
+  person and conversation to its page here, and the references inside a title, a message or a note are linked too. A
+  ticket opens its claim or its place in the queue, with an arrow beside it to the tracker. A reference whose address
+  cannot be built leads to the search for its name.
+- **Addresses**: every screen, filter and object has an address, so a link reproduces the list and the selection. The
+  old Board and Threads addresses lead to Claims and Inbox.
+- **What the pages do not do**: they are for watching and finding. Decisions are the agents' and the server's, and the
+  pages keep only the take-over of a silent claim, replying in a conversation, acknowledging a message and signing out.
+- **Live**: the screens follow the event stream and read themselves again when claims, tickets, slots or conversations
+  change; a form you are writing in is kept, and a banner offers a reload instead. An open conversation shows new
+  messages as they arrive.
 
-The pages are rendered on the server and enhanced by a few scripts of its own; they follow the event log live. The
-session cookie is `Secure`, so use them over HTTPS (or on `localhost`).
+The pages are rendered on the server and enhanced by a few scripts of its own, so every page also works without them.
+Light and dark follow the system. The fonts, IBM Plex Sans and Mono, are served by the server itself under the SIL
+Open Font License 1.1 (`web/fonts/LICENSE.txt`). The session cookie is `Secure`, so use the pages over HTTPS (or on
+`localhost`). [`docs/design/prototype.html`](docs/design/prototype.html) is a static copy of their design over made-up
+data, to open from a checkout; the server's pages are the source of truth.
 
 ## Security
 
@@ -725,7 +755,7 @@ session cookie is `Secure`, so use them over HTTPS (or on `localhost`).
   long to wait.
 - **TLS** is the proxy's job. The server speaks plain HTTP, and the client refuses a plain `http` server address that
   is not a loopback address, so a token never crosses a network unencrypted. The pages' cookie is `HttpOnly`, `Secure`
-  and `SameSite=Strict`, and their content security policy allows nothing but the server's own scripts and styles.
+  and `SameSite=Strict`, and their content security policy allows only the server's own scripts, styles, images, fonts and connections.
 - **Logs** name the method and the path of a request and never a header.
 - **What the edit hook can and cannot see.** The hook of an agent host sees the file edits the host's own tools make,
   before they are written. It does not see edits made through a shell command (`sed -i`, a redirect, a formatter), a
@@ -754,3 +784,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the build, the gates and the rules a 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The fonts the web pages serve, IBM Plex Sans and IBM Plex Mono, are under the SIL Open Font License 1.1: see
+[web/fonts/LICENSE.txt](web/fonts/LICENSE.txt).

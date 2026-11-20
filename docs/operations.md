@@ -345,10 +345,10 @@ A hold ends when it is released, when its session ends (`POST /v1/sessions/{id}/
 when its holder goes unseen for 20 minutes (an agent) or 12 hours (a session). The same 30-second sweep that applies the
 slots ends the silent holds of every pool with a hold, each pool in a transaction of its own; a pool that fails to sweep
 is logged (*a worktree pool could not be swept*) and the others are swept. The worktree events reach every member of
-the project, as the board shows every member's holds with the same fields; they carry the host, the worktree, the
+the project, as the rail's *Worktrees held* lists every member's holds; they carry the host, the worktree, the
 holder's kind and purpose, and never the machine, the pool, the session or the agent. An admin ends a hold
-with `POST /v1/admin/worktrees/force-release`, naming the member, the host and the worktree as the board shows them;
-the member is sent the reason.
+with `POST /v1/admin/worktrees/force-release`, naming the member, the host and the worktree as `GET /v1/worktrees`
+lists them under `board`; the member is sent the reason.
 
 ## Pull requests and the integration
 
@@ -431,9 +431,9 @@ describe_holder = false
   idempotent: a repeat answers `matched: false`.
 - **A silent integration is shown** where the project relies on one: while a claim is in review or a repository's
   `pr_status` is enabled. dibs records an `importer`'s calls, at most one a minute; when none has called for 15
-  minutes, `GET /v1/status`, the session brief, `dibs status` and the board say since when. Merges then complete no
-  claims and statuses go stale until it calls again: check the worker. A project that relies on no integration shows
-  nothing.
+  minutes, `GET /v1/status`, the session brief, `dibs status` and the *Integration* card of Now say since when. Merges
+  then complete no claims and statuses go stale until it calls again: check the worker. A project that relies on no
+  integration shows nothing.
 - **`describe_holder`** decides whether a status names the slot, its holder and their purpose. Everyone who can read the
   repository reads a status; keep it `false` where they should not see who holds what.
 
@@ -477,10 +477,10 @@ from the integration and the settings.
   small summary of each footprint (its areas and its contract paths). A settings change reads every footprint once.
 - **What people see.** Each overlap is announced once in a message from dibs to the holders it concerns (`high` for a
   shared file or a contract, `normal` for a moved base, which every merge brings), and listed by `GET /v1/status`,
-  `dibs status` and the board while its claims are live. A claim going stale ends no overlap and is not told again when
-  it comes back; an overlap ends when a footprint, a branch or the settings it rests on change, when a merge brings its
-  branch in, or when a claim it names ends. Removing a repository from the settings drops its footprints and what they
-  made.
+  `dibs status`, the Overlap card of Now and the claim's inspector in Claims while its claims are live. A claim going
+  stale ends no overlap and is not told again when it comes back; an overlap ends when a footprint, a branch or the
+  settings it rests on change, when a merge brings its branch in, or when a claim it names ends. Removing a repository
+  from the settings drops its footprints and what they made.
 - **Branches the client cannot read.** The hook and the heartbeat read the branch from git's files without starting git:
   `HEAD` of the directory `GIT_DIR` names, or of the nearest `.git` (a linked worktree's `.git` file is followed). A
   repository that keeps its refs in a reftable has a `HEAD` that names no branch (`refs/heads/.invalid`), so its claims
@@ -655,8 +655,8 @@ the server, then set `DIBS_LATEST_CLIENT` to 0.1.8.
 **0.1.9, a pool of worktrees for a member's agents.** A server of 0.1.9 migrates the database (migration 13,
 `0013_worktree_holds.sql`, a new table of worktree holds) and serves `GET /v1/worktrees`, `POST /v1/worktrees/take`,
 `POST /v1/worktrees/release`, `POST /v1/worktrees/beat`, `POST /v1/sessions/{id}/end` and
-`POST /v1/admin/worktrees/force-release`; its sweep ends silent holds beside the slots, and the board lists them under
-Worktrees (see [Worktrees](#worktrees)). Older clients never call the routes. On deploy:
+`POST /v1/admin/worktrees/force-release`; its sweep ends silent holds beside the slots, and the rail of the web pages
+lists them under *Worktrees held* (see [Worktrees](#worktrees)). Older clients never call the routes. On deploy:
 
 1. Take the snapshot, as for every release: migrations only go forward.
 2. Upgrade the server. Nothing is configured on it, and a project whose members declare no pool is unchanged.
@@ -759,7 +759,7 @@ the repository.
 | *another server, a restore or a migration holds the database* | Another process has the database; stop it. |
 | A client reports a `429` with `too_many_attempts` | Ten failed sign-ins from one address within a minute. If every client shares one address, the proxy's, `DIBS_TRUST_PROXY` and `DIBS_TRUSTED_PROXIES` are not set as above. |
 | A client reports `503` with `too_many_streams` | A member holds 8 event streams open, or the server 128. |
-| The board says *Integration silent since …* | Claims wait in review, or pull requests get a status, and no `importer` token has called for 15 minutes: the worker is down, its token was revoked, or it cannot reach the server. Merges complete no claims until it calls again. |
+| Now shows an *Integration* card, *The pull request integration has been silent since …* | Claims wait in review, or pull requests get a status, and no `importer` token has called for 15 minutes: the worker is down, its token was revoked, or it cannot reach the server. Merges complete no claims until it calls again. |
 | An integration reports `410` with `cursor_expired` | It was off for longer than the log keeps events (90 days); it reads the state again and follows the log from `after=0`. |
 | The web pages cannot sign in | The session cookie is `Secure`: use the pages over HTTPS (or `localhost`). |
 | A session opted into pushes hears a message only at its next tool call | Its host did not load the push for the session (see [hosts.md](hosts.md#waking-a-session-that-waits-for-its-person)), or the member holds 8 event streams already and the tool server falls back to reading the inbox every five minutes. |

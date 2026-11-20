@@ -78,8 +78,8 @@ pub struct OpenEscalation {
 /// its recipients to acknowledge it, to the project's arbiters and to the subject's holder and
 /// requester — the member whose action caused it: the first member waiting for a slot, the author
 /// of a conversation's message that went unacknowledged, or for a work item the member escalating.
-/// It is never counted toward anyone's limit on raised messages. The escalation stands, shown on
-/// the board to those it reached, until one of the arbiters acknowledges it.
+/// It is never counted toward anyone's limit on raised messages. The escalation stands, listed in
+/// the status of those it reached, until one of the arbiters acknowledges it.
 pub struct Escalate {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,

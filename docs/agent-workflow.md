@@ -305,9 +305,9 @@ commits of the range change in an area someone else holds.
 Agents do not settle priority between people. When the holder of what you need refused, or did not acknowledge your
 request within 30 minutes, or two agents keep wanting the same thing, escalate (`dibs_escalate`, or `dibs escalate
 <item> --reason "..."`, `--slot <slot>`, `--thread <id>`): dibs sends it, urgent and asking to be acknowledged, to the
-project's arbiters and to whoever holds what is disputed and whoever asked for it, and the board shows it until an
-arbiter acknowledges it. Give a reason an arbiter understands in one reading: what each side wants and what has been
-tried. Meanwhile:
+project's arbiters and to whoever holds what is disputed and whoever asked for it, and the web pages' Now screen shows
+it until an arbiter acknowledges it. Give a reason an arbiter understands in one reading: what each side wants and what
+has been tried. Meanwhile:
 
 - do not take over a live claim or a slot, and do not edit in the area;
 - pick other work (`dibs_ready`);

@@ -735,7 +735,8 @@ base no older than the merge: the branch caught up. A claim going stale ends not
 of what is found anew, so an overlap stays stored, unshown, while a claim of it is stale, and is not announced again
 when that claim comes back. One that ended and is found again later is new. The overlaps are derived again whenever a
 footprint changes, a branch changes, a merge is reported or the settings change (new `contracts` or `area_deps` apply to
-the stored footprints at once). `GET /v1/status` and the board list those whose claims are all live.
+the stored footprints at once). `GET /v1/status`, the Overlap card of Now and the overlaps on a claim's inspector in
+Claims list those whose claims are all live.
 
 ### Edit check
 
@@ -848,9 +849,9 @@ subject's parties, never to the caller:
   that asks for one, and that message's sender, who asked.
 
 It answers `201 { "escalation": { "thread_id", "message_id", "arbiters": [handle, …], "reached": [handle, …] } }` and
-appends `escalated`. The escalation stands, in `GET /v1/status` and on the board, until one of the arbiters it reached
-acknowledges its message; a holder's acknowledgement settles nothing. While it stands, the same subject is not escalated
-again: `already_escalated` (`409`, `details.thread_id` naming the escalation's conversation) — follow the arbiters'
+appends `escalated`. The escalation stands, in `GET /v1/status` and on the Arbitrate card of Now, until one of the
+arbiters it reached acknowledges its message; a holder's acknowledgement settles nothing. While it stands, the same
+subject is not escalated again: `already_escalated` (`409`, `details.thread_id` naming the escalation's conversation) — follow the arbiters'
 answer there. A conversation is named in an escalation by its id alone (`conversation #31`), never by its subject,
 since the arbiters and holders it reaches may not read it; the caller's reason is theirs to word. What dibs writes is
 never counted toward the limit on raised messages. Refusals: `no_arbiters` (`409`) when the project names no arbiter
@@ -1018,7 +1019,7 @@ by whom, why and since when. Which worktrees a pool has, and whether they are pr
 server never lists a free worktree. A pool is the member's, on one machine, for one checkout: a request names it by
 `machine` (the id the member's dibs gave the machine, 32 lowercase hexadecimal digits) and `pool` (1 to 64 lowercase
 letters and digits, a digest of the pool's directory the machine computes). Both are the caller's: the server answers
-them to the caller alone, never to another member, never on the log or the board. A request always reaches the
+them to the caller alone, never to another member, never on the log or in a board hold. A request always reaches the
 caller's own pool, whatever it names; two members naming the same machine and pool reach two pools.
 
 A hold is not the member's but one **holder**'s: a session of theirs (`holder_session`), or one agent that session started
@@ -1078,15 +1079,15 @@ not the caller's; `invalid_request` for a missing or invalid field, named by its
 `POST /v1/sessions/{id}/end` ends every hold of a session and its agents; see [Sessions](#sessions).
 
 `POST /v1/admin/worktrees/force-release`, body `{ "session_id": 9, "member": "bob", "host": "desktop", "worktree":
-"worktree1", "reason": "…" }`, ends a member's hold, named as the board names it, in each of the member's pools on that
+"worktree1", "reason": "…" }`, ends a member's hold, named as a board hold names it, in each of the member's pools on that
 host that holds the worktree, and has dibs tell the member, quoting `reason` (`worktree_released`, cause `released`, `by`
 the admin). Answers `{ "released": [board hold, …], "thread_id": 31 | null }` (`null` when the admin's own hold ended).
 Refusals: `worktree_not_held` (`409`) when the member holds that worktree on that host in no pool; `not_found` for a member
 the project does not have.
 
-The worktree events, `worktree_taken` and `worktree_released`, carry what the board shows of a hold and never the
-machine, the pool, the session or the agent. Every member of the project sees them, so every board follows a hold as it
-is taken and released.
+The worktree events, `worktree_taken` and `worktree_released`, carry what a board hold shows and never the machine, the
+pool, the session or the agent. Every member of the project sees them, so the rail's *Worktrees held* follows a hold as
+it is taken and released.
 
 ### Events
 
@@ -1471,34 +1472,89 @@ only they and the admins read.
 
 ## The web pages
 
-The pages under `/ui` are for people in a browser: `/ui/login` (sign in with a token), `/ui/` (status, with the live wide
-claims and, for each of their areas, whether it is free, acknowledged by its holder or waiting for them), `/ui/board`,
-`/ui/threads` and `/ui/threads/{id}`, with `/ui/events/stream` feeding the open page. They are rendered on the server and
-are not part of the API. A page's script asks `GET /ui/session?after=<cursor>` when its stream is refused: `204` while
-the session lives, `401` once it ended, and `410 cursor_expired` with `details.latest` when the retention removed
-events after its cursor, so the page reads its state again and follows the stream from `latest`. The board opens with
-a banner for each escalation the viewer may read that waits for an
-arbiter, linking to its conversation. The board's *Ready* column is the viewer's ready list, each card with its priority, likely
-areas and a link to its tracker, and below it the open items that are not ready with their blockers or the held area;
-an item its tracker closed while a claim holds it is marked *Closed upstream*. A claim made as debt work carries a *Debt* badge on the board and the
-status page, and a claim that waits for areas lists each as *waiting for default:billing from alice*; the pages read
-them again when an area is handed over, a wait ends or a claim is narrowed. Above the columns, below the slots, the
-worktrees members' machines lend are listed while they are held, one card per member and host, each hold with its
-worktree, whether the member's session or one of its agents holds it, its purpose, the item it is for and since when;
-a free worktree is never listed, and the filter keeps them all. Then the live wide claims are listed with their reason and, for each area, who has acknowledged them; the area filter keeps the wide claims that name
-the area, the member filter those of the member and those that wait for the member's acknowledgement. When a claim or an
-item changes, the page fetches `GET /ui/board/fragment` with the same query string, once per burst of events and not
-while the tab is hidden, and swaps its columns in, except while a form in them is in use, when it shows its reload
-banner instead. The fragment is the columns' HTML alone, with the forms' session tokens, marked by the header
-`X-Dibs-Fragment: board` and `Cache-Control: no-store`; without a live session it answers `401` with the error shape,
-never the sign-in page; the columns carry the time they were rendered at, which the page's *updated* time shows after a
-swap. A take-over made from the board returns to the board with the same filter; the form's return path is followed
-only when it is a path of this service, and anything else returns to `/ui/board`. The threads list marks each conversation's
-highest importance and whether it holds a message awaiting the viewer's acknowledgement; a thread page marks a raised
-importance on the messages that carry it, marks what dibs wrote as *from dibs*, and, under a message that asks to be
-acknowledged, lists its recipients with who has acknowledged, updated live from the `acked` events, and offers a
-recipient who has not an *Acknowledge* button (`POST /ui/threads/{id}/messages/{message}/ack`) while the message still
-asks: an announcement whose wide claim has ended asks for nothing.
-A reply from the page may ask everyone to acknowledge it. Their forms post a token of the session they were rendered for, and the session cookie
-(`dibs_ui`) is `HttpOnly`, `Secure`, `SameSite=Strict` and scoped to `/ui`. A session ends 12 hours after the page last used it. Every page answer
-carries a content security policy that allows only the server's own scripts, styles and connections.
+The pages under `/ui` are for people in a browser. They are rendered on the server from templates, are not part of the
+API, and carry a content security policy that allows only the server's own scripts, styles, images, fonts and
+connections. A page needs the session cookie (`dibs_ui`, `HttpOnly`, `Secure`, `SameSite=Strict`, scoped to `/ui`).
+Without one a page answers `303` to `/ui/login`; with one whose session ended it answers `401` with a page that says so
+and removes the cookie. A session ends 12 hours after the page last used it.
+
+Every page of a signed-in browser is drawn in one frame: a rail (the project, the search box, the five screens with
+their counts, the people with their claims, the slots and the worktrees held, and the sign-out form) and a main area
+holding the screen's list and, on four screens, an inspector for the object the address selects.
+
+| Route | Answers |
+|---|---|
+| `GET /ui/login` | The sign-in form, with a one-hour cookie (`dibs_login`) tying the form to this browser. |
+| `GET /ui` | `308` to `/ui/`. |
+| `GET /ui/` | Now: what waits for a person's look, every claim by how long it has been held, and what happened today. |
+| `GET /ui/claims` | Claims: the live and silent claims by holder. |
+| `GET /ui/claims/{item}` | Claims, with the claim on that work item in the inspector. |
+| `GET /ui/queue` | Queue: the tickets that wait to be claimed. |
+| `GET /ui/queue/{item}` | Queue, with that ticket in the inspector. |
+| `GET /ui/areas` | Areas: the project's areas by repository. |
+| `GET /ui/areas/{repo}:{area}` | Areas, with that area, written as dibs writes it (`api:billing`), in the inspector. |
+| `GET /ui/inbox` | Inbox: the conversations. |
+| `GET /ui/inbox/{thread}` | Inbox, with that conversation and its reply form in the inspector; reading it marks it read. |
+| `GET /ui/search` | Search: claims, pull requests, tickets in the queue, branches, areas, people, conversations and slots. |
+| `POST /ui/login` | Opens a session for a pasted token and answers `303` to `/ui/`; a refused token shows the form again. |
+| `POST /ui/logout` | Ends the session and answers `303` to `/ui/login`. |
+| `POST /ui/items/{item}/takeover` | Takes over a silent claim of another member. |
+| `POST /ui/threads/{thread}/messages` | Posts a reply to a conversation. |
+| `POST /ui/threads/{thread}/messages/{message}/ack` | Acknowledges a message. |
+| `GET /ui/events/stream` | The project's log as server-sent events, as `GET /v1/events/stream` sends it to the signed-in member. |
+| `GET /ui/session` | `204` while the session lives, `401` once it ended. |
+| `GET /ui/static/{hash}/{name}` | A file of the bundle: the stylesheet, the scripts and the fonts. Only the current `hash` serves; the file is cached for a year. |
+
+The old addresses stay and lead to the screens that took their place, whether or not a session exists. All answer `308`:
+`GET /ui/board` to `/ui/claims` (a `member` in its query becomes `who`; its other parameters are dropped),
+`GET /ui/threads` to `/ui/inbox`, and `GET /ui/threads/{id}` to `/ui/inbox/{id}`. `GET /ui/board/fragment` no longer
+exists.
+
+**What an address keeps.** Each list keeps its state in the query, so an address reproduces the list and the selection,
+and a value that does not read means the default:
+
+| Parameter | On | Meaning |
+|---|---|---|
+| `filter` | Claims | `all` (the default), `working`, `review`, `silent`, `held` (held over a week), `finished` (its ticket is finished) or `branch` (the recorded branch is named after another ticket). |
+| `who` | Claims | A member's handle: only that member's claims. |
+| `q` | Claims, Queue, Areas, Inbox, Search | Words, each of which must occur in a row's text, whatever the case and the order; a leading `#` on a word is dropped. On Search, one number (`42` or `#42`) also brings the entries of that number first. |
+| `all` | Queue, Areas | `1` lists every row. By default Queue lists the first 25 rows of each group, and Areas leaves out the free areas of a repository that declares more than 80; a `q` lists every match. |
+| `tab` | Inbox | `people` (the default), `grants` (grant requests waiting for the viewer's decision) or `dibs` (what dibs reported, one row per ticket). With a conversation selected and no `tab`, the list opens on the tab the conversation belongs to. |
+| `slot` | any page | A slot's name: that slot is open in the rail. |
+| `palette` | Search | `1`: the answer is the results alone, without the frame, with at most 5 hits per kind instead of 50. |
+
+An address whose object is gone, or whose segment does not read as one, answers `404` with the whole page: the rail, the
+list and an inspector that says what is gone. That covers a claim that ended, a ticket that is not in the queue, an area
+the project does not declare, and a conversation that does not exist or that the viewer may not read, which read the
+same. A claim that ended links to its ticket's place in the queue when it waits there, and a ticket a claim holds to
+that claim.
+
+**Forms.** A form posts the token of the session it was rendered for as `csrf`; one without it, or with another
+session's, is answered `403` with a page that says the form expired. The sign-in form's `csrf` is the secret of its own
+`dibs_login` cookie instead, and it also posts `token`.
+
+| Form | Fields besides `csrf` | Answers |
+|---|---|---|
+| Take over (Claims, on another member's silent claim) | `reason` (required), `back` | `303` to `back`, a path of this service, and to `/ui/claims` for anything else. |
+| Reply (Inbox) | `body`, `require_ack` (`1` asks every recipient to acknowledge) | `303` to the message in its conversation (`/ui/inbox/{thread}#m-{message}`). A text the rules refuse, an empty one, one over 16 KiB or one holding a NUL, answers `422` with the conversation and the reply kept in its form. |
+| Acknowledge (Inbox, on a message that asks for it) | none | `303` to the message in its conversation; one given already changes nothing. |
+| Sign out (the rail) | none | `303` to `/ui/login`. |
+
+Any other refusal of the service, such as a claim that went live again before its take-over, is shown in the frame of the
+screen the form came from, with the service's reason and a way back, under the refusal's status.
+
+**The stream and the session check.** The pages follow `GET /ui/events/stream` from the position they were rendered at,
+which the service reads before it reads what the page shows. A page's script asks `GET /ui/session?after=<cursor>` when
+its stream is refused: `204` while the session lives, `401` once it ended, and `410 cursor_expired` with `details.latest`
+when the retention removed events after its cursor, so the page reads its state again and follows the stream from
+`latest`. A script also records the browser's offset from UTC in the `dibs_tz` cookie, so that *Today* on Now starts at
+the viewer's midnight; UTC's is used without it.
+
+**The scripts.** The scripts enhance pages that work without them. They fetch a page of this service and swap its named
+regions (`data-region`: `rail`, `list`, `inspector`, `results`) into the page shown, and read nothing else out of an
+answer. A click on a link that selects an object loads the page at its address and swaps the inspector in place; the
+address goes into the browser's history, and `Escape` closes the inspector. After an event of a kind the screen shows,
+the screen fetches its own address again, once per burst of events and not while the tab is hidden. A region the person
+is writing in is left as it is and a banner offers a reload, and a conversation follows the stream by itself. The search
+palette asks `GET /ui/search?q=…&palette=1` after a pause in the typing. An answer that is not the page of a live
+session, such as the sign-in page, never reaches the page: the script shows that the session ended instead.
