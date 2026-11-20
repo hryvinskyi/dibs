@@ -6,16 +6,18 @@
 //! them the overlaps between live claims of different members, each announced once to the holders
 //! it concerns.
 
+mod checkout;
 mod contract;
 mod footprint;
 mod names;
 mod overlap;
 mod source;
 
+pub use checkout::{checkout_candidate, checkout_claim};
 pub use contract::{Consumer, ConsumerError, Contract};
 pub use footprint::{
     Footprint, FootprintBase, FootprintDigest, FootprintEntry, FootprintOutcome, FootprintReport,
-    NotStored, decide_footprint, heartbeat_branches,
+    NotStored, decide_footprint,
 };
 pub use names::{BranchName, BranchNameError, CommitSha, CommitShaError};
 pub use overlap::{

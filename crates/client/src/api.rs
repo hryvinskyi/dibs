@@ -22,7 +22,7 @@ use dibs_domain::radar::{BranchName, OverlapKind};
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::report::{Feedback, FeedbackReason, RefusalId, ReportDay, Tally};
 use dibs_domain::review::PrRef;
-use dibs_domain::session::{AgentLabel, HostName};
+use dibs_domain::session::{AgentLabel, CheckoutToken, HostName};
 use dibs_domain::settings::{ProjectSettings, SettingsDocument, SettingsError};
 use dibs_domain::slot::SlotName;
 
@@ -941,6 +941,10 @@ pub struct EditCheckRequest {
     pub paths: Vec<RelPath>,
     /// Whether the edits are being made, so what the check plans is recorded.
     pub reserve: bool,
+    /// The checkout the edits are made in, which a check that reserves reports; none from a
+    /// machine without an id, and none for a check that only asks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<CheckoutToken>,
     /// The branch the checkout is on; none on a detached head.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<BranchName>,

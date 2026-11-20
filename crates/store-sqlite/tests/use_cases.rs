@@ -107,6 +107,11 @@ mod use_cases {
             .unwrap()
     }
 
+    /// The checkout a test names by `digit`: its token is the digit 32 times.
+    fn checkout(digit: char) -> dibs_domain::session::CheckoutToken {
+        dibs_domain::session::CheckoutToken::parse(&digit.to_string().repeat(32)).unwrap()
+    }
+
     async fn register(app: &UseCases, actor: &Actor, n: usize) -> SessionId {
         app.register_session
             .execute(
@@ -939,7 +944,7 @@ mod use_cases {
 
     #[tokio::test]
     async fn footprints_on_the_file_find_one_shared_file_among_thousands_and_tell_it_once() {
-        use dibs_app::use_cases::{FootprintInput, FootprintRecorded, OnBranch};
+        use dibs_app::use_cases::{FootprintInput, FootprintRecorded, FromCheckout, OnBranch};
         use dibs_domain::paths::RelPath;
         use dibs_domain::radar::{BranchName, CommitSha, FootprintBase, OverlapKind};
         use dibs_domain::repo::RepoId;
@@ -1010,10 +1015,14 @@ mod use_cases {
                 repo: RepoId::implicit(),
                 branch: BranchName::parse(&format!("work-{n}")).unwrap(),
             };
+            let from = FromCheckout {
+                token: checkout('a'),
+                branch: Some(on.clone()),
+            };
             world
                 .app
                 .heartbeat
-                .execute(person, session, Some(&on))
+                .execute(person, session, Some(&from))
                 .await
                 .unwrap();
             let mut paths: Vec<String> = (0..2999).map(|k| format!("src/{n}/f{k}.rs")).collect();
@@ -1072,6 +1081,84 @@ mod use_cases {
         assert_eq!(tx.footprints(admin.project).await.unwrap().len(), 1);
     }
 
+    #[tokio::test]
+    async fn the_checkouts_two_sessions_report_are_kept_on_the_file_and_keep_both_from_recording() {
+        use dibs_app::use_cases::{FromCheckout, OnBranch};
+        use dibs_domain::radar::BranchName;
+        use dibs_domain::repo::RepoId;
+
+        let world = World::new().await;
+        let app = &world.app;
+        let admin = project(app, "widgets", "alice").await;
+        let sessions = [
+            register(app, &admin, 0).await,
+            register(app, &admin, 1).await,
+        ];
+        let mut items = Vec::new();
+        for (n, session) in sessions.iter().enumerate() {
+            let item = create_item(app, &admin, n + 1).await;
+            app.claim_item
+                .execute(
+                    &admin,
+                    ClaimItemInput {
+                        item,
+                        session: *session,
+                        areas: Vec::new(),
+                        wide: None,
+                        kind: None,
+                    },
+                )
+                .await
+                .unwrap();
+            items.push(item);
+        }
+        let on = |branch: &str| FromCheckout {
+            token: checkout('a'),
+            branch: Some(OnBranch {
+                repo: RepoId::implicit(),
+                branch: BranchName::parse(branch).unwrap(),
+            }),
+        };
+        let beat = |session: SessionId, branch: &'static str| {
+            let from = on(branch);
+            let admin = &admin;
+            async move {
+                app.heartbeat
+                    .execute(admin, session, Some(&from))
+                    .await
+                    .unwrap();
+            }
+        };
+        beat(sessions[0], "alice/1-first").await;
+        beat(sessions[1], "alice/2-second").await;
+        beat(sessions[0], "alice/1-again").await;
+        let mut tx = world.store.begin().await.unwrap();
+        let stored = tx
+            .session_checkouts(admin.project, admin.member, OffsetDateTime::UNIX_EPOCH)
+            .await
+            .unwrap();
+        let reported: Vec<SessionId> = stored.iter().map(|row| row.session).collect();
+        assert_eq!(
+            reported, sessions,
+            "one row per session, by checkout then session"
+        );
+        let branch_of = |claim: Option<dibs_domain::claim::Claim>| {
+            claim.and_then(|claim| claim.branch(&RepoId::implicit()).map(ToString::to_string))
+        };
+        assert_eq!(
+            branch_of(tx.claim(admin.project, items[0]).await.unwrap()).as_deref(),
+            Some("alice/1-first"),
+            "recorded while the first session was alone in the checkout, and never since"
+        );
+        assert_eq!(
+            branch_of(tx.claim(admin.project, items[1]).await.unwrap()),
+            None
+        );
+        drop(tx);
+        let names = world.event_names(admin.project).await;
+        assert_eq!(names.iter().filter(|n| **n == "branch_recorded").count(), 1);
+    }
+
     /// A project whose settings declare `composer.lock` `regenerate`, with an integration and two
     /// members, bob and carol, each claiming an item with its work on a branch of its own.
     struct Regenerated {
@@ -1084,7 +1171,7 @@ mod use_cases {
 
     impl Regenerated {
         async fn new() -> Self {
-            use dibs_app::use_cases::OnBranch;
+            use dibs_app::use_cases::{FromCheckout, OnBranch};
             use dibs_domain::radar::BranchName;
             use dibs_domain::repo::RepoId;
 
@@ -1147,12 +1234,15 @@ mod use_cases {
                     )
                     .await
                     .unwrap();
-                let on = OnBranch {
-                    repo: RepoId::implicit(),
-                    branch: BranchName::parse(&format!("work-{n}")).unwrap(),
+                let from = FromCheckout {
+                    token: checkout('a'),
+                    branch: Some(OnBranch {
+                        repo: RepoId::implicit(),
+                        branch: BranchName::parse(&format!("work-{n}")).unwrap(),
+                    }),
                 };
                 app.heartbeat
-                    .execute(&person, session, Some(&on))
+                    .execute(&person, session, Some(&from))
                     .await
                     .unwrap();
                 people.push(person);

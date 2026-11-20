@@ -33,7 +33,13 @@ use crate::use_cases::common::existing_item;
 use crate::use_cases::writing::{Posted, SystemPost, titled_body};
 use crate::work::Work;
 
-/// The checkout a member's request comes from: its repository and the branch it is on.
+mod checkout;
+mod held;
+
+pub use checkout::FromCheckout;
+pub(crate) use checkout::{fed_by_checkout, report_checkout};
+
+/// The repository a member's checkout is of and the branch it is on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnBranch {
     /// The repository.

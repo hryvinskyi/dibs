@@ -2,6 +2,7 @@
 //! remembered in the state directory as it arrives.
 
 use std::cell::OnceCell;
+use std::path::PathBuf;
 
 use time::OffsetDateTime;
 use tokio::runtime::Runtime;
@@ -16,9 +17,11 @@ use dibs_client::checkout::Checkout;
 use dibs_domain::paths::RelPath;
 use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
+use dibs_domain::session::CheckoutToken;
 use dibs_domain::slot::SlotName;
 
 use crate::failure::sentence;
+use crate::guard::machine::machine_id;
 use crate::guard::remote::{Remote, RemoteError};
 use crate::guard::views;
 
@@ -26,19 +29,35 @@ use crate::guard::views;
 pub struct HookGateway {
     remote: Remote,
     checkout: Checkout,
+    state_base: PathBuf,
     runtime: OnceCell<Runtime>,
     client: OnceCell<Client>,
+    token: OnceCell<Option<CheckoutToken>>,
 }
 
 impl HookGateway {
-    /// The gateway of `checkout`'s project.
-    pub fn new(remote: Remote, checkout: Checkout) -> Self {
+    /// The gateway of `checkout`'s project; `state_base` is the state directory that keeps this
+    /// machine's id.
+    pub fn new(remote: Remote, checkout: Checkout, state_base: PathBuf) -> Self {
         Self {
             remote,
             checkout,
+            state_base,
             runtime: OnceCell::new(),
             client: OnceCell::new(),
+            token: OnceCell::new(),
         }
+    }
+
+    /// The token the checkout is named by on this machine, worked out once; none when the
+    /// machine has no id.
+    fn token(&self) -> Option<&CheckoutToken> {
+        self.token
+            .get_or_init(|| {
+                let machine = machine_id(&self.state_base)?;
+                self.checkout.token(&machine)
+            })
+            .as_ref()
     }
 
     fn runtime(&self) -> Result<&Runtime, PortError> {
@@ -145,6 +164,7 @@ impl CoordinationGateway for HookGateway {
                 repo: repo.clone(),
                 paths: paths.to_vec(),
                 reserve: true,
+                checkout: self.token().cloned(),
                 branch: branch.cloned(),
             };
             Ok::<_, RemoteError>(client.edit_check(&request).await?)

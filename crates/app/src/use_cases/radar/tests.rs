@@ -8,12 +8,14 @@ use dibs_domain::event::EventKind;
 use dibs_domain::ids::ItemId;
 use dibs_domain::message::Importance;
 use dibs_domain::paths::{RelPath, RepoPath};
-use dibs_domain::radar::{BranchName, CommitSha, FootprintBase, NotStored, OverlapKind};
+use dibs_domain::radar::{
+    BranchName, BranchSource, CommitSha, FootprintBase, NotStored, OverlapKind,
+};
 use dibs_domain::repo::RepoId;
 use dibs_domain::review::PrRef;
 
 use super::*;
-use crate::use_cases::testing::{Env, Person, START, document, session};
+use crate::use_cases::testing::{Env, Person, START, checkout, document, in_checkout, session};
 use crate::use_cases::{
     ApplySettings, ClaimItem, ClaimItemInput, EditCheck, EditCheckInput, Heartbeat, ListThreads,
     PrReport, ReadThread, Release, ReportPr, ReportedEnd, StartReview, StartReviewInput, Status,
@@ -53,11 +55,10 @@ fn repo() -> RepoId {
     RepoId::implicit()
 }
 
-fn on(branch: &str) -> OnBranch {
-    OnBranch {
-        repo: repo(),
-        branch: BranchName::parse(branch).unwrap(),
-    }
+/// The checkout `a` on `branch`: each person's own, since checkouts are told apart only within
+/// one member.
+fn on(branch: &str) -> FromCheckout {
+    in_checkout('a', Some(branch))
 }
 
 fn path(text: &str) -> RepoPath {
@@ -80,13 +81,37 @@ async fn claim(env: &Env, who: &Person, item: ItemId) {
         .unwrap();
 }
 
-/// Claims `item` for `who` and has their checkout's heartbeat say its work is on `branch`.
+/// Claims `item` for `who` and has the heartbeat of their checkout, where their session works on
+/// that one claim alone, say its work is on `branch`.
 async fn claim_on(env: &Env, who: &Person, item: ItemId, branch: &str) {
     claim(env, who, item).await;
     Heartbeat::new(&env.deps)
         .execute(&who.actor, who.session, Some(&on(branch)))
         .await
         .unwrap();
+}
+
+/// Records `branch` on `item`'s claim as one the claim named, through the radar as every writer
+/// records a branch.
+async fn named(env: &Env, item: ItemId, branch: &str) {
+    let deps = &env.deps;
+    let mut work = Work::begin_unattended(&*deps.store, env.project)
+        .await
+        .unwrap();
+    let settings = work.project_settings(&deps.hot_rules).await.unwrap();
+    let claim = work.claim(env.project, item).await.unwrap().unwrap();
+    let radar = Radar {
+        ids: &*deps.ids,
+        schemes: &deps.ref_schemes,
+        settings: &settings,
+        now: env.now(),
+    };
+    let branch = BranchName::parse(branch).unwrap();
+    radar
+        .record_branch(&mut work, &claim, &repo(), &branch, BranchSource::Named)
+        .await
+        .unwrap();
+    work.commit(&*deps.notifier).await.unwrap();
 }
 
 /// A footprint of `item`'s `branch` against `main`, from the merge base `base` committed when
@@ -195,16 +220,16 @@ async fn an_edit_records_the_branch_its_claim_works_on_once_per_change() {
     let env = Env::with_settings(SETTINGS).await;
     let item = env.item("gh:acme/widgets#1").await;
     claim(&env, &env.bob, item).await;
-    let edit = |branch: Option<OnBranch>| EditCheckInput {
+    let edit = |branch: Option<&str>| EditCheckInput {
         session: env.bob.session,
         paths: vec![path("packages/billing/a.php")],
         reserve: true,
-        branch,
+        checkout: Some(in_checkout('a', branch)),
     };
     let check = EditCheck::new(&env.deps);
     let before = env.events().await.len();
     check
-        .execute(&env.bob.actor, edit(Some(on("bob/1-x"))))
+        .execute(&env.bob.actor, edit(Some("bob/1-x")))
         .await
         .unwrap();
     let recorded = |kinds: &[EventKind]| {
@@ -216,7 +241,7 @@ async fn an_edit_records_the_branch_its_claim_works_on_once_per_change() {
     assert_eq!(recorded(&env.kinds_after(before).await), 1);
     let again = env.events().await.len();
     check
-        .execute(&env.bob.actor, edit(Some(on("bob/1-x"))))
+        .execute(&env.bob.actor, edit(Some("bob/1-x")))
         .await
         .unwrap();
     check.execute(&env.bob.actor, edit(None)).await.unwrap();
@@ -226,7 +251,7 @@ async fn an_edit_records_the_branch_its_claim_works_on_once_per_change() {
         "the same branch, and a detached head, change nothing"
     );
     check
-        .execute(&env.bob.actor, edit(Some(on("bob/1-y"))))
+        .execute(&env.bob.actor, edit(Some("bob/1-y")))
         .await
         .unwrap();
     assert_eq!(recorded(&env.kinds_after(again).await), 1);
@@ -368,13 +393,31 @@ async fn one_members_two_claims_never_overlap() {
     let first = env.item("gh:acme/widgets#1").await;
     let second = env.item("gh:acme/widgets#2").await;
     claim_on(&env, &env.bob, first, "bob/1").await;
-    claim(&env, &env.bob, second).await;
+    let other = session(&env.deps, &env.bob.actor, "desktop", "desktop/second").await;
+    ClaimItem::new(&env.deps)
+        .execute(
+            &env.bob.actor,
+            ClaimItemInput {
+                wide: None,
+                item: second,
+                session: other,
+                areas: Vec::new(),
+                kind: None,
+            },
+        )
+        .await
+        .unwrap();
     Heartbeat::new(&env.deps)
-        .execute(&env.bob.actor, env.bob.session, Some(&on("bob/1")))
+        .execute(
+            &env.bob.actor,
+            other,
+            Some(&in_checkout('b', Some("bob/1"))),
+        )
         .await
         .unwrap();
     report(&env, footprint(first, "bob/1", "abcd", &["a.rs"])).await;
     report(&env, footprint(second, "bob/1", "abcd", &["a.rs"])).await;
+    assert_eq!(stored_footprints(&env).await, 2);
     assert!(overlaps(&env).await.is_empty());
 }
 
@@ -636,7 +679,11 @@ async fn a_merge_moves_the_base_under_every_branch_behind_it_its_authors_other_w
         .await
         .unwrap();
     Heartbeat::new(&env.deps)
-        .execute(&env.alice.actor, second, Some(&on("alice/3")))
+        .execute(
+            &env.alice.actor,
+            second,
+            Some(&in_checkout('b', Some("alice/3"))),
+        )
         .await
         .unwrap();
     report(
@@ -719,14 +766,7 @@ async fn the_next_branch_of_an_item_merged_in_steps_is_behind_the_merge_of_the_o
     )
     .await;
     review(&env, &env.alice, alices, "acme/widgets#7", true).await;
-    Heartbeat::new(&env.deps)
-        .execute(
-            &env.alice.actor,
-            env.alice.session,
-            Some(&on("alice/1-part-two")),
-        )
-        .await
-        .unwrap();
+    named(&env, alices, "alice/1-part-two").await;
     assert_eq!(
         stored_footprints(&env).await,
         0,
@@ -888,7 +928,7 @@ async fn a_branch_change_takes_the_old_branchs_footprint_and_what_it_made() {
                 session: env.bob.session,
                 paths: vec![path("packages/search/a.php")],
                 reserve: true,
-                branch: Some(on("bob/2-again")),
+                checkout: Some(on("bob/2-again")),
             },
         )
         .await
@@ -928,7 +968,7 @@ async fn two_sessions_of_one_machine_on_two_branches_never_move_each_others_clai
             .await
             .unwrap();
         heartbeat
-            .execute(&env.bob.actor, other, Some(&on("main")))
+            .execute(&env.bob.actor, other, Some(&in_checkout('b', Some("main"))))
             .await
             .unwrap();
     }
@@ -1069,9 +1109,12 @@ async fn a_repository_the_settings_no_longer_list_takes_its_footprints_and_overl
                 .execute(
                     &who.actor,
                     who.session,
-                    Some(&OnBranch {
-                        repo: RepoId::parse(repo).unwrap(),
-                        branch: BranchName::parse(branch).unwrap(),
+                    Some(&FromCheckout {
+                        token: checkout('a'),
+                        branch: Some(OnBranch {
+                            repo: RepoId::parse(repo).unwrap(),
+                            branch: BranchName::parse(branch).unwrap(),
+                        }),
                     }),
                 )
                 .await

@@ -219,16 +219,34 @@ export async function narrowClaim(baseUrl, token, itemId, areas) {
 }
 
 /**
- * Sends a session's heartbeat from a checkout of `repo` on `branch`.
+ * The checkout each person the cases sign in as works in, as a client names it: 32 lowercase
+ * hexadecimal characters. Checkouts are told apart only within one member, so one each is enough.
+ */
+export const CHECKOUTS = Object.freeze({
+  alice: 'a11ce000a11ce000a11ce000a11ce000',
+  bob: 'b0b00000b0b00000b0b00000b0b00000',
+});
+
+/** What a checkout's name is: 32 lowercase hexadecimal characters. */
+const CHECKOUT = /^[0-9a-f]{32}$/;
+
+/**
+ * Sends a session's heartbeat from `checkout`, a checkout of `repo` on `branch`. A session alone
+ * in its checkout with one claim records the branch on that claim.
  * @param {string} baseUrl
  * @param {string} token the member's token
  * @param {number} sessionId
+ * @param {string} checkout the checkout, 32 lowercase hexadecimal characters
  * @param {string} repo
  * @param {string} branch
  * @returns {Promise<void>}
  */
-export async function heartbeatOn(baseUrl, token, sessionId, repo, branch) {
-  await send(baseUrl, token, 'POST', '/v1/heartbeat', { session_id: sessionId, repo, branch }, 200);
+export async function heartbeatOn(baseUrl, token, sessionId, checkout, repo, branch) {
+  if (!CHECKOUT.test(checkout)) {
+    throw new Error(`a checkout is named by 32 lowercase hexadecimal characters, not ${checkout}`);
+  }
+  const body = { session_id: sessionId, checkout, repo, branch };
+  await send(baseUrl, token, 'POST', '/v1/heartbeat', body, 200);
 }
 
 /**

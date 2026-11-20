@@ -116,6 +116,7 @@ mod contract {
         a_claim_in_review_keeps_its_pull_requests_start_and_whether_more_follow,
         a_claim_keeps_the_branch_of_each_repository,
         session_checkouts_are_kept_per_checkout_read_by_member_and_time_and_forgotten,
+        session_checkouts_reported_before_a_time_go_in_their_project_only,
         a_claim_keeps_its_kind_and_the_areas_it_waits_for,
         an_area_waits_for_one_claim_of_a_project_at_a_time,
         projects_with_a_waiting_claim_are_listed,
@@ -998,6 +999,57 @@ mod contract {
         assert!(
             matches!(tx.commit().await, Err(StoreError::Backend(_))),
             "a checkout of a missing member fails the commit"
+        );
+    }
+
+    async fn session_checkouts_reported_before_a_time_go_in_their_project_only(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let token = |n: u128| CheckoutToken::parse(&format!("{n:032x}")).unwrap();
+        let reported = |session, member, checkout: u128, seconds| SessionCheckout {
+            session,
+            member,
+            checkout: token(checkout),
+            reported_at: at(seconds),
+        };
+        let mut tx = store.begin().await.unwrap();
+        for (project, checkout) in [
+            (A, reported(ALICE_LAPTOP, ALICE, 1, 10)),
+            (A, reported(ALICE_LAPTOP, ALICE, 2, 20)),
+            (A, reported(BOB_LAPTOP, BOB, 1, 30)),
+            (B, reported(DAVE_LAPTOP, DAVE, 1, 10)),
+        ] {
+            tx.save_session_checkout(project, &checkout).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.delete_session_checkouts_before(A, at(20)).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.delete_session_checkouts_before(A, at(20)).await.unwrap(),
+            0,
+            "nothing more is older"
+        );
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.session_checkouts(A, ALICE, at(0)).await.unwrap(),
+            [reported(ALICE_LAPTOP, ALICE, 2, 20)],
+            "one reported at the time itself stays"
+        );
+        assert_eq!(
+            tx.session_checkouts(A, BOB, at(0)).await.unwrap(),
+            [reported(BOB_LAPTOP, BOB, 1, 30)]
+        );
+        assert_eq!(
+            tx.session_checkouts(B, DAVE, at(0)).await.unwrap(),
+            [reported(DAVE_LAPTOP, DAVE, 1, 10)],
+            "another project's are left alone"
         );
     }
 

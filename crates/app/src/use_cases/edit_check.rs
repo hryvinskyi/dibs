@@ -4,13 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::claim::Claim;
 use dibs_domain::edit::{self, EditCheckInput as DomainInput, Verdict, edit_verdicts};
 use dibs_domain::event::{EventKind, Reserved};
 use dibs_domain::grant::Grant;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::paths::RepoPath;
-use dibs_domain::radar::{BranchRecording, BranchSource, WorktreeRef, record_branch};
+use dibs_domain::radar::BranchSource;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::reservation::ReservationPlan;
 
@@ -20,7 +21,7 @@ use crate::error::AppError;
 use crate::named::{NamedVerdict, Names, item_ref};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::common::own_session;
-use crate::use_cases::radar::{OnBranch, Radar};
+use crate::use_cases::radar::{FromCheckout, Radar, fed_by_checkout, report_checkout};
 use crate::use_cases::wide_asks::Announcer;
 use crate::work::Work;
 
@@ -34,9 +35,10 @@ pub struct EditCheckInput {
     /// Whether the edits are being made: then what the check plans is recorded and the claims the
     /// edits were attributed to are refreshed. A check that only asks (`false`) writes nothing.
     pub reserve: bool,
-    /// The checkout the edits are made in and the branch it is on, when it is on one: the claims
-    /// the edits are attributed to record that their work is on that branch.
-    pub branch: Option<OnBranch>,
+    /// The checkout the edits are made in, and the branch it is on when it is on one. A check
+    /// that reserves stores that the session reported working there, and may record the branch
+    /// on the one claim the checkout feeds.
+    pub checkout: Option<FromCheckout>,
 }
 
 /// The verdicts of a check, each with the handles of the members it names, and what the check
@@ -96,12 +98,16 @@ impl EditVerdicts {
 /// were attributed to, wherever those claims were taken. A `Reserved` event is appended per claim
 /// that actually gained something, so a repeated check appends nothing. An area an edit adds to the
 /// caller's claim that another member's live wide claim names makes the caller one of that wide
-/// claim's holders, so its announcement is sent to them in the same transaction. The claims the
-/// edits are attributed to record the branch of the checkout the edits are made in, learned from
-/// that checkout, unless they learned theirs from a stronger source; the pools are not read, so a
-/// branch learned from a pool worktree counts as still held. A `BranchRecorded` event marks each
-/// change of branch, and the claim's footprint of the repository, which measured the branch
-/// before, goes with what it made.
+/// claim's holders, so its announcement is sent to them in the same transaction.
+///
+/// A check that reserves and names its checkout stores that its session reported working there
+/// now. When the checkout is on a branch, that branch, learned from the checkout, is recorded on
+/// one claim at most: the one live claim the session took or last renewed and works on, when the
+/// edits were attributed to it, the session reported no other checkout and no other session of
+/// the member reported this one, within the project's `stale_after`. A branch the claim learned
+/// from a stronger source that still holds is kept. A `BranchRecorded` event marks a change of
+/// branch, and the claim's footprint of the repository, which measured the branch before, goes
+/// with what it made.
 pub struct EditCheck {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -186,34 +192,21 @@ impl EditCheck {
                 .paths
                 .insert(share.path.clone());
         }
-        let changed = claims.into_iter().filter(|claim| {
-            claim.member == actor.member
-                && (gains.contains_key(&claim.item) || check.touch.contains(&claim.item))
-        });
-        let mut branched = Vec::new();
-        for mut claim in changed {
-            if let Some(gain) = gains.get(&claim.item) {
-                claim.areas.extend(gain.areas.iter().cloned());
+        let stale_after = settings.stale_after();
+        let mut fed = None;
+        if let Some(from) = &input.checkout {
+            let reported =
+                report_checkout(&mut work, actor.member, input.session, &from.token, now).await?;
+            let on = from
+                .branch
+                .as_ref()
+                .filter(|on| settings.repo(&on.repo).is_some());
+            if let Some(on) = on {
+                let touched = |claim: &Claim| check.touch.contains(&claim.item);
+                fed = fed_by_checkout(&mut work, &reported, &claims, stale_after, touched)
+                    .await?
+                    .map(|claim| (claim.item, on));
             }
-            if check.touch.contains(&claim.item) {
-                claim.last_seen = now;
-                if let Some(on) = &input.branch {
-                    let held = |_: &WorktreeRef| true;
-                    match record_branch(&claim, &on.repo, &on.branch, BranchSource::Checkout, &held)
-                    {
-                        BranchRecording::Kept => {}
-                        BranchRecording::SourceChanged(moved) => claim = moved,
-                        BranchRecording::BranchChanged {
-                            claim: moved,
-                            recorded,
-                        } => {
-                            claim = moved;
-                            branched.push(recorded);
-                        }
-                    }
-                }
-            }
-            work.save_claim(project, &claim).await?;
         }
         let radar = Radar {
             ids: &*self.ids,
@@ -221,11 +214,29 @@ impl EditCheck {
             settings: &settings,
             now,
         };
-        for recorded in branched {
-            let (item, repo) = (recorded.item, recorded.repo.clone());
-            work.record(now, EventKind::BranchRecorded(recorded))
-                .await?;
-            radar.drop_footprint(&mut work, item, &repo).await?;
+        let changed = claims.into_iter().filter(|claim| {
+            claim.member == actor.member
+                && (gains.contains_key(&claim.item) || check.touch.contains(&claim.item))
+        });
+        for mut claim in changed {
+            if let Some(gain) = gains.get(&claim.item) {
+                claim.areas.extend(gain.areas.iter().cloned());
+            }
+            if check.touch.contains(&claim.item) {
+                claim.last_seen = now;
+            }
+            work.save_claim(project, &claim).await?;
+            if let Some((_, on)) = fed.filter(|(item, _)| *item == claim.item) {
+                radar
+                    .record_branch(
+                        &mut work,
+                        &claim,
+                        &on.repo,
+                        &on.branch,
+                        BranchSource::Checkout,
+                    )
+                    .await?;
+            }
         }
         let held_more = gains.values().any(|gain| !gain.areas.is_empty());
         for (item, gain) in gains {
@@ -299,7 +310,7 @@ mod tests {
                     session: who.session,
                     paths: paths.iter().map(|p| path(p)).collect(),
                     reserve,
-                    branch: None,
+                    checkout: None,
                 },
             )
             .await
@@ -369,6 +380,63 @@ mod tests {
         let stored = tx.claim(env.project, item).await.unwrap().unwrap();
         assert!(stored.areas.is_empty());
         assert_eq!(stored.last_seen, crate::use_cases::testing::START);
+    }
+
+    #[tokio::test]
+    async fn a_reserving_check_records_its_checkouts_branch_only_on_the_claim_its_edits_touch() {
+        use dibs_domain::radar::{BranchSource, BranchSourceKind};
+
+        use crate::use_cases::testing::{START, in_checkout};
+
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim(&env, &env.bob, item, &[]).await;
+        let edit = |paths: &[&str], reserve: bool, branch: &str| EditCheckInput {
+            session: env.bob.session,
+            paths: paths.iter().map(|p| path(p)).collect(),
+            reserve,
+            checkout: Some(in_checkout('a', Some(branch))),
+        };
+        let check = EditCheck::new(&env.deps);
+        let before = env.events().await.len();
+        let asked = edit(&["default:packages/billing/a.rs"], false, "bob/1-asked");
+        check.execute(&env.bob.actor, asked).await.unwrap();
+        assert_eq!(env.events().await.len(), before);
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let member = env.bob.actor.member;
+        let stored = tx.session_checkouts(env.project, member, START).await;
+        assert!(
+            stored.unwrap().is_empty(),
+            "a check that only asks stores nothing"
+        );
+        drop(tx);
+        let untouched = edit(&["default:README.md"], true, "bob/1-readme");
+        let result = check.execute(&env.bob.actor, untouched).await.unwrap();
+        assert!(result.touch.is_empty());
+        let touched = edit(&["default:packages/billing/a.rs"], true, "bob/1-x");
+        check.execute(&env.bob.actor, touched).await.unwrap();
+        let recorded: Vec<(String, BranchSourceKind)> = env
+            .kinds_after(before)
+            .await
+            .into_iter()
+            .filter_map(|kind| match kind {
+                EventKind::BranchRecorded(recorded) => {
+                    Some((recorded.branch.to_string(), recorded.source))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            [("bob/1-x".to_owned(), BranchSourceKind::Checkout)],
+            "never from an edit the claim was not given"
+        );
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let stored = tx.claim(env.project, item).await.unwrap().unwrap();
+        let repo = dibs_domain::repo::RepoId::implicit();
+        assert_eq!(stored.branch_source(&repo), Some(&BranchSource::Checkout));
+        let reported = tx.session_checkouts(env.project, member, START).await;
+        assert_eq!(reported.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -502,7 +570,7 @@ mod tests {
                     session: env.bob.session,
                     paths: vec![path("web:src/a.rs")],
                     reserve: true,
-                    branch: None,
+                    checkout: None,
                 },
             )
             .await
@@ -515,7 +583,7 @@ mod tests {
                     session: env.alice.session,
                     paths: Vec::new(),
                     reserve: false,
-                    branch: None,
+                    checkout: None,
                 },
             )
             .await

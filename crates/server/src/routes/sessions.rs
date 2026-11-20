@@ -9,13 +9,13 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use dibs_app::use_cases::{OnBranch, RegisterSessionInput};
+use dibs_app::use_cases::{FromCheckout, OnBranch, RegisterSessionInput};
 use dibs_domain::ids::ItemId;
 use dibs_domain::message::SessionLabel;
 use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
 use dibs_domain::report::ReportDay;
-use dibs_domain::session::{AgentLabel, HostName};
+use dibs_domain::session::{AgentLabel, CheckoutToken, HostName};
 
 use crate::auth::Authed;
 use crate::error::ApiError;
@@ -62,6 +62,7 @@ pub async fn register(
 #[derive(Deserialize)]
 pub struct HeartbeatBody {
     session_id: Option<u64>,
+    checkout: Option<String>,
     repo: Option<String>,
     branch: Option<String>,
     machine: Option<Value>,
@@ -75,19 +76,23 @@ struct HeartbeatAnswer {
     reports_accepted: Vec<ReportDay>,
 }
 
-/// Records a session's sign of life and answers the claims it kept alive. `repo` and `branch` name
-/// the checkout the session works in and the branch it is on, which the claims of this session it
-/// kept alive record; a checkout on a detached head sends no branch, and a branch needs its
-/// repository. `reports` carries what the session's machine counted, one entry per day, and
-/// `machine` the id its dibs gave that machine: each day is kept for the caller and the machine,
-/// replacing what was kept for that day. `reported` names the days whose report changed it, and
-/// `reports_accepted` every day whose report was read and is kept, so the client sends the others
-/// again; a report that cannot be read is left out and never fails the heartbeat.
+/// Records a session's sign of life and answers the claims it kept alive. `checkout` names the
+/// checkout the session works in, by the 32 lowercase hexadecimal characters its client makes of
+/// it, and `repo` and `branch` the repository it is of and the branch it is on; a checkout on a
+/// detached head sends no branch, and a branch needs its repository. A heartbeat that names its
+/// checkout stores that the session works there, and records the branch on the session's one
+/// working claim when no other checkout of the session and no other session in this checkout
+/// stand in the way; one that names none records no branch. `reports` carries what the session's
+/// machine counted, one entry per day, and `machine` the id its dibs gave that machine: each day
+/// is kept for the caller and the machine, replacing what was kept for that day. `reported` names
+/// the days whose report changed it, and `reports_accepted` every day whose report was read and is
+/// kept, so the client sends the others again; a report that cannot be read is left out and never
+/// fails the heartbeat.
 ///
 /// # Errors
 /// `forbidden` for an integration;
-/// `invalid_request` without a session, for a malformed repository or branch, or a branch without
-/// its repository; the answer for the use case's failure.
+/// `invalid_request` without a session, for a malformed checkout, repository or branch, or a
+/// branch without its repository; the answer for the use case's failure.
 pub async fn heartbeat(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -108,11 +113,17 @@ pub async fn heartbeat(
         }),
         None => None,
     };
+    let from = body
+        .checkout
+        .as_deref()
+        .map(|text| parse("checkout", text, CheckoutToken::parse))
+        .transpose()?
+        .map(|token| FromCheckout { token, branch });
     let reports = heartbeat_reports(actor.member, body.machine.as_ref(), body.reports.as_ref());
     let outcome = state
         .app
         .heartbeat
-        .execute_reporting(&actor, session, branch.as_ref(), reports.as_ref())
+        .execute_reporting(&actor, session, from.as_ref(), reports.as_ref())
         .await?;
     let answer = HeartbeatAnswer {
         refreshed: outcome.refreshed,
@@ -129,8 +140,9 @@ struct EndedAnswer {
 }
 
 /// The caller's session ended: every worktree hold it, or one of its agents, has in any of the
-/// caller's pools ends with it. The session itself stays registered, and a session that holds
-/// nothing is answered with nothing released.
+/// caller's pools ends with it, and the checkouts it reported working in are forgotten. The
+/// session itself stays registered, and a session that holds nothing is answered with nothing
+/// released.
 ///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for a session not the caller's.

@@ -256,6 +256,12 @@ pub trait SessionRows: Send {
         project: ProjectId,
         session: SessionId,
     ) -> StoreResult<()>;
+    /// Forgets every checkout of the project last reported before `before`; answers how many.
+    async fn delete_session_checkouts_before(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<u64>;
 }
 
 /// Work items.

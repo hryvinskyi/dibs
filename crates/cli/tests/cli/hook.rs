@@ -495,6 +495,26 @@ fn an_edit_check_names_the_branch_the_checkout_is_on_and_a_detached_head_none() 
     let api = setup.checkout("api", Some("api"), API_REMOTE);
     crate::support::git(&api, &["checkout", "-q", "-b", "bob/5-rates"]);
     claim(&setup, "bob", &api, "gh:acme/api#5", &[]);
+    let branches = |setup: &Setup| {
+        let state = setup
+            .dibs(&setup.bob, &api)
+            .args(["status", "--json"])
+            .output()
+            .unwrap();
+        json(&state)["live"][0]["claim"]["branches"].clone()
+    };
+    let synced = setup
+        .dibs(&setup.bob, &api)
+        .args(["sync", "--force"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&synced), 0, "{}", text(&synced.stderr));
+    assert_eq!(
+        branches(&setup),
+        json!({"api": "bob/5-rates"}),
+        "the session that took the claim, alone in its checkout, records the branch"
+    );
+    crate::support::git(&api, &["checkout", "-q", "-b", "bob/5-next"]);
     let edited = setup.hook(
         "bob",
         &api,
@@ -502,25 +522,36 @@ fn an_edit_check_names_the_branch_the_checkout_is_on_and_a_detached_head_none() 
         &edit(&api, &["src/billing/a.rs"]),
     );
     assert_eq!(decision(&edited), "no_objection");
-    let sent: Vec<String> = setup
-        .server
-        .request_log()
-        .into_iter()
+    let token = |request: &String| {
+        let start = request.find(r#""checkout":""#)? + r#""checkout":""#.len();
+        request.get(start..start + 32).map(str::to_owned)
+    };
+    let log = setup.server.request_log();
+    let sent: Vec<&String> = log
+        .iter()
         .filter(|request| request.contains("/v1/edit-check"))
         .collect();
     assert!(
         sent.iter()
-            .any(|request| request.contains(r#""branch":"bob/5-rates""#)),
+            .any(|request| request.contains(r#""branch":"bob/5-next""#)),
         "{sent:?}"
     );
-    let state = setup
-        .dibs(&setup.bob, &api)
-        .args(["status", "--json"])
-        .output()
-        .unwrap();
+    let beat: Vec<String> = log
+        .iter()
+        .filter(|request| request.contains("/v1/heartbeat"))
+        .filter_map(token)
+        .collect();
+    assert!(
+        !beat.is_empty()
+            && sent
+                .iter()
+                .all(|request| token(request).is_some_and(|t| beat.contains(&t))),
+        "a reserving check names the checkout the heartbeat named: {sent:?} {beat:?}"
+    );
     assert_eq!(
-        json(&state)["live"][0]["claim"]["branches"],
-        json!({"api": "bob/5-rates"})
+        branches(&setup),
+        json!({"api": "bob/5-rates"}),
+        "the host's session took no claim, so its checkout records no branch"
     );
 
     crate::support::git(&api, &["checkout", "-q", "--detach"]);

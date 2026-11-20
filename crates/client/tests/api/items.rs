@@ -248,6 +248,7 @@ fn edit_checks_answer_per_path_and_ungoverned_paths_need_no_server() {
             repo: RepoId::parse("api").unwrap(),
             paths: paths(&["README.md", "src/billing/a.rs", "src/search/b.rs"]),
             reserve: false,
+            checkout: None,
             branch: None,
         };
         let verdicts = bob.edit_check(&request).await.unwrap().verdicts;
@@ -333,6 +334,7 @@ fn a_holder_grants_another_member_edits_for_their_item() {
                 repo: RepoId::parse("api").unwrap(),
                 paths: paths(&["src/billing/a.rs"]),
                 reserve: false,
+                checkout: None,
                 branch: None,
             })
             .await
@@ -436,7 +438,10 @@ fn a_stale_claim_is_taken_over_released_and_done() {
         .unwrap();
         bob.done(item).await.unwrap();
         assert_eq!(bob.item(item).await.unwrap().item.status, ItemStatus::Done);
-        let heartbeat = bob.heartbeat(bob_session, None, None, &[]).await.unwrap();
+        let heartbeat = bob
+            .heartbeat(bob_session, None, None, None, &[])
+            .await
+            .unwrap();
         assert!(heartbeat.refreshed.is_empty());
     });
 }
@@ -558,6 +563,7 @@ fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
             repo: RepoId::parse("api").unwrap(),
             paths: paths(&["src/billing/a.rs"]),
             reserve: true,
+            checkout: None,
             branch: None,
         };
         let held = bob.edit_check(&request).await.unwrap().verdicts;
@@ -643,6 +649,7 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
                 repo: RepoId::parse("api").unwrap(),
                 paths: paths(&["src/billing/round.rs"]),
                 reserve: false,
+                checkout: None,
                 branch: None,
             })
             .await
@@ -729,6 +736,7 @@ fn a_feature_claim_waits_for_a_debt_held_area_and_receives_it_when_it_is_narrowe
             repo: RepoId::parse("api").unwrap(),
             paths: paths(&["src/billing/a.rs"]),
             reserve: true,
+            checkout: None,
             branch: None,
         };
         let verdicts = bob.edit_check(&request).await.unwrap().verdicts;
@@ -783,6 +791,7 @@ fn a_heartbeat_carries_the_days_reports_and_feedback_is_kept_as_the_server_answe
             .heartbeat(
                 bob_session,
                 None,
+                None,
                 Some(&machine),
                 std::slice::from_ref(&report),
             )
@@ -790,7 +799,7 @@ fn a_heartbeat_carries_the_days_reports_and_feedback_is_kept_as_the_server_answe
             .unwrap();
         assert_eq!(first.reported, [day]);
         let again = bob
-            .heartbeat(bob_session, None, Some(&machine), &[report])
+            .heartbeat(bob_session, None, None, Some(&machine), &[report])
             .await
             .unwrap();
         assert_eq!(again.reports_accepted, [day]);
@@ -831,4 +840,75 @@ fn a_heartbeat_carries_the_days_reports_and_feedback_is_kept_as_the_server_answe
         ),
         "{log}"
     );
+}
+
+#[test]
+fn a_heartbeat_and_a_reserving_check_that_name_their_checkout_record_its_branch() {
+    use dibs_client::api::OnBranch;
+    use dibs_domain::radar::BranchName;
+    use dibs_domain::session::CheckoutToken;
+
+    let world = World::new();
+    let bob = world.client(&world.bob);
+    run(async {
+        let item = bob
+            .create_item(&new_item("gh:acme/api#8", "Refunds"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let desk = session(&bob, "desk/cli").await.session_id;
+        bob.claim(
+            item,
+            &ClaimRequest {
+                wide: None,
+                session_id: desk,
+                areas: Vec::new(),
+                kind: None,
+            },
+        )
+        .await
+        .unwrap();
+        let api = RepoId::parse("api").unwrap();
+        let branch_of = |status: &dibs_client::api::Status| {
+            status.live[0]
+                .claim
+                .branches
+                .get(&api)
+                .map(ToString::to_string)
+        };
+        let on = OnBranch {
+            repo: api.clone(),
+            branch: BranchName::parse("bob/8-refunds").unwrap(),
+        };
+        bob.heartbeat(desk, None, Some(&on), None, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            branch_of(&bob.status().await.unwrap()),
+            None,
+            "no checkout named"
+        );
+        let checkout = CheckoutToken::parse("0123456789abcdef0123456789abcdef").unwrap();
+        bob.heartbeat(desk, Some(&checkout), Some(&on), None, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            branch_of(&bob.status().await.unwrap()).as_deref(),
+            Some("bob/8-refunds")
+        );
+        let request = EditCheckRequest {
+            session_id: desk,
+            repo: api.clone(),
+            paths: paths(&["src/billing/a.rs"]),
+            reserve: true,
+            checkout: Some(checkout),
+            branch: Some(BranchName::parse("bob/8-refunds-next").unwrap()),
+        };
+        bob.edit_check(&request).await.unwrap();
+        assert_eq!(
+            branch_of(&bob.status().await.unwrap()).as_deref(),
+            Some("bob/8-refunds-next")
+        );
+    });
 }

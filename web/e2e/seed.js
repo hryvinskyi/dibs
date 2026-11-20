@@ -9,6 +9,7 @@
  */
 
 import {
+  CHECKOUTS,
   applySettings,
   claimFrom,
   heartbeatOn,
@@ -70,12 +71,26 @@ export async function seedWidgets(dibs) {
   const queued = idAt(ids, 2);
 
   const claims = [
-    { token: dibs.adminToken, item: working, host: 'alice-laptop', branch: 'alice/1-rates', areas: ['api:billing'] },
-    { token: dibs.memberToken, item: review, host: 'bob-desk', branch: 'bob/2-refunds', areas: [] },
+    {
+      token: dibs.adminToken,
+      checkout: CHECKOUTS.alice,
+      item: working,
+      host: 'alice-laptop',
+      branch: 'alice/1-rates',
+      areas: ['api:billing'],
+    },
+    {
+      token: dibs.memberToken,
+      checkout: CHECKOUTS.bob,
+      item: review,
+      host: 'bob-desk',
+      branch: 'bob/2-refunds',
+      areas: [],
+    },
   ];
   for (const claim of claims) {
     const session = await claimFrom(dibs.url, claim.token, claim.item, claim.host, { areas: claim.areas });
-    await heartbeatOn(dibs.url, claim.token, session, 'api', claim.branch);
+    await heartbeatOn(dibs.url, claim.token, session, claim.checkout, 'api', claim.branch);
     const stored = await reportFootprint(dibs.url, dibs.adminToken, claim.item, {
       repo: 'api',
       branch: claim.branch,

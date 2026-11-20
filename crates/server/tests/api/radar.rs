@@ -1,14 +1,14 @@
-//! The radar through the router: a member's checkout says which branch their claim works on, an
-//! integration lists the branches and reports what each changes, the overlap that makes is told to
-//! both holders and shown in the status, a merge moves the base under the other branch, and every
-//! refusal.
+//! The radar through the router: a member's checkout says which branch their claim works on when
+//! nothing else works there, an integration lists the branches and reports what each changes, the
+//! overlap that makes is told to both holders and shown in the status, a merge moves the base
+//! under the other branch, and every refusal.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use dibs_domain::member::Role;
 
-use crate::support::{Person, World, assert_error};
+use crate::support::{Person, World, assert_error, checkout_of};
 
 /// Two repositories: `api` with `billing` and `search`, where search depends on billing and
 /// `schema/**` is a published contract that all of `web` consumes; `web` with `checkout`.
@@ -111,8 +111,9 @@ async fn an_edit_and_a_heartbeat_record_the_branch_and_the_integration_reads_it(
         .post(
             &team.bob,
             "/v1/edit-check",
-            json!({"session_id": team.bob_session, "repo": "api", "paths": ["src/billing/a.rs"],
-                   "reserve": true, "branch": "bob/2-refunds"}),
+            json!({"session_id": team.bob_session, "checkout": checkout_of(team.bob_session),
+                   "repo": "api", "paths": ["src/billing/a.rs"], "reserve": true,
+                   "branch": "bob/2-refunds"}),
         )
         .await;
     assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
@@ -121,7 +122,8 @@ async fn an_edit_and_a_heartbeat_record_the_branch_and_the_integration_reads_it(
         .post(
             &team.alice,
             "/v1/heartbeat",
-            json!({"session_id": team.alice_session, "repo": "web", "branch": "alice/1-rates"}),
+            json!({"session_id": team.alice_session, "checkout": checkout_of(team.alice_session),
+                   "repo": "web", "branch": "alice/1-rates"}),
         )
         .await;
     assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);
@@ -206,6 +208,14 @@ async fn an_edit_and_a_heartbeat_record_the_branch_and_the_integration_reads_it(
             json!({"session_id": team.bob_session, "repo": "Bad!"}),
             "repo",
         ),
+        (
+            json!({"session_id": team.bob_session, "checkout": "ABCDEF0123456789ABCDEF0123456789"}),
+            "checkout",
+        ),
+        (
+            json!({"session_id": team.bob_session, "checkout": "c0ffee"}),
+            "checkout",
+        ),
     ] {
         let refused = team.world.post(&team.bob, "/v1/heartbeat", body).await;
         assert_error(
@@ -229,6 +239,25 @@ async fn an_edit_and_a_heartbeat_record_the_branch_and_the_integration_reads_it(
         StatusCode::UNPROCESSABLE_ENTITY,
         "invalid_request",
     );
+    let refused = team
+        .world
+        .post(
+            &team.bob,
+            "/v1/edit-check",
+            json!({"session_id": team.bob_session, "repo": "api", "paths": ["a"],
+                   "reserve": true, "checkout": "not a checkout"}),
+        )
+        .await;
+    assert_error(
+        &refused,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_request",
+    );
+    assert!(
+        refused.body.to_string().contains("checkout"),
+        "{}",
+        refused.body
+    );
 }
 
 #[tokio::test]
@@ -242,7 +271,8 @@ async fn one_shared_file_reported_through_the_footprint_route_tells_both_holders
             .post(
                 who,
                 "/v1/heartbeat",
-                json!({"session_id": session, "repo": "api", "branch": branch}),
+                json!({"session_id": session, "checkout": checkout_of(session),
+                       "repo": "api", "branch": branch}),
             )
             .await;
     }
@@ -393,7 +423,8 @@ async fn a_contract_changed_in_one_repository_meets_its_consumer_in_the_other() 
             .post(
                 who,
                 "/v1/heartbeat",
-                json!({"session_id": session, "repo": repo, "branch": branch}),
+                json!({"session_id": session, "checkout": checkout_of(session),
+                       "repo": repo, "branch": branch}),
             )
             .await;
     }
@@ -462,7 +493,8 @@ async fn two_sessions_of_one_machine_keep_the_branch_of_their_own_claims() {
                 .post(
                     &team.bob,
                     "/v1/heartbeat",
-                    json!({"session_id": session, "repo": "api", "branch": branch}),
+                    json!({"session_id": session, "checkout": checkout_of(session),
+                       "repo": "api", "branch": branch}),
                 )
                 .await;
             assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);
@@ -496,7 +528,8 @@ async fn every_role_lists_the_live_claims_with_their_state_and_branches_and_noth
         .post(
             &team.bob,
             "/v1/heartbeat",
-            json!({"session_id": team.bob_session, "repo": "api", "branch": "bob/2"}),
+            json!({"session_id": team.bob_session, "checkout": checkout_of(team.bob_session),
+                   "repo": "api", "branch": "bob/2"}),
         )
         .await;
     team.world
@@ -527,4 +560,137 @@ async fn every_role_lists_the_live_claims_with_their_state_and_branches_and_noth
         ]}),
         "a stale claim is left out; a claim in review never goes stale"
     );
+}
+
+#[tokio::test]
+async fn two_sessions_of_a_member_in_one_checkout_record_no_branch_and_announce_nothing() {
+    let team = Team::new().await;
+    let second = team.world.session(&team.bob, "desk-two").await;
+    let other_item = team
+        .world
+        .item(&team.bob, Some("gh:acme/api#3"), "Search")
+        .await;
+    let claimed = team
+        .world
+        .post(
+            &team.bob,
+            &format!("/v1/items/{other_item}/claim"),
+            json!({"session_id": second}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    let shared = checkout_of(team.bob_session);
+    let detached = team
+        .world
+        .post(
+            &team.bob,
+            "/v1/heartbeat",
+            json!({"session_id": second, "checkout": shared, "repo": "api"}),
+        )
+        .await;
+    assert_eq!(detached.status, StatusCode::OK, "{}", detached.body);
+    for _ in 0..2 {
+        for (session, branch) in [
+            (team.bob_session, "bob/2-refunds"),
+            (second, "bob/3-search"),
+        ] {
+            let edit = team
+                .world
+                .post(
+                    &team.bob,
+                    "/v1/edit-check",
+                    json!({"session_id": session, "checkout": shared, "repo": "api",
+                           "paths": ["src/billing/a.rs"], "reserve": true, "branch": branch}),
+                )
+                .await;
+            assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
+            let beat = team
+                .world
+                .post(
+                    &team.bob,
+                    "/v1/heartbeat",
+                    json!({"session_id": session, "checkout": shared, "repo": "api",
+                           "branch": branch}),
+                )
+                .await;
+            assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);
+        }
+    }
+    let listed = team.world.get(&team.worker, "/v1/claims").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    for claim in listed.body["claims"].as_array().unwrap() {
+        assert_eq!(claim["branches"], json!({}), "{}", listed.body);
+    }
+    let events = team.world.get(&team.worker, "/v1/events").await;
+    let recorded = events.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "branch_recorded")
+        .count();
+    assert_eq!(recorded, 0, "{}", events.body);
+
+    let ended = team
+        .world
+        .post(&team.bob, &format!("/v1/sessions/{second}/end"), json!({}))
+        .await;
+    assert_eq!(ended.status, StatusCode::OK, "{}", ended.body);
+    let beat = team
+        .world
+        .post(
+            &team.bob,
+            "/v1/heartbeat",
+            json!({"session_id": team.bob_session, "checkout": shared, "repo": "api",
+                   "branch": "bob/2-refunds"}),
+        )
+        .await;
+    assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);
+    let status = team.world.get(&team.bob, "/v1/status").await;
+    let mine = status.body["live"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|held| held["claim"]["item"] == team.bobs)
+        .map(|held| held["claim"].clone())
+        .unwrap();
+    assert_eq!(
+        mine["branches"],
+        json!({"api": "bob/2-refunds"}),
+        "{}",
+        status.body
+    );
+    assert_eq!(
+        mine["branch_sources"],
+        json!({"api": "checkout"}),
+        "{}",
+        status.body
+    );
+}
+
+#[tokio::test]
+async fn a_heartbeat_and_an_edit_that_name_no_checkout_record_no_branch() {
+    let team = Team::new().await;
+    let edit = team
+        .world
+        .post(
+            &team.bob,
+            "/v1/edit-check",
+            json!({"session_id": team.bob_session, "repo": "api", "paths": ["src/billing/a.rs"],
+                   "reserve": true, "branch": "bob/2-refunds"}),
+        )
+        .await;
+    assert_eq!(edit.status, StatusCode::OK, "{}", edit.body);
+    let beat = team
+        .world
+        .post(
+            &team.bob,
+            "/v1/heartbeat",
+            json!({"session_id": team.bob_session, "repo": "api", "branch": "bob/2-refunds"}),
+        )
+        .await;
+    assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);
+    let listed = team.world.get(&team.worker, "/v1/claims").await;
+    for claim in listed.body["claims"].as_array().unwrap() {
+        assert_eq!(claim["branches"], json!({}), "{}", listed.body);
+    }
 }

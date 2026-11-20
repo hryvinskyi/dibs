@@ -7,33 +7,11 @@ use time::OffsetDateTime;
 
 use crate::area::QualifiedArea;
 use crate::claim::Claim;
-use crate::ids::{ItemId, MemberId, SessionId};
+use crate::ids::{ItemId, MemberId};
 use crate::paths::{RelPath, RepoPath};
-use crate::radar::{
-    BranchName, BranchRecording, BranchSource, CommitSha, HeldWorktrees, record_branch,
-};
+use crate::radar::{BranchName, CommitSha};
 use crate::repo::RepoId;
 use crate::settings::ProjectSettings;
-
-/// What a heartbeat of `session` from a checkout of `repo` on `branch` records, as the checkout's
-/// branch, on the claims it kept alive that were taken or last renewed in that session; a claim of
-/// another session of the same machine may be in another checkout on another branch, and is left
-/// alone. Only the recordings that change something are answered, in the order of `refreshed`;
-/// `worktrees` answers whether a pool worktree a claim's branch was learned from is still held.
-pub fn heartbeat_branches(
-    refreshed: &[Claim],
-    session: SessionId,
-    repo: &RepoId,
-    branch: &BranchName,
-    worktrees: &impl HeldWorktrees,
-) -> Vec<BranchRecording> {
-    refreshed
-        .iter()
-        .filter(|claim| claim.session == session)
-        .map(|claim| record_branch(claim, repo, branch, BranchSource::Checkout, worktrees))
-        .filter(|recording| *recording != BranchRecording::Kept)
-        .collect()
-}
 
 /// What the radar knows of a footprint's paths under the project's settings: the areas they lie in,
 /// whether one lies in no area, and those a contract of their repository declares. It is what the

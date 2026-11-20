@@ -116,7 +116,7 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/me` | any | The caller, their project and its settings. |
 | `GET /v1/members` | any | The project's members. |
 | `POST /v1/sessions` | people | Register a session, or update the one of the same label. |
-| `POST /v1/heartbeat` | people | A session's sign of life, the branch its checkout is on, and what its machine counted. |
+| `POST /v1/heartbeat` | people | A session's sign of life, the checkout it works in and its branch, and what its machine counted. |
 | `POST /v1/sessions/{id}/end` | people | A session of yours ended: the worktree holds it and its agents have end. |
 | `GET /v1/items` | any | List work items. |
 | `POST /v1/items` | any | Create a work item, or return the one a reference names. |
@@ -195,6 +195,7 @@ item     { id, ref | null, title, status: "open" | "claimed" | "done" | "dropped
 item ref { id, ref | null, title, link | null }
 claim    { item, holder, session_id, host, areas: ["repo:area", …], wide: { areas: ["repo:area", …], reason } | null,
            claimed_at, renewed_at, last_seen, state, review, branches: { "<repo id>": "<branch>", … },
+           branch_sources: { "<repo id>": "pull_request" | "worktree" | "named" | "checkout", … },
            kind: "feature" | "debt",
            pending: { "repo:area": { from, asked_at | null, escalated_at | null }, … } }
 grant    { id, item, area, from, to, created_at }
@@ -263,18 +264,25 @@ and `agent` are required, `push` (default `false`) says the session can be woken
 session. A label registers once per member; registering it again updates the session, keeps its id and counts as the
 session's sign of life: a session that can be woken registers again every minute while it runs.
 
-`POST /v1/heartbeat`, body `{ "session_id": 7, "repo": "api", "branch": "bob/42-refunds" }`, answers
-`{ "refreshed": [12] }`: the items whose claims the heartbeat kept alive. A claim is *live* while its holder was seen
-within the project's `stale_after`; a heartbeat, an edit check that reserves, or a renewal counts as seen.
+`POST /v1/heartbeat`, body
+`{ "session_id": 7, "checkout": "3f0c9a4e1b7d2c8a5e6f0b1a2c3d4e5f", "repo": "api", "branch": "bob/42-refunds" }`,
+answers `{ "refreshed": [12] }`: the items whose claims the heartbeat kept alive. A claim is *live* while its holder was
+seen within the project's `stale_after`; a heartbeat, an edit check that reserves, or a renewal counts as seen.
 
-`repo` and `branch` are optional and name the checkout the session works in and the branch it is on; a checkout on a
-detached head sends no `branch`, and a `branch` needs its `repo`. The claims the heartbeat kept alive that this session
-took or last renewed record the branch for the repository (`branch_recorded` when it is another one than before): one
-session works in one checkout, while another session of the same machine may work in another checkout on another
-branch, and its claims are left alone. A claim whose branch changes loses its footprint of that repository (see
-[Branches and overlaps](#branches-and-overlaps)). A repository the project does not list records nothing. Refusals add
-`invalid_request` for a malformed `repo` (whether or not a `branch` comes with it) or `branch`, or a `branch` without
-`repo`.
+`checkout`, `repo` and `branch` are optional. `checkout` names the checkout the session works in: 32 lowercase
+hexadecimal characters, the first half of the SHA-256 of the machine's id (see [Pilot figures](#pilot-figures)), a NUL
+byte and the absolute path of the checkout's root as the file system resolves it. The server compares these only
+between sessions of one member and never learns the path; a machine without an id sends none. `repo` and `branch` name
+the repository the checkout is of and the branch it is on; a checkout on a detached head sends no `branch`, and a
+`branch` needs its `repo`.
+
+A heartbeat that names its checkout stores that the session reported working there now, on a branch or not. When it is
+on a branch of a repository the project lists, the branch is recorded, learned from the checkout, on one claim at
+most: the one live claim this session took or last renewed and works on (not in review), and only while, within the
+project's `stale_after`, the session reported no other checkout and no other session of the member reported this one
+(see [Branches and overlaps](#branches-and-overlaps)). A heartbeat that names no checkout stores none and records no
+branch. Refusals add `invalid_request` for a malformed `checkout`, a malformed `repo` (whether or not a `branch` comes
+with it) or `branch`, or a `branch` without `repo`.
 
 `reports`, optional, carries what the session's machine counted, at most 7 days, each day once, and `machine` the id
 the member's dibs gave that machine once (32 lowercase hexadecimal digits, 128 random bits; see
@@ -308,9 +316,10 @@ rest is kept. The server logs each report left out as a warning naming the membe
 machine's id is shown to nobody: not on the log, not in the figures.
 
 `POST /v1/sessions/{id}/end` takes no body: the caller's session `id` ended, and every worktree hold it, or one of its
-agents, has in any of the caller's pools ends with it (`worktree_released`, cause `session_ended`). The session stays
-registered. Answers `{ "released": [own hold, …] }` (see [Worktrees](#worktrees)), ordered by pool and worktree, empty
-when it held nothing, so it may be sent again. `not_found` for a session that is not the caller's.
+agents, has in any of the caller's pools ends with it (`worktree_released`, cause `session_ended`). The checkouts it
+reported are forgotten, so it no longer keeps another session of the member in the same checkout from recording its
+branch. The session stays registered. Answers `{ "released": [own hold, …] }` (see [Worktrees](#worktrees)), ordered
+by pool and worktree, empty when it held nothing, so it may be sent again. `not_found` for a session that is not the caller's.
 
 ### Items
 
@@ -688,14 +697,29 @@ Work that collides rarely does so in one commit: it collides over the days a bra
 files every branch touches, and through a published interface changed in one place and used in another. dibs records
 which branch each claim works on, keeps what each of those branches changes, and tells the holders when two of them meet.
 
-**Branches.** Which branch a claim works on is recorded, never guessed from a branch's name. An edit check that reserves
-sends the `branch` the checkout is on, and the claims the edits are attributed to record it for the check's repository;
-a heartbeat sends it too, for the claims of its own session (see [Sessions](#sessions)). A claim keeps the last branch
-seen per repository (`branches` in the claim), and `branch_recorded` marks each change. When the branch changes, the
-claim's footprint of that repository goes with what it made: it measured the branch the claim left. The command line
-reads the branch from git's own files (`HEAD` of the directory `GIT_DIR` names, or of the nearest `.git`, in a linked
-worktree the one its `.git` file names), never by starting git, and sends none on a detached head or in a repository
-that keeps its refs in a reftable.
+**Branches.** Which branch a claim works on is recorded, never guessed from a branch's name. A claim keeps one branch
+per repository (`branches` in the claim) and where it was learned from (`branch_sources`), and `branch_recorded`, which
+carries the `source`, marks each change of branch. What records it, strongest first:
+
+1. `pull_request`: the head branch of a pull request the claim recorded for review;
+2. `worktree`: the branch of a pool worktree the member holds for the claim's item;
+3. `named`: a branch the claim named when it was taken or renewed;
+4. `checkout`: the branch of the checkout a session works in, sent by a heartbeat or an edit check that reserves, under
+   three conditions judged within the project's `stale_after`: the session took or last renewed exactly one live claim
+   it works on (a claim in review does not count), and for an edit check the edits were attributed to that claim; the
+   session reported no other checkout (an agent of it editing in a worktree is another); and no other session of the
+   member reported this checkout. Several sessions in one checkout, whose branch changes under all of them, say nothing
+   of which claim the branch is for, and record nothing.
+
+A weaker source never replaces a stronger one while the stronger one holds: a pull request's head while the claim is in
+review and records that pull request, a worktree's branch while the worktree is held for the item by a hold that has
+not gone silent, a named branch until the claim names another or a stronger source replaces it. A checkout's branch
+holds against nothing. Two sources of one strength but another pull request or another worktree do not replace each
+other while the recorded one holds. The same branch learned from another source changes the source alone. When the
+branch changes, the claim's footprint of that repository goes with what it made: it measured the branch the claim left.
+The command line reads the branch from git's own files (`HEAD` of the directory `GIT_DIR` names, or of the nearest
+`.git`, in a linked worktree the one its `.git` file names), never by starting git, and sends none on a detached head
+or in a repository that keeps its refs in a reftable.
 
 `GET /v1/claims` answers every live claim, ordered by item:
 `{ "claims": [{ "item": 12, "holder": "bob", "state": "working" | "in_review", "branches": { "api": "bob/42-refunds" } }] }`.
@@ -766,8 +790,12 @@ Claims list those whose claims are all live.
 `POST /v1/edit-check`, body `{ "session_id": 7, "repo": "default", "paths": ["packages/billing/a.rs"], "reserve": false }`.
 Every path lies in the one repository `repo` names (an id from `/v1/me`) and is relative to its root, `/`-separated.
 With `reserve: true` the edit is being made and what the check plans is recorded on the caller's claim; without it, the
-check writes nothing. An optional `branch` names the branch the checkout is on; with `reserve: true` the claims the
-edits are attributed to record it (see [Branches and overlaps](#branches-and-overlaps)). Answers a verdict per path, in the order asked:
+check writes nothing. An optional `checkout` names the checkout the edits are made in, as a heartbeat names it (see
+[Sessions](#sessions)), and an optional `branch` the branch it is on. A check with `reserve: true` that names its
+checkout stores that the session reported working there, and records the branch, learned from the checkout, on the
+session's one working claim when the edits were attributed to it and the checkout rule allows it (see
+[Branches and overlaps](#branches-and-overlaps)); one that names no checkout records no branch. A malformed `checkout`
+is `invalid_request`. Answers a verdict per path, in the order asked:
 
 ```json
 { "verdicts": [

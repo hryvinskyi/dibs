@@ -4,7 +4,7 @@ use time::Duration;
 
 use super::*;
 use crate::claim::Claim;
-use crate::ids::{ItemId, MemberId, SessionId};
+use crate::ids::{ItemId, MemberId};
 use crate::message::Importance;
 use crate::paths::{RelPath, RepoPath};
 use crate::repo::RepoId;
@@ -73,21 +73,6 @@ fn checkout(name: &str) -> RecordedBranch {
     RecordedBranch::new(branch(name), BranchSource::Checkout)
 }
 
-/// Holds no pool worktree.
-fn no_worktree(_: &WorktreeRef) -> bool {
-    false
-}
-
-/// The claim a recording that changes something stores.
-fn changed(recording: &BranchRecording) -> &Claim {
-    match recording {
-        BranchRecording::SourceChanged(claim) | BranchRecording::BranchChanged { claim, .. } => {
-            claim
-        }
-        BranchRecording::Kept => panic!("the recording changes nothing"),
-    }
-}
-
 /// A base on `main` whose merge base was committed at `minutes`.
 fn main_at(minutes: i64) -> FootprintBase {
     FootprintBase {
@@ -141,48 +126,6 @@ fn report(item: u64, name: &str, base: &str, paths: &[&str]) -> FootprintReport 
         paths: rels(paths),
         truncated: false,
     }
-}
-
-#[test]
-fn a_heartbeat_records_its_branch_on_the_claims_of_its_own_session_only() {
-    let mut first = on_branch(1, ALICE, "old");
-    first.session = SessionId(1);
-    let mut second = claim(2, ALICE, &[], 0);
-    second.session = SessionId(1);
-    let mut other_worktree = on_branch(3, ALICE, "alice/3-search");
-    other_worktree.session = SessionId(2);
-    let kept = [first, second, other_worktree];
-    let beat = |session: u64, name: &str| {
-        heartbeat_branches(
-            &kept,
-            SessionId(session),
-            &repo("api"),
-            &branch(name),
-            &no_worktree,
-        )
-    };
-    let set = beat(1, "alice/1-rates");
-    let items: Vec<ItemId> = set
-        .iter()
-        .map(|recording| changed(recording).item)
-        .collect();
-    assert_eq!(
-        items,
-        [ItemId(1), ItemId(2)],
-        "every claim of the session, none of another session on the same machine"
-    );
-    assert!(set.iter().all(|recording| {
-        changed(recording).branch(&repo("api")) == Some(&branch("alice/1-rates"))
-            && changed(recording).branch_source(&repo("api")) == Some(&BranchSource::Checkout)
-    }));
-    assert!(
-        beat(2, "alice/3-search").is_empty(),
-        "the other session's claim is on its branch already"
-    );
-    let moved = beat(2, "alice/3-next");
-    assert_eq!(moved.len(), 1);
-    assert_eq!(changed(&moved[0]).item, ItemId(3));
-    assert!(beat(9, "x").is_empty());
 }
 
 #[test]

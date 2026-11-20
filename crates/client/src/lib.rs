@@ -6,6 +6,7 @@
 pub mod api;
 pub mod branch;
 pub mod checkout;
+pub mod checkout_token;
 pub mod client;
 pub mod credentials;
 pub mod error;

@@ -25,6 +25,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey};
 use dibs_domain::report::{DayReport, MachineId};
+use dibs_domain::session::CheckoutToken;
 use dibs_domain::settings::SettingsDocument;
 
 use crate::api::{
@@ -135,6 +136,8 @@ struct MembersAnswer {
 #[derive(Serialize)]
 struct HeartbeatBody<'a> {
     session_id: SessionId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkout: Option<&'a CheckoutToken>,
     #[serde(flatten)]
     on: Option<&'a OnBranch>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,20 +270,23 @@ impl Client {
             .await
     }
 
-    /// `POST /v1/heartbeat`: a session's sign of life, from a checkout on a branch when `on` names
-    /// one, carrying what the machine `machine` counted on the days of `reports`.
+    /// `POST /v1/heartbeat`: a session's sign of life from the checkout `checkout` names, on a
+    /// branch when `on` names one, carrying what the machine `machine` counted on the days of
+    /// `reports`. A heartbeat that names no checkout records no branch.
     ///
     /// # Errors
     /// [`ClientError`].
     pub async fn heartbeat(
         &self,
         session: SessionId,
+        checkout: Option<&CheckoutToken>,
         on: Option<&OnBranch>,
         machine: Option<&MachineId>,
         reports: &[DayReport],
     ) -> Result<Heartbeat, ClientError> {
         let body = HeartbeatBody {
             session_id: session,
+            checkout,
             on,
             machine,
             reports,

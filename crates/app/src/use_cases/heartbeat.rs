@@ -5,7 +5,7 @@ use std::sync::Arc;
 use dibs_domain::event::{EventKind, HookReported};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
-use dibs_domain::radar::{BranchRecording, WorktreeRef, heartbeat_branches};
+use dibs_domain::radar::BranchSource;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::report::{HeartbeatReports, HookReport, ReportDay};
 
@@ -14,7 +14,7 @@ use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::common::own_session;
-use crate::use_cases::radar::{OnBranch, Radar};
+use crate::use_cases::radar::{FromCheckout, Radar, fed_by_checkout, report_checkout};
 use crate::work::Work;
 
 /// What a heartbeat kept alive.
@@ -34,14 +34,16 @@ pub struct HeartbeatOutcome {
 /// here; a claim that already went stale is renewed only by claiming it again. The caller's places
 /// in slot queues, and the slot holds their heartbeats keep, are seen now too, from any machine.
 ///
-/// A heartbeat from a checkout on a branch records that branch, learned from the checkout, on the
-/// claims it kept alive that its own session took or last renewed: one session works in one
-/// checkout, while another session of the same machine may work in another checkout on another
-/// branch. A branch a claim learned from a stronger source is kept; the pools are not read, so a
-/// branch learned from a pool worktree counts as still held. A `BranchRecorded` event marks each
-/// change of branch, and the claim's footprint of the repository, which measured the branch
-/// before, goes with what it made; a change of source alone is stored and nothing more. A
-/// repository the project does not list records nothing.
+/// A heartbeat that names its checkout stores that its session reported working there now,
+/// whether or not the checkout is on a branch. When the checkout is on a branch of a repository the
+/// project lists, that branch, learned from the checkout, is recorded on one claim at most: the
+/// one live claim its session took or last renewed and works on, and only while the session
+/// reported no other checkout and no other session of the member reported this one, within the
+/// project's `stale_after`. A branch the claim learned from a stronger source that still holds is
+/// kept. A `BranchRecorded` event marks a change of branch, and the claim's footprint of the
+/// repository, which measured the branch before, goes with what it made; a change of source alone
+/// is stored and nothing more. A heartbeat that names no checkout stores none and records no
+/// branch.
 ///
 /// The reports it carries are kept one per member, machine (by the id its dibs gave it, whatever it
 /// is called) and day: a report that differs from the one kept replaces it and appends a
@@ -77,9 +79,9 @@ impl Heartbeat {
         &self,
         actor: &Actor,
         session: SessionId,
-        branch: Option<&OnBranch>,
+        from: Option<&FromCheckout>,
     ) -> Result<HeartbeatOutcome, AppError> {
-        self.execute_reporting(actor, session, branch, None).await
+        self.execute_reporting(actor, session, from, None).await
     }
 
     /// Records the heartbeat and keeps the reports it carries.
@@ -91,7 +93,7 @@ impl Heartbeat {
         &self,
         actor: &Actor,
         session: SessionId,
-        branch: Option<&OnBranch>,
+        from: Option<&FromCheckout>,
         reports: Option<&HeartbeatReports>,
     ) -> Result<HeartbeatOutcome, AppError> {
         actor.require_person()?;
@@ -111,29 +113,32 @@ impl Heartbeat {
                 kept.push(claim);
             }
         }
-        if let Some(on) = branch.filter(|on| settings.repo(&on.repo).is_some()) {
-            let radar = Radar {
-                ids: &*self.ids,
-                schemes: &self.ref_schemes,
-                settings: &settings,
-                now,
-            };
-            let held = |_: &WorktreeRef| true;
-            for recording in heartbeat_branches(&kept, session.id, &on.repo, &on.branch, &held) {
-                match recording {
-                    BranchRecording::Kept => {}
-                    BranchRecording::SourceChanged(claim) => {
-                        work.save_claim(actor.project, &claim).await?;
-                    }
-                    BranchRecording::BranchChanged { claim, recorded } => {
-                        work.save_claim(actor.project, &claim).await?;
-                        work.record(now, EventKind::BranchRecorded(recorded))
-                            .await?;
-                        radar
-                            .drop_footprint(&mut work, claim.item, &on.repo)
-                            .await?;
-                    }
-                }
+        if let Some(from) = from {
+            let reported =
+                report_checkout(&mut work, actor.member, session.id, &from.token, now).await?;
+            let on = from
+                .branch
+                .as_ref()
+                .filter(|on| settings.repo(&on.repo).is_some());
+            if let Some(on) = on
+                && let Some(claim) =
+                    fed_by_checkout(&mut work, &reported, &kept, stale_after, |_| true).await?
+            {
+                let radar = Radar {
+                    ids: &*self.ids,
+                    schemes: &self.ref_schemes,
+                    settings: &settings,
+                    now,
+                };
+                radar
+                    .record_branch(
+                        &mut work,
+                        claim,
+                        &on.repo,
+                        &on.branch,
+                        BranchSource::Checkout,
+                    )
+                    .await?;
             }
         }
         let mut board = work.slot_board(actor.project).await?;
@@ -194,8 +199,8 @@ mod tests {
     use dibs_domain::repo::RepoId;
 
     use super::*;
-    use crate::use_cases::testing::{Env, session};
-    use crate::use_cases::{ClaimItem, ClaimItemInput};
+    use crate::use_cases::testing::{Env, START, checkout, in_checkout, session};
+    use crate::use_cases::{ClaimItem, ClaimItemInput, OnBranch};
 
     async fn claim(env: &Env, item: ItemId, session: SessionId) {
         ClaimItem::new(&env.deps)
@@ -241,45 +246,255 @@ mod tests {
         assert_eq!(env.events().await.len(), events);
     }
 
+    async fn beat(env: &Env, session: SessionId, from: Option<FromCheckout>) {
+        Heartbeat::new(&env.deps)
+            .execute(&env.bob.actor, session, from.as_ref())
+            .await
+            .unwrap();
+    }
+
+    /// The branch `item`'s claim records in the project's one repository, and its source.
+    async fn recorded(env: &Env, item: ItemId) -> Option<(String, BranchSource)> {
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let stored = tx.claim(env.project, item).await.unwrap().unwrap();
+        let recorded = stored.branches.get(&RepoId::implicit())?;
+        Some((recorded.branch.to_string(), recorded.source.clone()))
+    }
+
+    /// The branches the log recorded after `before`, with their items and sources.
+    async fn recordings(env: &Env, before: usize) -> Vec<(ItemId, String, BranchSourceKind)> {
+        env.kinds_after(before)
+            .await
+            .into_iter()
+            .filter_map(|kind| match kind {
+                EventKind::BranchRecorded(recorded) => {
+                    Some((recorded.item, recorded.branch.to_string(), recorded.source))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn from_checkout(name: &str) -> Option<(String, BranchSource)> {
+        Some((name.to_owned(), BranchSource::Checkout))
+    }
+
     #[tokio::test]
     async fn a_heartbeat_from_a_checkout_on_a_branch_records_it_on_the_claim_once() {
         let env = Env::new().await;
         let item = env.item("gh:acme/widgets#1").await;
         claim(&env, item, env.bob.session).await;
-        let on = |repo: &str, branch: &str| OnBranch {
-            repo: RepoId::parse(repo).unwrap(),
-            branch: BranchName::parse(branch).unwrap(),
+        let unlisted = FromCheckout {
+            token: checkout('a'),
+            branch: Some(OnBranch {
+                repo: RepoId::parse("elsewhere").unwrap(),
+                branch: BranchName::parse("bob/1-y").unwrap(),
+            }),
         };
         let before = env.events().await.len();
-        let heartbeat = Heartbeat::new(&env.deps);
-        for branch in [
-            Some(on("default", "bob/1-x")),
-            Some(on("default", "bob/1-x")),
-            Some(on("elsewhere", "bob/1-y")),
-            None,
+        for from in [
+            in_checkout('a', Some("bob/1-x")),
+            in_checkout('a', Some("bob/1-x")),
+            unlisted,
+            in_checkout('a', None),
         ] {
-            heartbeat
-                .execute(&env.bob.actor, env.bob.session, branch.as_ref())
-                .await
-                .unwrap();
+            beat(&env, env.bob.session, Some(from)).await;
         }
-        let kinds = env.kinds_after(before).await;
-        assert!(
-            matches!(kinds.as_slice(), [EventKind::BranchRecorded(recorded)]
-                if recorded.item == item && recorded.branch.as_str() == "bob/1-x"
-                    && recorded.source == BranchSourceKind::Checkout),
-            "once, and never for a repository the project does not list: {kinds:?}"
+        assert_eq!(
+            recordings(&env, before).await,
+            [(item, "bob/1-x".to_owned(), BranchSourceKind::Checkout)],
+            "once, and never for a repository the project does not list"
+        );
+        assert_eq!(recorded(&env, item).await, from_checkout("bob/1-x"));
+    }
+
+    #[tokio::test]
+    async fn a_new_branch_of_the_checkout_replaces_the_old_one_and_drops_its_footprint() {
+        use dibs_domain::radar::{CommitSha, FootprintBase};
+
+        use crate::use_cases::{FootprintInput, RecordFootprint};
+
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim(&env, item, env.bob.session).await;
+        beat(
+            &env,
+            env.bob.session,
+            Some(in_checkout('a', Some("bob/1-x"))),
+        )
+        .await;
+        RecordFootprint::new(&env.deps)
+            .execute(
+                &env.importer,
+                FootprintInput {
+                    item,
+                    repo: "default".to_owned(),
+                    branch: BranchName::parse("bob/1-x").unwrap(),
+                    base: FootprintBase {
+                        branch: BranchName::parse("main").unwrap(),
+                        sha: CommitSha::parse("abcd").unwrap(),
+                        at: env.now(),
+                    },
+                    paths: [dibs_domain::paths::RelPath::parse("a.rs").unwrap()].into(),
+                    truncated: false,
+                },
+            )
+            .await
+            .unwrap();
+        let footprints = |env: &Env| {
+            let store = env.deps.store.clone();
+            let project = env.project;
+            async move {
+                let mut tx = store.begin().await.unwrap();
+                tx.footprints(project).await.unwrap().len()
+            }
+        };
+        assert_eq!(footprints(&env).await, 1);
+        let before = env.events().await.len();
+        beat(
+            &env,
+            env.bob.session,
+            Some(in_checkout('a', Some("bob/1-y"))),
+        )
+        .await;
+        assert_eq!(
+            recordings(&env, before).await,
+            [(item, "bob/1-y".to_owned(), BranchSourceKind::Checkout)]
+        );
+        assert_eq!(recorded(&env, item).await, from_checkout("bob/1-y"));
+        assert_eq!(footprints(&env).await, 0, "it measured the branch before");
+    }
+
+    #[tokio::test]
+    async fn two_sessions_of_a_member_in_one_checkout_record_no_branch_until_one_ends() {
+        use crate::use_cases::EndSession;
+
+        let env = Env::new().await;
+        let first = env.item("gh:acme/widgets#1").await;
+        let second = env.item("gh:acme/widgets#2").await;
+        let other = session(&env.deps, &env.bob.actor, "desktop", "desktop/second").await;
+        claim(&env, first, env.bob.session).await;
+        claim(&env, second, other).await;
+        let before = env.events().await.len();
+        beat(&env, other, Some(in_checkout('a', None))).await;
+        for _ in 0..3 {
+            beat(&env, env.bob.session, Some(in_checkout('a', Some("bob/1")))).await;
+            beat(&env, other, Some(in_checkout('a', Some("bob/2")))).await;
+        }
+        assert_eq!(
+            (recorded(&env, first).await, recorded(&env, second).await),
+            (None, None),
+            "a session on a detached head shares the checkout all the same"
+        );
+        assert!(recordings(&env, before).await.is_empty());
+        EndSession::new(&env.deps)
+            .execute(&env.bob.actor, other)
+            .await
+            .unwrap();
+        beat(&env, env.bob.session, Some(in_checkout('a', Some("bob/1")))).await;
+        assert_eq!(recorded(&env, first).await, from_checkout("bob/1"));
+        assert_eq!(recorded(&env, second).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_that_names_no_checkout_stores_none_and_records_nothing() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim(&env, item, env.bob.session).await;
+        let before = env.events().await.len();
+        beat(&env, env.bob.session, None).await;
+        assert!(recordings(&env, before).await.is_empty());
+        assert_eq!(recorded(&env, item).await, None);
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let member = env.bob.actor.member;
+        let stored = tx.session_checkouts(env.project, member, START).await;
+        assert!(stored.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_in_two_checkouts_records_from_neither() {
+        use dibs_domain::paths::RepoPath;
+
+        use crate::use_cases::{EditCheck, EditCheckInput};
+
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim(&env, item, env.bob.session).await;
+        beat(&env, env.bob.session, Some(in_checkout('a', Some("bob/1")))).await;
+        let before = env.events().await.len();
+        EditCheck::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                EditCheckInput {
+                    session: env.bob.session,
+                    paths: vec![RepoPath::parse("default:packages/billing/a.rs").unwrap()],
+                    reserve: true,
+                    checkout: Some(in_checkout('b', Some("bob/1-agent"))),
+                },
+            )
+            .await
+            .unwrap();
+        beat(
+            &env,
+            env.bob.session,
+            Some(in_checkout('a', Some("bob/1-next"))),
+        )
+        .await;
+        assert!(recordings(&env, before).await.is_empty());
+        assert_eq!(recorded(&env, item).await, from_checkout("bob/1"));
+    }
+
+    #[tokio::test]
+    async fn a_branch_from_a_worktree_held_for_the_item_outlasts_any_checkout_heartbeat() {
+        use dibs_domain::radar::WorktreeRef;
+        use dibs_domain::report::MachineId;
+        use dibs_domain::slot::Purpose;
+        use dibs_domain::worktree::{PoolId, WorktreeName};
+
+        use crate::use_cases::{TakeWorktree, TakeWorktreeInput};
+
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim(&env, item, env.bob.session).await;
+        let worktree = WorktreeRef {
+            machine: MachineId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            pool: PoolId::parse("a1b2c3").unwrap(),
+            worktree: WorktreeName::parse("worktree1").unwrap(),
+        };
+        TakeWorktree::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                TakeWorktreeInput {
+                    session: env.bob.session,
+                    machine: worktree.machine.clone(),
+                    pool: worktree.pool.clone(),
+                    names: vec![worktree.worktree.clone()],
+                    agent: None,
+                    purpose: Purpose::parse("refunds").unwrap(),
+                    item: Some(item),
+                },
+            )
+            .await
+            .unwrap();
+        let from_worktree = RecordedBranch::new(
+            BranchName::parse("bob/1-worktree").unwrap(),
+            BranchSource::Worktree(worktree),
         );
         let mut tx = env.deps.store.begin().await.unwrap();
-        let stored = tx.claim(env.project, item).await.unwrap().unwrap();
-        assert_eq!(
-            stored.branch(&RepoId::implicit()).map(BranchName::as_str),
-            Some("bob/1-x")
-        );
-        assert_eq!(
-            stored.branch_source(&RepoId::implicit()),
-            Some(&BranchSource::Checkout)
-        );
+        let mut stored = tx.claim(env.project, item).await.unwrap().unwrap();
+        stored
+            .branches
+            .insert(RepoId::implicit(), from_worktree.clone());
+        tx.save_claim(env.project, &stored).await.unwrap();
+        tx.commit().await.unwrap();
+        let before = env.events().await.len();
+        for name in ["bob/1-x", "bob/1-y", "bob/1-x"] {
+            beat(&env, env.bob.session, Some(in_checkout('a', Some(name)))).await;
+        }
+        assert!(recordings(&env, before).await.is_empty());
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let kept = tx.claim(env.project, item).await.unwrap().unwrap();
+        assert_eq!(kept.branches.get(&RepoId::implicit()), Some(&from_worktree));
     }
 
     #[tokio::test]
@@ -297,14 +512,8 @@ mod tests {
         tx.save_claim(env.project, &stored).await.unwrap();
         tx.commit().await.unwrap();
         let before = env.events().await.len();
-        let on = OnBranch {
-            repo: RepoId::implicit(),
-            branch: BranchName::parse("bob/9-elsewhere").unwrap(),
-        };
-        Heartbeat::new(&env.deps)
-            .execute(&env.bob.actor, env.bob.session, Some(&on))
-            .await
-            .unwrap();
+        let from = in_checkout('a', Some("bob/9-elsewhere"));
+        beat(&env, env.bob.session, Some(from)).await;
         assert!(env.kinds_after(before).await.is_empty());
         let mut tx = env.deps.store.begin().await.unwrap();
         let kept = tx.claim(env.project, item).await.unwrap().unwrap();

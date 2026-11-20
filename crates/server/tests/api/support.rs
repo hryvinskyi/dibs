@@ -301,6 +301,12 @@ pub fn request(
     }
 }
 
+/// The checkout a test's session works in alone, as its client names it: a token of its own,
+/// made from the session's id.
+pub fn checkout_of(session: u64) -> String {
+    format!("{session:032x}")
+}
+
 /// A member about to join.
 pub fn new_member(handle: &str) -> NewMember {
     NewMember {

@@ -13,6 +13,7 @@
 
 import { ageClaim } from './claim-age.js';
 import {
+  CHECKOUTS,
   applySettings,
   claimFrom,
   claimItem,
@@ -235,8 +236,8 @@ test('an overlap reported through the API shows as a card on Now without a reloa
     { ref: 'gh:acme/widgets#2', title: 'Rounding of the invoice' },
   ]);
   const people = [
-    { token: dibs.adminToken, branch: 'alice/1-rates' },
-    { token: dibs.memberToken, branch: 'bob/2-rounding' },
+    { token: dibs.adminToken, checkout: CHECKOUTS.alice, branch: 'alice/1-rates' },
+    { token: dibs.memberToken, checkout: CHECKOUTS.bob, branch: 'bob/2-rounding' },
   ];
 
   await signIn(page, dibs.url, dibs.memberToken);
@@ -247,7 +248,7 @@ test('an overlap reported through the API shows as a card on Now without a reloa
   for (const [index, person] of people.entries()) {
     const item = itemAt(ids, index);
     const session = await claimFrom(dibs.url, person.token, item, `laptop-${index}`);
-    await heartbeatOn(dibs.url, person.token, session, 'api', person.branch);
+    await heartbeatOn(dibs.url, person.token, session, person.checkout, 'api', person.branch);
     const stored = await reportFootprint(dibs.url, dibs.adminToken, item, {
       repo: 'api',
       branch: person.branch,
@@ -323,7 +324,7 @@ test("a branch a heartbeat records replaces the claim's branch on an open Claims
   await applySettings(dibs.url, dibs.adminToken, widgetsSettings());
   const ids = await importItems(dibs.url, dibs.adminToken, [{ ref: 'gh:acme/widgets#1', title: 'Rates in the ledger' }]);
   const session = await claimFrom(dibs.url, dibs.memberToken, itemAt(ids, 0), 'bob-desk');
-  await heartbeatOn(dibs.url, dibs.memberToken, session, 'api', 'bob/1-rates');
+  await heartbeatOn(dibs.url, dibs.memberToken, session, CHECKOUTS.bob, 'api', 'bob/1-rates');
 
   await signIn(page, dibs.url, dibs.memberToken);
   await page.goto(`${dibs.url}/ui/claims/${itemAt(ids, 0)}`);
@@ -331,7 +332,7 @@ test("a branch a heartbeat records replaces the claim's branch on an open Claims
   await expect(branch).toContainText('bob/1-rates');
   await markDocument(page);
 
-  await heartbeatOn(dibs.url, dibs.memberToken, session, 'api', 'bob/7-other');
+  await heartbeatOn(dibs.url, dibs.memberToken, session, CHECKOUTS.bob, 'api', 'bob/7-other');
   await expect(branch).toContainText('bob/7-other');
   await expect(branch).not.toContainText('bob/1-rates');
   await expectSameDocument(page);

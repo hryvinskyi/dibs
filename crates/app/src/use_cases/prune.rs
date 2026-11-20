@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use dibs_domain::event::{EventKind, Pruned};
+use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ProjectId, ThreadId};
 use dibs_domain::report::ReportDay;
 use dibs_domain::retention::{Cutoffs, Keeps, PruneCounts, thread_expired};
@@ -26,13 +27,18 @@ pub struct PruneReport {
 
 /// Removes, in every project and each project in a transaction of its own, the conversations quiet
 /// for longer than they are kept — but never one about a work item that is still open, nor one
-/// carrying an escalation no arbiter has settled — with their messages, and the events older than the log keeps, with the reports of days before them and what integrations last said of pull requests before them; then records what went in one `pruned` event
-/// per project that lost anything. A reader whose cursor is behind what went is told so. Browser
-/// sessions past their end go too. The service runs it once a day; it acts for nobody.
+/// carrying an escalation no arbiter has settled — with their messages, and the events older than
+/// the log keeps, with the reports of days before them and what integrations last said of pull
+/// requests before them; then records what went in one `pruned` event per project that lost
+/// anything. A reader whose cursor is behind what went is told so. The checkouts sessions reported
+/// longer ago than the project's `stale_after` go too, without counting in that event: no rule
+/// reads them any more. Browser sessions past their end go as well. The service runs it once a
+/// day; it acts for nobody.
 pub struct Prune {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn EventNotifier>,
+    hot_rules: Arc<HotRuleRegistry>,
 }
 
 impl Prune {
@@ -42,6 +48,7 @@ impl Prune {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             notifier: deps.notifier.clone(),
+            hot_rules: deps.hot_rules.clone(),
         }
     }
 
@@ -106,6 +113,9 @@ impl Prune {
             .await?;
         work.delete_pr_states_before(project, cutoffs.events)
             .await?;
+        let stale_after = work.project_settings(&self.hot_rules).await?.stale_after();
+        work.delete_session_checkouts_before(project, now - stale_after)
+            .await?;
         if !counts.is_empty() {
             work.record(now, EventKind::Pruned(Pruned { counts }))
                 .await?;
@@ -120,7 +130,7 @@ mod tests {
     use time::Duration;
 
     use dibs_domain::handle::Handle;
-    use dibs_domain::ids::{EventId, ItemId, ThreadId};
+    use dibs_domain::ids::{EventId, ItemId, SessionId, ThreadId};
     use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
 
     use super::*;
@@ -340,6 +350,53 @@ mod tests {
         env.advance(Duration::days(181));
         Prune::new(&env.deps).execute().await.unwrap();
         assert!(subjects(&env).await.is_empty(), "settled, it goes by date");
+    }
+
+    #[tokio::test]
+    async fn a_checkout_reported_longer_ago_than_stale_after_goes_and_a_recent_one_stays() {
+        use crate::use_cases::Heartbeat;
+        use crate::use_cases::testing::{in_checkout, session};
+
+        let env = Env::new().await;
+        let other = session(&env.deps, &env.bob.actor, "desktop", "desktop/second").await;
+        let heartbeat = Heartbeat::new(&env.deps);
+        heartbeat
+            .execute(
+                &env.bob.actor,
+                env.bob.session,
+                Some(&in_checkout('a', None)),
+            )
+            .await
+            .unwrap();
+        env.advance(Duration::hours(23));
+        heartbeat
+            .execute(&env.bob.actor, other, Some(&in_checkout('b', None)))
+            .await
+            .unwrap();
+        env.advance(Duration::hours(2));
+        let before = env.events().await.len();
+        let report = Prune::new(&env.deps).execute().await.unwrap();
+        assert!(report.failed.is_empty());
+        assert!(report.pruned.is_empty(), "no pruned event counts them");
+        assert_eq!(env.events().await.len(), before);
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let kept = tx
+            .session_checkouts(
+                env.project,
+                env.bob.actor.member,
+                crate::use_cases::testing::START,
+            )
+            .await
+            .unwrap();
+        let kept: Vec<(SessionId, String)> = kept
+            .into_iter()
+            .map(|reported| (reported.session, reported.checkout.to_string()))
+            .collect();
+        assert_eq!(
+            kept,
+            [(other, "b".repeat(32))],
+            "the project keeps them for 24 hours"
+        );
     }
 
     #[tokio::test]

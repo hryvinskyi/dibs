@@ -10,7 +10,7 @@ use time::Duration;
 use dibs_domain::member::Role;
 use dibs_server::ui::ZONE_COOKIE;
 
-use crate::support::{Person, World};
+use crate::support::{Person, World, checkout_of};
 use crate::ui_support::{Browser, Page, claim, sign_in};
 
 /// A project whose repository `api` is `acme/widgets` on GitHub, with the areas `billing` and
@@ -44,7 +44,8 @@ async fn beat(world: &World, who: &Person, session: u64, branch: &str) {
         .post(
             who,
             "/v1/heartbeat",
-            json!({"session_id": session, "repo": "api", "branch": branch}),
+            json!({"session_id": session, "checkout": checkout_of(session), "repo": "api",
+                   "branch": branch}),
         )
         .await;
     assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);

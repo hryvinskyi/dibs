@@ -644,6 +644,18 @@ impl SessionRows for MemoryTx {
             .retain(|(p, s, _), _| !(*p == project && *s == session));
         Ok(())
     }
+
+    async fn delete_session_checkouts_before(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<u64> {
+        let count = self.work.session_checkouts.len();
+        self.work
+            .session_checkouts
+            .retain(|(p, _, _), c| !(*p == project && c.reported_at < before));
+        Ok(u64::try_from(count - self.work.session_checkouts.len()).unwrap_or(u64::MAX))
+    }
 }
 
 #[async_trait]

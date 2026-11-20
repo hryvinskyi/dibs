@@ -107,15 +107,16 @@ impl ClientWorkspace {
         state_base: PathBuf,
     ) -> Self {
         let state = remote.state.clone();
+        let gateway = HookGateway::new(remote.clone(), checkout.clone(), state_base.clone());
         Self {
-            remote: remote.clone(),
+            remote,
             state_base,
             pool: OnceCell::new(),
             cache: StateCache::new(state.clone(), checkout.root()),
             upkeep: DetachedSync::new(state.clone(), checkout.root()),
             ledger: SessionLedgers::new(state.clone()),
             tallies: StateTallies::new(state.clone()),
-            gateway: HookGateway::new(remote, checkout.clone()),
+            gateway,
             checkout,
             git_dir,
             state,

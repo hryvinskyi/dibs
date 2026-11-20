@@ -42,6 +42,7 @@ use dibs_client::checkout::Checkout;
 use dibs_client::update::{Updated, Wanted};
 use dibs_domain::repo::RepoId;
 use dibs_domain::report::{DayReport, MachineId};
+use dibs_domain::session::CheckoutToken;
 use semver::Version;
 
 use crate::cli::SyncArgs;
@@ -169,8 +170,10 @@ async fn sync_now(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
     let locations = ctx.locations()?;
     let timings = timing::load(locations.state_dir());
     let machine = machine_id(locations.state_dir());
+    let token = machine.as_ref().and_then(|machine| checkout.token(machine));
     let checked = Checked {
         checkout: &checkout,
+        token: token.as_ref(),
         on: on.as_ref(),
         timings: &timings,
         machine: machine.as_ref(),
@@ -275,9 +278,11 @@ fn notify_only(latest: &Version) -> String {
     format!("dibs {latest} is recommended; run dibs self-update in a terminal to install it.")
 }
 
-/// The checkout a sync runs in, the branch it is on, the machine's hook timings and its id.
+/// The checkout a sync runs in, the token it is named by, the branch it is on, the machine's hook
+/// timings and its id.
 struct Checked<'a> {
     checkout: &'a Checkout,
+    token: Option<&'a CheckoutToken>,
     on: Option<&'a OnBranch>,
     timings: &'a HookTimings,
     machine: Option<&'a MachineId>,
@@ -302,7 +307,7 @@ async fn run(
         let reports = report::pending(&remote.state, checked.timings, now);
         let carried = checked.machine.map_or(&[][..], |_| &reports[..]);
         let answer = client
-            .heartbeat(id, checked.on, checked.machine, carried)
+            .heartbeat(id, checked.token, checked.on, checked.machine, carried)
             .await?;
         let accepted: Vec<DayReport> = reports
             .into_iter()

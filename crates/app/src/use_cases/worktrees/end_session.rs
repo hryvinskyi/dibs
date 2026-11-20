@@ -1,4 +1,5 @@
-//! The end of a session, which ends every hold it and its agents have.
+//! The end of a session, which ends every hold it and its agents have and forgets the checkouts it
+//! reported.
 
 use std::sync::Arc;
 
@@ -15,7 +16,8 @@ use crate::use_cases::worktrees::view::{HeldWorktree, Labels};
 use crate::work::Work;
 
 /// A session of the caller ended: every hold it, or one of its agents, has in any of the caller's
-/// pools ends with it. The session itself stays registered.
+/// pools ends with it, and the checkouts it reported working in are forgotten, so it no longer
+/// counts as sharing one with another session. The session itself stays registered.
 pub struct EndSession {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -52,6 +54,8 @@ impl EndSession {
             ended.extend(scene.apply(decide_session_ended(&scene.pool, session)));
             scene.save(&mut work, now).await?;
         }
+        work.forget_session_checkouts(actor.project, session)
+            .await?;
         let ended = Labels::default().all(&mut work, ended).await?;
         work.commit(&*self.notifier).await?;
         Ok(ended)

@@ -205,3 +205,21 @@ pub(crate) async fn session(
         .unwrap()
         .id
 }
+
+/// The checkout a test names by `digit`: its token is the digit 32 times, so two digits are two
+/// checkouts.
+pub(crate) fn checkout(digit: char) -> dibs_domain::session::CheckoutToken {
+    dibs_domain::session::CheckoutToken::parse(&digit.to_string().repeat(32)).unwrap()
+}
+
+/// The checkout `digit`, on `branch` of the project's one repository; on no branch when `branch`
+/// is `None`.
+pub(crate) fn in_checkout(digit: char, branch: Option<&str>) -> crate::use_cases::FromCheckout {
+    crate::use_cases::FromCheckout {
+        token: checkout(digit),
+        branch: branch.map(|name| crate::use_cases::OnBranch {
+            repo: dibs_domain::repo::RepoId::implicit(),
+            branch: dibs_domain::radar::BranchName::parse(name).unwrap(),
+        }),
+    }
+}

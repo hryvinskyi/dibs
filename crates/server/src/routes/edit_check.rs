@@ -7,10 +7,11 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use dibs_app::use_cases::{EditCheckInput, OnBranch};
+use dibs_app::use_cases::{EditCheckInput, FromCheckout, OnBranch};
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
+use dibs_domain::session::CheckoutToken;
 
 use crate::auth::Authed;
 use crate::error::ApiError;
@@ -25,6 +26,7 @@ pub struct CheckBody {
     repo: Option<String>,
     paths: Option<Vec<String>>,
     reserve: Option<bool>,
+    checkout: Option<String>,
     branch: Option<String>,
 }
 
@@ -37,12 +39,17 @@ struct CheckAnswer {
 /// names (its id in the project's settings; a project that lists no repositories has one, named by
 /// the id `/v1/me` reports) and is relative to that repository's root, `/`-separated. With
 /// `reserve: true` the edits are being made and what the check plans is recorded; without it
-/// (the default) the check writes nothing. `branch` names the branch the checkout is on, which the
-/// claims the edits are attributed to record; a checkout on a detached head sends none.
+/// (the default) the check writes nothing. `checkout` names the checkout the edits are made in, by
+/// the 32 lowercase hexadecimal characters its client makes of it, and `branch` the branch it is
+/// on; a checkout on a detached head sends no branch. A check that reserves and names its checkout
+/// stores that the session works there, and records the branch on the session's one working claim
+/// when the edits were attributed to it and no other checkout of the session and no other session
+/// in this checkout stand in the way; one that names none records no branch.
 ///
 /// # Errors
 /// `forbidden` for an integration;
-/// `invalid_request` for a missing repository, session or path list, or an invalid path;
+/// `invalid_request` for a missing repository, session or path list, or an invalid path, checkout
+/// or branch;
 /// `unknown_repo` for a repository the project does not list; `not_found` for a session not the
 /// caller's.
 pub async fn check(
@@ -72,11 +79,17 @@ pub async fn check(
             repo: repo.clone(),
             branch,
         });
+    let checkout = body
+        .checkout
+        .as_deref()
+        .map(|text| parse("checkout", text, CheckoutToken::parse))
+        .transpose()?
+        .map(|token| FromCheckout { token, branch });
     let input = EditCheckInput {
         session,
         paths,
         reserve: body.reserve.unwrap_or(false),
-        branch,
+        checkout,
     };
     let check = state.app.edit_check.execute(&actor, input).await?;
     let answer = CheckAnswer {

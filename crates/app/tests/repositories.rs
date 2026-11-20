@@ -189,7 +189,7 @@ mod repositories {
                         session,
                         paths: paths.iter().map(|p| RepoPath::parse(p).unwrap()).collect(),
                         reserve: true,
-                        branch: None,
+                        checkout: None,
                     },
                 )
                 .await
@@ -300,7 +300,7 @@ mod repositories {
                     session: project.alice_session,
                     paths: vec![RepoPath::parse("search:src/lib.rs").unwrap()],
                     reserve: false,
-                    branch: None,
+                    checkout: None,
                 },
             )
             .await

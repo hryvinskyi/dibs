@@ -265,6 +265,7 @@ checkpointed.
 | An event of the log | 90 days |
 | A day's report of a member's machine | as long as the events of that day (90 days) |
 | What an integration last said of a pull request | 90 days after it last reported the pull request |
+| That a session works in a checkout | the project's `stale_after` after the session last reported it; until the session ends, when it ends first |
 | A browser session | 12 hours after it was last used |
 | A snapshot | the newest `DIBS_SNAPSHOT_KEEP`, and of those none older than 30 days, but the newest always |
 

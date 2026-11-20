@@ -153,4 +153,16 @@ impl SessionRows for SqliteTx {
         self.run(statement).await?;
         Ok(())
     }
+
+    async fn delete_session_checkouts_before(
+        &mut self,
+        project: ProjectId,
+        before: OffsetDateTime,
+    ) -> StoreResult<u64> {
+        let statement =
+            sqlx::query("DELETE FROM session_checkouts WHERE project_id = ?1 AND reported_at < ?2")
+                .bind(int(project.get())?)
+                .bind(nanos(before)?);
+        self.run(statement).await
+    }
 }

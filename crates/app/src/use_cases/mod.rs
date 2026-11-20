@@ -109,7 +109,9 @@ pub use open_ui_session::{OpenUiSession, OpenedUiSession, UI_SESSION_LIFETIME};
 pub use operate_project::OperateProject;
 pub use post_message::{PostMessage, PostMessageInput};
 pub use prune::{Prune, PruneReport};
-pub use radar::{FootprintInput, FootprintRecorded, NamedOverlap, OnBranch, RecordFootprint};
+pub use radar::{
+    FootprintInput, FootprintRecorded, FromCheckout, NamedOverlap, OnBranch, RecordFootprint,
+};
 pub use read_stats::{MAX_STATS_EVENTS, ReadStats, StatsView};
 pub use read_thread::{ReadThread, RecipientAck, ThreadView};
 pub use ready::{ExcludedEntry, NamedNotReady, Ready, ReadyEntry, ReadyView};
@@ -428,7 +430,7 @@ mod integration_refusals {
                         session,
                         paths: vec![RepoPath::parse("default:packages/billing/a.rs").unwrap()],
                         reserve: false,
-                        branch: None,
+                        checkout: None,
                     },
                 )
                 .await

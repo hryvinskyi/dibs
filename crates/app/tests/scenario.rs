@@ -159,7 +159,7 @@ mod scenario {
                         session,
                         paths: paths.iter().map(|p| path(p)).collect(),
                         reserve: true,
-                        branch: None,
+                        checkout: None,
                     },
                 )
                 .await

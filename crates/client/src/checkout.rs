@@ -27,11 +27,14 @@ use thiserror::Error;
 use dibs_domain::paths::RelPath;
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::repo::{RemoteUrl, RepoId};
+use dibs_domain::report::MachineId;
+use dibs_domain::session::CheckoutToken;
 use dibs_domain::settings::{CheckoutRefused, ProjectSettings, RepoSpec};
 
 use crate::api::Me;
+use crate::checkout_token::checkout_token;
 use crate::git_dirs::GitDirs;
-use crate::paths::{canonical, resolve_existing};
+use crate::paths::{canonical, resolve_existing, resolved};
 use crate::server_url::ServerUrl;
 use crate::worktree_pool::{MARKER_FILE, SETTINGS_FILE, settings_file};
 
@@ -300,6 +303,12 @@ impl Checkout {
     /// The directory the checkout's paths are relative to.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The token this checkout is named by on the machine `machine`: a digest of the machine's id
+    /// and the root as the file system resolves it, so every spelling of the root gives one token.
+    pub fn token(&self, machine: &MachineId) -> Option<CheckoutToken> {
+        checkout_token(machine, &resolved(&self.root)).ok()
     }
 
     /// The configuration file that governs the checkout.
@@ -926,6 +935,24 @@ mod tests {
                 .as_str(),
             "src/new.rs"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_has_one_token_whichever_spelling_of_its_root_named_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("api");
+        fs::create_dir_all(&root).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let config = checkout(Some("api")).config().clone();
+        let machine = MachineId::from_bits(7);
+        let real = Checkout::new(root.clone(), config.clone()).token(&machine);
+        let linked = Checkout::new(link, config.clone()).token(&machine);
+        assert!(real.is_some());
+        assert_eq!(linked, real);
+        let other = Checkout::new(dir.path().join("web"), config).token(&machine);
+        assert_ne!(other, real);
     }
 
     #[cfg(windows)]
