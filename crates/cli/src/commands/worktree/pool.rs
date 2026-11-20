@@ -21,7 +21,7 @@ use dibs_client::checkout::Checkout;
 use dibs_client::credentials::CredentialKey;
 use dibs_client::git_dirs::GitDirs;
 use dibs_client::paths::{canonical, plain, same_dir};
-use dibs_client::state::{StateDir, WorktreeState};
+use dibs_client::state::{PoolRecord, StateDir, WorktreeHoldRecord, WorktreeState};
 use dibs_client::worktree_pool::{
     PoolWorktree, WorktreeSettings, pool_id, read_marker, read_settings, settings_file,
     write_marker,
@@ -186,6 +186,25 @@ impl Pool {
     /// What this machine remembers of the pool's project.
     pub fn state(&self) -> &StateDir {
         &self.state
+    }
+
+    /// Records the holder `name` was taken for, and with it where the pool's worktrees live and
+    /// the repository the lending checkout names, which the signs of life sent later carry with
+    /// the branch each worktree is on.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn remember_hold(
+        &self,
+        name: &WorktreeName,
+        record: &WorktreeHoldRecord,
+    ) -> io::Result<()> {
+        let pool = PoolRecord {
+            root: self.settings.root.clone(),
+            repo: self.checkout.named_repo(),
+        };
+        self.files.remember_pool(&pool)?;
+        self.files.remember_hold(name, record)
     }
 
     /// The pool's worktrees, in order.

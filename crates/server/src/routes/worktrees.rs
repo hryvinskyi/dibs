@@ -21,6 +21,8 @@ use dibs_app::use_cases::{
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ThreadId;
 use dibs_domain::message::Body;
+use dibs_domain::radar::BranchName;
+use dibs_domain::repo::RepoId;
 use dibs_domain::report::MachineId;
 use dibs_domain::session::HostName;
 use dibs_domain::slot::Purpose;
@@ -251,6 +253,7 @@ pub struct BeatEntry {
     holder_session: Option<u64>,
     agent: Option<String>,
     seen_at: Option<String>,
+    branch: Option<String>,
 }
 
 /// The body of `POST /v1/worktrees/beat`.
@@ -259,6 +262,7 @@ pub struct BeatBody {
     session_id: Option<u64>,
     machine: Option<String>,
     pool: Option<String>,
+    repo: Option<String>,
     beats: Option<Vec<BeatEntry>>,
 }
 
@@ -284,6 +288,11 @@ fn beat_in_body(at: usize, beat: &BeatEntry) -> Result<WorktreeBeatInput, ApiErr
         seen_at: parse_required(&field("seen_at"), beat.seen_at.as_deref(), |text| {
             OffsetDateTime::parse(text, &Rfc3339).map_err(|_| "it is a time in RFC 3339")
         })?,
+        branch: beat
+            .branch
+            .as_deref()
+            .map(|text| parse(&field("branch"), text, BranchName::parse))
+            .transpose()?,
     })
 }
 
@@ -292,6 +301,11 @@ fn beat_in_body(at: usize, beat: &BeatEntry) -> Result<WorktreeBeatInput, ApiErr
 /// hold seen at `seen_at` (a time after now counts as now; a hold's last sight never moves back).
 /// A beat naming a worktree that is free or held by another holder changes nothing and is
 /// answered `unknown`. Each worktree and holder is answered once, in the order first named.
+///
+/// `repo` names the repository of the pool's worktrees, and a beat's `branch` the branch its
+/// worktree is on. A kept beat with a branch, for a hold that names a work item, records that
+/// branch on the caller's live claim on the item, learned from that worktree; a repository the
+/// project does not list records nothing.
 ///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for a session not the caller's, sending or named
@@ -305,6 +319,11 @@ pub async fn beat(
     let Json(body) = body?;
     let session = session_in_body("session_id", body.session_id)?;
     let (machine, pool) = pool_in_body(body.machine.as_deref(), body.pool.as_deref())?;
+    let repo = body
+        .repo
+        .as_deref()
+        .map(|text| parse("repo", text, RepoId::parse))
+        .transpose()?;
     let beats = required("beats", body.beats)?
         .iter()
         .enumerate()
@@ -314,6 +333,7 @@ pub async fn beat(
         session,
         machine,
         pool,
+        repo,
         beats,
     };
     let beaten = state.app.beat_worktrees.execute(&actor, input).await?;

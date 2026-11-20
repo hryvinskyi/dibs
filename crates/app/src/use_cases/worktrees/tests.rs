@@ -8,6 +8,8 @@ use dibs_domain::event::{EventKind, WorktreeReleaseCause, WorktreeReleased, Work
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::message::{Author, Body};
+use dibs_domain::radar::{BranchName, BranchSource, BranchSourceKind, WorktreeRef};
+use dibs_domain::repo::RepoId;
 use dibs_domain::report::MachineId;
 use dibs_domain::session::HostName;
 use dibs_domain::slot::Purpose;
@@ -16,8 +18,8 @@ use dibs_domain::worktree::{AgentKey, Holder, HolderKind, PoolId, WorktreeHolder
 use super::*;
 use crate::AppError;
 use crate::actor::Actor;
-use crate::use_cases::testing::{Env, Person, session};
-use crate::use_cases::{ReadThread, RemoveMember, Status};
+use crate::use_cases::testing::{Env, Person, in_checkout, session};
+use crate::use_cases::{ClaimItem, ClaimItemInput, Heartbeat, ReadThread, RemoveMember, Status};
 
 const LAPTOP: &str = "0123456789abcdef0123456789abcdef";
 const DESKTOP: &str = "fedcba9876543210fedcba9876543210";
@@ -115,9 +117,20 @@ impl<'a> Ask<'a> {
             .await
     }
 
+    /// Sends `beats` from the pool of the project's one repository.
     async fn beat(
         &self,
         env: &Env,
+        beats: Vec<WorktreeBeatInput>,
+    ) -> Result<dibs_domain::worktree::Beaten, AppError> {
+        self.beat_of(env, Some(RepoId::implicit()), beats).await
+    }
+
+    /// Sends `beats` from a pool whose worktrees are of `repo`, when the machine knows it.
+    async fn beat_of(
+        &self,
+        env: &Env,
+        repo: Option<RepoId>,
         beats: Vec<WorktreeBeatInput>,
     ) -> Result<dibs_domain::worktree::Beaten, AppError> {
         BeatWorktrees::new(&env.deps)
@@ -127,6 +140,7 @@ impl<'a> Ask<'a> {
                     session: self.session,
                     machine: machine(self.machine),
                     pool: pool_id(self.pool),
+                    repo,
                     beats,
                 },
             )
@@ -145,6 +159,7 @@ fn beat(
         session,
         agent: key.map(agent),
         seen_at,
+        branch: None,
     }
 }
 
@@ -921,4 +936,329 @@ async fn an_integration_takes_releases_beats_and_ends_nothing() {
     for (n, refusal) in refusals.into_iter().enumerate() {
         assert_eq!(refusal.unwrap_err().code(), "forbidden", "case {n}");
     }
+}
+
+/// `who` claims `item` from their session.
+async fn claim(env: &Env, who: &Person, item: ItemId) {
+    ClaimItem::new(&env.deps)
+        .execute(
+            &who.actor,
+            ClaimItemInput {
+                branches: Default::default(),
+                wide: None,
+                item,
+                session: who.session,
+                areas: Vec::new(),
+                kind: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// A beat of `worktree` by its holder, the worktree on `branch`.
+fn beat_on(
+    worktree: &str,
+    session: SessionId,
+    key: Option<&str>,
+    seen_at: OffsetDateTime,
+    branch: &str,
+) -> WorktreeBeatInput {
+    WorktreeBeatInput {
+        branch: Some(BranchName::parse(branch).unwrap()),
+        ..beat(worktree, session, key, seen_at)
+    }
+}
+
+/// The worktree `name` of the pool the tests take from.
+fn from_worktree(name_of: &str) -> BranchSource {
+    BranchSource::Worktree(WorktreeRef {
+        machine: machine(LAPTOP),
+        pool: pool_id(CHECKOUT),
+        worktree: name(name_of),
+    })
+}
+
+/// The branch `item`'s claim records in the project's one repository, and where it was learned.
+async fn branch_of(env: &Env, item: ItemId) -> Option<(String, BranchSource)> {
+    let mut tx = env.deps.store.begin().await.unwrap();
+    let claim = tx.claim(env.project, item).await.unwrap()?;
+    let recorded = claim.branches.get(&RepoId::implicit())?;
+    Some((recorded.branch.to_string(), recorded.source.clone()))
+}
+
+/// The sources of the `BranchRecorded` events appended after the first `skip`.
+async fn recorded_after(env: &Env, skip: usize) -> Vec<BranchSourceKind> {
+    env.kinds_after(skip)
+        .await
+        .into_iter()
+        .filter_map(|kind| match kind {
+            EventKind::BranchRecorded(recorded) => Some(recorded.source),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_beat_records_its_worktrees_branch_on_the_callers_claim_on_the_item_its_hold_names() {
+    let env = Env::new().await;
+    let named = env.item("gh:acme/widgets#1").await;
+    let other = env.item("gh:acme/widgets#2").await;
+    let bobs = env.item("gh:acme/widgets#3").await;
+    claim(&env, &env.alice, named).await;
+    claim(&env, &env.alice, other).await;
+    claim(&env, &env.bob, bobs).await;
+    let alice = Ask::of(&env.alice);
+    for (key, item) in [
+        ("agent-1", Some(named)),
+        ("agent-2", None),
+        ("agent-3", Some(bobs)),
+    ] {
+        Ask {
+            item,
+            ..alice.clone().agent(key)
+        }
+        .took(&env)
+        .await;
+    }
+    let before = env.events().await.len();
+    let session = env.alice.session;
+    let now = env.now();
+    alice
+        .beat(
+            &env,
+            vec![
+                beat_on("worktree1", session, Some("agent-1"), now, "alice/1-totals"),
+                beat_on("worktree2", session, Some("agent-2"), now, "alice/2-rates"),
+                beat_on("worktree3", session, Some("agent-3"), now, "alice/3-tax"),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_of(&env, named).await,
+        Some(("alice/1-totals".to_owned(), from_worktree("worktree1")))
+    );
+    assert_eq!(
+        branch_of(&env, other).await,
+        None,
+        "a hold that names no item records nothing"
+    );
+    assert_eq!(
+        branch_of(&env, bobs).await,
+        None,
+        "another member's claim on the item a hold names is never the caller's"
+    );
+    assert_eq!(
+        recorded_after(&env, before).await,
+        [BranchSourceKind::Worktree]
+    );
+    alice
+        .beat(
+            &env,
+            vec![beat_on(
+                "worktree1",
+                session,
+                Some("agent-1"),
+                now,
+                "alice/1-totals",
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recorded_after(&env, before).await.len(),
+        1,
+        "the same branch again changes nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_beat_without_a_branch_a_listed_repository_a_claim_or_its_hold_records_nothing() {
+    let env = Env::new().await;
+    let item = env.item("gh:acme/widgets#1").await;
+    let unclaimed = env.item("gh:acme/widgets#2").await;
+    let alice = Ask::of(&env.alice);
+    let agent_1 = Ask {
+        item: Some(item),
+        ..alice.clone().agent("agent-1")
+    };
+    agent_1.took(&env).await;
+    Ask {
+        item: Some(unclaimed),
+        ..alice.clone().agent("agent-2")
+    }
+    .took(&env)
+    .await;
+    let session = env.alice.session;
+    let now = env.now();
+    alice
+        .beat(
+            &env,
+            vec![beat_on(
+                "worktree2",
+                session,
+                Some("agent-2"),
+                now,
+                "alice/2-x",
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_of(&env, unclaimed).await,
+        None,
+        "an item nobody claims has no claim to record on"
+    );
+    claim(&env, &env.alice, item).await;
+    let on = || beat_on("worktree1", session, Some("agent-1"), now, "alice/1-totals");
+    alice
+        .beat(&env, vec![beat("worktree1", session, Some("agent-1"), now)])
+        .await
+        .unwrap();
+    alice
+        .beat_of(&env, Some(RepoId::parse("web").unwrap()), vec![on()])
+        .await
+        .unwrap();
+    alice.beat_of(&env, None, vec![on()]).await.unwrap();
+    assert_eq!(
+        branch_of(&env, item).await,
+        None,
+        "no branch, a repository the project does not list, or none named"
+    );
+    env.advance(Duration::minutes(21));
+    let later = env.now();
+    let beaten = alice
+        .beat(
+            &env,
+            vec![beat_on(
+                "worktree1",
+                session,
+                Some("agent-1"),
+                later,
+                "alice/1-totals",
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(beaten.unknown.len(), 1, "the agent's hold went silent");
+    assert_eq!(branch_of(&env, item).await, None);
+}
+
+#[tokio::test]
+async fn two_worktrees_held_for_one_item_change_its_branch_once_until_the_first_is_released() {
+    let env = Env::new().await;
+    let item = env.item("gh:acme/widgets#1").await;
+    claim(&env, &env.alice, item).await;
+    let alice = Ask::of(&env.alice);
+    for key in ["agent-1", "agent-2"] {
+        Ask {
+            item: Some(item),
+            ..alice.clone().agent(key)
+        }
+        .took(&env)
+        .await;
+    }
+    let before = env.events().await.len();
+    let session = env.alice.session;
+    for _ in 0..2 {
+        for (worktree, key, branch) in [
+            ("worktree1", "agent-1", "alice/1-totals"),
+            ("worktree2", "agent-2", "alice/1-rates"),
+        ] {
+            env.advance(Duration::minutes(1));
+            let now = env.now();
+            alice
+                .beat(
+                    &env,
+                    vec![beat_on(worktree, session, Some(key), now, branch)],
+                )
+                .await
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        branch_of(&env, item).await,
+        Some(("alice/1-totals".to_owned(), from_worktree("worktree1"))),
+        "the second worktree waits while the first is held"
+    );
+    assert_eq!(recorded_after(&env, before).await.len(), 1, "never flipped");
+
+    alice
+        .release(&env, WorktreeRelease::Name(name("worktree1")))
+        .await
+        .unwrap();
+    let now = env.now();
+    alice
+        .beat(
+            &env,
+            vec![beat_on(
+                "worktree2",
+                session,
+                Some("agent-2"),
+                now,
+                "alice/1-rates",
+            )],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_of(&env, item).await,
+        Some(("alice/1-rates".to_owned(), from_worktree("worktree2"))),
+        "once the first is released, the second's branch is the claim's"
+    );
+    assert_eq!(recorded_after(&env, before).await.len(), 2);
+}
+
+#[tokio::test]
+async fn a_checkouts_branch_waits_while_the_worktree_is_held_and_replaces_it_after() {
+    let env = Env::new().await;
+    let item = env.item("gh:acme/widgets#1").await;
+    claim(&env, &env.alice, item).await;
+    let alice = Ask {
+        item: Some(item),
+        ..Ask::of(&env.alice).agent("agent-1")
+    };
+    alice.took(&env).await;
+    let session = env.alice.session;
+    let now = env.now();
+    alice
+        .beat(
+            &env,
+            vec![beat_on(
+                "worktree1",
+                session,
+                Some("agent-1"),
+                now,
+                "alice/1-totals",
+            )],
+        )
+        .await
+        .unwrap();
+    let heartbeat = || async {
+        Heartbeat::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                session,
+                Some(&in_checkout('a', Some("main"))),
+            )
+            .await
+            .unwrap();
+    };
+    heartbeat().await;
+    assert_eq!(
+        branch_of(&env, item).await,
+        Some(("alice/1-totals".to_owned(), from_worktree("worktree1"))),
+        "the checkout's branch waits while the worktree is held"
+    );
+    alice
+        .release(&env, WorktreeRelease::Name(name("worktree1")))
+        .await
+        .unwrap();
+    heartbeat().await;
+    assert_eq!(
+        branch_of(&env, item).await,
+        Some(("main".to_owned(), BranchSource::Checkout)),
+        "a worktree no longer held no longer holds its branch"
+    );
 }

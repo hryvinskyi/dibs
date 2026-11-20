@@ -26,8 +26,10 @@
 //!   `worktree-<pool>-<name>.lock`, held by whatever resets, prepares or stops one worktree of a
 //!   pool;
 //! - `cache/<scope>/<name>` — files callers keep for themselves ([`StateDir::file`]);
-//! - `worktrees/<scope>/<pool>/` — what this machine knows of each worktree of one pool
-//!   ([`WorktreeState`]): `<name>.hold.json`, the holder this machine took it for, why, when, and
+//! - `worktrees/<scope>/<pool>/` — what this machine knows of one pool ([`WorktreeState`]):
+//!   `pool.json`, the directory its worktrees live in and the repository they are of, written with
+//!   every hold a take records; and of each of its worktrees: `<name>.hold.json`, the holder this
+//!   machine took it for, why, when, and
 //!   whether its reset finished, written on a take and removed on a release; `<name>.beat`, whose
 //!   time of last change is the holder's last sign of life in it; `<name>.free-since`, when it was
 //!   last seen free; `<name>.left`, the session whose agent ended in it and left it in use for a
@@ -53,6 +55,7 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::message::{Importance, SessionLabel, Subject};
+use dibs_domain::repo::RepoId;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::Purpose;
 use dibs_domain::worktree::{AgentKey, PoolId, WorktreeName};
@@ -72,6 +75,17 @@ pub struct StateDir {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeState {
     dir: PathBuf,
+}
+
+/// Where a pool's worktrees live and which repository they are of, as the checkout that lends the
+/// pool names them: what a sending of the signs of life needs to read the branch each worktree is
+/// on, as the pool itself is known here only by its id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolRecord {
+    /// The directory the worktrees live in, each in `<root>/<name>`.
+    pub root: PathBuf,
+    /// The repository the worktrees are of.
+    pub repo: RepoId,
 }
 
 /// The holder this machine took a worktree for.
@@ -648,6 +662,19 @@ impl WorktreeState {
         &self.dir
     }
 
+    /// Where the pool's worktrees live and which repository they are of, when a take recorded it.
+    pub fn pool(&self) -> Option<PoolRecord> {
+        read_json(&self.dir.join(POOL_FILE))
+    }
+
+    /// Remembers where the pool's worktrees live and which repository they are of.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn remember_pool(&self, record: &PoolRecord) -> io::Result<()> {
+        write_json(&self.dir.join(POOL_FILE), record)
+    }
+
     /// The holder this machine took `name` for, when it holds a record of one.
     pub fn hold(&self, name: &WorktreeName) -> Option<WorktreeHoldRecord> {
         read_json(&self.path(name, "hold.json"))
@@ -849,6 +876,10 @@ impl WorktreeState {
         self.dir.join(format!("{name}.{what}"))
     }
 }
+
+/// The file of a pool's [`PoolRecord`] in the pool's directory. No worktree's file is named so:
+/// each of theirs is `<name>.<what>`, and no `<what>` is `json` alone.
+const POOL_FILE: &str = "pool.json";
 
 /// Removes a file, its absence being no failure.
 fn remove(path: &Path) -> io::Result<()> {
@@ -1177,6 +1208,49 @@ mod tests {
     fn a_label_is_one_file_name() {
         assert_eq!(file_name("laptop/cli"), "laptop%2Fcli");
         assert_eq!(file_name("a b:c\\d"), "a%20b%3Ac%5Cd");
+    }
+
+    #[test]
+    fn a_pool_keeps_where_its_worktrees_live_and_their_repository_beside_their_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path(), &key("acme"));
+        let worktrees = state.worktrees(&PoolId::parse("c0ffee").unwrap());
+        let other = state.worktrees(&PoolId::parse("beef").unwrap());
+        assert_eq!(
+            worktrees.pool(),
+            None,
+            "a pool taken before it was recorded"
+        );
+        let record = PoolRecord {
+            root: dir.path().join("widgets-worktrees"),
+            repo: RepoId::parse("api").unwrap(),
+        };
+        worktrees.remember_pool(&record).unwrap();
+        assert_eq!(worktrees.pool(), Some(record.clone()));
+        assert_eq!(other.pool(), None, "another pool's record is its own");
+        let moved = PoolRecord {
+            repo: RepoId::parse("web").unwrap(),
+            ..record
+        };
+        worktrees.remember_pool(&moved).unwrap();
+        assert_eq!(worktrees.pool(), Some(moved));
+
+        let name = WorktreeName::parse("pool").unwrap();
+        let hold = WorktreeHoldRecord {
+            session_id: SessionId(4),
+            agent: None,
+            purpose: None,
+            item: None,
+            taken_at: OffsetDateTime::UNIX_EPOCH,
+            reset_done: true,
+        };
+        worktrees.remember_hold(&name, &hold).unwrap();
+        assert_eq!(
+            worktrees.holds(),
+            vec![(name, hold)],
+            "the pool's record is no worktree's, even one named pool"
+        );
+        assert!(worktrees.pool().is_some());
     }
 
     #[test]

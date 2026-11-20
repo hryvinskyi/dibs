@@ -40,7 +40,6 @@ use dibs_client::api::OnBranch;
 use dibs_client::branch::current_branch;
 use dibs_client::checkout::Checkout;
 use dibs_client::update::{Updated, Wanted};
-use dibs_domain::repo::RepoId;
 use dibs_domain::report::{DayReport, MachineId};
 use dibs_domain::session::CheckoutToken;
 use semver::Version;
@@ -357,12 +356,10 @@ async fn run(
 /// head.
 fn checkout_branch(checkout: &Checkout, git_dir: Option<&Path>) -> Option<OnBranch> {
     let branch = current_branch(checkout.root(), git_dir)?;
-    let repo = checkout
-        .config()
-        .repo
-        .clone()
-        .unwrap_or_else(RepoId::implicit);
-    Some(OnBranch { repo, branch })
+    Some(OnBranch {
+        repo: checkout.named_repo(),
+        branch,
+    })
 }
 
 /// Whether the session's host can be shown what is delivered between its tool calls.

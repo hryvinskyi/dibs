@@ -1,7 +1,8 @@
 //! The worktree routes through the real router over a real SQLite file: taking, taking again,
 //! answering busy, releasing by worktree and by holder, beats, the end of a session, the admin's
-//! forced release, each refusal with its status and code, what other members see, and the sweep
-//! that ends a silent agent's hold and keeps a session's.
+//! forced release, each refusal with its status and code, what other members see, the sweep
+//! that ends a silent agent's hold and keeps a session's, and the branch a beat records on the
+//! claim of the item its hold names.
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -14,7 +15,7 @@ use dibs_domain::member::Role;
 use dibs_server::stream::Shutdown;
 use dibs_server::sweep::run_sweeper;
 
-use crate::support::{Answer, Person, World, assert_error};
+use crate::support::{Answer, Person, World, assert_error, two_repositories};
 
 /// The machine every take of the tests names.
 const MACHINE: &str = "0123456789abcdef0123456789abcdef";
@@ -817,4 +818,81 @@ async fn removing_a_member_ends_their_worktree_holds() {
     assert_eq!(removed.body["worktrees"], 2);
     let board = world.get(&team.alice, "/v1/worktrees").await;
     assert_eq!(board.body["board"], json!([]));
+}
+
+#[tokio::test]
+async fn a_beat_records_its_worktrees_branch_on_the_claim_of_the_item_its_hold_names() {
+    let team = team().await;
+    let world = &team.world;
+    let [hook, cli, _] = team.sessions;
+    world.settings(&team.alice, two_repositories()).await;
+    let item = world
+        .item(&team.alice, Some("gh:acme/api#7"), "Fix the totals")
+        .await;
+    let claimed = world
+        .post(
+            &team.alice,
+            &format!("/v1/items/{item}/claim"),
+            json!({"session_id": cli}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    took(
+        &take(
+            world,
+            &team.alice,
+            hook,
+            json!({"agent": "agent-1", "item": item}),
+        )
+        .await,
+    );
+    let beat_on = |repo: &str, branch: &str| {
+        json!({"session_id": cli, "machine": MACHINE, "pool": POOL, "repo": repo,
+               "beats": [{"worktree": "worktree1", "holder_session": hook, "agent": "agent-1",
+                          "seen_at": "2026-03-02T09:00:00Z", "branch": branch}]})
+    };
+    for (body, field) in [
+        (beat_on("api", "alice/7 totals"), "beats[0].branch"),
+        (beat_on("Not/A/Repo", "alice/7-totals"), "repo"),
+    ] {
+        let refused = world.post(&team.alice, "/v1/worktrees/beat", body).await;
+        assert_error(
+            &refused,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+        );
+        assert_eq!(refused.body["error"]["details"]["field"], field);
+    }
+    let beaten = world
+        .post(
+            &team.alice,
+            "/v1/worktrees/beat",
+            beat_on("api", "alice/7-totals"),
+        )
+        .await;
+    assert_eq!(beaten.status, StatusCode::OK, "{}", beaten.body);
+    assert_eq!(beaten.body["kept"][0]["worktree"], "worktree1");
+
+    let listed = world.get(&team.alice, "/v1/claims").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(
+        listed.body["claims"][0]["branches"],
+        json!({"api": "alice/7-totals"}),
+        "{}",
+        listed.body
+    );
+    let status = world.get(&team.alice, "/v1/status").await;
+    let claim = &status.body["live"][0]["claim"];
+    assert_eq!(
+        claim["branches"],
+        json!({"api": "alice/7-totals"}),
+        "{}",
+        status.body
+    );
+    assert_eq!(
+        claim["branch_sources"],
+        json!({"api": "worktree"}),
+        "{}",
+        status.body
+    );
 }

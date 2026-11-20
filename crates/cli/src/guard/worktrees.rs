@@ -280,11 +280,10 @@ impl WorktreePool for ClientWorktreePool {
                 taken_at: SystemClock.now(),
                 reset_done: true,
             };
-            let files = self.pool.files();
-            if let Err(error) = files.remember_hold(name, &record) {
+            if let Err(error) = self.pool.remember_hold(name, &record) {
                 tracing::debug!(error = %error, "a worktree's holder could not be recorded");
             }
-            if let Err(error) = files.mark_taken(name) {
+            if let Err(error) = self.pool.files().mark_taken(name) {
                 tracing::debug!(error = %error, "the free and stopped marks could not be cleared");
             }
             return Ok(Retaken::Took);

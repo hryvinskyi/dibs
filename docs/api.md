@@ -714,7 +714,10 @@ carries the `source`, marks each change of branch. What records it, strongest fi
 1. `pull_request`: the head branch of a pull request the claim recorded for review, sent as `head` with the review
    (`POST /v1/items/{id}/review`) or by an integration with the pull request's state (`POST /v1/prs/state`), recorded
    in the repository the pull request belongs to; the head a merge report carries records nothing;
-2. `worktree`: the branch of a pool worktree the member holds for the claim's item;
+2. `worktree`: the branch of a pool worktree the member holds for the claim's item, sent with the worktree's signs of
+   life (`branch` of `POST /v1/worktrees/beat`, see [Worktrees](#worktrees)) and recorded on the member's live claim
+   on the item the hold names. Only a hold taken for an item records: the holds the guard takes for a host's agents
+   and sessions name none, so their worktrees' branches record nothing;
 3. `named`: a branch the claim named when it was taken or renewed (`branches` of `POST /v1/items/{id}/claim`);
 4. `checkout`: the branch of the checkout a session works in, sent by a heartbeat or an edit check that reserves, under
    three conditions judged within the project's `stale_after`: the session took or last renewed exactly one live claim
@@ -1132,15 +1135,25 @@ caller's sessions or agents holds it, or the hold of that holder (`worktree_rele
 session not the caller's; `invalid_request` for naming both a worktree and a holder, or neither, or an `agent` without
 its `holder_session`.
 
-`POST /v1/worktrees/beat`, body `{ "session_id": 9, "machine": "…", "pool": "…", "beats": [{ "worktree": "worktree2",
-"holder_session": 9, "agent": "a1b2", "seen_at": "2026-03-02T09:14:00Z" }, …] }` (`agent` optional), carries the
-holders' signs of life, sent by any session of the caller on behalf of any of the caller's sessions and their agents. A
-beat that names a worktree and its holder moves the hold's `last_seen` to `seen_at` — never back, and a time after now
-counts as now. Answers `{ "kept": [beaten, …], "unknown": [beaten, …] }`, each `{ worktree, holder_session, agent | null }`
-once, in the order first named: `kept` the holds the beats named, `unknown` the pairs that hold nothing — the worktree is
-free or another holder has it, as when a hold ended while its beats could not reach the server. Silent holds end before
-the beats are applied, whenever they were sent. Refusals: `not_found` for a session, sending or named by a beat, that is
-not the caller's; `invalid_request` for a missing or invalid field, named by its place (`beats[0].seen_at`).
+`POST /v1/worktrees/beat`, body `{ "session_id": 9, "machine": "…", "pool": "…", "repo": "api", "beats": [{ "worktree":
+"worktree2", "holder_session": 9, "agent": "a1b2", "seen_at": "2026-03-02T09:14:00Z", "branch": "bob/42-refunds" }, …] }`
+(`repo`, `agent` and `branch` optional), carries the holders' signs of life, sent by any session of the caller on behalf
+of any of the caller's sessions and their agents. A beat that names a worktree and its holder moves the hold's
+`last_seen` to `seen_at` — never back, and a time after now counts as now. Answers
+`{ "kept": [beaten, …], "unknown": [beaten, …] }`, each `{ worktree, holder_session, agent | null }` once, in the order
+first named: `kept` the holds the beats named, `unknown` the pairs that hold nothing — the worktree is free or another
+holder has it, as when a hold ended while its beats could not reach the server. Silent holds end before the beats are
+applied, whenever they were sent.
+
+`repo` is the id of the repository the pool's worktrees are of, and a beat's `branch` the branch its worktree is on (the
+command line sends none on a detached head, and neither for a pool it took from before it kept the pool's repository).
+A kept beat with a branch, for a hold that names an item (`item` of the take), records that branch on the caller's live
+claim on the item, learned from that worktree of that pool (`worktree`, see [Branches and
+overlaps](#branches-and-overlaps)): the same worktree moves the branch it gave, and another worktree held for the same
+item waits until the first is no longer held. Nothing is recorded for a hold that names no item, an item the caller
+holds no live claim on, a beat without a branch, or a `repo` that is missing or not one the project lists. Refusals:
+`not_found` for a session, sending or named by a beat, that is not the caller's; `invalid_request` for a missing or
+invalid field, named by its place (`beats[0].seen_at`, `beats[0].branch`, `repo`).
 
 `POST /v1/sessions/{id}/end` ends every hold of a session and its agents; see [Sessions](#sessions).
 

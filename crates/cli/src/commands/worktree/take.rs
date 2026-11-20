@@ -429,7 +429,7 @@ impl<P: ProjectCommands> Taker<'_, P> {
             taken_at,
             reset_done: done,
         };
-        if let Err(error) = self.pool.files().remember_hold(name, &record) {
+        if let Err(error) = self.pool.remember_hold(name, &record) {
             tracing::debug!(error = %error, "a worktree's holder could not be recorded");
         }
     }

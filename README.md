@@ -454,6 +454,7 @@ leaves a locked worktree for its next run.
 
 | File | Holds |
 |---|---|
+| `worktrees/<scope>/<pool>/pool.json` | the directory the pool's worktrees live in and the repository the lending checkout names; written with every hold a take records, so the signs of life can carry each worktree's branch |
 | `worktrees/<scope>/<pool>/<name>.hold.json` | the holder this machine took the worktree for (session id and agent key), the purpose, the item, when, and whether its reset finished; written on a take, removed on a release |
 | `worktrees/<scope>/<pool>/<name>.beat` | its modification time is the holder's last sign of life, and it names the session and agent that left it when a hook knows them; hooks and `dibs worktree beat` touch it, with no network |
 | `worktrees/<scope>/<pool>/<name>.free-since` | when the worktree was first seen free |
@@ -467,9 +468,11 @@ leaves a locked worktree for its next run.
 | `cache/<scope>/worktrees-served.json` | when the server answered a worktree route after it was found so |
 
 The signs of life are sent for the holder the hold record names, by the detached `dibs sync` and by `upkeep`, at most once
-a minute whatever `heartbeat_every` is. A sign the server answers as unknown (it let go of the hold while the signs could
-not reach it) takes that same worktree again for the same holder, if it is still free. A server older than the client
-answers `404` on the worktree routes: signs of life are dropped without a word and that server is not asked for them again
+a minute whatever `heartbeat_every` is. Each names the branch its worktree is on (read from the worktree's own `.git`),
+and a hold taken for an item (`--item`) records that branch on your claim on the item. A sign the server answers as
+unknown (it let go of the hold while the signs could not reach it) takes that same worktree again for the same holder,
+if it is still free. A server older than the client answers `404` on the worktree routes: signs of life are dropped
+without a word and that server is not asked for them again
 for a day, or until a take, a release or a listing of worktrees is answered (the server was upgraded), a session end it cannot serve has nothing to let go of, and a worktree a host asks for falls back to the host's
 own, as when the server cannot be reached.
 

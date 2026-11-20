@@ -28,6 +28,14 @@ pub fn current_branch(dir: &Path, git_dir: Option<&Path>) -> Option<BranchName> 
     branch_of_head(&head_text(dir, git_dir)?)
 }
 
+/// The branch of the checkout whose top is `dir`, read as [`current_branch`] reads it: `None`
+/// unless `dir` has a `.git` of its own, so a directory that is gone, or is no checkout yet, never
+/// answers with the branch of a checkout around it.
+pub fn top_branch(dir: &Path) -> Option<BranchName> {
+    fs::metadata(dir.join(".git")).ok()?;
+    current_branch(dir, None)
+}
+
 /// What the `HEAD` of a checkout says, as far as its file tells it for certain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {
@@ -163,6 +171,41 @@ mod tests {
         }
         let outside = tempfile::tempdir().unwrap();
         assert_eq!(head(outside.path(), None), Head::Unknown);
+    }
+
+    #[test]
+    fn the_branch_at_a_checkouts_top_is_its_own_and_a_directory_without_a_git_has_none() {
+        let outer = tempfile::tempdir().unwrap();
+        write(&outer.path().join(".git/HEAD"), "ref: refs/heads/main\n");
+        let pool = outer.path().join("pool");
+        let worktree = pool.join("worktree1");
+        assert_eq!(top_branch(&worktree), None, "a worktree that is gone");
+        fs::create_dir_all(&worktree).unwrap();
+        assert_eq!(
+            current_branch(&worktree, None),
+            Some(BranchName::parse("main").unwrap()),
+            "read upwards, the enclosing checkout answers"
+        );
+        assert_eq!(
+            top_branch(&worktree),
+            None,
+            "a directory that is no checkout yet"
+        );
+        let linked = outer.path().join(".git/worktrees/worktree1");
+        write(&linked.join("HEAD"), "ref: refs/heads/alice/7-totals\n");
+        write(
+            &worktree.join(".git"),
+            &format!("gitdir: {}\n", linked.display()),
+        );
+        assert_eq!(
+            top_branch(&worktree),
+            Some(BranchName::parse("alice/7-totals").unwrap())
+        );
+        write(
+            &linked.join("HEAD"),
+            "4f2a91c0e2d1b7a9f00b3c4d5e6f708192a3b4c5\n",
+        );
+        assert_eq!(top_branch(&worktree), None, "a detached head");
     }
 
     #[cfg(unix)]

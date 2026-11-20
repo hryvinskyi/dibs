@@ -7,6 +7,8 @@ use time::OffsetDateTime;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, SessionId, ThreadId};
 use dibs_domain::message::SessionLabel;
+use dibs_domain::radar::BranchName;
+use dibs_domain::repo::RepoId;
 use dibs_domain::report::MachineId;
 use dibs_domain::session::HostName;
 use dibs_domain::slot::Purpose;
@@ -177,6 +179,9 @@ pub struct WorktreeBeat {
     /// When the holder was last seen using it.
     #[serde(with = "time::serde::rfc3339")]
     pub seen_at: OffsetDateTime,
+    /// The branch the worktree is on; absent on a detached head, or when it cannot be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<BranchName>,
 }
 
 /// `POST /v1/worktrees/beat`.
@@ -188,6 +193,10 @@ pub struct BeatWorktreesRequest {
     pub machine: MachineId,
     /// The pool.
     pub pool: PoolId,
+    /// The repository of the pool's worktrees, when this machine recorded it; absent for a pool
+    /// taken from before it was recorded, whose beats carry no branch either.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<RepoId>,
     /// The beats.
     pub beats: Vec<WorktreeBeat>,
 }

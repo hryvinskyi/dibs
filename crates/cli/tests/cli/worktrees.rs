@@ -19,7 +19,8 @@
 //! worktree the server freed once it has been free long enough, and not again until it is taken,
 //! leaves a worktree another dibs is resetting alone, and names what lies beyond the pool's count;
 //! a server without the worktree routes has the signs of life dropped without a word, until it
-//! answers them again.
+//! answers them again. A worktree taken for a work item gives the claim on it the branch the
+//! worktree is on, sent with its signs of life.
 //!
 //! Through the tools: a take mints an agent of its own for each call, rescues what the worktree
 //! held, and waits for a release; the listing and a release by agent or by name agree with the
@@ -1133,6 +1134,51 @@ impl Pool {
         }
         panic!("no lock of {name} under {}", cache.display());
     }
+}
+
+#[test]
+fn a_worktree_taken_for_an_item_gives_its_claim_the_branch_it_is_on() {
+    let pool = Pool::new(2);
+    let made = pool.dibs(&["new", "gh:acme/api#7", "--title", "Fix the totals"]);
+    assert_eq!(status(&made), 0, "{}", text(&made.stderr));
+    let claimed = pool.dibs(&["claim", "gh:acme/api#7"]);
+    assert_eq!(status(&claimed), 0, "{}", text(&claimed.stderr));
+    let out = pool.dibs(&[
+        "worktree",
+        "take",
+        "--agent",
+        "agent-1",
+        "--item",
+        "gh:acme/api#7",
+    ]);
+    assert_eq!(status(&out), 0, "{}", text(&out.stderr));
+    let tree = last_line(&out);
+    git(&tree, &["checkout", "-q", "-b", "alice/7-totals"]);
+    pool.beat("worktree1");
+    let branches = || {
+        let synced = pool.dibs(&["sync", "--force"]);
+        assert_eq!(status(&synced), 0, "{}", text(&synced.stderr));
+        let state = pool.dibs(&["status", "--json"]);
+        assert_eq!(status(&state), 0, "{}", text(&state.stderr));
+        json(&state)["live"][0]["claim"]["branches"].clone()
+    };
+    assert_eq!(branches(), serde_json::json!({"api": "alice/7-totals"}));
+    let log = pool.setup.server.request_log();
+    let beats: Vec<&String> = log
+        .iter()
+        .filter(|request| request.contains("/v1/worktrees/beat"))
+        .collect();
+    assert!(
+        beats.iter().any(|request| {
+            request.contains(r#""repo":"api""#) && request.contains(r#""branch":"alice/7-totals""#)
+        }),
+        "the beat names the pool's repository and the worktree's branch: {beats:?}"
+    );
+    assert_eq!(
+        branches(),
+        serde_json::json!({"api": "alice/7-totals"}),
+        "the checkout's own branch, sent again by the heartbeat, does not replace the worktree's"
+    );
 }
 
 #[test]

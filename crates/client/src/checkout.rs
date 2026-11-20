@@ -321,6 +321,12 @@ impl Checkout {
         &self.config
     }
 
+    /// The repository the checkout names, unconfirmed: the one its configuration names, or the
+    /// one repository of a project that lists none.
+    pub fn named_repo(&self) -> RepoId {
+        self.config.repo.clone().unwrap_or_else(RepoId::implicit)
+    }
+
     /// The sentence telling the person that the file holds tables about a pool of worktrees,
     /// which dibs never reads from it, and where each belongs; `None` when it holds none.
     pub fn ignored_tables(&self) -> Option<String> {
@@ -857,6 +863,12 @@ mod tests {
                 .as_str(),
             "default"
         );
+    }
+
+    #[test]
+    fn the_repository_a_checkout_names_is_its_configured_one_or_the_projects_one() {
+        assert_eq!(checkout(Some("web")).named_repo().as_str(), "web");
+        assert_eq!(checkout(None).named_repo(), RepoId::implicit());
     }
 
     fn me(project: &str) -> Me {

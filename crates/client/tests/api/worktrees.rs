@@ -163,18 +163,21 @@ fn beats_keep_holds_a_session_end_releases_them_and_an_admin_forces_one() {
                 session_id: a,
                 machine: machine(),
                 pool: pool(),
+                repo: None,
                 beats: vec![
                     WorktreeBeat {
                         worktree: name("worktree1"),
                         holder_session: a,
                         agent: Some(agent("a1")),
                         seen_at: dibs_test_server::START,
+                        branch: None,
                     },
                     WorktreeBeat {
                         worktree: name("worktree2"),
                         holder_session: a,
                         agent: Some(agent("a1")),
                         seen_at: dibs_test_server::START,
+                        branch: None,
                     },
                 ],
             })
@@ -241,6 +244,7 @@ fn a_server_without_the_routes_is_older_than_this_client() {
                 session_id: session,
                 machine: machine(),
                 pool: pool(),
+                repo: None,
                 beats: Vec::new(),
             })
             .await

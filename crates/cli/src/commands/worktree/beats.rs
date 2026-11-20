@@ -5,6 +5,9 @@
 //! A sending reads, in every pool of the project on this machine, each worktree this machine holds
 //! a record of whose beat file changed since the last sending and since the record's take, and
 //! sends one beat per such worktree, for the holder the record names, dated by the file's change.
+//! Each beat names the branch its worktree is on, and the pool's beats the repository its
+//! worktrees are of, as the pool's record says where they live and which repository the lending
+//! checkout names; a pool without that record, taken before it was kept, sends neither.
 //!
 //! A beat the server answers as unknown names a hold the server ended while the beats could not
 //! reach it. The worktree is then taken again, by its name alone, for the same holder and the same
@@ -24,9 +27,11 @@ use dibs_agent_host::upkeep::is_fresh;
 use dibs_client::api::{
     BeatWorktreesRequest, BeatenWorktree, TakeWorktreeRequest, WorktreeBeat, WorktreeOutcome,
 };
+use dibs_client::branch::top_branch;
 use dibs_client::state::{StateDir, WorktreeHoldRecord, WorktreeState, read_json, write_json};
 use dibs_client::{Client, ClientError};
 use dibs_domain::ids::SessionId;
+use dibs_domain::radar::BranchName;
 use dibs_domain::report::MachineId;
 use dibs_domain::slot::Purpose;
 use dibs_domain::worktree::{PoolId, WorktreeName};
@@ -113,7 +118,12 @@ impl Beats<'_> {
         }
         let since = self.state.worktree_beats_sent_at();
         for (pool, files) in self.state.worktree_pools() {
-            let beats = due(&files.holds(), |name| files.beat_at(name), since);
+            let recorded = files.pool();
+            let branch_of = |name: &WorktreeName| {
+                let recorded = recorded.as_ref()?;
+                top_branch(&recorded.root.join(name.as_str()))
+            };
+            let beats = due(&files.holds(), |name| files.beat_at(name), branch_of, since);
             if beats.is_empty() {
                 continue;
             }
@@ -122,6 +132,7 @@ impl Beats<'_> {
                 session_id: self.sender,
                 machine: self.machine.clone(),
                 pool: pool.clone(),
+                repo: recorded.map(|recorded| recorded.repo),
                 beats,
             };
             let answer = match self.client.beat_worktrees(&request).await {
@@ -219,10 +230,12 @@ impl Beats<'_> {
 
 /// The beats due for the holds this machine records in one pool: one for each worktree whose
 /// sign of life, read by `beat_at`, is newer than the last sending `since` and no older than the
-/// record's take, for the holder the record names.
+/// record's take, for the holder the record names, with the branch `branch_of` reads the worktree
+/// is on. The branch is read only for a beat that is due.
 pub fn due(
     holds: &[(WorktreeName, WorktreeHoldRecord)],
     beat_at: impl Fn(&WorktreeName) -> Option<OffsetDateTime>,
+    branch_of: impl Fn(&WorktreeName) -> Option<BranchName>,
     since: Option<OffsetDateTime>,
 ) -> Vec<WorktreeBeat> {
     holds
@@ -235,6 +248,7 @@ pub fn due(
                 holder_session: record.session_id,
                 agent: record.agent.clone(),
                 seen_at,
+                branch: branch_of(name),
             })
         })
         .collect()
@@ -248,6 +262,10 @@ mod tests {
 
     fn name(text: &str) -> WorktreeName {
         WorktreeName::parse(text).unwrap()
+    }
+
+    fn no_branch(_: &WorktreeName) -> Option<BranchName> {
+        None
     }
 
     fn at(minutes: i64) -> OffsetDateTime {
@@ -277,7 +295,7 @@ mod tests {
             "worktree2" => Some(at(8)),
             _ => None,
         };
-        let sent = due(&holds, beats, Some(at(10)));
+        let sent = due(&holds, beats, no_branch, Some(at(10)));
         assert_eq!(
             sent,
             vec![WorktreeBeat {
@@ -285,19 +303,62 @@ mod tests {
                 holder_session: SessionId(4),
                 agent: Some(AgentKey::parse("a1").unwrap()),
                 seen_at: at(12),
+                branch: None,
             }],
             "only what changed since the last sending, and only where a beat was left"
         );
-        let never_sent = due(&holds, beats, None);
+        let never_sent = due(&holds, beats, no_branch, None);
         assert_eq!(never_sent.len(), 2);
         assert_eq!(never_sent[1].agent, None, "a session holds worktree2");
-        assert!(due(&holds, beats, Some(at(12))).is_empty());
+        assert!(due(&holds, beats, no_branch, Some(at(12))).is_empty());
     }
 
     #[test]
     fn a_sign_of_life_older_than_the_take_is_not_the_holders() {
         let holds = vec![(name("worktree1"), record(4, Some("a1"), at(30)))];
-        assert!(due(&holds, |_| Some(at(20)), None).is_empty());
-        assert_eq!(due(&holds, |_| Some(at(30)), None).len(), 1);
+        assert!(due(&holds, |_| Some(at(20)), no_branch, None).is_empty());
+        assert_eq!(due(&holds, |_| Some(at(30)), no_branch, None).len(), 1);
+    }
+
+    #[test]
+    fn a_beat_carries_the_branch_its_worktree_is_on_and_none_where_none_is_read() {
+        let holds = vec![
+            (name("worktree1"), record(4, Some("a1"), at(0))),
+            (name("worktree2"), record(4, Some("b2"), at(0))),
+            (name("worktree3"), record(4, Some("c3"), at(0))),
+        ];
+        let asked = std::cell::RefCell::new(Vec::new());
+        let branch_of = |worktree: &WorktreeName| {
+            asked.borrow_mut().push(worktree.to_string());
+            match worktree.as_str() {
+                "worktree1" => BranchName::parse("alice/7-totals").ok(),
+                _ => None,
+            }
+        };
+        let beats = |worktree: &WorktreeName| match worktree.as_str() {
+            "worktree3" => None,
+            _ => Some(at(5)),
+        };
+        let sent = due(&holds, beats, branch_of, None);
+        let branches: Vec<(String, Option<String>)> = sent
+            .iter()
+            .map(|beat| {
+                let branch = beat.branch.as_ref().map(ToString::to_string);
+                (beat.worktree.to_string(), branch)
+            })
+            .collect();
+        assert_eq!(
+            branches,
+            [
+                ("worktree1".to_owned(), Some("alice/7-totals".to_owned())),
+                ("worktree2".to_owned(), None),
+            ],
+            "a detached head, or a worktree whose branch cannot be read, sends the beat alone"
+        );
+        assert_eq!(
+            asked.into_inner(),
+            ["worktree1", "worktree2"],
+            "the branch is read only for a beat that is due"
+        );
     }
 }
