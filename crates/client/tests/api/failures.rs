@@ -1,6 +1,7 @@
 //! A server that is not there, is too slow, refuses the token, or answers something that is not
 //! dibs.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use dibs_client::api::NewItem;
@@ -176,6 +177,7 @@ fn narrowed_areas(world: &World, client: &Client) -> Result<usize, ClientError> 
         bob.claim(
             item,
             &ClaimRequest {
+                branches: BTreeMap::new(),
                 session_id: session,
                 areas: vec!["billing".to_owned()],
                 wide: None,

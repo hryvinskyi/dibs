@@ -1,6 +1,8 @@
 //! Work items and claims: `status`, `items`, `new`, `claim`, `takeover`, `release`, `done`,
 //! `grant` and `ask-grant`.
 
+pub mod branch;
+
 use std::fmt::Write as _;
 
 use time::OffsetDateTime;
@@ -183,6 +185,7 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
         None => None,
     };
     let connection = ctx.connect().await?;
+    let branches = branch::branches(&args.branches, &connection, &connection.me)?;
     let item = connection.resolve(&key).await?;
     let session = connection.session().await?;
     let claimed = connection
@@ -194,6 +197,7 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
                 areas: args.areas,
                 wide,
                 kind: args.debt.then_some(ClaimKind::Debt),
+                branches,
             },
         )
         .await
@@ -340,6 +344,7 @@ async fn start_review(args: ReviewArgs, ctx: &Context) -> Result<(), Failure> {
                     &ReviewRequest {
                         pr,
                         more: args.more,
+                        head: args.head,
                     },
                 )
                 .await

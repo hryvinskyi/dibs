@@ -2,6 +2,7 @@
 //! Each operation checks its input, makes the client's call of the same purpose, and answers the
 //! client's typed answer or the [`Failure`] it stands for.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use dibs_client::Client;
@@ -25,6 +26,7 @@ use dibs_domain::worktree::WorktreeName;
 
 use crate::commands::check::Governed;
 use crate::commands::feedback;
+use crate::commands::work::branch::{self, NamedBranch};
 use crate::commands::worktree::pool::Pool;
 use crate::commands::worktree::project::ShellCommands;
 use crate::commands::worktree::rescue::Author;
@@ -202,13 +204,21 @@ impl Link {
     /// A [`Failure`] for an invalid input, a refusal naming the holder, or of the call.
     pub async fn claim(&self, input: ClaimInput) -> Result<Claimed, Failure> {
         let key = input.key.key("key")?;
-        let item = self.resolve(&key).await?;
         let wide = input.wide()?;
+        let named: Vec<NamedBranch> = input.branch()?.into_iter().collect();
+        let branches = if named.is_empty() {
+            BTreeMap::new()
+        } else {
+            let me = self.call(self.connection.client.me()).await?;
+            branch::branches(&named, &self.connection, &me)?
+        };
+        let item = self.resolve(&key).await?;
         let request = ClaimRequest {
             session_id: self.session,
             kind: input.kind(),
             areas: input.areas,
             wide,
+            branches,
         };
         self.call(self.connection.client.claim(item, &request))
             .await
@@ -268,6 +278,7 @@ impl Link {
     /// A [`Failure`] for an invalid input, a refusal, or of the call.
     pub async fn review(&self, input: ReviewInput) -> Result<Reviewed, Failure> {
         let pr = input.pr()?;
+        let head = input.head()?;
         let item = self.resolve(&input.key.key("key")?).await?;
         if input.drop {
             return self
@@ -277,6 +288,7 @@ impl Link {
         let request = ReviewRequest {
             pr,
             more: input.more,
+            head,
         };
         self.call(self.connection.client.review(item, &request))
             .await

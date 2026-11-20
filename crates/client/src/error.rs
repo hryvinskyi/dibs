@@ -16,7 +16,7 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::{ExternalRef, ItemStatus};
-use dibs_domain::repo::{RemoteUrl, RepoId};
+use dibs_domain::repo::RemoteUrl;
 
 /// Why a call did not give its answer.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -209,9 +209,10 @@ pub struct ErrorDetails {
     /// A repository the project does not list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteUrl>,
-    /// A repository id the project does not list.
+    /// A repository the project does not list, as the request named it: an id (`api`) or a
+    /// remote's path (`acme/api`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repo: Option<RepoId>,
+    pub repo: Option<String>,
     /// The request field at fault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,

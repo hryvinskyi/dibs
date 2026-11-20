@@ -228,6 +228,8 @@ fn the_handshake_names_the_server_and_lists_every_tool_with_a_schema() {
     };
     assert_eq!(schema("dibs_claim")["required"], json!(["key"]));
     assert!(schema("dibs_claim")["properties"]["areas"].is_object());
+    assert!(schema("dibs_claim")["properties"]["branch"].is_object());
+    assert!(schema("dibs_review")["properties"]["head"].is_object());
     assert_eq!(schema("dibs_new")["required"], json!(["ref", "title"]));
     assert_eq!(schema("dibs_check")["required"], json!(["paths"]));
     assert_eq!(schema("dibs_send")["required"], json!(["body"]));
@@ -332,6 +334,49 @@ fn a_claim_goes_to_review_through_a_tool_and_another_members_edit_waits_for_the_
         json!({"key": "gh:acme/api#7", "pr": "acme/api#12", "drop": true}),
     );
     assert_eq!(dropped.ok()["claim"]["state"], "working");
+}
+
+#[test]
+fn a_claim_names_its_branch_through_a_tool_and_a_review_gives_its_head() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let mut alice = Mcp::start(&setup, "alice", &api);
+    alice.tool(
+        "dibs_new",
+        json!({"ref": "gh:acme/api#42", "title": "Refunds"}),
+    );
+
+    let named = alice.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#42", "areas": ["billing"], "branch": "bob/42-refunds"}),
+    );
+    let claim = &named.ok()["claim"];
+    assert_eq!(claim["branches"], json!({"api": "bob/42-refunds"}));
+    assert_eq!(claim["branch_sources"], json!({"api": "named"}));
+    let web = alice.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#42", "branch": "acme/web:bob/42-refunds-ui"}),
+    );
+    assert_eq!(web.ok()["claim"]["branch_sources"]["web"], "named");
+    let empty = alice.tool(
+        "dibs_claim",
+        json!({"key": "gh:acme/api#42", "branch": "api:"}),
+    );
+    assert!(empty.error().contains("`branch`"), "{}", empty.text);
+
+    let dropping = alice.tool(
+        "dibs_review",
+        json!({"key": "gh:acme/api#42", "pr": "acme/api#12", "drop": true, "head": "bob/42"}),
+    );
+    assert!(dropping.error().contains("`head`"), "{}", dropping.text);
+    let reviewed = alice.tool(
+        "dibs_review",
+        json!({"key": "gh:acme/api#42", "pr": "acme/api#12", "head": "refs/heads/bob/42-v2"}),
+    );
+    let claim = &reviewed.ok()["claim"];
+    assert_eq!(claim["branches"]["api"], "bob/42-v2");
+    assert_eq!(claim["branch_sources"]["api"], "pull_request");
+    assert_eq!(claim["branch_sources"]["web"], "named");
 }
 
 #[test]

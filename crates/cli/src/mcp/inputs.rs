@@ -15,6 +15,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::message::{Body, Importance, Subject};
+use dibs_domain::radar::BranchName;
 use dibs_domain::report::{FeedbackReason, RefusalId};
 use dibs_domain::review::PrRef;
 use dibs_domain::slot::{Purpose, SlotName};
@@ -22,6 +23,7 @@ use dibs_domain::wide::WideReason;
 use dibs_domain::worktree::{AgentKey, WorktreeName};
 
 use crate::commands::feedback::FeedbackOn;
+use crate::commands::work::branch::NamedBranch;
 use crate::failure::{Failure, sentence};
 
 /// A work item: its local id or its reference.
@@ -152,6 +154,10 @@ pub struct ClaimInput {
     /// a renewal keeps the kind the claim has.
     #[serde(default)]
     pub debt: bool,
+    /// The branch your work is on, `[<repo>:]<branch>` (`bob/42-refunds`, `web:bob/42-refunds`):
+    /// the repository by its id or its remote's path, the checkout's own when left out.
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// `dibs_narrow`.
@@ -175,6 +181,17 @@ pub struct WideClaimInput {
 }
 
 impl ClaimInput {
+    /// The branch the claim names, when it names one.
+    ///
+    /// # Errors
+    /// A [`Failure`] naming `branch` when a side of it is empty or it is no branch git accepts.
+    pub fn branch(&self) -> Result<Option<NamedBranch>, Failure> {
+        self.branch
+            .as_deref()
+            .map(|text| NamedBranch::parse(text).map_err(|problem| invalid("branch", &problem)))
+            .transpose()
+    }
+
     /// The kind of a new claim, as the client sends it: debt work, or the server's default.
     pub fn kind(&self) -> Option<ClaimKind> {
         self.debt.then_some(ClaimKind::Debt)
@@ -261,6 +278,10 @@ pub struct ReviewInput {
     /// none left, the claim is worked on again.
     #[serde(default)]
     pub drop: bool,
+    /// The pull request's head branch (`bob/42-refunds`), which becomes your claim's branch in
+    /// its repository.
+    #[serde(default)]
+    pub head: Option<String>,
 }
 
 impl ReviewInput {
@@ -271,6 +292,26 @@ impl ReviewInput {
     pub fn pr(&self) -> Result<PrRef, Failure> {
         PrRef::parse(&self.pr)
             .map_err(|error| invalid("pr", &format!("the pull request is not valid ({error})")))
+    }
+
+    /// The pull request's head branch, when it is given; a branch or its full ref
+    /// (`refs/heads/bob/42-refunds`).
+    ///
+    /// # Errors
+    /// A [`Failure`] naming `head` when it is no branch git accepts, or comes with `drop`.
+    pub fn head(&self) -> Result<Option<BranchName>, Failure> {
+        let Some(text) = self.head.as_deref() else {
+            return Ok(None);
+        };
+        if self.drop {
+            return Err(invalid(
+                "head",
+                "a pull request removed from your claim records no head; leave head out with drop",
+            ));
+        }
+        BranchName::parse_ref(text.trim())
+            .map(Some)
+            .map_err(|error| invalid("head", &format!("the head is not valid ({error})")))
     }
 }
 
@@ -921,6 +962,48 @@ mod tests {
                 .areas
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_claims_branch_is_read_in_the_command_lines_form_and_named_when_it_is_wrong() {
+        let branch = |value| parse::<ClaimInput>(json!({"key": 1, "branch": value})).branch();
+        assert_eq!(
+            parse::<ClaimInput>(json!({"key": 1})).branch().unwrap(),
+            None
+        );
+        assert_eq!(
+            branch("web:bob/42-refunds").unwrap(),
+            NamedBranch::parse("web:bob/42-refunds").ok()
+        );
+        let empty = branch(":bob/42-refunds").unwrap_err();
+        assert!(empty.message.contains("`branch`"), "{}", empty.message);
+    }
+
+    #[test]
+    fn a_reviews_head_is_a_branch_or_its_ref_and_never_comes_with_a_removal() {
+        let review = |extra: serde_json::Value| {
+            let mut input = json!({"key": 1, "pr": "acme/api#12"});
+            if let (Some(input), Some(extra)) = (input.as_object_mut(), extra.as_object()) {
+                input.extend(extra.clone());
+            }
+            parse::<ReviewInput>(input).head()
+        };
+        assert_eq!(review(json!({})).unwrap(), None);
+        assert_eq!(
+            review(json!({"head": "refs/heads/bob/42-refunds"}))
+                .unwrap()
+                .as_ref()
+                .map(BranchName::as_str),
+            Some("bob/42-refunds")
+        );
+        let malformed = review(json!({"head": "bob 42"})).unwrap_err();
+        assert!(
+            malformed.message.contains("`head`"),
+            "{}",
+            malformed.message
+        );
+        let dropped = review(json!({"head": "bob/42", "drop": true})).unwrap_err();
+        assert!(dropped.message.contains("`head`"), "{}", dropped.message);
     }
 
     #[test]

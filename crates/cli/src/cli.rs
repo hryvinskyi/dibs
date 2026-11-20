@@ -13,12 +13,15 @@ use dibs_domain::ids::{MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Importance, Subject};
+use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
 use dibs_domain::report::RefusalId;
 use dibs_domain::review::PrRef;
 use dibs_domain::settings::parse_duration;
 use dibs_domain::slot::{Purpose, SlotName};
 use dibs_domain::worktree::{AgentKey, WorktreeName};
+
+use crate::commands::work::branch::NamedBranch;
 
 /// Claim work, check edits and talk to the people and agents working on the same repositories.
 #[derive(Debug, Parser)]
@@ -75,7 +78,7 @@ pub enum Command {
     New(NewArgs),
     /// Claim a work item, or renew your claim, with the areas you will change; `dibs claim review`
     /// records the pull request of a claim you hold, and `dibs claim narrow` gives areas of it up.
-    Claim(ClaimArgs),
+    Claim(Box<ClaimArgs>),
     /// Take over another member's stale claim, telling them why.
     Takeover(TakeoverArgs),
     /// Release your claim; the item is open again.
@@ -287,6 +290,12 @@ pub struct ClaimArgs {
     /// the kind the claim has.
     #[arg(long)]
     pub debt: bool,
+    /// The branch your work is on, `[<repo>:]<branch>`: the repository by its id or its remote's
+    /// path, this checkout's repository when left out. It is what the overlap radar measures for
+    /// the claim, until a pull request's head or the branch of a worktree held for the item
+    /// replaces it. Repeat it for a branch in each of several repositories.
+    #[arg(long = "branch", value_parser = NamedBranch::parse)]
+    pub branches: Vec<NamedBranch>,
 }
 
 /// What `dibs claim` does with a claim the member holds.
@@ -327,6 +336,10 @@ pub struct ReviewArgs {
     /// rather than completing it.
     #[arg(long, requires = "pr")]
     pub more: bool,
+    /// The pull request's head branch (`bob/42-refunds` or `refs/heads/bob/42-refunds`): the
+    /// claim's branch in the pull request's repository from then on.
+    #[arg(long, requires = "pr", value_parser = BranchName::parse_ref)]
+    pub head: Option<BranchName>,
     /// Remove a pull request you recorded by mistake; with none left, the claim is worked on
     /// again.
     #[arg(long, value_parser = PrRef::parse, conflicts_with = "pr")]
@@ -1137,6 +1150,55 @@ mod tests {
             panic!("not a claim");
         };
         assert!(debt.debt);
+        let Invocation::Service(Command::Claim(named)) = Cli::try_parse_from([
+            "dibs",
+            "claim",
+            "42",
+            "--branch",
+            "bob/42-refunds",
+            "--branch",
+            "web:bob/42-refunds",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not a claim");
+        };
+        assert_eq!(
+            named.branches,
+            [
+                NamedBranch::parse("bob/42-refunds").unwrap(),
+                NamedBranch::parse("web:bob/42-refunds").unwrap()
+            ]
+        );
+        assert!(Cli::try_parse_from(["dibs", "claim", "42", "--branch", "api:"]).is_err());
+        let Invocation::Service(Command::Claim(headed)) = Cli::try_parse_from([
+            "dibs",
+            "claim",
+            "review",
+            "42",
+            "--pr",
+            "acme/api#7",
+            "--head",
+            "refs/heads/bob/42-refunds",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not a claim");
+        };
+        let Some(ClaimAction::Review(headed)) = headed.action else {
+            panic!("not a review");
+        };
+        assert_eq!(
+            headed.head.as_ref().map(BranchName::as_str),
+            Some("bob/42-refunds")
+        );
+        assert!(
+            Cli::try_parse_from(["dibs", "claim", "review", "42", "--head", "bob/42-refunds"])
+                .is_err(),
+            "a head needs the pull request it is the head of"
+        );
         let Invocation::Service(Command::Claim(narrow)) = Cli::try_parse_from([
             "dibs",
             "claim",

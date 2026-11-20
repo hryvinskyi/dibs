@@ -31,6 +31,10 @@ depends on another, record it (`dibs dep add <item> --blocked-by <other>`), and 
 - Find or create the work item (`dibs_items`, `dibs_new`), then claim it with the areas you expect to change
   (`dibs_claim`, or `dibs claim <item> --area <area>`).
 - Claiming again renews your claim; it does not take a second one.
+- Name the branch your work will be on when you claim: `dibs_claim` with `branch`, or
+  `dibs claim <item> --branch <branch>`. Write it as `<repo>:<branch>` for another repository than your checkout's
+  (`web:bob/42-refund-rounding`, the repository by its id or its remote's path); repeat `--branch` for each repository
+  the work spans. That branch is what dibs measures for overlaps, so name it again when you switch branches.
 - Work that only pays off debt — a refactoring, a clean-up, a fix of what was left behind, with no feature in it — is
   claimed as debt: `dibs_claim` with `debt: true`, or `dibs claim <item> --area <area> --debt`. Feature work may then
   take its areas from you (see below). Everything else is a feature, the default. A claim keeps the kind it was made
@@ -159,8 +163,9 @@ serve many teams:
 - Do not push or delete a protected tag, such as a release tag, unless the project lists you as its pusher: it is
   refused for anyone else, and so is a push that may carry tags (`--tags`, `--follow-tags`, `--mirror`) or names a
   short name a protected tag covers. Leave tagging to those members, and push your branch by its name without tags.
-- Once the pull request is open, record it on your claim: `dibs_review` with the item and `pr` (`owner/repo#number`), or
-  `dibs claim review <item> --pr <owner>/<repo>#<number>`. Your claim is then in review: it keeps its areas, so nobody
+- Once the pull request is open, record it on your claim with its head branch: `dibs_review` with the item, `pr`
+  (`owner/repo#number`) and `head`, or `dibs claim review <item> --pr <owner>/<repo>#<number> --head <branch>`. The
+  head becomes your claim's branch in that repository. Your claim is then in review: it keeps its areas, so nobody
   edits the files under review, and it needs no heartbeat while the pull request is open. You may go on pushing review
   fixes to its branch. Recorded the wrong one? Remove it: `dibs_review` with `drop: true`, or
   `dibs claim review <item> --drop-pr <owner>/<repo>#<number>`.
@@ -181,10 +186,23 @@ serve many teams:
 
 ## Overlaps
 
-dibs knows which branch each claim works on — your edits and heartbeats tell it, from the branch your checkout is on —
-and an integration tells it what each branch changes against its base. Keep one claim's work in one checkout: a session
-tells dibs the branch of the checkout it runs in. When your branch meets another member's, dibs
-writes to both of you, once:
+dibs records the branch each claim works on in each repository, and an integration tells it what each branch changes
+against its base. It learns the branch from these, the first one that holds winning:
+
+- the head of the pull request recorded on the claim (`head` above);
+- the branch of a pool worktree held for the claim's item. A worktree your host gives you is taken for no item; it
+  learns the item from your first edit in it that falls under exactly one of your claims, and from then on its branch
+  is that claim's. When you take a worktree yourself for an item, name the item (`dibs_worktree_take` with `item`,
+  `dibs worktree take --item <item>`);
+- the branch you named when you claimed (`branch` above);
+- the branch of the checkout you work in, but only while your session works on that one claim alone in that checkout.
+  A claim's branch is never taken from a checkout another session of yours shares, or from a session that reports
+  more than one checkout or works on several claims.
+
+`dibs_claim` claims as your session, the one your host's hooks report, when your host tells the tool server which
+session it serves; otherwise as the tool server's own session. A claim taken with `dibs claim` on the command line is
+a session of its own too, so in a checkout where your host's session also works, such a claim never gets the
+checkout's branch: name it with `--branch`. When your branch meets another member's, dibs writes to both of you, once:
 
 - **The same files** (`high`): both branches change one file. Rebase onto the base now, and settle in that conversation
   who changes what, so the second merge does not meet a conflict. Files the project regenerates rather than merges by

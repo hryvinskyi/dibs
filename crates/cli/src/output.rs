@@ -156,7 +156,8 @@ pub fn item_label(named: Option<&ItemName>, id: ItemId) -> String {
     named.map_or_else(|| format!("#{id}"), ItemName::label)
 }
 
-/// What a claim holds: `alice on laptop, areas api:billing`.
+/// What a claim holds, and the branch its work is on with where that was learned: `alice on
+/// laptop, areas api:billing, on branch api:alice/42-refunds (named)`.
 pub fn claim_text(claim: &Claim) -> String {
     let mut text = format!("{} on {}", claim.holder, claim.host);
     if claim.kind == ClaimKind::Debt {
@@ -173,6 +174,28 @@ pub fn claim_text(claim: &Claim) -> String {
     if let Some(review) = &claim.review {
         let prs: Vec<String> = review.prs.iter().map(ToString::to_string).collect();
         let _ = write!(text, ", in review on {}", prs.join(", "));
+    }
+    if !claim.branches.is_empty() {
+        let branches: Vec<String> = claim
+            .branches
+            .iter()
+            .map(|(repo, branch)| {
+                let source = claim
+                    .branch_sources
+                    .get(repo)
+                    .and_then(|source| source.words());
+                match source {
+                    Some(words) => format!("{repo}:{branch} ({words})"),
+                    None => format!("{repo}:{branch}"),
+                }
+            })
+            .collect();
+        let noun = if branches.len() == 1 {
+            "branch"
+        } else {
+            "branches"
+        };
+        let _ = write!(text, ", on {noun} {}", branches.join(", "));
     }
     text
 }

@@ -1,5 +1,7 @@
 //! Managing a project: members, tokens, settings and forced releases.
 
+use std::collections::BTreeMap;
+
 use dibs_client::api::{ClaimRequest, NewItem, NewMember};
 use dibs_domain::member::Role;
 use dibs_domain::settings::SettingsDocument;
@@ -117,6 +119,7 @@ fn an_admin_force_releases_any_claim() {
         bob.claim(
             item,
             &ClaimRequest {
+                branches: BTreeMap::new(),
                 wide: None,
                 session_id: bob_session,
                 areas: Vec::new(),

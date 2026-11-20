@@ -515,6 +515,120 @@ fn a_claim_goes_to_review_through_the_command_line_and_its_holder_reads_the_pull
 }
 
 #[test]
+fn a_claim_names_its_branch_and_a_pull_requests_head_replaces_it() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let alice = |args: &[&str]| setup.dibs(&setup.alice, &api).args(args).output().unwrap();
+    assert_eq!(
+        status(&alice(&["new", "gh:acme/api#42", "--title", "Refunds"])),
+        0
+    );
+
+    let claimed = alice(&["claim", "gh:acme/api#42", "--branch", "bob/42-refunds"]);
+    assert_eq!(status(&claimed), 0, "{}", text(&claimed.stderr));
+    assert!(
+        text(&claimed.stdout).contains("on branch api:bob/42-refunds (named)"),
+        "{}",
+        text(&claimed.stdout)
+    );
+    let shown = text(&alice(&["status"]).stdout);
+    assert!(
+        shown.contains("on branch api:bob/42-refunds (named)"),
+        "{shown}"
+    );
+
+    let both = alice(&[
+        "claim",
+        "gh:acme/api#42",
+        "--branch",
+        "acme/web:bob/42-refunds-ui",
+        "--json",
+    ]);
+    assert_eq!(status(&both), 0, "{}", text(&both.stderr));
+    let answer = json(&both);
+    assert_eq!(answer["claim"]["branches"]["web"], "bob/42-refunds-ui");
+    assert_eq!(answer["claim"]["branch_sources"]["web"], "named");
+    assert_eq!(answer["claim"]["branches"]["api"], "bob/42-refunds");
+
+    let twice = alice(&[
+        "claim",
+        "gh:acme/api#42",
+        "--branch",
+        "bob/42-refunds",
+        "--branch",
+        "api:bob/42-other",
+    ]);
+    assert_eq!(status(&twice), 2, "{}", text(&twice.stderr));
+    assert!(
+        text(&twice.stderr).contains("two branches"),
+        "{}",
+        text(&twice.stderr)
+    );
+    let unlisted = alice(&["claim", "gh:acme/api#42", "--branch", "acme/other:bob/42"]);
+    assert_eq!(status(&unlisted), 1, "{}", text(&unlisted.stderr));
+    let empty = alice(&["claim", "gh:acme/api#42", "--branch", ":bob/42-refunds"]);
+    assert_eq!(status(&empty), 2, "a usage error before any call");
+
+    let headless = alice(&["claim", "review", "gh:acme/api#42", "--head", "bob/42"]);
+    assert_eq!(status(&headless), 2, "--head needs --pr");
+
+    let reviewed = alice(&[
+        "claim",
+        "review",
+        "gh:acme/api#42",
+        "--pr",
+        "acme/api#12",
+        "--head",
+        "bob/42-refunds-v2",
+    ]);
+    assert_eq!(status(&reviewed), 0, "{}", text(&reviewed.stderr));
+    let shown = text(&alice(&["status"]).stdout);
+    assert!(
+        shown.contains(concat!(
+            "on branches api:bob/42-refunds-v2 (from its pull request), ",
+            "web:bob/42-refunds-ui (named)"
+        )),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_branch_named_outside_a_checkout_needs_its_repository_when_the_project_has_several() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let created = setup
+        .dibs(&setup.alice, &api)
+        .args(["new", "gh:acme/api#42", "--title", "Refunds"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&created), 0);
+    let elsewhere = setup.elsewhere();
+    let alice = |args: &[&str]| {
+        setup
+            .dibs(&setup.alice, &elsewhere)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let unsaid = alice(&["claim", "gh:acme/api#42", "--branch", "bob/42-refunds"]);
+    assert_eq!(status(&unsaid), 2, "{}", text(&unsaid.stderr));
+    assert!(
+        text(&unsaid.stderr).contains("<repo>:<branch>"),
+        "{}",
+        text(&unsaid.stderr)
+    );
+    let said = alice(&[
+        "claim",
+        "gh:acme/api#42",
+        "--branch",
+        "api:bob/42-refunds",
+        "--json",
+    ]);
+    assert_eq!(status(&said), 0, "{}", text(&said.stderr));
+    assert_eq!(json(&said)["claim"]["branch_sources"]["api"], "named");
+}
+
+#[test]
 fn the_status_names_each_overlap_with_the_way_on() {
     use dibs_domain::member::Role;
 

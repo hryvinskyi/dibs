@@ -373,6 +373,10 @@ pub struct Claim {
     /// The branch its work is on in each repository, by repository id.
     #[serde(default)]
     pub branches: BTreeMap<RepoId, BranchName>,
+    /// Where each of those branches was learned from, by repository id; a server that does not
+    /// say gives none.
+    #[serde(default)]
+    pub branch_sources: BTreeMap<RepoId, BranchSource>,
     /// Whether its work is a feature or debt work.
     #[serde(default)]
     pub kind: ClaimKind,
@@ -400,6 +404,37 @@ pub enum ClaimKind {
     /// A kind this client does not know yet.
     #[serde(other)]
     Other,
+}
+
+/// Where a claim's branch in a repository was learned from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchSource {
+    /// The head branch of a pull request the claim recorded.
+    PullRequest,
+    /// The branch of a pool worktree held for the claim's item.
+    Worktree,
+    /// A branch the claim named when it was taken or renewed.
+    Named,
+    /// The branch of the checkout the claim's session works in.
+    Checkout,
+    /// A source this client does not know yet.
+    #[serde(other)]
+    Other,
+}
+
+impl BranchSource {
+    /// How a person is told where the branch came from: `from its pull request`, `from its
+    /// worktree`, `named` or `from the checkout`; nothing for a source this client does not know.
+    pub const fn words(self) -> Option<&'static str> {
+        match self {
+            Self::PullRequest => Some("from its pull request"),
+            Self::Worktree => Some("from its worktree"),
+            Self::Named => Some("named"),
+            Self::Checkout => Some("from the checkout"),
+            Self::Other => None,
+        }
+    }
 }
 
 /// An area a claim waits for.
@@ -448,6 +483,9 @@ pub struct ReviewRequest {
     pub pr: PrRef,
     /// Whether more pull requests of the item follow this one.
     pub more: bool,
+    /// The pull request's head branch, recorded as the claim's branch in its repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<BranchName>,
 }
 
 /// `POST /v1/items/{id}/review/drop`.
@@ -498,6 +536,10 @@ pub struct ClaimRequest {
     /// keeps the kind it has.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<ClaimKind>,
+    /// The branch the claim's work is on, by repository as a person names it: its id (`api`) or
+    /// its remote's path (`acme/api`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub branches: BTreeMap<String, BranchName>,
 }
 
 /// The `wide` part of a claim: the areas to announce a change over, holding none of them.
@@ -1692,6 +1734,95 @@ mod tests {
         assert_eq!(event.members[&MemberId(7)].as_str(), "alice");
         assert!(matches!(event.kind, EventKind::MessagePosted(_)));
         assert!(event.message.is_none());
+    }
+
+    fn claim_with(sources: Option<serde_json::Value>) -> Claim {
+        let mut claim = json!({
+            "item": 4, "holder": "bob", "session_id": 2, "host": "laptop", "areas": [],
+            "claimed_at": "2026-01-02T03:04:05Z", "renewed_at": "2026-01-02T03:04:05Z",
+            "last_seen": "2026-01-02T03:04:05Z", "branches": {"api": "bob/42-refunds"}
+        });
+        if let Some(sources) = sources {
+            claim["branch_sources"] = sources;
+        }
+        serde_json::from_value(claim).unwrap()
+    }
+
+    #[test]
+    fn a_claims_branch_sources_are_read_and_an_older_server_gives_none() {
+        let api = RepoId::parse("api").unwrap();
+        assert!(claim_with(None).branch_sources.is_empty());
+        let named = claim_with(Some(json!({"api": "named"})));
+        assert_eq!(named.branch_sources[&api], BranchSource::Named);
+        let unknown = claim_with(Some(json!({"api": "forge_api"})));
+        assert_eq!(unknown.branch_sources[&api], BranchSource::Other);
+    }
+
+    #[test]
+    fn a_branch_source_is_told_in_words_and_an_unknown_one_in_none() {
+        let words: Vec<Option<&str>> = [
+            BranchSource::PullRequest,
+            BranchSource::Worktree,
+            BranchSource::Named,
+            BranchSource::Checkout,
+            BranchSource::Other,
+        ]
+        .into_iter()
+        .map(BranchSource::words)
+        .collect();
+        assert_eq!(
+            words,
+            [
+                Some("from its pull request"),
+                Some("from its worktree"),
+                Some("named"),
+                Some("from the checkout"),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn a_claim_and_a_review_send_their_branches_only_when_they_name_some() {
+        let claim = ClaimRequest {
+            session_id: SessionId(2),
+            areas: Vec::new(),
+            wide: None,
+            kind: None,
+            branches: BTreeMap::new(),
+        };
+        assert_eq!(
+            serde_json::to_value(&claim).unwrap(),
+            json!({"session_id": 2, "areas": []})
+        );
+        let named = ClaimRequest {
+            branches: BTreeMap::from([(
+                "acme/api".to_owned(),
+                BranchName::parse("bob/42-refunds").unwrap(),
+            )]),
+            ..claim
+        };
+        assert_eq!(
+            serde_json::to_value(&named).unwrap()["branches"],
+            json!({"acme/api": "bob/42-refunds"})
+        );
+        let review = ReviewRequest {
+            pr: PrRef::parse("acme/api#12").unwrap(),
+            more: false,
+            head: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&review).unwrap(),
+            json!({"pr": "acme/api#12", "more": false})
+        );
+        let headed = ReviewRequest {
+            head: Some(BranchName::parse("bob/42-refunds").unwrap()),
+            ..review
+        };
+        assert_eq!(
+            serde_json::to_value(&headed).unwrap()["head"],
+            "bob/42-refunds"
+        );
     }
 
     #[test]

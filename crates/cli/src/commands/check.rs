@@ -71,14 +71,7 @@ impl Governed {
                 "No .dibs.toml was found here or above in this repository; run dibs check inside a checkout.",
             ));
         };
-        let settings = me.project_settings().map_err(|error| {
-            Failure::config(
-                "unknown_settings",
-                sentence(&format!(
-                    "the project's settings use something this dibs does not know ({error}); update dibs"
-                )),
-            )
-        })?;
+        let settings = settings_of(me)?;
         let origin = Git::new(checkout.root()).origin();
         let repo = checkout
             .governing_repo(&settings, origin.as_ref())
@@ -139,6 +132,21 @@ impl Governed {
             .await
             .map_err(|error| connection.failed(error))
     }
+}
+
+/// The project's settings `me` carries, validated with what this dibs knows.
+///
+/// # Errors
+/// A configuration [`Failure`] when the settings use something this dibs does not know.
+pub fn settings_of(me: &Me) -> Result<ProjectSettings, Failure> {
+    me.project_settings().map_err(|error| {
+        Failure::config(
+            "unknown_settings",
+            sentence(&format!(
+                "the project's settings use something this dibs does not know ({error}); update dibs"
+            )),
+        )
+    })
 }
 
 async fn governed(ctx: &Context) -> Result<(Connection, Governed), Failure> {

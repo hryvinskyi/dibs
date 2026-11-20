@@ -1,5 +1,7 @@
 //! Who the caller is, items, claims, status, edit checks and grants.
 
+use std::collections::BTreeMap;
+
 use time::Duration;
 
 use dibs_client::ClientError;
@@ -86,6 +88,7 @@ fn an_item_is_created_once_found_by_its_reference_and_claimed() {
             .claim(
                 created.item.id,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: laptop.session_id,
                     areas: vec!["billing".to_owned()],
@@ -150,6 +153,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
             .claim(
                 first,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: alice_session,
                     areas: vec!["api:billing".to_owned()],
@@ -163,6 +167,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
             .claim(
                 first,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: bob_session,
                     areas: Vec::new(),
@@ -182,6 +187,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
             .claim(
                 second,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: bob_session,
                     areas: vec!["billing".to_owned()],
@@ -199,6 +205,7 @@ fn another_member_in_the_way_is_a_conflict_naming_them() {
             .claim(
                 second,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: bob_session,
                     areas: vec!["nowhere".to_owned()],
@@ -234,6 +241,7 @@ fn edit_checks_answer_per_path_and_ungoverned_paths_need_no_server() {
             .claim(
                 item,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: alice_session,
                     areas: vec!["billing".to_owned()],
@@ -310,6 +318,7 @@ fn a_holder_grants_another_member_edits_for_their_item() {
             who.claim(
                 item,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: session,
                     areas: vec![area.to_owned()],
@@ -376,6 +385,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
             .claim(
                 item,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: alice_session,
                     areas: vec!["checkout".to_owned()],
@@ -430,6 +440,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
         bob.claim(
             item,
             &ClaimRequest {
+                branches: BTreeMap::new(),
                 wide: None,
                 session_id: bob_session,
                 areas: Vec::new(),
@@ -483,6 +494,7 @@ fn the_ready_list_and_the_dependencies_are_read_and_written() {
             .claim(
                 waiting,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: session,
                     areas: Vec::new(),
@@ -531,6 +543,7 @@ fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
             .claim(
                 alices,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     session_id: alice_session,
                     areas: vec!["billing".to_owned()],
                     wide: None,
@@ -543,6 +556,7 @@ fn a_wide_claim_is_announced_held_until_acknowledged_and_shown_in_the_status() {
             .claim(
                 bobs,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     session_id: bob_session,
                     areas: Vec::new(),
                     wide: Some(WideRequest {
@@ -616,6 +630,7 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
             .claim(
                 item,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     wide: None,
                     session_id: laptop.session_id,
                     areas: vec!["billing".to_owned()],
@@ -629,6 +644,7 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
             .review(
                 item,
                 &ReviewRequest {
+                    head: None,
                     pr: pr.clone(),
                     more: true,
                 },
@@ -671,6 +687,7 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
             .review(
                 item,
                 &ReviewRequest {
+                    head: None,
                     pr: PrRef::parse("acme/api#8").unwrap(),
                     more: false,
                 },
@@ -678,6 +695,89 @@ fn a_claim_moves_to_review_and_another_members_edit_is_told_it_waits_for_the_mer
             .await
             .unwrap_err();
         assert_eq!(refused.code(), "not_holder");
+    });
+}
+
+#[test]
+fn a_named_branch_and_a_pull_requests_head_are_recorded_with_where_they_came_from() {
+    use dibs_client::api::{BranchSource, ReviewRequest};
+    use dibs_domain::radar::BranchName;
+    use dibs_domain::review::PrRef;
+
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    run(async {
+        let item = alice
+            .create_item(&new_item("gh:acme/api#42", "Refunds"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let laptop = session(&alice, "laptop/cli").await;
+        let api = RepoId::parse("api").unwrap();
+        let claimed = alice
+            .claim(
+                item,
+                &ClaimRequest {
+                    branches: BTreeMap::from([(
+                        "acme/api".to_owned(),
+                        BranchName::parse("alice/42-refunds").unwrap(),
+                    )]),
+                    session_id: laptop.session_id,
+                    areas: vec!["billing".to_owned()],
+                    wide: None,
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.claim.branches[&api].as_str(), "alice/42-refunds");
+        assert_eq!(claimed.claim.branch_sources[&api], BranchSource::Named);
+
+        let unlisted = alice
+            .claim(
+                item,
+                &ClaimRequest {
+                    branches: BTreeMap::from([(
+                        "acme/other".to_owned(),
+                        BranchName::parse("alice/42-refunds").unwrap(),
+                    )]),
+                    session_id: laptop.session_id,
+                    areas: Vec::new(),
+                    wide: None,
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(unlisted.code(), "unlisted_repository");
+        assert_eq!(
+            unlisted
+                .details()
+                .and_then(|details| details.repo.as_deref()),
+            Some("acme/other"),
+            "the repository as the claim named it"
+        );
+
+        let reviewed = alice
+            .review(
+                item,
+                &ReviewRequest {
+                    pr: PrRef::parse("acme/api#12").unwrap(),
+                    more: false,
+                    head: Some(BranchName::parse("alice/42-refunds-v2").unwrap()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            reviewed.claim.branches[&api].as_str(),
+            "alice/42-refunds-v2"
+        );
+        assert_eq!(
+            reviewed.claim.branch_sources[&api],
+            BranchSource::PullRequest
+        );
     });
 }
 
@@ -707,6 +807,7 @@ fn a_feature_claim_waits_for_a_debt_held_area_and_receives_it_when_it_is_narrowe
             .claim(
                 debt,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     session_id: alice_session,
                     areas: vec!["billing".to_owned()],
                     wide: None,
@@ -720,6 +821,7 @@ fn a_feature_claim_waits_for_a_debt_held_area_and_receives_it_when_it_is_narrowe
             .claim(
                 feature,
                 &ClaimRequest {
+                    branches: BTreeMap::new(),
                     session_id: bob_session,
                     areas: vec!["billing".to_owned()],
                     wide: None,
@@ -775,8 +877,6 @@ fn a_feature_claim_waits_for_a_debt_held_area_and_receives_it_when_it_is_narrowe
 
 #[test]
 fn a_heartbeat_carries_the_days_reports_and_feedback_is_kept_as_the_server_answers_it() {
-    use std::collections::BTreeMap;
-
     use dibs_client::api::{FeedbackAbout, FeedbackRequest};
     use dibs_domain::report::{
         DayCounts, DayReport, Feedback, FeedbackReason, RefusalId, ReportDay, Tally,
@@ -866,6 +966,7 @@ fn a_heartbeat_and_a_reserving_check_that_name_their_checkout_record_its_branch(
         bob.claim(
             item,
             &ClaimRequest {
+                branches: BTreeMap::new(),
                 wide: None,
                 session_id: desk,
                 areas: Vec::new(),

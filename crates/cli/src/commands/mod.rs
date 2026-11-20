@@ -32,7 +32,7 @@ pub async fn run(command: Command, ctx: &Context) -> Result<(), Failure> {
         Command::Ready => graph::ready(ctx).await,
         Command::Dep(command) => graph::dep(command, ctx).await,
         Command::New(args) => work::new(args, ctx).await,
-        Command::Claim(args) => work::claim(args, ctx).await,
+        Command::Claim(args) => work::claim(*args, ctx).await,
         Command::Takeover(args) => work::take_over(args, ctx).await,
         Command::Release(args) => work::release(args, ctx).await,
         Command::Done(args) => work::done(args, ctx).await,
