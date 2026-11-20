@@ -206,6 +206,10 @@ mod sqlite_file {
         assert!(plan.contains("dependencies_by_blocker"), "{plan}");
     }
 
+    /// The day's completions are read with one branch per kind that completes a claim — by its
+    /// holder, by a merge, by the tracker closing its item — joined with `UNION ALL`, each branch
+    /// an equality on the kind and a range on the time, so every branch searches the index on kind
+    /// and time and none scans the log.
     #[tokio::test]
     async fn completions_since_a_time_are_read_through_their_index() {
         let (_dir, path) = file();
@@ -216,6 +220,8 @@ mod sqlite_file {
              WHERE project_id = 1 AND kind = 'completed' AND at >= 0 \
              UNION ALL SELECT id, at FROM events \
              WHERE project_id = 1 AND kind = 'completed_by_merge' AND at >= 0 \
+             UNION ALL SELECT id, at FROM events \
+             WHERE project_id = 1 AND kind = 'completed_by_close' AND at >= 0 \
              ORDER BY at DESC, id DESC LIMIT 10",
         )
         .fetch_all(&mut connection)

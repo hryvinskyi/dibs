@@ -173,6 +173,90 @@ async fn a_complete_batch_closes_what_it_left_out() {
 }
 
 #[tokio::test]
+async fn a_batch_reporting_a_claimed_item_closed_completes_the_claim_and_tells_its_holder() {
+    let board = Board::new().await;
+    board.import(two_items()).await;
+    let item = board.id("gh:acme/web#2").await;
+    let session = board.world.session(&board.bob, "desktop").await;
+    let claimed = board
+        .world
+        .post(
+            &board.bob,
+            &format!("/v1/items/{item}/claim"),
+            json!({"session_id": session, "areas": ["search"]}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    let answer = board
+        .import(json!({"source": "board", "items": [
+            {"ref": "gh:acme/web#2", "title": "Search is slow", "closed": true}
+        ]}))
+        .await;
+    assert_eq!(
+        answer,
+        json!({
+            "items": [{"ref": "gh:acme/web#2", "outcome": "updated", "id": item,
+                       "dropped_hints": []}],
+            "closed": [],
+            "edges_added": 0,
+            "edges_removed": 0,
+            "refused_edges": []
+        }),
+        "the answer is what it always was"
+    );
+    let claims = board.world.get(&board.alice, "/v1/claims").await;
+    assert_eq!(claims.status, StatusCode::OK, "{}", claims.body);
+    assert!(
+        claims.body["claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|claim| claim["item"] != item),
+        "{}",
+        claims.body
+    );
+    let shown = board
+        .world
+        .get(&board.alice, &format!("/v1/items/{item}"))
+        .await;
+    assert_eq!(shown.body["item"]["status"], "done");
+    assert_eq!(shown.body["item"]["closed"], true);
+    let events = board.world.get(&board.alice, "/v1/events").await;
+    let completions: Vec<&Value> = events.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "completed_by_close")
+        .collect();
+    assert_eq!(completions.len(), 1, "{}", events.body);
+    assert_eq!(completions[0]["payload"]["item"], item);
+    assert_eq!(
+        completions[0]["payload"]["member"],
+        board.bob.actor.member.get()
+    );
+    let inbox = board.world.get(&board.bob, "/v1/inbox").await;
+    let thread = &inbox.body["threads"][0]["thread"];
+    assert_eq!(thread["subject"], "Done in the tracker: Search is slow");
+    let read = board
+        .world
+        .get(
+            &board.bob,
+            &format!("/v1/threads/{}", thread["id"].as_u64().unwrap()),
+        )
+        .await;
+    assert!(
+        read.body["messages"][0]["body"]
+            .as_str()
+            .unwrap()
+            .starts_with(
+                "Work item gh:acme/web#2 \"Search is slow\" was closed in its tracker; the claim on it is done."
+            ),
+        "{}",
+        read.body
+    );
+}
+
+#[tokio::test]
 async fn a_batch_is_refused_whole_for_its_shape_and_by_field_for_its_values() {
     let board = Board::new().await;
     let world = &board.world;

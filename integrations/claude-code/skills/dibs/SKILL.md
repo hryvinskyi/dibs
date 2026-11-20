@@ -170,7 +170,8 @@ serve many teams:
   edits the files under review, and it needs no heartbeat while the pull request is open. You may go on pushing review
   fixes to its branch. Recorded the wrong one? Remove it: `dibs_review` with `drop: true`, or
   `dibs claim review <item> --drop-pr <owner>/<repo>#<number>`.
-- The merge into a protected branch completes your claim; dibs tells you. When more pull requests of the same item
+- The merge into a protected branch completes your claim; dibs tells you. A ticket closed in its tracker completes your
+  claim too, at the next import, and dibs tells you. When more pull requests of the same item
   follow — a change in two repositories, or a feature landing in steps — record each with `more` (`--more`): the merge
   then returns the claim to you, with its areas, for the next one.
 - A pull request closed without merging, or merged into a branch that is not protected (one stacked on another), does
@@ -210,8 +211,9 @@ that still stand. Your own claims never overlap each other.
 - `dibs_done` when the work shipped without a pull request; a merge of the pull request you recorded completes the claim
   for you.
 - Work handed on to be checked is not done yet: give its areas up (`dibs_narrow`) and keep the claim, so the files are
-  free and the work is still yours when it comes back. A done item whose tracker still has it open can be claimed
-  again, and the claim brings it back; one the tracker closed, or a local item, stays done.
+  free and the work is still yours when it comes back. If its tracker closes the ticket meanwhile, the next import
+  completes the claim; once the tracker reopens it, you can claim it again. A done item whose tracker still has it open
+  can be claimed again, and the claim brings it back; one the tracker closed, or a local item, stays done.
 
 A claim stays live while your sessions send heartbeats; dibs sends them in the background. One that goes without a
 heartbeat for the project's `stale_after` becomes stale; a claim in review never does.

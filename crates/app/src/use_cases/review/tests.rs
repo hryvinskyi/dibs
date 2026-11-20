@@ -3,20 +3,23 @@
 
 use time::Duration;
 
+use dibs_domain::claim::Claim;
 use dibs_domain::event::{
     CompletedByMerge, EventKind, PrReported, ReviewEnded, ReviewStarted as Started,
 };
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
-use dibs_domain::message::Author;
+use dibs_domain::message::{Author, Importance};
 use dibs_domain::review::{ClaimState, PrRef};
 use dibs_domain::slot::{Purpose, SlotName};
 
 use super::*;
+use crate::records::MessageRecord;
 use crate::use_cases::testing::{Env, Person};
+use crate::use_cases::writing::TITLE_NOTE;
 use crate::use_cases::{
-    ClaimItem, ClaimItemInput, HoldMode, ListThreads, ReleaseSlot, ReleaseSlotInput, Status,
-    TakeSlot, TakeSlotInput, WideInput,
+    ClaimItem, ClaimItemInput, HoldMode, ListThreads, ReadThread, ReleaseSlot, ReleaseSlotInput,
+    Status, TakeSlot, TakeSlotInput, WideInput,
 };
 
 const SETTINGS: &str = r#"{
@@ -106,6 +109,29 @@ async fn subjects(env: &Env, who: &Person) -> Vec<String> {
         .into_iter()
         .map(|summary| summary.thread.record.subject.to_string())
         .collect()
+}
+
+/// The one message of the one conversation `who` can read.
+async fn the_notice(env: &Env, who: &Person) -> MessageRecord {
+    let threads = ListThreads::new(&env.deps)
+        .execute(&who.actor, None)
+        .await
+        .unwrap();
+    assert_eq!(threads.len(), 1, "one conversation");
+    let view = ReadThread::new(&env.deps)
+        .execute(&who.actor, threads[0].thread.record.id)
+        .await
+        .unwrap();
+    assert_eq!(view.messages.len(), 1, "one message");
+    view.messages[0].record.clone()
+}
+
+/// Asserts that `notice` is a message of normal importance asking no acknowledgement, whose text
+/// is `lead` followed by the line on whose words a title is.
+fn assert_told(notice: &MessageRecord, lead: &str) {
+    assert_eq!(notice.body.as_str(), format!("{lead}\n{TITLE_NOTE}"));
+    assert_eq!(notice.importance, Importance::Normal);
+    assert!(!notice.ack_required, "it asks no acknowledgement");
 }
 
 #[tokio::test]
@@ -244,6 +270,10 @@ async fn the_last_recorded_pull_request_merged_completes_the_claim_and_tells_its
         subjects(&env, &env.bob).await,
         ["Done by merge: Work on gh:acme/widgets#42"]
     );
+    assert_told(
+        &the_notice(&env, &env.bob).await,
+        "Pull request acme/widgets#7 merged; the claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" is done. Its areas are free and the item is done.",
+    );
     let threads = ListThreads::new(&env.deps)
         .execute(&env.bob.actor, None)
         .await
@@ -352,6 +382,10 @@ async fn a_pull_request_closed_unmerged_returns_the_claim_to_work_and_says_so() 
     assert_eq!(
         subjects(&env, &env.bob).await,
         ["Back from review: Work on gh:acme/widgets#42"]
+    );
+    assert_told(
+        &the_notice(&env, &env.bob).await,
+        "Pull request acme/widgets#7 was closed without being merged, so your claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" is no longer in review. You still hold it and its areas; work on it again, record the pull request that brings the work in, or release it.",
     );
 }
 
@@ -540,6 +574,10 @@ async fn a_pull_request_closed_while_another_waits_is_told_and_the_other_merge_n
     assert_eq!(
         subjects(&env, &env.bob).await,
         ["Set aside in review: Work on gh:acme/widgets#42"]
+    );
+    assert_told(
+        &the_notice(&env, &env.bob).await,
+        "Pull request acme/web#3 was closed without being merged. Your claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" stays in review on acme/api#7, but their merges no longer complete it: record the pull request that brings this work in (dibs claim review gh:acme/widgets#42 --pr <owner>/<repo>#<number>), or mark the item done yourself once it is in.",
     );
     assert_eq!(
         report(&env, "acme/api#7", merged()).await,

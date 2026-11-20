@@ -154,10 +154,11 @@ revokes their tokens and releases everything they held at once. With the Claude 
 - **Review.** Work reaches a protected branch through pull requests. A member records the pull request of their claim
   (`dibs claim review`); the claim is then *in review*: it keeps its areas, so nobody edits the files under review, and
   never goes stale while it waits. The merge of its last recorded pull request completes it, reported by an integration
-  that watches the forge; with `--more`, the merge returns it to work for the next pull request of the item. A close, or a
-  merge into a branch that is not protected, delivers nothing and returns the claim to its holder. Branch names and how
-  a pull request names its ticket are a team's own conventions; the agents' workflow suggests defaults (`bob/42-slug`,
-  `Refs #42`) that many teams use.
+  that watches the forge; with `--more`, the merge returns it to work for the next pull request of the item. A pull
+  request closed without a merge, or merged into a branch that is not protected, delivers nothing and returns the claim
+  to its holder. A ticket its tracker closes completes its claim at the next import, whatever the claim's state, and its
+  holder is told. Branch names and how a pull request names its ticket are a team's own conventions; the agents'
+  workflow suggests defaults (`bob/42-slug`, `Refs #42`) that many teams use.
 - **Overlap.** Each claim records the branch its holder's checkout is on, and an integration reports what each branch
   changes against its base (its *footprint*). When two members' branches change one file, when one changes a published
   contract (`contracts`) that the other's area depends on (`area_deps`), or when a merge into the base changes files a
@@ -692,7 +693,8 @@ Every route, request, response and error code is in [docs/api.md](docs/api.md). 
 token in the `Authorization` header, errors as `{ "error": { "code", "message" } }` with a stable `code`, and the
 project's event log as a page (`GET /v1/events`) or as server-sent events (`GET /v1/events/stream`). An integration
 worker feeds the project from an outside tracker with an `importer` token: it sends its whole view to `PUT /v1/items` as
-often as it likes, and a view equal to what is stored changes nothing. The same token reports merged and closed pull
+often as it likes, and a view equal to what is stored changes nothing, except that it completes a claim standing on an
+item it reports closed. The same token reports merged and closed pull
 requests (`POST /v1/prs/merged`, `POST /v1/prs/closed`), lists the claims in review (`GET /v1/review-claims`) and reads
 the status to set on pull requests (`GET /v1/pr-status`), lists the live claims and their branches
 (`GET /v1/claims`), and reports what each claim's branch changes (`PUT /v1/items/{id}/footprint`); each report may

@@ -1791,6 +1791,21 @@ mod contract {
             ],
             "a merge's completion is one too"
         );
+        tx.append_event(
+            A,
+            at(36),
+            &EventKind::CompletedByClose(dibs_domain::event::CompletedByClose {
+                item: SECOND,
+                member: ALICE,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tx.completions_since(A, at(35), 10).await.unwrap(),
+            vec![record(SECOND, ALICE, 36), record(FIRST, BOB, 35)],
+            "a tracker's close is one too"
+        );
     }
 
     async fn events_keep_every_field(store: Arc<dyn Store>) {
@@ -1827,6 +1842,10 @@ mod contract {
                 thread: ThreadId(81),
                 message: MessageId(91),
                 author: Some(BOB),
+            }),
+            EventKind::CompletedByClose(dibs_domain::event::CompletedByClose {
+                item: FIRST,
+                member: ALICE,
             }),
         ];
         let mut tx = store.begin().await.unwrap();

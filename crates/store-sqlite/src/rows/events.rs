@@ -152,13 +152,17 @@ impl EventRows for SqliteTx {
              UNION ALL \
              SELECT id, project_id, kind, payload, at FROM events \
              WHERE project_id = ?1 AND kind = ?5 AND at >= ?3 \
+             UNION ALL \
+             SELECT id, project_id, kind, payload, at FROM events \
+             WHERE project_id = ?1 AND kind = ?6 AND at >= ?3 \
              ORDER BY at DESC, id DESC LIMIT ?4",
         )
         .bind(int(project.get())?)
         .bind(EventKind::COMPLETION_NAMES[0])
         .bind(nanos(since)?)
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .bind(EventKind::COMPLETION_NAMES[1]);
+        .bind(EventKind::COMPLETION_NAMES[1])
+        .bind(EventKind::COMPLETION_NAMES[2]);
         self.all(statement)
             .await?
             .iter()

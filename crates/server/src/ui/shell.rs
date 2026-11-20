@@ -32,8 +32,8 @@ use crate::ui::slots::{SlotRow, SlotState};
 /// wide claim may edit in, the pull requests a claim waits in and the branch it works on.
 const STATUS_CHANGES: &str = "claimed renewed taken_over released completed force_released \
      reserved wide_claimed wide_granted_by_ack granted grant_revoked review_started pr_merged \
-     pr_closed pr_dropped review_ended completed_by_merge branch_recorded area_handed_over \
-     wait_withdrawn claim_narrowed";
+     pr_closed pr_dropped review_ended completed_by_merge completed_by_close branch_recorded \
+     area_handed_over wait_withdrawn claim_narrowed";
 
 /// The kinds of event that change the items, the slots, the worktrees, the escalations and the
 /// overlaps between claims.

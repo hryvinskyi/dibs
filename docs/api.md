@@ -207,8 +207,8 @@ summary  { thread, messages, unread, last_message_at | null, importance, awaitin
 `repo` of an item is the project's repository that its reference names, when the project lists it; `unlisted_remote` is
 the repository the reference names when the project does not list it. `priority` (0 is soonest, 4 latest, 2 when nothing
 said otherwise), `areas_hint` (the areas the work will probably touch; advisory, no claim declares them),
-`source_status` (the outside tracker's own state, as it shows it), `closed` (the tracker closed the item; a claim on it
-stays) and `source` (the importer's source that lists it) are what an importer reports. An *item ref* is how an answer
+`source_status` (the outside tracker's own state, as it shows it), `closed` (the tracker closed the item; the import
+that reports it closed completes a claim on it) and `source` (the importer's source that lists it) are what an importer reports. An *item ref* is how an answer
 mentions another item: `link` is the tracker's page for its reference (a `gh` reference links to its GitHub issue), or
 `null`.
 
@@ -218,7 +218,9 @@ them to acknowledge it; `acks` is in a thread read only, for a message that asks
 **What dibs writes.** Some messages no member typed: a wide claim's announcements, the request to hand an area over to a
 feature claim and the notice that it was handed over, the notice to a member whose stale
 claim was taken over, whose slot hold an admin ended or another member took over, whose slot hold expired or whose offer
-lapsed, whose worktree hold an admin ended, an escalation, and the notice that a member left. dibs writes them itself, in the project's name: `author` is
+lapsed, whose worktree hold an admin ended, the notice to a claim's holder that its pull request merged, was set aside
+or left review, or that its ticket was closed in its tracker, an escalation, and the notice that a member left. dibs
+writes them itself, in the project's name: `author` is
 `"dibs"`, `system` is `true` and `label` is `dibs`. When a member's action caused one, that member starts its thread
 (`thread.author` is their handle, `thread.system` is `false`) and the message speaks for them: it reaches the thread's
 other readers, never them, and asks them nothing. When nobody acted (an expiry, a lapse, the operator's command), dibs
@@ -346,18 +348,24 @@ The rules, applied in one transaction:
 
 - An item is keyed by its reference: one the project does not have is created (an event `item_created`), one it has is
   updated only when a fact changed (`item_updated`). A batch equal to what is stored writes nothing and appends no
-  event, so a worker may send its view as often as it likes.
+  event, unless a claim stands on an item it reports closed (below), so a worker may send its view as often as it
+  likes.
 - An area of `areas_hint` the project does not declare is left out and named in `dropped_hints`, never refused. A bare
   name is the item's own repository's area, else the one area of that name the project declares.
-- A `closed` item the project does not know is not created (`skipped_closed`); a known one is marked closed. Closing
-  never touches a claim.
+- A `closed` item the project does not know is not created (`skipped_closed`); a known one is marked closed.
 - `blocked_by` replaces the item's *imported* edges; an edge a person added with `POST …/dependencies` stays. An edge to
   a reference neither the project nor the batch knows is refused on its own (`unknown_blocker`), and so is one that
   would make two items wait for each other (`dependency_cycle`) or an item wait for itself (`self_dependency`); the rest
   of the batch applies. A closed blocker the project does not know blocks nothing and is dropped.
 - With `"complete": true` (the worker read every page without an error; it needs `source`), every open item of that
   source the batch did not mention is marked closed. A partial read never sends `complete`.
-- Nothing in a batch claims, releases or completes anything.
+- A claim on an item the batch reports closed — listed or carried as a blocker, whether that changes the item or it was
+  closed already — or on an item a complete batch closes because it left it out, is **completed**, whatever its state
+  (working, in review, stale): its areas are free, the grants on it end, what other claims waited for it to hand over
+  moves to them, the item is `done`, an event `completed_by_close` is appended, and its holder is sent one message from
+  dibs, "Work item … was closed in its tracker; the claim on it is done". The items, closures and edges are written
+  first, all in the batch's transaction. A claim on an item the batch reports open or does not mention is left as it
+  is, and nothing in a batch claims or releases anything. The answer does not list the completed claims; the log does.
 
 It answers `200`:
 
@@ -629,6 +637,11 @@ After a merge that delivers, with other pull requests recorded, the claim stays 
 it **completes** (`completed`, event `completed_by_merge`: areas free, grants on it ended, the item done, counted in the
 day's completions) and its holder is sent one message from dibs, "Pull request … merged; the claim on … is done"; or,
 when `more` was set, it is worked on again with its areas, seen now (`working`, `review_ended`).
+
+A claim also completes when the tracker closes its item, whatever its state, in review with more pull requests to come
+included: the next `PUT /v1/items` that reports the item closed completes it (event `completed_by_close`, with the same
+consequences and counted in the day's completions too), and its holder is sent one message from dibs, "Work item … was
+closed in its tracker; the claim on it is done". See [Items](#items).
 
 `POST /v1/prs/closed`, body `{ "pr": "acme/api#12" }`: the pull request was closed without being merged and leaves its
 claim (`pr_closed`). Its work is not in, so the claim's other pull requests can no longer complete it: with others left
@@ -1141,6 +1154,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `pr_merged`, `pr_closed`, `pr_dropped` | `item`, `member`, `pr` (`pr_dropped`: its holder removed it) |
 | `review_ended` | `item`, `member` (the claim is worked on again) |
 | `completed_by_merge` | `item`, `member` (the merge of its last pull request completed the claim) |
+| `completed_by_close` | `item`, `member` (the tracker closed the claim's item; the server completed the claim) |
 | `branch_recorded` | `item`, `member`, `repo`, `branch` (the branch the claim's work is on there now) |
 | `footprint_changed` | `item`, `member`, `repo`, `branch`, `paths` (how many), `truncated` |
 | `overlap_found` | `kind` (`same_file`, `contract`, `main_moved`), `items`, `pr` (`main_moved`; else `null`), `paths` (the first 100) |

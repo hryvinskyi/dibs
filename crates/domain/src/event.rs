@@ -133,6 +133,8 @@ pub enum EventKind {
     ReviewEnded(ReviewEnded),
     /// The merge of a claim's last recorded pull request completed it; the item is done.
     CompletedByMerge(CompletedByMerge),
+    /// The tracker closed a claim's item and the server completed the claim; the item is done.
+    CompletedByClose(CompletedByClose),
     /// A claim's work was seen on a branch of a repository it did not record there before.
     BranchRecorded(BranchRecorded),
     /// An integration reported what a claim's branch changes, and it differs from the report
@@ -214,6 +216,7 @@ impl EventKind {
             Self::PrDropped(_) => "pr_dropped",
             Self::ReviewEnded(_) => "review_ended",
             Self::CompletedByMerge(_) => "completed_by_merge",
+            Self::CompletedByClose(_) => "completed_by_close",
             Self::BranchRecorded(_) => "branch_recorded",
             Self::FootprintChanged(_) => "footprint_changed",
             Self::OverlapFound(_) => "overlap_found",
@@ -231,17 +234,19 @@ impl EventKind {
     }
 
     /// The item done and the member whose claim completed it, for the kinds that complete a claim:
-    /// by its holder, or by the merge of its last pull request.
+    /// by its holder, by the merge of its last pull request, or by the tracker closing its item.
     pub const fn completion(&self) -> Option<(ItemId, MemberId)> {
         match self {
             Self::Completed(Completed { item, member })
-            | Self::CompletedByMerge(CompletedByMerge { item, member }) => Some((*item, *member)),
+            | Self::CompletedByMerge(CompletedByMerge { item, member })
+            | Self::CompletedByClose(CompletedByClose { item, member }) => Some((*item, *member)),
             _ => None,
         }
     }
 
     /// The names of the kinds [`EventKind::completion`] answers for.
-    pub const COMPLETION_NAMES: [&'static str; 2] = ["completed", "completed_by_merge"];
+    pub const COMPLETION_NAMES: [&'static str; 3] =
+        ["completed", "completed_by_merge", "completed_by_close"];
 
     /// Every member the event names.
     pub fn members(&self) -> BTreeSet<MemberId> {
@@ -286,6 +291,7 @@ impl EventKind {
             Self::PrMerged(e) | Self::PrClosed(e) | Self::PrDropped(e) => vec![Some(e.member)],
             Self::ReviewEnded(e) => vec![Some(e.member)],
             Self::CompletedByMerge(e) => vec![Some(e.member)],
+            Self::CompletedByClose(e) => vec![Some(e.member)],
             Self::BranchRecorded(e) => vec![Some(e.member)],
             Self::FootprintChanged(e) => vec![Some(e.member)],
             Self::OverlapFound(_)
@@ -348,6 +354,7 @@ impl EventKind {
             | Self::PrDropped(_)
             | Self::ReviewEnded(_)
             | Self::CompletedByMerge(_)
+            | Self::CompletedByClose(_)
             | Self::BranchRecorded(_)
             | Self::FootprintChanged(_)
             | Self::OverlapFound(_)
@@ -415,6 +422,7 @@ impl EventKind {
             | Self::PrDropped(_)
             | Self::ReviewEnded(_)
             | Self::CompletedByMerge(_)
+            | Self::CompletedByClose(_)
             | Self::BranchRecorded(_)
             | Self::FootprintChanged(_)
             | Self::OverlapFound(_)
@@ -500,6 +508,7 @@ impl EventKind {
             | Self::PrDropped(_)
             | Self::ReviewEnded(_)
             | Self::CompletedByMerge(_)
+            | Self::CompletedByClose(_)
             | Self::BranchRecorded(_)
             | Self::FootprintChanged(_)
             | Self::OverlapFound(_)
@@ -908,6 +917,15 @@ pub struct ReviewEnded {
 /// A merge completed a claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedByMerge {
+    /// The item.
+    pub item: ItemId,
+    /// The member who held it.
+    pub member: MemberId,
+}
+
+/// The tracker closed a claim's item, and the server completed the claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedByClose {
     /// The item.
     pub item: ItemId,
     /// The member who held it.
@@ -1368,6 +1386,10 @@ mod tests {
                 item,
                 member: ALICE,
             }),
+            EventKind::CompletedByClose(CompletedByClose {
+                item,
+                member: ALICE,
+            }),
         ]
     }
 
@@ -1725,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn a_claim_completes_by_its_holder_or_by_a_merge_and_nothing_else_does() {
+    fn a_claim_completes_by_its_holder_by_a_merge_or_by_its_trackers_close_and_nothing_else_does() {
         let completions: Vec<(&str, Option<(ItemId, MemberId)>)> = every_kind()
             .iter()
             .chain(review_kinds().iter())
@@ -1737,11 +1759,12 @@ mod tests {
             [
                 ("completed", Some((ItemId(4), BOB))),
                 ("completed_by_merge", Some((ItemId(4), ALICE))),
+                ("completed_by_close", Some((ItemId(4), ALICE))),
             ]
         );
         assert_eq!(
             EventKind::COMPLETION_NAMES,
-            ["completed", "completed_by_merge"]
+            ["completed", "completed_by_merge", "completed_by_close"]
         );
     }
 

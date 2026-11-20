@@ -1,9 +1,10 @@
 //! An importer's batch: the items an outside source lists, with the blockers they wait for, and
 //! the plan that brings the project's items and imported dependencies in line with it.
 //!
-//! The plan changes only what differs from what is stored, so a batch equal to the stored state
-//! plans nothing. It never touches a claim. An importer sends its whole view again and again; each
-//! rule below keeps a repeated or partial view from doing harm:
+//! The plan changes only what differs from what is stored, and it also names the known items the
+//! source reports closed, whose claims the caller ends; a batch equal to the stored state changes
+//! no item. An importer sends its whole view again and again; each rule below keeps a repeated or
+//! partial view from doing harm:
 //!
 //! - an item the source closed that the project does not know is not created;
 //! - an edge to a reference neither the project nor the batch knows is refused on its own, while a
@@ -193,6 +194,14 @@ impl ItemChange {
             Self::SkippedClosed | Self::Refused(_) => None,
         }
     }
+
+    /// The item's id, when it existed before the batch.
+    pub fn known_id(&self) -> Option<ItemId> {
+        match self {
+            Self::Update { id, .. } | Self::Unchanged { id } => Some(*id),
+            Self::Create { .. } | Self::SkippedClosed | Self::Refused(_) => None,
+        }
+    }
 }
 
 /// One reported item and what the plan does with it.
@@ -200,6 +209,8 @@ impl ItemChange {
 pub struct PlannedItem {
     /// Its reference.
     pub reference: ExternalRef,
+    /// Whether the batch reports it closed, as a listed item or as a blocker.
+    pub closed: bool,
     /// What happens to it.
     pub change: ItemChange,
     /// The areas of its hint left out.
@@ -253,6 +264,26 @@ pub struct ImportPlan {
     pub removed: Vec<Dependency>,
     /// The edges not recorded, each with why.
     pub refused_edges: Vec<RefusedEdge>,
+}
+
+impl ImportPlan {
+    /// The known items the batch reports closed: each reported item that exists and that the batch
+    /// reports closed, whether that changes it or it was closed already, in the order reported,
+    /// then each item a complete batch closes because it left it out. Each id comes once. An item
+    /// the plan creates is not in it, nor one it skips or refuses.
+    pub fn closed_items(&self) -> Vec<ItemId> {
+        let reported = self
+            .items
+            .iter()
+            .filter(|planned| planned.closed)
+            .filter_map(|planned| planned.change.known_id());
+        let omitted = self.closed.iter().map(|closure| closure.id);
+        let mut ids = Vec::new();
+        for id in reported.chain(omitted) {
+            push_once(&mut ids, id);
+        }
+        ids
+    }
 }
 
 /// What a batch is compared with.
@@ -333,6 +364,7 @@ fn plan_item(
         if reported.closed {
             return PlannedItem {
                 reference,
+                closed: reported.closed,
                 change: ItemChange::SkippedClosed,
                 dropped_hints: Vec::new(),
             };
@@ -347,6 +379,7 @@ fn plan_item(
             Err(refused) => {
                 return PlannedItem {
                     reference,
+                    closed: reported.closed,
                     change: ItemChange::Refused(refused),
                     dropped_hints: Vec::new(),
                 };
@@ -357,6 +390,7 @@ fn plan_item(
         let source = reported.listing.as_ref().and(batch.source().cloned());
         return PlannedItem {
             reference,
+            closed: reported.closed,
             change: ItemChange::Create {
                 id: new_id(),
                 repository,
@@ -383,6 +417,7 @@ fn plan_item(
     };
     PlannedItem {
         reference,
+        closed: reported.closed,
         change,
         dropped_hints,
     }
@@ -907,6 +942,96 @@ mod tests {
         assert!(planned.closed[0].meta.closed);
         let partial = batch(vec![listed("gh:acme/web#1", &[])]);
         assert!(plan(&partial, &stored, &[]).plan.closed.is_empty());
+    }
+
+    fn closed(item: ReportedItem) -> ReportedItem {
+        ReportedItem {
+            closed: true,
+            ..item
+        }
+    }
+
+    #[test]
+    fn the_closed_items_are_the_known_ones_reported_closed_and_the_ones_left_out() {
+        let mut already = known(2, "gh:acme/web#2", board());
+        already.meta.closed = true;
+        let stored = [
+            known(1, "gh:acme/web#1", board()),
+            already,
+            known(3, "gh:acme/web#3", board()),
+            known(4, "gh:acme/web#4", board()),
+            known(5, "gh:acme/web#5", board()),
+        ];
+        let complete = ImportBatch::new(
+            board(),
+            true,
+            vec![
+                closed(listed("gh:acme/web#2", &[])),
+                closed(listed("gh:acme/web#1", &[])),
+                listed("gh:acme/web#3", &[]),
+                closed(listed("gh:acme/web#9", &[])),
+                listed("gh:acme/web#10", &[]),
+                closed(blocker("gh:acme/web#5", true)),
+            ],
+        )
+        .unwrap();
+        let planned = plan(&complete, &stored, &[]).plan;
+        assert_eq!(
+            planned.items[0].change,
+            ItemChange::Unchanged { id: ItemId(2) },
+            "already closed"
+        );
+        assert!(matches!(planned.items[1].change, ItemChange::Update { .. }));
+        assert_eq!(planned.items[3].change, ItemChange::SkippedClosed);
+        assert!(matches!(planned.items[4].change, ItemChange::Create { .. }));
+        assert_eq!(
+            planned.closed_items(),
+            [ItemId(2), ItemId(1), ItemId(5), ItemId(4)],
+            "the reported ones in the order reported, then the one the batch left out"
+        );
+    }
+
+    #[test]
+    fn a_known_item_reported_closed_only_as_a_blocker_is_a_closed_item() {
+        let stored = [
+            known(1, "gh:acme/web#1", board()),
+            known(2, "gh:acme/api#8", None),
+        ];
+        let planned = plan(
+            &batch(vec![
+                listed("gh:acme/web#1", &["gh:acme/api#8"]),
+                blocker("gh:acme/api#8", true),
+            ]),
+            &stored,
+            &[],
+        )
+        .plan;
+        assert!(planned.items[1].closed);
+        assert_eq!(planned.closed_items(), [ItemId(2)]);
+    }
+
+    #[test]
+    fn a_known_item_reported_closed_again_unchanged_is_still_a_closed_item() {
+        let mut already = known(1, "gh:acme/web#1", board());
+        already.meta.closed = true;
+        let planned = plan(
+            &batch(vec![closed(listed("gh:acme/web#1", &[]))]),
+            &[already],
+            &[],
+        )
+        .plan;
+        assert_eq!(
+            planned.items[0].change,
+            ItemChange::Unchanged { id: ItemId(1) }
+        );
+        assert_eq!(planned.closed_items(), [ItemId(1)]);
+    }
+
+    #[test]
+    fn a_batch_reporting_nothing_closed_names_no_closed_item() {
+        let stored = [known(1, "gh:acme/web#1", board())];
+        let planned = plan(&batch(vec![listed("gh:acme/web#1", &[])]), &stored, &[]).plan;
+        assert!(planned.closed_items().is_empty());
     }
 
     #[test]

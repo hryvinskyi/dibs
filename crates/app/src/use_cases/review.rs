@@ -6,12 +6,10 @@ use std::sync::Arc;
 
 use time::OffsetDateTime;
 
-use dibs_domain::claim::Claim;
 use dibs_domain::event::{self, EventKind, PrReported};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
-use dibs_domain::message::{Author, Importance, Recipients};
 use dibs_domain::paths::RelPath;
 use dibs_domain::pr_status::{PrState, pr_status};
 use dibs_domain::radar::BranchName;
@@ -26,13 +24,12 @@ use crate::dependencies::Dependencies;
 use crate::error::{AppError, Missing};
 use crate::named::{ItemName, NamedClaim, Names, refuse};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
-use crate::use_cases::claim_ending::{Ending, end_claim};
+use crate::use_cases::claim_ending::{Ending, end_claim, tell_holder};
 use crate::use_cases::common::existing_item;
 use crate::use_cases::handover::Handovers;
 use crate::use_cases::radar::{MergedInto, Radar};
 use crate::use_cases::slots::Scene;
 use crate::use_cases::wide_asks::Announcer;
-use crate::use_cases::writing::{Posted, SystemPost, titled_body};
 use crate::work::Work;
 
 /// What a holder asks: record this pull request on their claim of `item`.
@@ -312,7 +309,7 @@ impl ReportPr {
                             .join(", ")
                     })
                     .unwrap_or_default();
-                self.tell(&mut work, &claim, "Set aside in review: ", |item, title| {
+                tell_holder(&mut work, &*self.ids, &self.ref_schemes, &claim, "Set aside in review: ", |item, title| {
                     format!(
                         "Pull request {pr} {how}. Your claim on work item {item} \"{title}\" stays in review on {waiting}, but their merges no longer complete it: record the pull request that brings this work in (dibs claim review {item} --pr <owner>/<repo>#<number>), or mark the item done yourself once it is in."
                     )
@@ -331,7 +328,7 @@ impl ReportPr {
                 )
                 .await?;
                 if !end.delivers() {
-                    self.tell(&mut work, &claim, "Back from review: ", |item, title| {
+                    tell_holder(&mut work, &*self.ids, &self.ref_schemes, &claim, "Back from review: ", |item, title| {
                         format!(
                             "Pull request {pr} {how}, so your claim on work item {item} \"{title}\" is no longer in review. You still hold it and its areas; work on it again, record the pull request that brings the work in, or release it."
                         )
@@ -368,7 +365,7 @@ impl ReportPr {
                     },
                 )
                 .await?;
-                self.tell(&mut work, &claim, "Done by merge: ", |item, title| {
+                tell_holder(&mut work, &*self.ids, &self.ref_schemes, &claim, "Done by merge: ", |item, title| {
                     format!(
                         "Pull request {pr} merged; the claim on work item {item} \"{title}\" is done. Its areas are free and the item is done."
                     )
@@ -391,37 +388,6 @@ impl ReportPr {
         }
         work.commit(&*self.notifier).await?;
         Ok(outcome)
-    }
-
-    /// Tells the claim's holder, in a message from dibs, what became of their pull request: the
-    /// subject starts with `subject` and names the item's title, and `lead` writes the text from
-    /// how the item is named and its title.
-    async fn tell(
-        &self,
-        work: &mut Work,
-        claim: &Claim,
-        subject: &str,
-        lead: impl FnOnce(&str, &str) -> String,
-        now: OffsetDateTime,
-    ) -> Result<(), AppError> {
-        let item = ItemName::of(&existing_item(work, claim.item).await?, &self.ref_schemes);
-        let named = item
-            .external_ref
-            .as_ref()
-            .map_or_else(|| format!("#{}", item.id), ToString::to_string);
-        SystemPost {
-            ids: Posted::next(&*self.ids),
-            subject: format!("{subject}{}", item.title),
-            item: Some(item.id),
-            on_behalf_of: Author::System,
-            to: Recipients::Members([claim.member].into()),
-            body: titled_body(&lead(&named, item.title.as_str()), None)?,
-            importance: Importance::Normal,
-            ack_required: false,
-        }
-        .send(work, now)
-        .await?;
-        Ok(())
     }
 }
 

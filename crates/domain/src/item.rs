@@ -371,8 +371,8 @@ string_value!(SourceId, SourceIdError);
 /// The facts about an item an importer supplies: its title, the areas it will probably touch, how
 /// soon it should be done, the tracker's own state of it, and whether the tracker closed it.
 ///
-/// `closed` is the tracker's word, not a claim's end: an item closed upstream keeps any claim on
-/// it, and leaves the ready list.
+/// `closed` is the tracker's word: the import that reports an item closed completes the claim
+/// standing on it, and a closed item leaves the ready list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemMeta {
     /// The title.
