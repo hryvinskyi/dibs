@@ -633,7 +633,7 @@ pub enum WorktreeCommand {
 /// `dibs worktree take`.
 #[derive(Debug, Args)]
 pub struct WorktreeTakeArgs {
-    /// Why you take it, as every member reads it on the board.
+    /// Why you take it, as every member reads it under Worktrees held on the pages.
     #[arg(long, value_parser = Purpose::parse)]
     pub purpose: Option<Purpose>,
     /// The work item it is for: its local id or its reference.

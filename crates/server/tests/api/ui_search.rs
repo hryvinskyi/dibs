@@ -438,3 +438,123 @@ async fn every_page_carries_the_palette() {
         );
     }
 }
+
+#[tokio::test]
+async fn an_integration_account_is_not_listed_among_the_people() {
+    let seeded = Seeded::new().await;
+    let page = seeded.page("/ui/search?q=bot").await;
+    assert!(
+        !kinds(&page).contains(&"People".to_owned()),
+        "{}",
+        page.text
+    );
+    assert!(!titles(&page).contains(&"bot".to_owned()), "{}", page.text);
+    assert!(
+        !heres(&page).contains(&"/ui/claims?who=bot".to_owned()),
+        "{}",
+        page.text
+    );
+    let page = seeded.page("/ui/search?q=bob").await;
+    assert!(kinds(&page).contains(&"People".to_owned()), "{}", page.text);
+}
+
+#[tokio::test]
+async fn a_merged_pull_request_leads_to_the_claims_whose_base_it_moved() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    let bot = world.member(&alice, "bot", Role::Importer).await;
+    world.settings(&alice, settings()).await;
+    let mut moved = Vec::new();
+    for (who, session_name, number, area, branch, file) in [
+        (
+            &bob,
+            "bob-desk",
+            11,
+            "api:billing",
+            "bob/11-refunds",
+            "src/billing/a.rs",
+        ),
+        (
+            &alice,
+            "alice-desk",
+            14,
+            "api:search",
+            "alice/14-index",
+            "src/search/b.rs",
+        ),
+    ] {
+        let session = world.session(who, session_name).await;
+        let item = world
+            .item(
+                &alice,
+                Some(&format!("gh:acme/widgets#{number}")),
+                "Claimed work",
+            )
+            .await;
+        claim(&world, who, session, item, json!([area])).await;
+        beat(&world, who, session, branch).await;
+        let stored = world
+            .put(
+                &bot,
+                &format!("/v1/items/{item}/footprint"),
+                json!({"repo": "api", "branch": branch, "base": "main",
+                       "base_at": "2026-03-01T00:00:00Z", "base_sha": "abcd1234",
+                       "paths": [file]}),
+            )
+            .await;
+        assert_eq!(stored.body["stored"], true, "{}", stored.body);
+        moved.push(item);
+    }
+    let unmoved_session = world.session(&bob, "bob-laptop").await;
+    let unmoved = world
+        .item(&alice, Some("gh:acme/widgets#15"), "Untouched work")
+        .await;
+    claim(&world, &bob, unmoved_session, unmoved, json!([])).await;
+    let merged = world
+        .post(
+            &bot,
+            "/v1/prs/merged",
+            json!({"pr": "acme/widgets#7", "base": "main",
+                   "merged_at": "2099-01-01T00:00:00Z",
+                   "files": ["src/billing/a.rs", "src/search/b.rs"]}),
+        )
+        .await;
+    assert_eq!(merged.status, StatusCode::OK, "{}", merged.body);
+    let browser = sign_in(&world, &alice).await;
+
+    let found = browser.get(&world, "/ui/search?q=merged").await;
+    assert_eq!(titles(&found), ["PR acme/widgets#7"], "{}", found.text);
+    assert!(
+        results(&found).contains(r#"<div class="u">merged · moved the base under 2 claims</div>"#),
+        "{}",
+        found.text
+    );
+    let here = heres(&found).remove(0);
+    assert_eq!(here, "/ui/claims?q=acme%2Fwidgets%237");
+
+    let listed = browser.get(&world, &here).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.text);
+    assert_eq!(
+        listed.text.matches("data-row").count(),
+        2,
+        "{}",
+        listed.text
+    );
+    for item in moved {
+        assert!(
+            listed
+                .text
+                .contains(&format!(r#"href="/ui/claims/{item}?q="#)),
+            "{}",
+            listed.text
+        );
+    }
+    assert!(
+        !listed
+            .text
+            .contains(&format!(r#"href="/ui/claims/{unmoved}?"#)),
+        "{}",
+        listed.text
+    );
+}

@@ -187,6 +187,16 @@ async fn render(
     Ok(signed_page(session, html(status, &page)))
 }
 
+/// Who holds an area and for which tickets, each claim naming its own holder: `alice for #1, bob
+/// for #2`; `None` when no claim holds it. Each pair is a holder's handle and the ticket's name.
+pub(crate) fn held_by<'a>(claims: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    let named: Vec<String> = claims
+        .into_iter()
+        .map(|(holder, ticket)| format!("{holder} for {ticket}"))
+        .collect();
+    (!named.is_empty()).then(|| named.join(", "))
+}
+
 impl ListView {
     /// The map of `index` in the state `query`, the area `current` marked.
     fn of(index: &AreaIndex, query: &TextQuery, current: Option<&str>) -> Self {
@@ -227,8 +237,9 @@ impl Section {
         left.sort_by(|a, b| a.area.label.cmp(&b.area.label));
         let (held, free): (Vec<&AreaEntry>, Vec<&AreaEntry>) =
             left.into_iter().partition(|entry| entry.state.is_held());
-        let leaves_free_out = repo.areas.len() > FREE_SHOWN_UP_TO && !query.shows_all();
         let free_count = free.len();
+        let leaves_free_out =
+            repo.areas.len() > FREE_SHOWN_UP_TO && !query.shows_all() && free_count > 0;
         let shown_free = if leaves_free_out { Vec::new() } else { free };
         Some(Self {
             repo: repo.repo.to_string(),
@@ -248,19 +259,13 @@ impl Seat {
     /// The seat of an area.
     fn of(entry: &AreaEntry, query: &TextQuery, current: Option<&str>) -> Self {
         let full = &entry.area.full;
-        let title = match entry.holders.first() {
-            Some(first) => format!(
-                "{full} · {} for {}",
-                first.holder.handle,
-                entry
-                    .holders
-                    .iter()
-                    .map(|claim| claim.ticket.title.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            None => format!("{full} · free"),
-        };
+        let title = held_by(
+            entry
+                .holders
+                .iter()
+                .map(|claim| (claim.holder.handle.as_str(), claim.ticket.title.as_str())),
+        )
+        .map_or_else(|| format!("{full} · free"), |who| format!("{full} · {who}"));
         Self {
             href: query.address(Some(full)),
             title,
@@ -270,5 +275,99 @@ impl Seat {
             current: current == Some(full.as_str()),
             area: entry.area.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dibs_domain::handle::Handle;
+    use dibs_domain::ids::ItemId;
+    use dibs_domain::repo::RepoId;
+
+    use crate::ui::areas::index::ClaimSummary;
+    use crate::ui::links::{Link, LinkedText, TicketView};
+    use crate::ui::moments::Ago;
+
+    use super::*;
+
+    #[test]
+    fn every_holder_is_named_with_its_own_ticket() {
+        assert_eq!(held_by([]), None);
+        assert_eq!(held_by([("alice", "#1")]).as_deref(), Some("alice for #1"));
+        assert_eq!(
+            held_by([("alice", "#1"), ("bob", "#2")]).as_deref(),
+            Some("alice for #1, bob for #2")
+        );
+    }
+
+    fn summary(holder: &str, number: u64) -> ClaimSummary {
+        ClaimSummary {
+            id: ItemId(number),
+            ticket: TicketView {
+                label: format!("widgets#{number}"),
+                title: format!("#{number}"),
+                main: Link {
+                    href: format!("/ui/claims/{number}"),
+                    outside: false,
+                },
+                out: None,
+                out_name: "the tracker",
+            },
+            title: LinkedText { pieces: Vec::new() },
+            holder: PersonView::of(&Handle::parse(holder).unwrap()),
+            finished: false,
+            held_over_a_week: false,
+            held: Ago::Days(1),
+        }
+    }
+
+    fn entry(name: &str, holders: Vec<ClaimSummary>) -> AreaEntry {
+        let area = QualifiedArea::parse(&format!("api:{name}")).unwrap();
+        AreaEntry {
+            area: AreaView::of(&area),
+            qualified: area,
+            paths: vec![format!("src/{name}/**")],
+            depends_on: Vec::new(),
+            holders: holders.clone(),
+            wanted_by: Vec::new(),
+            state: AreaState::of(&holders),
+        }
+    }
+
+    fn repo(held: usize, free: usize) -> RepoAreas {
+        let areas = (0..held)
+            .map(|number| entry(&format!("held-{number:03}"), vec![summary("alice", 1)]))
+            .chain((0..free).map(|number| entry(&format!("free-{number:03}"), Vec::new())))
+            .collect();
+        RepoAreas {
+            repo: RepoId::parse("api").unwrap(),
+            areas,
+        }
+    }
+
+    fn unfiltered() -> TextQuery {
+        TextQuery::of(Screen::Areas, RawQuery::default())
+    }
+
+    #[test]
+    fn a_seat_names_every_holder_with_their_tickets() {
+        let both = entry("billing", vec![summary("alice", 1), summary("bob", 2)]);
+        let seat = Seat::of(&both, &unfiltered(), None);
+        assert_eq!(seat.title, "api:billing · alice for #1, bob for #2");
+        assert_eq!(seat.claims, 2);
+        let free = Seat::of(&entry("docs", Vec::new()), &unfiltered(), None);
+        assert_eq!(free.title, "api:docs · free");
+    }
+
+    #[test]
+    fn a_repository_with_many_areas_offers_its_free_ones_only_while_it_leaves_some_out() {
+        let with_free = Section::of(&repo(1, FREE_SHOWN_UP_TO), &unfiltered(), None).unwrap();
+        assert_eq!(with_free.free, FREE_SHOWN_UP_TO);
+        assert_eq!(with_free.seats.len(), 1);
+        assert_eq!(with_free.more.as_deref(), Some("/ui/areas?all=1"));
+        let none_free = Section::of(&repo(FREE_SHOWN_UP_TO + 1, 0), &unfiltered(), None).unwrap();
+        assert_eq!(none_free.free, 0);
+        assert_eq!(none_free.seats.len(), FREE_SHOWN_UP_TO + 1);
+        assert_eq!(none_free.more, None);
     }
 }

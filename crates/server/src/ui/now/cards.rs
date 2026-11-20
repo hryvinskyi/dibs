@@ -36,7 +36,8 @@ const DECIDE_AFTER: Duration = Duration::minutes(10);
 pub(crate) struct Facts<'a> {
     /// The project's claims, holds, escalations and overlaps.
     pub(crate) status: &'a StatusView,
-    /// The viewer's unread conversations and the grant requests waiting for them.
+    /// The viewer's unread conversations, those waiting for their acknowledgement and the grant
+    /// requests waiting for them.
     pub(crate) inbox: &'a InboxView,
     /// The member signed in.
     pub(crate) viewer: &'a Handle,
@@ -83,12 +84,20 @@ impl<'a> Facts<'a> {
 /// A card of Now.
 #[derive(Debug, Clone)]
 pub(crate) enum Card {
-    /// Conversations from people with messages the viewer has not read.
+    /// Conversations from people with messages the viewer has not read, and conversations with
+    /// messages waiting for the viewer's acknowledgement, read or not; each conversation once.
     Answer {
-        /// How many.
+        /// How many conversations from people are unread.
         total: usize,
-        /// The newest first.
+        /// Those, the newest first.
         lines: Lines<Talk>,
+        /// How many conversations wait for the viewer's acknowledgement and are not among the
+        /// unread ones.
+        acks_total: usize,
+        /// Those, the newest first.
+        acks: Lines<Talk>,
+        /// Whether any conversation of the card, unread or not, waits for an acknowledgement.
+        acknowledging: bool,
     },
     /// Grant requests asked of the viewer that have waited too long for their agent.
     Decide {
@@ -169,7 +178,8 @@ pub(crate) struct Lines<T> {
     pub(crate) more: usize,
 }
 
-/// An unread conversation from a person.
+/// An unread conversation from a person, or a conversation waiting for the viewer's
+/// acknowledgement.
 #[derive(Debug, Clone)]
 pub(crate) struct Talk {
     /// The conversation.
@@ -244,7 +254,10 @@ struct Need {
 /// The cards, in the order the page shows them.
 static NEEDS: [Need; 9] = [
     Need {
-        shown: |facts| !answers(facts).is_empty(),
+        shown: |facts| {
+            let unread = answers(facts);
+            !unread.is_empty() || !acknowledgements(facts, &unread).is_empty()
+        },
         card: answer,
     },
     Need {
@@ -339,16 +352,21 @@ fn areas_together(claims: &[&HeldItem], facts: &Facts<'_>) -> usize {
         .len()
 }
 
-/// The unread conversations from people that no other card shows: an open escalation's
-/// conversation is the Arbitrate card's.
-fn answers<'a>(facts: &Facts<'a>) -> Vec<&'a NamedSummary> {
-    let waiting = waiting_grants(facts.inbox);
-    let disputed: BTreeSet<ThreadId> = facts
+/// The conversations of open escalations, which are the Arbitrate card's.
+fn disputed(facts: &Facts<'_>) -> BTreeSet<ThreadId> {
+    facts
         .status
         .escalations
         .iter()
         .map(|escalation| escalation.thread)
-        .collect();
+        .collect()
+}
+
+/// The unread conversations from people that no other card shows: an open escalation's
+/// conversation is the Arbitrate card's.
+fn answers<'a>(facts: &Facts<'a>) -> Vec<&'a NamedSummary> {
+    let waiting = waiting_grants(facts.inbox);
+    let disputed = disputed(facts);
     facts
         .inbox
         .threads
@@ -361,27 +379,60 @@ fn answers<'a>(facts: &Facts<'a>) -> Vec<&'a NamedSummary> {
         .collect()
 }
 
-/// The card of the unread conversations from people, the newest first.
-fn answer(facts: &Facts<'_>, links: &LinkContext) -> Card {
-    let mut talks: Vec<ConversationSummary> = answers(facts)
+/// The conversations with messages waiting for the viewer's acknowledgement, read or not, that no
+/// other card shows and that are not among the unread ones [`answers`] lists: an open escalation's
+/// conversation is the Arbitrate card's, and an unread one is listed once, among the unread.
+fn acknowledgements<'a>(facts: &Facts<'a>, unread: &[&NamedSummary]) -> Vec<&'a NamedSummary> {
+    let disputed = disputed(facts);
+    let unread: BTreeSet<ThreadId> = unread
+        .iter()
+        .map(|summary| summary.thread.record.id)
+        .collect();
+    facts
+        .inbox
+        .awaiting_ack
+        .iter()
+        .filter(|summary| {
+            let id = summary.thread.record.id;
+            summary.awaiting_ack > 0 && !disputed.contains(&id) && !unread.contains(&id)
+        })
+        .collect()
+}
+
+/// The conversations, each as a line of a card, the newest first.
+fn talks(summaries: Vec<&NamedSummary>, facts: &Facts<'_>, links: &LinkContext) -> Lines<Talk> {
+    let mut talks: Vec<ConversationSummary> = summaries
         .into_iter()
         .map(|summary| ConversationSummary::of(summary, links))
         .collect();
     talks.sort_by(|a, b| b.last_at.cmp(&a.last_at).then_with(|| b.id.cmp(&a.id)));
+    lines(talks, |summary| Talk {
+        last: moment(summary.last_at, facts.now),
+        summary,
+    })
+}
+
+/// The card of the unread conversations from people and of the conversations waiting for the
+/// viewer's acknowledgement, each the newest first.
+fn answer(facts: &Facts<'_>, links: &LinkContext) -> Card {
+    let unread = answers(facts);
+    let acks = acknowledgements(facts, &unread);
+    let acknowledging = !acks.is_empty() || unread.iter().any(|summary| summary.awaiting_ack > 0);
     Card::Answer {
-        total: talks.len(),
-        lines: lines(talks, |summary| Talk {
-            last: moment(summary.last_at, facts.now),
-            summary,
-        }),
+        total: unread.len(),
+        acks_total: acks.len(),
+        lines: talks(unread, facts, links),
+        acks: talks(acks, facts, links),
+        acknowledging,
     }
 }
 
-/// The grant requests asked of the viewer more than [`DECIDE_AFTER`] ago.
+/// The grant requests asked of the viewer more than [`DECIDE_AFTER`] ago, among every one waiting
+/// and not only those an agent is handed.
 fn decisions<'a>(facts: &Facts<'a>) -> Vec<&'a PendingGrantAsk> {
     facts
         .inbox
-        .grant_asks
+        .every_grant_ask
         .iter()
         .filter(|ask| facts.now - ask.asked_at > DECIDE_AFTER)
         .collect()
@@ -642,6 +693,8 @@ mod tests {
             offers: Vec::new(),
             deliverable: None,
             grant_asks: Vec::new(),
+            every_grant_ask: Vec::new(),
+            awaiting_ack: Vec::new(),
         }
     }
 
@@ -866,8 +919,8 @@ mod tests {
             talk(4, Some("bob"), 0, Duration::minutes(1)),
             talk(5, Some("bob"), 1, Duration::minutes(2)),
         ];
-        world.inbox.grant_asks = vec![ask(5, Duration::minutes(1))];
-        let Card::Answer { total, lines } = world.card() else {
+        world.inbox.every_grant_ask = vec![ask(5, Duration::minutes(1))];
+        let Card::Answer { total, lines, .. } = world.card() else {
             panic!("an answer card");
         };
         assert_eq!(
@@ -930,7 +983,7 @@ mod tests {
                 )
             })
             .collect();
-        let Card::Answer { total, lines } = world.card() else {
+        let Card::Answer { total, lines, .. } = world.card() else {
             panic!("an answer card");
         };
         assert_eq!((total, lines.shown.len(), lines.more), (6, 4, 2));
@@ -946,9 +999,9 @@ mod tests {
     #[test]
     fn decide_shows_grant_requests_waiting_more_than_ten_minutes_oldest_first() {
         let mut world = World::new();
-        world.inbox.grant_asks = vec![ask(7, DECIDE_AFTER)];
+        world.inbox.every_grant_ask = vec![ask(7, DECIDE_AFTER)];
         assert!(world.cards().is_empty(), "ten minutes exactly is not more");
-        world.inbox.grant_asks = vec![
+        world.inbox.every_grant_ask = vec![
             ask(7, DECIDE_AFTER + Duration::seconds(1)),
             ask(8, Duration::hours(2)),
             ask(9, Duration::minutes(3)),
@@ -965,10 +1018,169 @@ mod tests {
             titles(&world.page()),
             ["2 grant requests have waited for your agent for more than ten minutes"]
         );
-        world.inbox.grant_asks.truncate(1);
+        world.inbox.every_grant_ask.truncate(1);
         assert_eq!(
             titles(&world.page()),
             ["1 grant request has waited for your agent for more than ten minutes"]
+        );
+    }
+
+    /// Twelve grant requests, newest first, as the use case answers them: the agent's list holds
+    /// the newest ten; only the two oldest were asked more than ten minutes ago.
+    fn twelve_asks(world: &mut World) {
+        world.inbox.every_grant_ask = (1..=12)
+            .map(|n| {
+                let asked = if n > 10 {
+                    Duration::hours(1) + Duration::minutes(i64::try_from(n).unwrap())
+                } else {
+                    Duration::minutes(i64::try_from(n).unwrap() / 2)
+                };
+                ask(20 + n, asked)
+            })
+            .collect();
+        world.inbox.grant_asks = world.inbox.every_grant_ask[..10].to_vec();
+    }
+
+    #[test]
+    fn decide_measures_from_every_waiting_request_and_not_only_the_agents_list() {
+        let mut world = World::new();
+        twelve_asks(&mut world);
+        let Card::Decide { total, lines } = world.card() else {
+            panic!("a decide card");
+        };
+        assert_eq!(total, 2);
+        let threads: Vec<&str> = lines.shown.iter().map(|line| line.href.as_str()).collect();
+        assert_eq!(threads, ["/ui/inbox/32", "/ui/inbox/31"]);
+    }
+
+    #[test]
+    fn a_request_beyond_the_agents_list_is_still_no_conversation_to_answer() {
+        let mut world = World::new();
+        twelve_asks(&mut world);
+        world.inbox.every_grant_ask.truncate(11);
+        world.inbox.threads = vec![talk(31, Some("bob"), 1, Duration::hours(1))];
+        assert!(
+            !world
+                .cards()
+                .iter()
+                .any(|card| matches!(card, Card::Answer { .. })),
+            "the eleventh request is a decision"
+        );
+    }
+
+    /// `summary`, with `count` messages waiting for the viewer's acknowledgement.
+    fn awaiting(mut summary: NamedSummary, count: u64) -> NamedSummary {
+        summary.awaiting_ack = count;
+        summary
+    }
+
+    #[test]
+    fn answer_names_the_conversations_waiting_for_an_acknowledgement_read_or_not() {
+        let mut world = World::new();
+        world.inbox.awaiting_ack = vec![
+            awaiting(talk(1, Some("bob"), 0, Duration::minutes(3)), 2),
+            awaiting(talk(2, None, 0, Duration::minutes(1)), 1),
+            awaiting(talk(3, Some("bob"), 0, Duration::minutes(2)), 1),
+        ];
+        world.status.escalations = vec![escalation(3, &["alice"])];
+        let cards = world.cards();
+        let Some(Card::Answer {
+            total,
+            lines,
+            acks_total,
+            acks,
+            ..
+        }) = cards
+            .iter()
+            .find(|card| matches!(card, Card::Answer { .. }))
+        else {
+            panic!("an answer card in {cards:?}");
+        };
+        assert_eq!((*total, lines.shown.len()), (0, 0));
+        assert_eq!(*acks_total, 2, "the escalation's is the Arbitrate card's");
+        let ids: Vec<ThreadId> = acks.shown.iter().map(|line| line.summary.id).collect();
+        assert_eq!(ids, [ThreadId(2), ThreadId(1)]);
+        let page = world.page();
+        assert!(
+            titles(&page).contains(&"2 conversations wait for your acknowledgement"),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"<span class="tag tag--warn" title="Messages waiting for your acknowledgement">2 to acknowledge</span>"#),
+            "{page}"
+        );
+        world.inbox.awaiting_ack.truncate(1);
+        world.inbox.threads = vec![talk(4, Some("bob"), 1, Duration::minutes(1))];
+        let page = world.page();
+        assert_eq!(
+            page.matches(r#"<article class="need">"#).count(),
+            2,
+            "one Answer card besides Arbitrate: {page}"
+        );
+        assert!(
+            titles(&page).contains(&"1 conversation from a person is unread"),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"<p class="sub">1 conversation waits for your acknowledgement:</p>"#),
+            "{page}"
+        );
+        world.inbox.awaiting_ack.clear();
+        assert!(!world.page().contains("to acknowledge"));
+    }
+
+    #[test]
+    fn an_unread_conversation_waiting_for_an_acknowledgement_is_listed_once_among_the_unread() {
+        let mut world = World::new();
+        world.inbox.threads = vec![awaiting(talk(1, Some("bob"), 1, Duration::minutes(3)), 1)];
+        world.inbox.awaiting_ack = vec![
+            awaiting(talk(1, Some("bob"), 1, Duration::minutes(3)), 1),
+            awaiting(talk(2, Some("carol"), 0, Duration::minutes(1)), 2),
+        ];
+        let Card::Answer {
+            total,
+            lines,
+            acks_total,
+            acks,
+            acknowledging,
+        } = world.card()
+        else {
+            panic!("an answer card");
+        };
+        assert_eq!(total, 1);
+        let unread: Vec<ThreadId> = lines.shown.iter().map(|line| line.summary.id).collect();
+        assert_eq!(unread, [ThreadId(1)]);
+        assert_eq!(acks_total, 1, "the unread one is not counted again");
+        let acked: Vec<ThreadId> = acks.shown.iter().map(|line| line.summary.id).collect();
+        assert_eq!(acked, [ThreadId(2)]);
+        assert!(acknowledging);
+        let page = world.page();
+        assert!(
+            page.contains(r#"<span class="tag tag--warn" title="Messages waiting for your acknowledgement">1 to acknowledge</span>"#),
+            "the unread line says it waits: {page}"
+        );
+        assert!(
+            page.contains(r#"<p class="sub">1 conversation waits for your acknowledgement:</p>"#),
+            "{page}"
+        );
+
+        world.inbox.awaiting_ack.truncate(1);
+        let Card::Answer {
+            total,
+            acks_total,
+            acknowledging,
+            ..
+        } = world.card()
+        else {
+            panic!("an answer card");
+        };
+        assert_eq!((total, acks_total), (1, 0));
+        assert!(acknowledging);
+        let page = world.page();
+        assert!(!page.contains("for your acknowledgement:"), "{page}");
+        assert!(
+            page.contains("reading it is not enough"),
+            "the rule still explains the badge: {page}"
         );
     }
 
@@ -1267,7 +1479,7 @@ mod tests {
         world.status.overlaps = vec![collision(OverlapKind::SameFile, [1, 5], &["api:a.rs"])];
         world.status.integration_silent_since = Some(NOW - Duration::hours(1));
         world.inbox.threads = vec![talk(1, Some("bob"), 1, Duration::minutes(1))];
-        world.inbox.grant_asks = vec![ask(8, Duration::hours(1))];
+        world.inbox.every_grant_ask = vec![ask(8, Duration::hours(1))];
         let labels: Vec<&str> = world
             .cards()
             .iter()

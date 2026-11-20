@@ -2,10 +2,14 @@
 /**
  * Addresses typed into the browser: a claim, an area and a conversation each open with their
  * object in the inspector; the retired Board and Threads addresses redirect permanently to Claims,
- * the Inbox and the conversation; and the address of a claim that is not open answers 404 with
- * the whole page, its inspector saying so.
+ * the Inbox and the conversation; the address of a claim that is not open answers 404 with
+ * the whole page, its inspector saying so; and a page answering a form, whose address only a POST
+ * answers, never asks for that address with a GET, not even when the stream says the page may have
+ * missed events, its Reload keeps leading to the screen's own address, and the browser's Back from a
+ * row opened in place there shows the screen rather than asking for the posted address.
  */
 
+import { startThread } from './dibs-api.js';
 import { expect, test } from './fixtures.js';
 import { TITLES, seedWidgets } from './seed.js';
 import { signIn } from './sign-in.js';
@@ -91,4 +95,120 @@ test('the address of a claim that is not open shows the whole page, its inspecto
   await inspector(page).getByRole('link', { name: 'Close' }).click();
   await expect(page).toHaveURL(`${dibs.url}/ui/claims`);
   await expect(inspector(page)).toHaveAttribute('data-selected', 'false');
+});
+
+/** The longest reply the service takes, in bytes. */
+const LONGEST_REPLY = 16_384;
+
+test('a page answering a form never asks for its address with a GET, and its Reload leads to the screen', async ({
+  page,
+  dibs,
+}) => {
+  const threadId = await startThread(dibs.url, dibs.adminToken, {
+    subject: 'Rounding rules',
+    to: ['bob'],
+    body: 'May I touch round.rs?',
+  });
+  const postedTo = `/ui/threads/${threadId}/messages`;
+  const screen = `/ui/inbox/${threadId}`;
+  /** @type {string[]} */
+  const fetchedWithGet = [];
+  page.on('request', (request) => {
+    if (request.method() === 'GET' && new URL(request.url()).pathname === postedTo) {
+      fetchedWithGet.push(request.url());
+    }
+  });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}${screen}`);
+  await page.getByRole('textbox', { name: 'Message' }).fill('x'.repeat(LONGEST_REPLY + 1));
+
+  // The refused page's stream is refused once, and the session check then says that the log no
+  // longer reaches back to the page's cursor, as it does once the retention removed those events.
+  let streams = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/ui/events/stream') {
+      streams += 1;
+    }
+  });
+  await page.route((url) => url.pathname === '/ui/events/stream', (route) => route.fulfill({ status: 410 }), {
+    times: 1,
+  });
+  /** @type {(value: void) => void} */
+  let resynced = () => {};
+  const checked = new Promise((resolve) => {
+    resynced = resolve;
+  });
+  await page.route(
+    (url) => url.pathname === '/ui/session',
+    async (route) => {
+      const after = Number(new URL(route.request().url()).searchParams.get('after') ?? '0');
+      await route.fulfill({
+        status: 410,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: { code: 'cursor_expired', message: 'The events are gone.', details: { latest: after } },
+        }),
+      });
+      resynced();
+    },
+    { times: 1 },
+  );
+
+  const sent = page.waitForResponse((response) => new URL(response.url()).pathname === postedTo);
+  await page.getByRole('button', { name: 'Send' }).click();
+  expect((await sent).status()).toBe(422);
+  await expect(page).toHaveURL(`${dibs.url}${postedTo}`);
+  await checked;
+  // After the resync the stream is followed again, from the newest event.
+  await expect.poll(() => streams).toBeGreaterThanOrEqual(2);
+  // Longer than a burst's window, after which a refresh would have asked for the address.
+  await page.waitForTimeout(1500);
+
+  expect(fetchedWithGet).toEqual([]);
+  const notice = page.locator('[data-changed]');
+  await expect(notice).toBeHidden();
+  await expect(notice.getByRole('link', { name: 'Reload', includeHidden: true })).toHaveAttribute('href', screen);
+  await expect(page.getByRole('textbox', { name: 'Message' })).toHaveValue('x'.repeat(LONGEST_REPLY + 1));
+});
+
+test("Back from a row opened in place on a page answering a form shows the screen, never a GET of the posted address", async ({
+  page,
+  dibs,
+}) => {
+  const threadId = await startThread(dibs.url, dibs.adminToken, {
+    subject: 'Rounding rules',
+    to: ['bob'],
+    body: 'May I touch round.rs?',
+  });
+  const otherId = await startThread(dibs.url, dibs.adminToken, {
+    subject: 'Staging is down',
+    to: ['bob'],
+    body: 'Who is on it?',
+  });
+  const postedTo = `/ui/threads/${threadId}/messages`;
+  /** @type {string[]} */
+  const fetchedWithGet = [];
+  page.on('request', (request) => {
+    if (request.method() === 'GET' && new URL(request.url()).pathname === postedTo) {
+      fetchedWithGet.push(request.url());
+    }
+  });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/inbox/${threadId}`);
+  await page.getByRole('textbox', { name: 'Message' }).fill('x'.repeat(LONGEST_REPLY + 1));
+  const sent = page.waitForResponse((response) => new URL(response.url()).pathname === postedTo);
+  await page.getByRole('button', { name: 'Send' }).click();
+  expect((await sent).status()).toBe(422);
+  await expect(page).toHaveURL(`${dibs.url}${postedTo}`);
+
+  await page.locator('[data-region="list"]').getByRole('link', { name: 'Staging is down' }).click();
+  await expect(page).toHaveURL(`${dibs.url}/ui/inbox/${otherId}`);
+  await expect(page.locator('[data-inspector-heading]')).toHaveText('Staging is down');
+
+  await page.goBack();
+  await expect(page.locator('[data-inspector-heading]')).toHaveText('Rounding rules');
+  await expect(page.locator('[data-region="list"] [data-row][aria-current="true"]')).toContainText('Rounding rules');
+  expect(fetchedWithGet).toEqual([]);
 });

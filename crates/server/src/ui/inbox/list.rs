@@ -168,6 +168,8 @@ pub(crate) struct FoldRow {
     pub(crate) count: usize,
     /// How many of them have messages the viewer has not read.
     pub(crate) unread: usize,
+    /// How many of their messages wait for the viewer's acknowledgement.
+    pub(crate) awaiting_ack: u64,
     /// The newest notice.
     pub(crate) newest: ConversationSummary,
     /// The address of the newest notice in the inspector, with the list's state.
@@ -315,6 +317,7 @@ fn notices(mail: &Mailbox<'_>, query: &ListQuery, selected: Option<ThreadId>) ->
         if let Some((_, row)) = folded.iter_mut().find(|(id, _)| *id == item) {
             row.count += 1;
             row.unread += unread;
+            row.awaiting_ack += summary.awaiting_ack;
             row.current |= current;
             continue;
         }
@@ -329,6 +332,7 @@ fn notices(mail: &Mailbox<'_>, query: &ListQuery, selected: Option<ThreadId>) ->
                 item: facts,
                 count: 1,
                 unread,
+                awaiting_ack: summary.awaiting_ack,
                 newest: summary.clone(),
                 href: query.address(Some(summary.id)),
                 current,
@@ -481,6 +485,31 @@ mod tests {
         assert_eq!(folded[0].href, "/ui/inbox/5?tab=dibs");
         let loose: Vec<ThreadId> = loose.iter().map(|row| row.summary.id).collect();
         assert_eq!(loose, [ThreadId(1)]);
+    }
+
+    #[test]
+    fn a_folded_row_counts_every_acknowledgement_its_notices_wait_for_read_or_not() {
+        let awaiting = |mut summary: NamedSummary, count: u64| {
+            summary.awaiting_ack = count;
+            summary
+        };
+        let threads = [
+            awaiting(thread(5, true, Some(7), 0), 1),
+            thread(4, true, Some(8), 1),
+            awaiting(thread(3, true, Some(7), 0), 2),
+        ];
+        let body = with(&threads, &[], |mail| {
+            let shown = ListQuery::default().showing(&TABS[2]);
+            mail.rows(&TABS[2], &shown, None)
+        });
+        let Body::Notices(folded, _) = body else {
+            panic!("{body:?}");
+        };
+        let counts: Vec<(usize, u64)> = folded
+            .iter()
+            .map(|row| (row.unread, row.awaiting_ack))
+            .collect();
+        assert_eq!(counts, [(0, 3), (1, 0)]);
     }
 
     #[test]

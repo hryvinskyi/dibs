@@ -23,15 +23,17 @@ use crate::ui::assets::BUNDLE_HASH;
 use crate::ui::inbox::summary::{unread_from_people, waiting_grants};
 use crate::ui::links::{LinkContext, LinkedText, PersonView, TicketView, places};
 use crate::ui::live::latest_event;
-use crate::ui::moments::{Ago, Span, moment, span};
+use crate::ui::moments::{Ago, Moment, Span, moment, span};
 use crate::ui::now;
 use crate::ui::session::UiSession;
-use crate::ui::slots::SlotRow;
+use crate::ui::slots::{SlotRow, SlotState};
 
-/// The kinds of event that change the project's claims and holds.
+/// The kinds of event that change the project's claims and holds: who holds what, the areas a
+/// wide claim may edit in, the pull requests a claim waits in and the branch it works on.
 const STATUS_CHANGES: &str = "claimed renewed taken_over released completed force_released \
-     reserved wide_claimed wide_granted_by_ack grant_revoked review_started pr_merged pr_closed \
-     review_ended completed_by_merge area_handed_over wait_withdrawn claim_narrowed";
+     reserved wide_claimed wide_granted_by_ack granted grant_revoked review_started pr_merged \
+     pr_closed pr_dropped review_ended completed_by_merge branch_recorded area_handed_over \
+     wait_withdrawn claim_narrowed";
 
 /// The kinds of event that change the items, the slots, the worktrees, the escalations and the
 /// overlaps between claims.
@@ -42,8 +44,9 @@ const PROJECT_CHANGES: &str = "item_created item_updated dependency_added depend
      footprint_changed yield_requested area_handed_over wait_withdrawn claim_narrowed \
      item_reopened worktree_taken worktree_released";
 
-/// The kinds of event that change the conversations.
-const MESSAGE_CHANGES: &str = "thread_started message_posted acked";
+/// The kinds of event that change the conversations: one started, written in, acknowledged,
+/// deleted by an admin, or removed by the daily retention.
+const MESSAGE_CHANGES: &str = "thread_started message_posted acked thread_deleted pruned";
 
 /// A screen of the pages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,23 +106,20 @@ impl Screen {
     pub const fn has_inspector(self) -> bool {
         !matches!(self, Self::Now | Self::Search)
     }
+}
 
-    /// The kinds of event after which the screen offers to refresh, space separated, each once:
-    /// those that change the claims and those that change the rest of the project, and on Now and
-    /// Inbox those that change the conversations.
-    pub fn changed_kinds(self) -> String {
-        let messages = match self {
-            Self::Now | Self::Inbox => MESSAGE_CHANGES,
-            Self::Claims | Self::Queue | Self::Areas | Self::Search => "",
-        };
-        let mut seen = BTreeSet::new();
-        [STATUS_CHANGES, PROJECT_CHANGES, messages]
-            .iter()
-            .flat_map(|kinds| kinds.split_whitespace())
-            .filter(|kind| seen.insert(*kind))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
+/// The kinds of event after which a screen reads itself again, space separated, each once: those
+/// that change the claims, the rest of the project and the conversations. Every screen takes them
+/// all, as the rail every screen carries counts the claims, what waits on Now and the unread
+/// conversations.
+fn changed_kinds() -> String {
+    let mut seen = BTreeSet::new();
+    [STATUS_CHANGES, PROJECT_CHANGES, MESSAGE_CHANGES]
+        .iter()
+        .flat_map(|kinds| kinds.split_whitespace())
+        .filter(|kind| seen.insert(*kind))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Where a page was asked for: its address with its query, and the slot the query opens in the
@@ -269,8 +269,16 @@ pub struct PersonRow {
 pub struct SlotView {
     /// Its name.
     pub name: String,
+    /// Where it stands.
+    pub state: SlotState,
     /// The handle of its group's holder, while it is held.
     pub holder: Option<String>,
+    /// Its group's hold.
+    pub hold: Option<SlotHoldView>,
+    /// The handles of the members waiting, first in line first.
+    pub waiting: Vec<String>,
+    /// Its group's offer.
+    pub offer: Option<SlotOfferView>,
     /// What its declaration says about it.
     pub note: Option<LinkedText>,
     /// The longest one hold lasts.
@@ -281,6 +289,28 @@ pub struct SlotView {
     pub open: bool,
 }
 
+/// The hold of a slot's group in the rail.
+#[derive(Debug, Clone)]
+pub struct SlotHoldView {
+    /// Why it is held.
+    pub purpose: LinkedText,
+    /// The slot held, when it is another slot of the group.
+    pub through: Option<String>,
+    /// When it ends unless renewed.
+    pub until: Moment,
+    /// The last sign of life of what keeps it.
+    pub seen: Moment,
+}
+
+/// The offer of a slot's group in the rail.
+#[derive(Debug, Clone)]
+pub struct SlotOfferView {
+    /// The handle of the member it is offered to.
+    pub member: String,
+    /// When it lapses.
+    pub until: Moment,
+}
+
 /// A worktree hold in the rail.
 #[derive(Debug, Clone)]
 pub struct WorktreeView {
@@ -288,6 +318,8 @@ pub struct WorktreeView {
     pub worktree: String,
     /// The member whose pool it is.
     pub holder: PersonView,
+    /// The host of the session that holds it.
+    pub host: String,
     /// Whether one of the member's agents holds it.
     pub by_agent: bool,
     /// How long ago it was taken.
@@ -349,7 +381,7 @@ pub async fn load(
         rail: RailView::of(&loaded, &links, screen, here.slot.as_deref()),
         after: loaded.after,
         address: here.address.clone(),
-        changed_kinds: screen.changed_kinds(),
+        changed_kinds: changed_kinds(),
     };
     Ok((shell, loaded, links))
 }
@@ -387,7 +419,19 @@ impl RailView {
                     let row = SlotRow::of(line);
                     SlotView {
                         open: slot == Some(row.name.as_str()),
+                        state: row.state,
                         holder: row.holder,
+                        hold: row.hold.map(|hold| SlotHoldView {
+                            purpose: LinkedText::of(&hold.purpose, None, links),
+                            through: hold.through,
+                            until: moment(hold.until, loaded.now),
+                            seen: moment(hold.last_seen, loaded.now),
+                        }),
+                        waiting: row.waiting,
+                        offer: row.offer.map(|offer| SlotOfferView {
+                            member: offer.member,
+                            until: moment(offer.until, loaded.now),
+                        }),
                         note: row.note.map(|note| LinkedText::of(&note, None, links)),
                         max_hold: span(line.spec.max_hold),
                         group: row.group,
@@ -402,6 +446,7 @@ impl RailView {
                 .map(|hold| WorktreeView {
                     worktree: hold.worktree.to_string(),
                     holder: PersonView::of(&hold.member),
+                    host: hold.host.to_string(),
                     by_agent: hold.holder == HolderKind::Agent,
                     age: moment(hold.since, loaded.now).ago,
                     purpose: LinkedText::of(hold.purpose.as_str(), None, links),
@@ -461,7 +506,26 @@ fn people(loaded: &Loaded) -> Vec<PersonRow> {
 
 #[cfg(test)]
 mod tests {
+    use dibs_domain::event::EventKind;
+
     use super::*;
+
+    /// The name of every kind of event, read from the answer the derived parser of [`EventKind`]
+    /// gives a name it does not know: the parser is generated from the enum, so it lists them all.
+    fn every_kind_name() -> Vec<String> {
+        let unknown = serde_json::json!({"kind": "no_such_kind", "payload": {}});
+        let error = serde_json::from_value::<EventKind>(unknown)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        let (_, listed) = error
+            .split_once("expected one of ")
+            .unwrap_or_else(|| panic!("{error}"));
+        listed
+            .split(", ")
+            .map(|name| name.trim_matches('`').to_owned())
+            .collect()
+    }
 
     const ALL: [Screen; 6] = [
         Screen::Now,
@@ -472,25 +536,46 @@ mod tests {
         Screen::Search,
     ];
 
+    /// The kinds that change nothing a screen or the rail shows.
+    const UNSHOWN: [&str; 4] = [
+        // A pending area's escalation time, which no screen shows.
+        "yield_unescalated",
+        // A machine's day counts, kept for admins and that member, shown on no screen.
+        "hook_reported",
+        // An agent's opinion of a refusal, shown on no screen.
+        "feedback_given",
+        // Whether a pull request merges cleanly, shown on no screen.
+        "pr_state_reported",
+    ];
+
     #[test]
-    fn every_screen_refreshes_on_the_claims_and_the_project_and_now_and_inbox_on_messages() {
-        for screen in ALL {
-            let kinds = screen.changed_kinds();
-            let listed: Vec<&str> = kinds.split(' ').collect();
-            let distinct: BTreeSet<&str> = listed.iter().copied().collect();
-            assert_eq!(listed.len(), distinct.len(), "{screen:?}: {kinds}");
-            for kind in STATUS_CHANGES
-                .split_whitespace()
-                .chain(PROJECT_CHANGES.split_whitespace())
-            {
-                assert!(distinct.contains(kind), "{screen:?} misses {kind}");
-            }
-            let messages = matches!(screen, Screen::Now | Screen::Inbox);
-            assert_eq!(
-                distinct.contains("message_posted"),
-                messages,
-                "{screen:?}: {kinds}"
+    fn every_screen_refreshes_on_every_kind_of_event_that_changes_what_it_or_the_rail_shows() {
+        let kinds = changed_kinds();
+        let listed: Vec<&str> = kinds.split(' ').collect();
+        let refreshing: BTreeSet<&str> = listed.iter().copied().collect();
+        assert_eq!(listed.len(), refreshing.len(), "each once: {kinds}");
+        let names = every_kind_name();
+        let every: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        assert!(every.len() > UNSHOWN.len(), "{names:?}");
+        for kind in UNSHOWN {
+            assert!(every.contains(kind), "{kind} is a kind of event");
+        }
+        for &kind in &every {
+            assert!(
+                refreshing.contains(kind) != UNSHOWN.contains(&kind),
+                "{kind} is refreshed on or explicitly not shown, and not both"
             );
+        }
+        assert!(refreshing.is_subset(&every), "{kinds}");
+        for kind in [
+            "branch_recorded",
+            "pr_dropped",
+            "granted",
+            "thread_deleted",
+            "pruned",
+            "message_posted",
+        ] {
+            assert!(refreshing.contains(kind), "{kind}");
         }
     }
 

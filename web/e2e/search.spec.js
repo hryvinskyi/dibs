@@ -3,7 +3,9 @@
  * The search palette in a real browser: the command key with K and `/` open it, and so does typing
  * in the rail's search box, while tabbing onto that box does not; `Escape` closes it and gives the
  * focus back to where it was; a pull request's number finds the pull request first, its outside
- * link going to GitHub, and Enter opens its claim; a word of a claim's title finds the claim.
+ * link going to GitHub, and Enter opens its claim; a word of a claim's title finds the claim; a
+ * search that fails for a new query leaves no hit of the earlier one to open and says it failed
+ * until the next answer.
  */
 
 import { expect, test } from './fixtures.js';
@@ -141,4 +143,71 @@ test("a pull request's number finds it first, its outside link is GitHub's, and 
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(`${dibs.url}/ui/claims/${seeded.review}`);
   await expect(page.locator('[data-region="inspector"] [data-inspector-heading]')).toHaveText(TITLES.review);
+});
+
+test('a search that fails for a new query leaves no hit of the earlier query to open', async ({ page, dibs }) => {
+  await seedWidgets(dibs);
+  await signIn(page, dibs.url, dibs.adminToken);
+  await page.goto(`${dibs.url}/ui/claims`);
+  await page.route(/\/ui\/search\?.*palette=1/, async (route) => {
+    const query = new URL(route.request().url()).searchParams.get('q');
+    if (query === 'refund') {
+      await route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' });
+    } else {
+      await route.continue();
+    }
+  });
+
+  await page.keyboard.press('ControlOrMeta+k');
+  const input = page.locator('input[data-palette-input]');
+  await input.fill('billing');
+  const hits = palette(page).locator('[data-hit]');
+  await expect(hits.first()).toBeVisible();
+  await expect(hits.first()).toHaveAttribute('aria-selected', 'true');
+
+  const failed = page.waitForResponse((response) => response.status() === 503);
+  await input.fill('refund');
+  await failed;
+  await expect(hits).toHaveCount(0);
+  await expect(input).not.toHaveAttribute('aria-activedescendant', /.+/);
+  const failure = palette(page).locator('[data-palette-failed]');
+  await expect(failure).toBeVisible();
+  await expect(failure).toHaveText('The search did not answer. Press Enter to search on its page.');
+  await expect(failure).toHaveAttribute('role', 'status');
+  await expect(palette(page).locator('.pal__hint:not([data-palette-failed])')).toHaveCount(0);
+
+  // With no hit to open, Enter submits the palette's own form for what is typed: the search page
+  // for "refund", never a page of the earlier query's hits.
+  await page.keyboard.press('Enter');
+  await expect(page).toHaveURL(`${dibs.url}/ui/search?q=refund`);
+});
+
+test('the line saying a search failed gives way to the hits of the next search that answers', async ({
+  page,
+  dibs,
+}) => {
+  await seedWidgets(dibs);
+  await signIn(page, dibs.url, dibs.adminToken);
+  await page.goto(`${dibs.url}/ui/claims`);
+  await page.route(/\/ui\/search\?.*palette=1/, async (route) => {
+    if (new URL(route.request().url()).searchParams.get('q') === 'refund') {
+      await route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' });
+    } else {
+      await route.continue();
+    }
+  });
+
+  await page.keyboard.press('ControlOrMeta+k');
+  const input = page.locator('input[data-palette-input]');
+  const failure = palette(page).locator('[data-palette-failed]');
+  await input.fill('refund');
+  await expect(failure).toBeVisible();
+
+  await input.fill('billing');
+  await expect(palette(page).locator('[data-hit]').first()).toBeVisible();
+  await expect(failure).toHaveCount(0);
+
+  await input.fill('');
+  await expect(failure).toHaveCount(0);
+  await expect(palette(page).locator('.pal__hint')).toBeVisible();
 });

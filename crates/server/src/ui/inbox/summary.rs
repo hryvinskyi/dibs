@@ -1,6 +1,7 @@
 //! One conversation as a list shows it — its subject, who started it and for whom, the ticket it is
-//! about, how many messages it holds and how many the viewer has not read, how pressing it is and
-//! when its last message was written — and which conversations are messages from people.
+//! about, how many messages it holds, how many the viewer has not read and how many wait for their
+//! acknowledgement, how pressing it is and when its last message was written — and which
+//! conversations are messages from people.
 //!
 //! A message from people is a conversation a member started, the viewer included, unless it is a
 //! grant request still waiting for the viewer's decision: the viewer's agent decides that one, so it
@@ -34,6 +35,8 @@ pub(crate) struct ConversationSummary {
     pub(crate) messages: u64,
     /// How many of them the viewer has not read; their own never count.
     pub(crate) unread: u64,
+    /// How many of them wait for the viewer's acknowledgement, read or not; their own never do.
+    pub(crate) awaiting_ack: u64,
     /// The highest importance among its messages.
     pub(crate) importance: Importance,
     /// When its last message was written, or when it started.
@@ -58,6 +61,7 @@ impl ConversationSummary {
             ticket: record.item.map(|item| TicketView::of_item(item, links)),
             messages: summary.messages,
             unread: summary.unread,
+            awaiting_ack: summary.awaiting_ack,
             importance: summary.importance,
             last_at: summary.last_message_at.unwrap_or(record.created_at),
         }
@@ -92,9 +96,10 @@ impl ConversationSummary {
     }
 }
 
-/// The conversations of the grant requests waiting for the viewer's decision.
+/// The conversations of the grant requests waiting for the viewer's decision, every one of them
+/// and not only those an agent is handed.
 pub(crate) fn waiting_grants(inbox: &InboxView) -> BTreeSet<ThreadId> {
-    inbox.grant_asks.iter().map(|ask| ask.thread).collect()
+    inbox.every_grant_ask.iter().map(|ask| ask.thread).collect()
 }
 
 /// Whether the conversation is a message from people: a member started it, the viewer included,

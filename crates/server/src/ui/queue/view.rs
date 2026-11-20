@@ -2,20 +2,23 @@
 //! waits, and the command that claims it — as a list row and an inspector print it, built from the
 //! status the frame read.
 //!
-//! The queue is the ready list followed by the open items left out of it, except those a live claim
-//! holds: those are claims, and Claims shows them.
+//! Which tickets the queue holds is decided by [`listed`]; this builds the view of each.
 
 use std::collections::BTreeSet;
 
 use dibs_app::named::ItemName;
 use dibs_app::records::ItemRecord;
-use dibs_app::use_cases::{ExcludedEntry, NamedNotReady, ReadyEntry, StatusView};
+use dibs_app::use_cases::{NamedNotReady, StatusView};
 use dibs_domain::ids::ItemId;
-use dibs_domain::item::ItemRepository;
+use dibs_domain::item::{ItemKey, ItemRepository};
 
 use crate::ui::claims::classify::finished;
-use crate::ui::links::{AreaView, LinkContext, LinkedText, PersonView, TicketView};
-use crate::ui::queue::listing::waits;
+use crate::ui::links::{AreaView, LinkContext, LinkedPiece, LinkedText, PersonView, TicketView};
+use crate::ui::queue::listing::{Listed, Standing, listed};
+
+/// The bytes a word of a command keeps unquoted: a POSIX shell gives none of them a meaning inside
+/// a word.
+const SHELL_SAFE: &[u8] = b"_-.:/#@+=,%";
 
 /// A ticket of the queue.
 #[derive(Debug, Clone)]
@@ -74,19 +77,17 @@ pub(crate) enum ReasonView {
     },
 }
 
-/// The command that claims a ticket.
+/// The command that claims a ticket: what the Copy button copies, and the same text as the page
+/// prints it, the ticket and each area a link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Command {
     /// The whole command, as the Copy button copies it.
     pub(crate) text: String,
-    /// The ticket, printed as a link inside the command.
-    pub(crate) reference: TicketView,
-    /// Each `--area`, printed as a link inside the command.
-    pub(crate) areas: Vec<AreaView>,
+    /// The same text in pieces, the ticket and each area linked; together they read `text` exactly.
+    pub(crate) shown: LinkedText,
 }
 
-/// The queue the status shows: the ready tickets, then the open ones left out of the ready list for
-/// another reason than a live claim, each group in the status's order.
+/// The queue the status shows, in the order [`listed`] gives.
 pub(crate) fn queue_items(status: &StatusView, links: &LinkContext) -> Vec<QueueItemView> {
     let done: BTreeSet<ItemId> = status
         .live
@@ -95,48 +96,27 @@ pub(crate) fn queue_items(status: &StatusView, links: &LinkContext) -> Vec<Queue
         .filter(|held| finished(&held.item.item))
         .map(|held| held.item.item.id)
         .collect();
-    let ready = status
-        .ready
-        .ready
-        .iter()
-        .map(|entry| QueueItemView::ready(entry, links));
-    let waiting = status
-        .ready
-        .excluded
-        .iter()
-        .filter_map(|entry| QueueItemView::waiting(entry, &done, links));
-    ready.chain(waiting).collect()
+    listed(status)
+        .map(|entry| QueueItemView::of(&entry, &done, links))
+        .collect()
 }
 
 impl QueueItemView {
-    /// The ticket of an item the caller can claim now.
-    pub(crate) fn ready(entry: &ReadyEntry, links: &LinkContext) -> Self {
-        let readiness = Readiness::Ready {
-            was_held_by: entry.stale_holder.as_ref().map(PersonView::of),
+    /// The ticket of an item the queue lists. `done` holds the claimed items whose tickets are
+    /// finished.
+    pub(crate) fn of(entry: &Listed<'_>, done: &BTreeSet<ItemId>, links: &LinkContext) -> Self {
+        let readiness = match entry.standing {
+            Standing::Ready { stale_holder } => Readiness::Ready {
+                was_held_by: stale_holder.map(PersonView::of),
+            },
+            Standing::NotReady { reasons } => Readiness::NotReady {
+                reasons: reasons
+                    .iter()
+                    .filter_map(|reason| ReasonView::of(reason, done, links))
+                    .collect(),
+            },
         };
-        Self::build(&entry.item.item, readiness, links)
-    }
-
-    /// The ticket of an open item left out of the ready list; none when the queue does not list it,
-    /// because a live claim holds it. `done` holds the claimed items whose tickets are finished.
-    pub(crate) fn waiting(
-        entry: &ExcludedEntry,
-        done: &BTreeSet<ItemId>,
-        links: &LinkContext,
-    ) -> Option<Self> {
-        if !waits(entry) {
-            return None;
-        }
-        let reasons = entry
-            .reasons
-            .iter()
-            .filter_map(|reason| ReasonView::of(reason, done, links))
-            .collect();
-        Some(Self::build(
-            &entry.item.item,
-            Readiness::NotReady { reasons },
-            links,
-        ))
+        Self::build(entry.item, readiness, links)
     }
 
     fn build(item: &ItemRecord, readiness: Readiness, links: &LinkContext) -> Self {
@@ -146,9 +126,13 @@ impl QueueItemView {
         };
         let ticket = TicketView::of(item.id, item.external_ref.as_ref(), links);
         let areas: Vec<AreaView> = item.areas_hint.iter().map(AreaView::of).collect();
+        let key = item
+            .external_ref
+            .clone()
+            .map_or(ItemKey::Local(item.id), ItemKey::External);
         Self {
             id: item.id,
-            command: Command::of(&ticket, &areas),
+            command: Command::of(&key, &ticket, &areas),
             ticket,
             title: LinkedText::of(item.title.as_str(), home, links),
             priority: item.priority.get(),
@@ -224,19 +208,52 @@ fn ticket_of(item: &ItemName, links: &LinkContext) -> TicketView {
 }
 
 impl Command {
-    /// The command that claims the ticket `reference` with the areas `areas`: `dibs claim` and the
-    /// ticket's full reference, or `#{id}` when it has none, then `--area repo:name` for each area.
-    pub(crate) fn of(reference: &TicketView, areas: &[AreaView]) -> Self {
-        let text = areas
-            .iter()
-            .fold(format!("dibs claim {}", reference.title), |text, area| {
-                format!("{text} --area {}", area.full)
+    /// The command that claims the item named `key`, whose ticket is `ticket`, with the areas
+    /// `areas`: `dibs claim` and the key — the full reference, or the bare id when there is none —
+    /// then `--area repo:name` for each area, every argument quoted for a shell when it needs to
+    /// be. The key leads where the ticket's name leads, and each area to its page.
+    pub(crate) fn of(key: &ItemKey, ticket: &TicketView, areas: &[AreaView]) -> Self {
+        let mut pieces = vec![
+            LinkedPiece {
+                text: "dibs claim ".to_owned(),
+                link: None,
+            },
+            LinkedPiece {
+                text: shell_word(&key.to_string()),
+                link: Some(ticket.main.clone()),
+            },
+        ];
+        for area in areas {
+            pieces.push(LinkedPiece {
+                text: " --area ".to_owned(),
+                link: None,
             });
-        Self {
-            text,
-            reference: reference.clone(),
-            areas: areas.to_vec(),
+            pieces.push(LinkedPiece {
+                text: shell_word(&area.full),
+                link: Some(area.link()),
+            });
         }
+        Self {
+            text: pieces.iter().map(|piece| piece.text.as_str()).collect(),
+            shown: LinkedText { pieces },
+        }
+    }
+}
+
+/// `word` as one word of a POSIX shell command line that reads back as `word` and nothing else:
+/// unchanged when it is made only of ASCII letters, digits and `_-.:/#@+=,%` and does not start
+/// with `#`, which would begin a comment; else in single quotes, each quote inside written `'\''`.
+/// The empty word is `''`.
+fn shell_word(word: &str) -> String {
+    let safe = !word.is_empty()
+        && !word.starts_with('#')
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || SHELL_SAFE.contains(&byte));
+    if safe {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
     }
 }
 
@@ -245,6 +262,7 @@ mod tests {
     use std::sync::Arc;
 
     use dibs_app::named::NamedItem;
+    use dibs_app::use_cases::{ExcludedEntry, ReadyEntry, ReadyView};
     use dibs_domain::area::QualifiedArea;
     use dibs_domain::forge::ForgeRegistry;
     use dibs_domain::handle::Handle;
@@ -375,38 +393,157 @@ mod tests {
         ));
     }
 
+    /// The ready entry of `item`, its claim gone silent when `stale` names the holder.
+    fn ready(item: ItemRecord, stale: Option<&str>) -> ReadyEntry {
+        ReadyEntry {
+            item: named(item),
+            link: None,
+            stale_holder: stale.map(handle),
+        }
+    }
+
+    fn waiting(item: ItemRecord, reasons: Vec<NamedNotReady>) -> ExcludedEntry {
+        ExcludedEntry {
+            item: named(item),
+            link: None,
+            reasons,
+        }
+    }
+
+    fn status(ready: Vec<ReadyEntry>, excluded: Vec<ExcludedEntry>) -> StatusView {
+        StatusView {
+            ready: ReadyView { ready, excluded },
+            live: Vec::new(),
+            stale: Vec::new(),
+            holds: Vec::new(),
+            wide: Vec::new(),
+            slots: Vec::new(),
+            worktrees: Vec::new(),
+            escalations: Vec::new(),
+            integration_silent_since: None,
+            overlaps: Vec::new(),
+        }
+    }
+
+    /// The text a command's pieces read together.
+    fn read(command: &Command) -> String {
+        command
+            .shown
+            .pieces
+            .iter()
+            .map(|piece| piece.text.as_str())
+            .collect()
+    }
+
     #[test]
-    fn the_command_is_the_full_reference_then_an_area_each() {
+    fn a_safe_word_is_left_as_it_is() {
+        for word in [
+            "gh:acme/widgets#42",
+            "api:billing",
+            "7",
+            "jira:ACME-12",
+            "x:a_b-c.d@e+f=g,h%i",
+        ] {
+            assert_eq!(shell_word(word), word);
+        }
+    }
+
+    #[test]
+    fn a_word_a_shell_would_read_otherwise_is_single_quoted() {
+        for (word, quoted) in [
+            ("x:$(touch pwned)", "'x:$(touch pwned)'"),
+            ("x:`touch pwned`", "'x:`touch pwned`'"),
+            ("x:a;touch pwned", "'x:a;touch pwned'"),
+            ("x:a|sh", "'x:a|sh'"),
+            ("x:a b", "'x:a b'"),
+            ("x:$HOME", "'x:$HOME'"),
+            ("x:a&b", "'x:a&b'"),
+            ("x:a>b", "'x:a>b'"),
+            ("x:a*", "'x:a*'"),
+            ("x:~a", "'x:~a'"),
+            ("x:é", "'x:é'"),
+            ("#7", "'#7'"),
+            ("", "''"),
+        ] {
+            assert_eq!(shell_word(word), quoted, "{word}");
+        }
+    }
+
+    #[test]
+    fn a_single_quote_inside_a_word_closes_the_quotes_escapes_itself_and_reopens_them() {
+        assert_eq!(shell_word("x:it's"), r"'x:it'\''s'");
+        assert_eq!(shell_word("'"), r"''\'''");
+        assert_eq!(
+            shell_word("x:'; touch pwned; '"),
+            r"'x:'\''; touch pwned; '\'''"
+        );
+    }
+
+    #[test]
+    fn the_command_is_the_full_reference_then_an_area_each_and_reads_as_it_is_copied() {
         let none = context(Vec::new());
         let gh = external("gh:acme/widgets#42");
         let ticket = TicketView::of(ItemId(7), Some(&gh), &none);
+        let key = ItemKey::External(gh);
         let areas = [
             AreaView::of(&area("api:billing")),
             AreaView::of(&area("web:search")),
         ];
-        let with = Command::of(&ticket, &areas);
+        let with = Command::of(&key, &ticket, &areas);
         assert_eq!(
             with.text,
             "dibs claim gh:acme/widgets#42 --area api:billing --area web:search"
         );
-        assert_eq!(with.reference, ticket);
-        assert_eq!(with.areas, areas);
+        assert_eq!(read(&with), with.text);
+        let links: Vec<(&str, Option<&str>)> = with
+            .shown
+            .pieces
+            .iter()
+            .map(|piece| {
+                (
+                    piece.text.as_str(),
+                    piece.link.as_ref().map(|link| link.href.as_str()),
+                )
+            })
+            .collect();
         assert_eq!(
-            Command::of(&ticket, &[]).text,
+            links,
+            [
+                ("dibs claim ", None),
+                ("gh:acme/widgets#42", Some(ticket.main.href.as_str())),
+                (" --area ", None),
+                ("api:billing", Some("/ui/areas/api:billing")),
+                (" --area ", None),
+                ("web:search", Some("/ui/areas/web:search")),
+            ]
+        );
+        assert_eq!(
+            Command::of(&key, &ticket, &[]).text,
             "dibs claim gh:acme/widgets#42"
         );
     }
 
     #[test]
-    fn a_ticket_without_a_reference_is_claimed_by_its_id() {
+    fn a_ticket_without_a_reference_is_claimed_by_its_bare_id() {
         let none = context(Vec::new());
         let ticket = TicketView::of(ItemId(7), None, &none);
+        let key = ItemKey::Local(ItemId(7));
         let areas = [AreaView::of(&area("api:billing"))];
-        assert_eq!(
-            Command::of(&ticket, &areas).text,
-            "dibs claim #7 --area api:billing"
-        );
-        assert_eq!(Command::of(&ticket, &[]).text, "dibs claim #7");
+        let with = Command::of(&key, &ticket, &areas);
+        assert_eq!(with.text, "dibs claim 7 --area api:billing");
+        assert_eq!(read(&with), with.text);
+        assert_eq!(Command::of(&key, &ticket, &[]).text, "dibs claim 7");
+        assert_eq!(ticket.label, "#7", "the ticket is still shown as #7");
+    }
+
+    #[test]
+    fn a_reference_a_shell_would_run_is_quoted_in_the_command_and_in_what_the_page_prints() {
+        let none = context(Vec::new());
+        let hostile = external("x:$(touch pwned)");
+        let ticket = TicketView::of(ItemId(7), Some(&hostile), &none);
+        let with = Command::of(&ItemKey::External(hostile), &ticket, &[]);
+        assert_eq!(with.text, "dibs claim 'x:$(touch pwned)'");
+        assert_eq!(read(&with), with.text);
     }
 
     #[test]
@@ -414,12 +551,10 @@ mod tests {
         let none = context(Vec::new());
         let mut item = record(7, Some("gh:acme/widgets#7"), "Rates", &["api:billing"]);
         item.priority = Priority::new(2).unwrap();
-        let entry = ReadyEntry {
-            item: named(item),
-            link: None,
-            stale_holder: Some(handle("carol")),
+        let project = status(vec![ready(item, Some("carol"))], Vec::new());
+        let [view] = &queue_items(&project, &none)[..] else {
+            panic!("one ticket is listed");
         };
-        let view = QueueItemView::ready(&entry, &none);
         assert!(view.is_ready());
         assert_eq!(view.priority, 2);
         assert_eq!(
@@ -427,41 +562,35 @@ mod tests {
             "dibs claim gh:acme/widgets#7 --area api:billing"
         );
         assert!(matches!(
-            view.readiness,
+            &view.readiness,
             Readiness::Ready { was_held_by: Some(person) } if person.handle == "carol"
         ));
     }
 
     #[test]
-    fn an_excluded_ticket_is_listed_unless_a_live_claim_holds_it() {
+    fn a_waiting_ticket_names_each_reason_in_the_status_order() {
         let none = context(Vec::new());
-        let entry = |reasons: Vec<NamedNotReady>| ExcludedEntry {
-            item: named(record(
-                7,
-                Some("gh:acme/widgets#7"),
-                "Rates",
-                &["api:billing"],
-            )),
-            link: None,
-            reasons,
-        };
         let held = NamedNotReady::AreaHeld {
             area: area("api:billing"),
             holder: handle("bob"),
             item: name(9, Some("gh:acme/widgets#9")),
         };
-        let claimed = NamedNotReady::Claimed {
-            holder: handle("bob"),
+        let blocked = NamedNotReady::BlockedBy {
+            items: vec![name(3, Some("gh:acme/widgets#3"))],
         };
-        let done = BTreeSet::new();
-        let waiting = QueueItemView::waiting(&entry(vec![held.clone()]), &done, &none).unwrap();
-        assert!(!waiting.is_ready());
-        let Readiness::NotReady { reasons } = &waiting.readiness else {
+        let item = record(7, Some("gh:acme/widgets#7"), "Rates", &["api:billing"]);
+        let project = status(Vec::new(), vec![waiting(item, vec![blocked, held])]);
+        let [view] = &queue_items(&project, &none)[..] else {
+            panic!("one ticket is listed");
+        };
+        assert!(!view.is_ready());
+        let Readiness::NotReady { reasons } = &view.readiness else {
             panic!("an excluded ticket is not ready");
         };
-        assert_eq!(reasons.len(), 1);
-        assert!(QueueItemView::waiting(&entry(vec![claimed.clone()]), &done, &none).is_none());
-        assert!(QueueItemView::waiting(&entry(vec![claimed, held]), &done, &none).is_none());
+        assert!(matches!(
+            reasons[..],
+            [ReasonView::BlockedBy { .. }, ReasonView::AreaHeld { .. }]
+        ));
     }
 
     #[test]
@@ -476,17 +605,8 @@ mod tests {
         let blocked = NamedNotReady::BlockedBy {
             items: vec![name(3, Some("gh:acme/widgets#3"))],
         };
-        let waiting = QueueItemView::waiting(
-            &ExcludedEntry {
-                item: named(item.clone()),
-                link: None,
-                reasons: vec![blocked, held],
-            },
-            &BTreeSet::new(),
-            &none,
-        )
-        .unwrap();
-        let text = waiting.text();
+        let waits = status(Vec::new(), vec![waiting(item.clone(), vec![blocked, held])]);
+        let text = queue_items(&waits, &none)[0].text();
         for word in [
             "gh:acme/widgets#7",
             "Rates",
@@ -497,55 +617,35 @@ mod tests {
         ] {
             assert!(text.contains(word), "{word} in {text}");
         }
-        let ready = QueueItemView::ready(
-            &ReadyEntry {
-                item: named(item),
-                link: None,
-                stale_holder: Some(handle("carol")),
-            },
-            &none,
-        );
-        assert!(!ready.text().contains("carol"), "{}", ready.text());
+        let silent = status(vec![ready(item, Some("carol"))], Vec::new());
+        let text = queue_items(&silent, &none)[0].text();
+        assert!(!text.contains("carol"), "{text}");
     }
 
     #[test]
     fn the_queue_lists_ready_tickets_then_waiting_ones_and_leaves_out_the_claimed() {
         let known = context(Vec::new());
-        let status = StatusView {
-            ready: dibs_app::use_cases::ReadyView {
-                ready: vec![ReadyEntry {
-                    item: named(record(1, Some("gh:acme/widgets#1"), "First", &[])),
-                    link: None,
-                    stale_holder: None,
-                }],
-                excluded: vec![
-                    ExcludedEntry {
-                        item: named(record(2, Some("gh:acme/widgets#2"), "Second", &[])),
-                        link: None,
-                        reasons: vec![NamedNotReady::Claimed {
-                            holder: handle("bob"),
-                        }],
-                    },
-                    ExcludedEntry {
-                        item: named(record(3, Some("gh:acme/widgets#3"), "Third", &[])),
-                        link: None,
-                        reasons: vec![NamedNotReady::BlockedBy {
-                            items: vec![name(1, Some("gh:acme/widgets#1"))],
-                        }],
-                    },
-                ],
-            },
-            live: Vec::new(),
-            stale: Vec::new(),
-            holds: Vec::new(),
-            wide: Vec::new(),
-            slots: Vec::new(),
-            worktrees: Vec::new(),
-            escalations: Vec::new(),
-            integration_silent_since: None,
-            overlaps: Vec::new(),
-        };
-        let ids: Vec<ItemId> = queue_items(&status, &known)
+        let project = status(
+            vec![ready(
+                record(1, Some("gh:acme/widgets#1"), "First", &[]),
+                None,
+            )],
+            vec![
+                waiting(
+                    record(2, Some("gh:acme/widgets#2"), "Second", &[]),
+                    vec![NamedNotReady::Claimed {
+                        holder: handle("bob"),
+                    }],
+                ),
+                waiting(
+                    record(3, Some("gh:acme/widgets#3"), "Third", &[]),
+                    vec![NamedNotReady::BlockedBy {
+                        items: vec![name(1, Some("gh:acme/widgets#1"))],
+                    }],
+                ),
+            ],
+        );
+        let ids: Vec<ItemId> = queue_items(&project, &known)
             .iter()
             .map(|item| item.id)
             .collect();

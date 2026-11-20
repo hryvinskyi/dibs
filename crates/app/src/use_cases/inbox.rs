@@ -55,8 +55,14 @@ pub struct InboxView {
     /// were asked for.
     pub deliverable: Option<Vec<DeliverableMessage>>,
     /// The grants asked of the caller that wait for their decision, newest first, at most
-    /// [`MAX_GRANT_ASKS`].
+    /// [`MAX_GRANT_ASKS`]: the list an agent is handed, the beginning of `every_grant_ask`.
     pub grant_asks: Vec<PendingGrantAsk>,
+    /// Every grant asked of the caller that waits for their decision, newest first, however many
+    /// there are: a conversation holding one is a decision, never an unread conversation.
+    pub every_grant_ask: Vec<PendingGrantAsk>,
+    /// The threads the caller may read with messages awaiting their acknowledgement, newest
+    /// activity first, read or not: `unread_only` never leaves one out.
+    pub awaiting_ack: Vec<NamedSummary>,
 }
 
 /// A grant asked of the caller that waits for their decision: asked in a conversation they have not
@@ -167,14 +173,17 @@ impl Inbox {
         let waiting = awaiting_per_thread(&awaiting(&mut work, actor).await?);
         let names = Names::load(&mut work).await?;
         let readable = readable_summaries(actor, summaries);
+        let awaiting_count =
+            |summary: &ThreadSummary| waiting.get(&summary.thread.id).copied().unwrap_or(0);
         let threads = readable
             .iter()
             .filter(|summary| !query.unread_only || summary.unread > 0)
-            .cloned()
-            .map(|summary| {
-                let count = waiting.get(&summary.thread.id).copied().unwrap_or(0);
-                names.summary(summary, count)
-            })
+            .map(|summary| names.summary(summary.clone(), awaiting_count(summary)))
+            .collect::<Result<_, _>>()?;
+        let awaiting_ack = readable
+            .iter()
+            .filter(|summary| awaiting_count(summary) > 0)
+            .map(|summary| names.summary(summary.clone(), awaiting_count(summary)))
             .collect::<Result<_, _>>()?;
         let unacked = if query.unacked {
             Some(unacked(&mut work, actor).await?)
@@ -186,8 +195,8 @@ impl Inbox {
         } else {
             None
         };
-        let grant_asks = self
-            .grant_asks(&mut work, actor, &scene.settings, &names, now)
+        let every_grant_ask = self
+            .every_grant_ask(&mut work, actor, &scene.settings, &names, now)
             .await?;
         work.commit(&*self.notifier).await?;
         Ok(InboxView {
@@ -195,14 +204,19 @@ impl Inbox {
             unacked,
             offers,
             deliverable,
-            grant_asks,
+            grant_asks: every_grant_ask
+                .iter()
+                .take(MAX_GRANT_ASKS)
+                .cloned()
+                .collect(),
+            every_grant_ask,
+            awaiting_ack,
         })
     }
 
-    /// The grants asked of the actor that wait for their decision, newest first, at most
-    /// [`MAX_GRANT_ASKS`]: asked in a conversation they wrote nothing in, and still waiting by the
-    /// claims and grants of now.
-    async fn grant_asks(
+    /// Every grant asked of the actor that waits for their decision, newest first: asked in a
+    /// conversation they wrote nothing in, and still waiting by the claims and grants of now.
+    async fn every_grant_ask(
         &self,
         work: &mut Work,
         actor: &Actor,
@@ -242,7 +256,7 @@ impl Inbox {
         }
         waiting.sort_by_key(|(message, _, _)| std::cmp::Reverse((message.created_at, message.id)));
         let mut listed = Vec::new();
-        for (message, request, holder_item) in waiting.into_iter().take(MAX_GRANT_ASKS) {
+        for (message, request, holder_item) in waiting {
             let item = existing_item(work, request.ask.item).await?;
             let holder_item = existing_item(work, holder_item).await?;
             listed.push(PendingGrantAsk {
@@ -692,6 +706,7 @@ mod tests {
             .await
             .unwrap();
         assert!(inbox.threads.iter().all(|thread| thread.awaiting_ack == 0));
+        assert!(inbox.awaiting_ack.is_empty());
         let acked = AckMessage::new(&env.deps)
             .execute(&env.alice.actor, announced[0])
             .await
@@ -869,6 +884,145 @@ mod tests {
             .await
             .unwrap();
         assert!(grant_asks(&env, &env.alice.actor).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn every_waiting_request_is_listed_for_the_pages_while_an_agent_is_handed_the_newest_ten()
+    {
+        use crate::use_cases::{AskGrant, AskGrantInput, ClaimItem, ClaimItemInput};
+
+        let (env, first, _) = asked_of_alice().await;
+        for n in 5..16 {
+            env.advance(time::Duration::minutes(7));
+            let item = env.item(&format!("gh:acme/widgets#{n}")).await;
+            ClaimItem::new(&env.deps)
+                .execute(
+                    &env.bob.actor,
+                    ClaimItemInput {
+                        item,
+                        session: env.bob.session,
+                        areas: Vec::new(),
+                        wide: None,
+                        kind: None,
+                    },
+                )
+                .await
+                .unwrap();
+            AskGrant::new(&env.deps)
+                .execute(
+                    &env.bob.actor,
+                    AskGrantInput {
+                        item,
+                        area: "billing".to_owned(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let inbox = Inbox::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                InboxQuery {
+                    unread_only: true,
+                    unacked: false,
+                    deliverable: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(inbox.every_grant_ask.len(), 12);
+        assert_eq!(inbox.grant_asks.len(), MAX_GRANT_ASKS);
+        assert_eq!(
+            inbox.grant_asks[..],
+            inbox.every_grant_ask[..MAX_GRANT_ASKS],
+            "the agent's list is the newest of them"
+        );
+        assert_eq!(
+            inbox.every_grant_ask.last().map(|ask| ask.thread),
+            Some(first),
+            "the oldest last"
+        );
+        let threads: BTreeSet<ThreadId> =
+            inbox.every_grant_ask.iter().map(|ask| ask.thread).collect();
+        assert_eq!(threads.len(), 12, "each in a conversation of its own");
+    }
+
+    #[tokio::test]
+    async fn a_thread_awaiting_the_callers_acknowledgement_is_listed_read_or_not_until_it_is_given()
+    {
+        let env = Env::new().await;
+        let (thread, asking) = send(
+            &env,
+            &env.alice.actor,
+            StartThreadInput {
+                ack_required: true,
+                ..input(
+                    Addressees::Members(vec![Handle::parse("bob").unwrap()]),
+                    "Read the rates",
+                )
+            },
+        )
+        .await;
+        send(
+            &env,
+            &env.alice.actor,
+            input(
+                Addressees::Members(vec![Handle::parse("bob").unwrap()]),
+                "Lunch",
+            ),
+        )
+        .await;
+        let inbox = Inbox::new(&env.deps);
+        let unread_only = InboxQuery {
+            unread_only: true,
+            unacked: false,
+            deliverable: false,
+        };
+        let listed = |view: &InboxView| -> Vec<(ThreadId, u64)> {
+            view.awaiting_ack
+                .iter()
+                .map(|summary| (summary.thread.record.id, summary.awaiting_ack))
+                .collect()
+        };
+        let unread = inbox.execute(&env.bob.actor, unread_only).await.unwrap();
+        assert_eq!(
+            listed(&unread),
+            [(thread, 1)],
+            "the one asking, not the other"
+        );
+        MarkRead::new(&env.deps)
+            .execute(&env.bob.actor, thread)
+            .await
+            .unwrap();
+        let read = inbox.execute(&env.bob.actor, unread_only).await.unwrap();
+        assert!(
+            read.threads
+                .iter()
+                .all(|summary| summary.thread.record.id != thread),
+            "read, so not among the unread"
+        );
+        assert_eq!(listed(&read), [(thread, 1)], "still waiting once read");
+        assert!(
+            inbox
+                .execute(&env.alice.actor, unread_only)
+                .await
+                .unwrap()
+                .awaiting_ack
+                .is_empty(),
+            "its author's never waits on itself"
+        );
+        AckMessage::new(&env.deps)
+            .execute(&env.bob.actor, asking)
+            .await
+            .unwrap();
+        assert!(
+            inbox
+                .execute(&env.bob.actor, unread_only)
+                .await
+                .unwrap()
+                .awaiting_ack
+                .is_empty()
+        );
     }
 
     #[tokio::test]

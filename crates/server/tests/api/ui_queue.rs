@@ -1,7 +1,8 @@
 //! Queue (`/ui/queue`) through the real router: the ready tickets grouped by priority and those that
-//! are not ready with their reasons, the cap on a group and the text filter, a ticket in the
-//! inspector with its command and every reference a link, the claimed tickets that are not here, an
-//! address of no ticket in the queue, and the escaping of what members wrote.
+//! are not ready with their reasons, the cap on a group, the text filter and the narrowings to a
+//! claim's kept-out tickets and to an area, a ticket in the inspector with its command — printed as
+//! it is copied, quoted for a shell — and every reference a link, the claimed tickets that are not
+//! here, an address of no ticket in the queue, and the escaping of what members wrote.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -468,7 +469,7 @@ async fn the_inspector_shows_the_ticket_its_areas_and_the_command_with_every_ref
     );
     assert!(
         shown.contains(
-            r#"<span class="r">held by <a class="who" href="/ui/claims?who=bob"><span class="av av--s pc-"#
+            r#"<span class="r" title="held by bob for gh:acme/widgets#10">held by <a class="who" href="/ui/claims?who=bob"><span class="av av--s pc-"#
         ),
         "{shown}"
     );
@@ -483,20 +484,228 @@ async fn the_inspector_shows_the_ticket_its_areas_and_the_command_with_every_ref
         shown.contains(r#"<button type="button" hidden data-copy="dibs claim gh:acme/widgets#20 --area api:billing">Copy</button>"#),
         "{shown}"
     );
-    let command = shown
-        .find(r#"<div class="cmd"><span>dibs claim "#)
-        .unwrap_or_else(|| panic!("{shown}"));
-    let command = &shown[command..shown[command..].find("</span><button").unwrap() + command];
+    let markup = command_markup(shown);
     assert!(
-        command.contains(&format!(
-            r#"<span class="ref"><a href="/ui/queue/{}" title="gh:acme/widgets#20">widgets#20</a>"#,
+        markup.contains(&format!(
+            r#"dibs claim <a class="lnk" href="/ui/queue/{}">gh:acme/widgets#20</a>"#,
             seeded.touches
         )),
-        "{command}"
+        "{markup}"
     );
     assert!(
-        command.contains(r#" --area <a class="area" href="/ui/areas/api:billing" title="api:billing">api:billing</a>"#),
-        "{command}"
+        markup.contains(r#" --area <a class="lnk" href="/ui/areas/api:billing">api:billing</a>"#),
+        "{markup}"
+    );
+    let (visible, copied) = command(shown);
+    assert_eq!(visible, copied);
+    assert_eq!(visible, "dibs claim gh:acme/widgets#20 --area api:billing");
+}
+
+/// The markup of the command the inspector prints.
+fn command_markup(shown: &str) -> &str {
+    let open = r#"<div class="cmd"><span>"#;
+    let start = shown
+        .find(open)
+        .unwrap_or_else(|| panic!("no command in {shown}"))
+        + open.len();
+    let end = shown[start..].find("</span><button").unwrap() + start;
+    &shown[start..end]
+}
+
+/// The command the inspector prints as a person reads it, and the text its Copy button copies:
+/// both with the markup taken out and the escaped characters read back.
+fn command(shown: &str) -> (String, String) {
+    let mut visible = String::new();
+    let mut in_tag = false;
+    for character in command_markup(shown).chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => visible.push(character),
+            _ => {}
+        }
+    }
+    let attribute = r#" data-copy=""#;
+    let start = shown
+        .find(attribute)
+        .unwrap_or_else(|| panic!("no copy button in {shown}"))
+        + attribute.len();
+    let end = shown[start..].find('"').unwrap() + start;
+    (unescape(&visible), unescape(&shown[start..end]))
+}
+
+/// Text with the characters the page escapes read back.
+fn unescape(text: &str) -> String {
+    text.replace("&#39;", "'")
+        .replace("&#34;", "\"")
+        .replace("&#60;", "<")
+        .replace("&#62;", ">")
+        .replace("&#38;", "&")
+}
+
+#[tokio::test]
+async fn a_reference_a_shell_would_run_is_quoted_and_the_command_shown_is_the_one_copied() {
+    let (world, alice, _, _) = project().await;
+    let hostile = world
+        .item(&alice, Some("x:$(touch pwned)"), "Hostile reference")
+        .await;
+    let browser = sign_in(&world, &alice).await;
+    let page = browser.get(&world, &format!("/ui/queue/{hostile}")).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    let shown = inspector(&page);
+    let (visible, copied) = command(shown);
+    assert_eq!(copied, "dibs claim 'x:$(touch pwned)'");
+    assert_eq!(visible, copied);
+    assert!(
+        shown.contains(r#"data-copy="dibs claim &#39;x:$(touch pwned)&#39;""#),
+        "{shown}"
+    );
+}
+
+#[tokio::test]
+async fn a_ticket_without_a_reference_is_claimed_by_its_bare_id_and_still_shown_as_its_number() {
+    let (world, alice, _, _) = project().await;
+    let local = world.item(&alice, None, "No tracker").await;
+    let browser = sign_in(&world, &alice).await;
+    let page = browser.get(&world, &format!("/ui/queue/{local}")).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    let shown = inspector(&page);
+    let (visible, copied) = command(shown);
+    assert_eq!(copied, format!("dibs claim {local}"));
+    assert_eq!(visible, copied);
+    assert!(
+        shown.contains(&format!(r##"title="#{local}">#{local}</a>"##)),
+        "{shown}"
+    );
+}
+
+#[tokio::test]
+async fn the_queue_narrows_to_exactly_the_tickets_a_claim_keeps_out_or_that_will_touch_an_area() {
+    let seeded = Seeded::new().await;
+    let kept = seeded
+        .page(&format!("/ui/queue?kept_by={}", seeded.bob_billing))
+        .await;
+    assert_eq!(kept.status, StatusCode::OK, "{}", kept.text);
+    assert_eq!(rows(&kept, &seeded.queued()), [seeded.touches]);
+    assert!(
+        kept.text
+            .contains(r#"<span class="dim">0 ready · 1 not ready</span>"#),
+        "{}",
+        kept.text
+    );
+    assert!(
+        kept.text.contains(
+            r#"<span class="faint">waiting for the claim on widgets#10</span><a class="mini" href="/ui/queue">every ticket</a>"#
+        ),
+        "{}",
+        kept.text
+    );
+    assert!(
+        kept.text.contains(&format!(
+            r#"<input type="hidden" name="kept_by" value="{}">"#,
+            seeded.bob_billing
+        )),
+        "{}",
+        kept.text
+    );
+    assert!(
+        kept.text.contains(&format!(
+            r#"data-inspect href="/ui/queue/{}?kept_by={}""#,
+            seeded.touches, seeded.bob_billing
+        )),
+        "{}",
+        kept.text
+    );
+    let other = seeded
+        .page(&format!("/ui/queue?kept_by={}", seeded.bob_other))
+        .await;
+    assert!(rows(&other, &seeded.queued()).is_empty(), "{}", other.text);
+
+    let billing = seeded.page("/ui/queue?area=api%3Abilling").await;
+    assert_eq!(rows(&billing, &seeded.queued()), [seeded.touches]);
+    assert!(
+        billing
+            .text
+            .contains(r#"<input type="hidden" name="area" value="api:billing">"#),
+        "{}",
+        billing.text
+    );
+    let search = seeded.page("/ui/queue?area=api:search").await;
+    assert_eq!(rows(&search, &seeded.queued()), [seeded.search]);
+    assert!(
+        search
+            .text
+            .contains(r#"<span class="dim">1 ready · 0 not ready</span>"#),
+        "{}",
+        search.text
+    );
+
+    let selected = seeded
+        .page(&format!(
+            "/ui/queue/{}?area=api%3Asearch&q=tweaks",
+            seeded.search
+        ))
+        .await;
+    assert_eq!(selected.status, StatusCode::OK, "{}", selected.text);
+    let shown = inspector(&selected);
+    assert!(
+        shown.contains(
+            r#"<a class="x" data-inspect href="/ui/queue?q=tweaks&#38;area=api%3Asearch" aria-label="Close">"#
+        ),
+        "{shown}"
+    );
+
+    let unread = seeded.page("/ui/queue?kept_by=abc&area=nowhere").await;
+    assert_eq!(unread.status, StatusCode::OK, "{}", unread.text);
+    assert_eq!(rows(&unread, &seeded.queued()), seeded.queued());
+    assert!(!unread.text.contains("every ticket"), "{}", unread.text);
+}
+
+#[tokio::test]
+async fn an_area_one_member_holds_for_two_tickets_names_both_in_the_inspector() {
+    let (world, alice, bob, bot) = project().await;
+    let ids = import(
+        &world,
+        &bot,
+        json!([
+            {"ref": "gh:acme/widgets#10", "title": "Bob billing work"},
+            {"ref": "gh:acme/widgets#11", "title": "More billing work"},
+            {"ref": "gh:acme/widgets#20", "title": "Touches billing", "areas_hint": ["api:billing"]}
+        ]),
+    )
+    .await;
+    let [first, second, touches] = ids[..] else {
+        panic!("three items were listed: {ids:?}");
+    };
+    let desk = world.session(&bob, "bob-desk").await;
+    claim(&world, &bob, desk, first, json!(["api:billing"])).await;
+    let laptop = world.session(&bob, "bob-laptop").await;
+    claim(&world, &bob, laptop, second, json!(["api:billing"])).await;
+    let browser = sign_in(&world, &alice).await;
+    let page = browser.get(&world, &format!("/ui/queue/{touches}")).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    let shown = inspector(&page);
+    assert!(
+        shown.contains(
+            r#"<span class="r" title="held by bob for gh:acme/widgets#10, bob for gh:acme/widgets#11">held by <a class="who" href="/ui/claims?who=bob">"#
+        ),
+        "{shown}"
+    );
+    for claimed in [first, second] {
+        assert!(
+            shown.contains(&format!(
+                r#"<span class="ref"><a href="/ui/claims/{claimed}""#
+            )),
+            "{shown}"
+        );
+    }
+    let touched = &shown[shown.find("Areas it will probably touch").unwrap()..];
+    assert_eq!(
+        touched
+            .matches(r#"<a class="who" href="/ui/claims?who=bob">"#)
+            .count(),
+        2,
+        "{touched}"
     );
 }
 

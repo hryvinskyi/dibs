@@ -1,7 +1,8 @@
 //! Claims (`/ui/claims`) through the real router: the claims grouped by holder, the filters and
 //! their counts, the holder and text filters, a claim in the inspector with every reference a link,
 //! the take-over of a silent claim, a wide claim's areas, debt work and the areas a claim waits for,
-//! an address of no open claim, and the escaping of what members wrote.
+//! the queue links that lead to exactly the tickets they count, an address of no open claim, and
+//! the escaping of what members wrote.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -457,7 +458,7 @@ async fn a_claim_in_review_links_its_pull_request_branch_and_the_files_it_shares
     let shown = inspector(&working);
     assert!(
         shown.contains(
-            r#"<a class="lnk" href="/ui/queue?q=api%3Abilling">1 ticket will touch it</a>"#
+            r#"<a class="lnk" href="/ui/queue?area=api%3Abilling">1 ticket will touch it</a>"#
         ),
         "{shown}"
     );
@@ -738,5 +739,113 @@ async fn debt_work_is_marked_and_a_claim_names_the_debt_work_it_waits_for() {
     assert!(
         shown.contains("<b>alice</b></a>'s debt work</span>"),
         "{shown}"
+    );
+}
+
+/// The address the first link after `before` in `markup` leads to, its escaped characters read
+/// back.
+fn link_after(markup: &str, before: &str) -> String {
+    let at = markup
+        .find(before)
+        .unwrap_or_else(|| panic!("no {before} in {markup}"))
+        + before.len();
+    let open = r#"<a class="lnk" href=""#;
+    let start = markup[at..].find(open).unwrap() + at + open.len();
+    let end = markup[start..].find('"').unwrap() + start;
+    markup[start..end].replace("&#38;", "&")
+}
+
+#[tokio::test]
+async fn the_queue_links_of_a_claim_lead_to_exactly_the_tickets_they_count() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    let bot = world.member(&alice, "bot", Role::Importer).await;
+    world.settings(&alice, settings()).await;
+    let imported = world
+        .put(
+            &bot,
+            "/v1/items",
+            json!({"items": [
+                {"ref": "gh:acme/widgets#7", "title": "Rates"},
+                {"ref": "gh:acme/widgets#17", "title": "Seventeen", "areas_hint": ["api:search"]},
+                {"ref": "gh:acme/widgets#70", "title": "Seventy", "areas_hint": ["api:search"]},
+                {"ref": "gh:acme/widgets#20", "title": "Touches billing",
+                 "areas_hint": ["api:billing"]}
+            ]}),
+        )
+        .await;
+    assert_eq!(imported.status, StatusCode::OK, "{}", imported.body);
+    let id = |at: usize| imported.body["items"][at]["id"].as_u64().unwrap();
+    let (seven, seventeen, seventy, touches) = (id(0), id(1), id(2), id(3));
+    let desk = world.session(&bob, "bob-desk").await;
+    claim(&world, &bob, desk, seven, json!(["api:billing"])).await;
+    let closed = world
+        .put(
+            &bot,
+            "/v1/items",
+            json!({"items": [{"ref": "gh:acme/widgets#7", "title": "Rates", "closed": true}]}),
+        )
+        .await;
+    assert_eq!(closed.status, StatusCode::OK, "{}", closed.body);
+    let browser = sign_in(&world, &alice).await;
+    let page = browser.get(&world, &format!("/ui/claims/{seven}")).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    let shown = inspector(&page);
+    let queued = |path: String| {
+        let browser = &browser;
+        let world = &world;
+        async move { browser.get(world, &path).await }
+    };
+    let listed = |page: &Page| -> Vec<u64> {
+        [seventeen, seventy, touches]
+            .into_iter()
+            .filter(|id| {
+                page.text.contains(&format!(
+                    r#"<a class="row__t" data-inspect href="/ui/queue/{id}"#
+                ))
+            })
+            .collect()
+    };
+
+    assert!(
+        shown.contains(&format!(
+            r#"It keeps <a class="lnk" href="/ui/queue?kept_by={seven}">1 ticket</a> out of the queue."#
+        )),
+        "{shown}"
+    );
+    let kept = queued(link_after(shown, "It keeps ")).await;
+    assert_eq!(kept.status, StatusCode::OK, "{}", kept.text);
+    assert_eq!(listed(&kept), [touches], "{}", kept.text);
+    assert!(
+        kept.text
+            .contains(r#"<span class="dim">0 ready · 1 not ready</span>"#),
+        "{}",
+        kept.text
+    );
+
+    assert!(
+        shown.contains(
+            r#"<a class="lnk" href="/ui/queue?area=api%3Abilling">1 ticket will touch it</a>"#
+        ),
+        "{shown}"
+    );
+    let touching = queued(link_after(shown, r#"title="api:billing">api:billing</a>"#)).await;
+    assert_eq!(touching.status, StatusCode::OK, "{}", touching.text);
+    assert_eq!(listed(&touching), [touches], "{}", touching.text);
+    assert!(
+        touching
+            .text
+            .contains(r#"<span class="dim">0 ready · 1 not ready</span>"#),
+        "{}",
+        touching.text
+    );
+
+    let everything = queued("/ui/queue".to_owned()).await;
+    assert_eq!(
+        listed(&everything),
+        [seventeen, seventy, touches],
+        "{}",
+        everything.text
     );
 }

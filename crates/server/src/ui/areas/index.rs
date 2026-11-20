@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use dibs_domain::area::QualifiedArea;
 use dibs_domain::ids::ItemId;
 use dibs_domain::repo::RepoId;
 use dibs_domain::settings::RepoSpec;
@@ -35,6 +36,8 @@ pub(crate) struct RepoAreas {
 pub(crate) struct AreaEntry {
     /// The area, in its full form `repo:name`.
     pub(crate) area: AreaView,
+    /// The area as the domain names it.
+    pub(crate) qualified: QualifiedArea,
     /// The paths it declares, as declared.
     pub(crate) paths: Vec<String>,
     /// The areas it depends on.
@@ -207,6 +210,7 @@ impl RepoAreas {
                     state: AreaState::of(&holders),
                     holders,
                     area,
+                    qualified,
                 }
             })
             .collect();

@@ -1,6 +1,8 @@
 //! The view of one claim — its ticket, holder, areas, state, pull requests and branches, and how it
 //! stands — as a list row and an inspector print it, built from the status the frame read.
 
+use std::collections::BTreeSet;
+
 use time::{Duration, OffsetDateTime};
 
 use dibs_app::use_cases::{HeldItem, StatusView};
@@ -8,6 +10,7 @@ use dibs_domain::handle::Handle;
 use dibs_domain::handover::ClaimKind;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemRepository;
+use dibs_domain::radar::OverlapKind;
 use dibs_domain::repo::RepoId;
 
 use crate::ui::claims::classify::{finished, held_over_a_week, other_ticket, silent};
@@ -94,6 +97,8 @@ pub(crate) struct ClaimView {
     pub(crate) activity: Activity,
     /// The pull requests its review recorded, each leading to this claim.
     pub(crate) prs: Vec<PullRequestView>,
+    /// The full names of the merged pull requests that moved the base under it.
+    pub(crate) moved_by: Vec<String>,
     /// The branch it recorded in each repository.
     pub(crate) branches: Vec<RepoBranch>,
     /// Whether its ticket is finished.
@@ -221,6 +226,7 @@ impl ClaimView {
             last_seen: moment(claim.last_seen, scene.now),
             activity,
             prs,
+            moved_by: moved_by(scene.status, item.id),
             branches: claim
                 .branches
                 .iter()
@@ -240,7 +246,8 @@ impl ClaimView {
     }
 
     /// The text a list's filter and the search match against: the ticket's full reference, the
-    /// title, the holder, the areas, the branches and the pull requests.
+    /// title, the holder, the areas, the branches, the pull requests of its review and the merged
+    /// ones that moved its base.
     pub(crate) fn text(&self) -> String {
         let title: String = self
             .title
@@ -258,6 +265,7 @@ impl ClaimView {
                     .map(|branch| branch.branch.label.clone()),
             )
             .chain(self.prs.iter().map(|pr| pr.title.clone()))
+            .chain(self.moved_by.iter().cloned())
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -288,6 +296,23 @@ fn wide(held: &HeldItem, home: Option<&RepoId>, scene: &Scene<'_>) -> Option<Wid
     })
 }
 
+/// The full names of the merged pull requests that moved the base under `item`, each once, in
+/// name order.
+fn moved_by(status: &StatusView, item: ItemId) -> Vec<String> {
+    status
+        .overlaps
+        .iter()
+        .map(|named| &named.overlap)
+        .filter(|overlap| {
+            overlap.kind() == OverlapKind::MainMoved && overlap.items().contains(&item)
+        })
+        .filter_map(|overlap| overlap.pr())
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// The holder of the live or stale claim on `item`, when the status shows one.
 fn holder_of(status: &StatusView, item: ItemId) -> Option<&Handle> {
     status
@@ -296,4 +321,158 @@ fn holder_of(status: &StatusView, item: ItemId) -> Option<&Handle> {
         .chain(&status.stale)
         .find(|held| held.item.item.id == item)
         .map(|held| &held.claim.holder)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+
+    use time::macros::datetime;
+
+    use dibs_app::named::{NamedClaim, NamedItem};
+    use dibs_app::records::ItemRecord;
+    use dibs_app::use_cases::{NamedOverlap, ReadyView};
+    use dibs_domain::claim::Claim;
+    use dibs_domain::forge::ForgeRegistry;
+    use dibs_domain::hot_rule::HotRuleRegistry;
+    use dibs_domain::ids::{MemberId, SessionId};
+    use dibs_domain::item::{ExternalRef, Title};
+    use dibs_domain::paths::RepoPath;
+    use dibs_domain::radar::{MergeMark, Overlap};
+    use dibs_domain::ref_scheme::RefSchemeRegistry;
+    use dibs_domain::review::{ClaimState, PrRef};
+    use dibs_domain::session::HostName;
+    use dibs_domain::settings::{ProjectSettings, SettingsDocument};
+
+    use crate::ui::links::places;
+
+    use super::*;
+
+    const NOW: OffsetDateTime = datetime!(2026-03-10 12:00:00 UTC);
+
+    fn handle(text: &str) -> Handle {
+        Handle::parse(text).unwrap()
+    }
+
+    fn held(id: u64) -> HeldItem {
+        let item = ItemRecord::new(
+            ItemId(id),
+            Some(ExternalRef::parse(&format!("gh:acme/widgets#{id}")).unwrap()),
+            Title::parse(&format!("Item {id}")).unwrap(),
+            ItemRepository::Listed(RepoId::parse("api").unwrap()),
+            MemberId(1),
+            NOW - Duration::days(60),
+        );
+        HeldItem {
+            claim: NamedClaim {
+                claim: Claim {
+                    item: ItemId(id),
+                    member: MemberId(1),
+                    session: SessionId(1),
+                    host: HostName::parse("laptop").unwrap(),
+                    areas: BTreeSet::new(),
+                    wide: None,
+                    claimed_at: NOW - Duration::hours(2),
+                    renewed_at: NOW - Duration::hours(2),
+                    last_seen: NOW - Duration::minutes(1),
+                    state: ClaimState::Working,
+                    branches: BTreeMap::new(),
+                    kind: ClaimKind::Feature,
+                    pending: BTreeMap::new(),
+                },
+                holder: handle("alice"),
+            },
+            item: NamedItem {
+                item,
+                created_by: handle("alice"),
+            },
+            link: None,
+        }
+    }
+
+    fn overlap(kind: OverlapKind, pr: Option<&str>, items: &[u64]) -> NamedOverlap {
+        let merge = pr.map(|pr| MergeMark {
+            pr: PrRef::parse(pr).unwrap(),
+            at: NOW,
+        });
+        let overlap = Overlap::new(
+            kind,
+            items.iter().map(|id| ItemId(*id)).collect(),
+            merge,
+            BTreeSet::from([RepoPath::parse("api:src/a.rs").unwrap()]),
+        )
+        .unwrap();
+        NamedOverlap {
+            overlap,
+            items: Vec::new(),
+        }
+    }
+
+    fn status(claims: Vec<HeldItem>, overlaps: Vec<NamedOverlap>) -> StatusView {
+        StatusView {
+            live: claims,
+            stale: Vec::new(),
+            holds: Vec::new(),
+            wide: Vec::new(),
+            ready: ReadyView {
+                ready: Vec::new(),
+                excluded: Vec::new(),
+            },
+            slots: Vec::new(),
+            worktrees: Vec::new(),
+            escalations: Vec::new(),
+            integration_silent_since: None,
+            overlaps,
+        }
+    }
+
+    /// The views of every live claim of `status`.
+    fn views(status: &StatusView) -> Vec<ClaimView> {
+        let document: SettingsDocument = serde_json::from_value(serde_json::json!({
+            "repos": [{"id": "api", "remote": "https://github.com/acme/widgets",
+                       "areas": [{"name": "billing", "paths": ["billing/**"]}]}]
+        }))
+        .unwrap();
+        let links = LinkContext::new(
+            ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+            Arc::new(RefSchemeRegistry::standard()),
+            Arc::new(ForgeRegistry::standard()),
+            places(status),
+        );
+        let viewer = handle("alice");
+        let scene = Scene {
+            status,
+            viewer: &viewer,
+            now: NOW,
+            stale_after: Duration::days(1),
+            links: &links,
+        };
+        status
+            .live
+            .iter()
+            .map(|held| ClaimView::of(held, &scene))
+            .collect()
+    }
+
+    #[test]
+    fn the_text_holds_the_merged_pull_requests_that_moved_the_claims_base() {
+        let status = status(
+            vec![held(3), held(5), held(8)],
+            vec![
+                overlap(OverlapKind::MainMoved, Some("acme/widgets#7"), &[3]),
+                overlap(OverlapKind::MainMoved, Some("acme/widgets#7"), &[5]),
+                overlap(OverlapKind::MainMoved, Some("acme/widgets#4"), &[3]),
+                overlap(OverlapKind::SameFile, None, &[5, 8]),
+            ],
+        );
+        let claims = views(&status);
+        assert_eq!(claims[0].moved_by, ["acme/widgets#4", "acme/widgets#7"]);
+        assert_eq!(claims[1].moved_by, ["acme/widgets#7"]);
+        assert!(claims[2].moved_by.is_empty());
+        let words = |claim: &ClaimView| claim.text();
+        assert!(words(&claims[0]).contains("acme/widgets#7"));
+        assert!(words(&claims[1]).contains("acme/widgets#7"));
+        assert!(!words(&claims[2]).contains("acme/widgets#7"));
+    }
 }

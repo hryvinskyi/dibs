@@ -1,18 +1,27 @@
 // @ts-check
 /**
  * Navigation inside a screen without a page load: a plain click on a link that selects an object
- * of the screen (`a[data-inspect]`) fetches the page at its address and swaps its inspector in,
- * pushes the address to the history, marks the row of that object as current and moves the focus
- * to the inspector's heading. Closing the inspector (its close link, or `Escape`) returns the
- * focus to the row that was selected, or to the list's heading. The browser's Back and Forward
- * swap the inspector of the address they land on. A modified click, another button or another
- * origin is left to the browser; an answer that cannot be shown loads the address as a page.
+ * of the screen (`a[data-inspect]`) fetches the page at its address, pushes the address to the
+ * history, and shows what the answer holds: its inspector swapped in with the focus on its heading,
+ * and the screen's other regions brought up to date from the same answer, so that what opening the
+ * object changed shows at once (`opening-regions.js` decides which); the row of that object is
+ * marked as current. Closing the inspector (its close link, or `Escape`) returns the focus to the
+ * row that was selected, or to the list's heading. The browser's Back and Forward show the address
+ * they land on the same way, from the address the page is read from: a page answering a form shows
+ * the address the form posted to, which only a POST answers, so Back there shows the screen's own
+ * address. A modified click, another button or another origin is left to the
+ * browser; an answer that cannot be shown loads the address as a page.
  */
 
+import { closesOnKey, isPlainClick } from './inspect-input.js';
+import { closeLinkIndex } from './list-selection.js';
+import { currentRowLink, listRows, markSelected, rowLink } from './list-rows.js';
+import { OPENED_REGION, openingAction, regionsToAsk } from './opening-regions.js';
+import { answerStillWanted } from './answer-address.js';
+import { hasEdits } from './form-use.js';
+import { swapKeepingPlace } from './region-swap.js';
+import { pathOf, sameOrigin, samePath } from './page-addresses.js';
 import { findRegion, swapRegion } from './regions.js';
-
-/** The regions an in-place navigation asks for. */
-const INSPECTOR_ONLY = Object.freeze(['inspector']);
 
 /** What a pushed history entry carries, so the page can tell its own entries. */
 const HISTORY_STATE = Object.freeze({ dibsInspect: true });
@@ -23,173 +32,15 @@ const FIELD = 'input, textarea, select, [contenteditable]:not([contenteditable="
 /**
  * What the inspector's navigation is given.
  * @typedef {object} InspectorDeps
+ * @property {Pick<import('./readable-address.js').PageAddress, 'readable'>} address the address the
+ *   page is read from again, which a page answering a form does not show
  * @property {import('./regions.js').FetchRegions} fetchRegions
  * @property {Pick<History, 'pushState'>} history
  * @property {Pick<Location, 'href' | 'assign'>} location
- * @property {(region: Element) => void} onSwap called with each inspector swapped in
+ * @property {(region: Element) => void} onSwap called with each region swapped in
  * @property {() => void} onNavigate called when a navigation starts, before its request leaves
  * @property {() => void} showSignedOut called when the session turns out to have ended
  */
-
-/**
- * Whether a click is the primary button with no modifier key, not handled already.
- * @param {Pick<MouseEvent, 'button' | 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'defaultPrevented'>} event
- * @returns {boolean}
- */
-export function isPlainClick(event) {
-  return (
-    event.button === 0 &&
-    !event.ctrlKey &&
-    !event.metaKey &&
-    !event.shiftKey &&
-    !event.altKey &&
-    !event.defaultPrevented
-  );
-}
-
-/**
- * An absolute address parsed; `null` when it is not one.
- * @param {string} address
- * @returns {URL | null}
- */
-function parsed(address) {
-  try {
-    return new URL(address);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Whether two absolute addresses are on one origin.
- * @param {string} a
- * @param {string} b
- * @returns {boolean}
- */
-function sameOrigin(a, b) {
-  const first = parsed(a);
-  const second = parsed(b);
-  return first !== null && second !== null && first.origin === second.origin;
-}
-
-/**
- * Whether two absolute addresses are on one origin with one path; the query and the fragment are
- * ignored.
- * @param {string} a
- * @param {string} b
- * @returns {boolean}
- */
-export function samePath(a, b) {
-  const first = parsed(a);
-  const second = parsed(b);
-  return first !== null && second !== null && first.origin === second.origin && first.pathname === second.pathname;
-}
-
-/**
- * Whether two absolute addresses name one page: one origin, one path, one query.
- * @param {string} a
- * @param {string} b
- * @returns {boolean}
- */
-function sameAddress(a, b) {
-  const first = parsed(a);
-  const second = parsed(b);
-  return (
-    first !== null &&
-    second !== null &&
-    first.origin === second.origin &&
-    first.pathname === second.pathname &&
-    first.search === second.search
-  );
-}
-
-/**
- * Which of the rows' links (absolute addresses, `''` for a row without one) points at the page
- * shown, or -1.
- * @param {readonly string[]} hrefs
- * @param {string} pathname the path of the page shown
- * @returns {number}
- */
-export function selectedIndex(hrefs, pathname) {
-  return hrefs.findIndex((href) => parsed(href)?.pathname === pathname);
-}
-
-/**
- * Which of the inspector's links (absolute addresses) is its close link: the one that goes back to
- * the list the object shown belongs to, whose path is the page's path without its last segment.
- * @param {readonly string[]} hrefs
- * @param {string} pathname the path of the page shown
- * @returns {number}
- */
-export function closeLinkIndex(hrefs, pathname) {
-  const cut = pathname.lastIndexOf('/');
-  if (cut <= 0) {
-    return -1;
-  }
-  const list = pathname.slice(0, cut);
-  return hrefs.findIndex((href) => parsed(href)?.pathname === list);
-}
-
-/**
- * Whether a key closes the inspector: `Escape`, not handled already, not typed into a field, with
- * no dialog open and an object selected.
- * @param {{ key: string, inField: boolean, dialogOpen: boolean, selected: boolean, defaultPrevented: boolean }} press
- * @returns {boolean}
- */
-export function closesOnKey({ key, inField, dialogOpen, selected, defaultPrevented }) {
-  return key === 'Escape' && !defaultPrevented && !inField && !dialogOpen && selected;
-}
-
-/**
- * The link a row selects its object with: the row itself when it is that link.
- * @param {Element} row
- * @returns {HTMLAnchorElement | null}
- */
-function rowLink(row) {
-  if (row instanceof HTMLAnchorElement && row.hasAttribute('data-inspect')) {
-    return row;
-  }
-  const link = row.querySelector('a[data-inspect]');
-  return link instanceof HTMLAnchorElement ? link : null;
-}
-
-/**
- * The rows of the screen's list.
- * @param {Element} app
- * @returns {Element[]}
- */
-function listRows(app) {
-  const list = findRegion(app, 'list');
-  return list === null ? [] : Array.from(list.querySelectorAll('[data-row]'));
-}
-
-/**
- * The link of the row marked as current, if any.
- * @param {Element} app
- * @returns {HTMLAnchorElement | null}
- */
-function currentRowLink(app) {
-  const row = listRows(app).find((candidate) => candidate.getAttribute('aria-current') === 'true');
-  return row === undefined ? null : rowLink(row);
-}
-
-/**
- * Marks the row whose link points at `pathname` as current; the others lose the mark.
- * @param {Element} app
- * @param {string} pathname
- * @returns {void}
- */
-function markSelected(app, pathname) {
-  const rows = listRows(app);
-  const chosen = selectedIndex(rows.map((row) => rowLink(row)?.href ?? ''), pathname);
-  rows.forEach((row, index) => {
-    if (index === chosen) {
-      row.setAttribute('aria-current', 'true');
-    } else {
-      row.removeAttribute('aria-current');
-    }
-  });
-}
 
 /**
  * Moves the focus to an element that can hold it.
@@ -204,12 +55,24 @@ function focusOn(target) {
   return false;
 }
 
+/**
+ * What each opening action does with a region: the region swapped in, or `null` when it is kept.
+ * @type {{
+ *   [A in import('./opening-regions.js').OpeningAction]: (current: Element, incoming: Element) => Element | null
+ * }}
+ */
+const OPENING = {
+  open: swapRegion,
+  refresh: swapKeepingPlace,
+  keep: () => null,
+};
+
 /** @type {WeakSet<Element>} */
 const mounted = new WeakSet();
 
 /**
- * Makes `data-inspect` links swap the inspector region in place. Mounting the same element again
- * does nothing.
+ * Makes `data-inspect` links show their object in place. Mounting the same element again does
+ * nothing.
  * @param {Element} app the `.app` element
  * @param {InspectorDeps} deps
  * @returns {() => void} teardown
@@ -219,36 +82,52 @@ export function mountInspector(app, deps) {
     return () => {};
   }
   mounted.add(app);
-  const { fetchRegions, history, location, onSwap, onNavigate, showSignedOut } = deps;
+  const { address, fetchRegions, history, location, onSwap, onNavigate, showSignedOut } = deps;
   const doc = app.ownerDocument;
   const controller = new AbortController();
   const { signal } = controller;
   /** @type {AbortController | null} */
   let inflight = null;
-  let shown = location.href;
+  let shown = address.readable();
 
   /**
-   * Shows the inspector of the answer: swaps it in, records the address, marks the row and moves
-   * the focus.
-   * @param {Element} incoming
+   * Shows the answer: swaps its regions in, records the address, marks the row and moves the
+   * focus.
+   * @param {Map<string, Element>} regions
+   * @param {readonly string[]} names the regions asked for, in the order they are swapped in
    * @param {string} href
    * @param {boolean} push
    * @param {string} wasSelected the address of the row selected before, `''` for none
    */
-  const show = (incoming, href, push, wasSelected) => {
-    const current = findRegion(app, 'inspector');
-    if (current === null) {
+  const show = (regions, names, href, push, wasSelected) => {
+    if (findRegion(app, OPENED_REGION) === null) {
       location.assign(href);
       return;
     }
-    const next = swapRegion(current, incoming);
+    /** @type {Element[]} */
+    const swapped = [];
+    for (const name of names) {
+      const current = findRegion(app, name);
+      const incoming = regions.get(name);
+      if (current === null || incoming === undefined) {
+        continue;
+      }
+      const next = OPENING[openingAction(name, hasEdits(current))](current, incoming);
+      if (next !== null) {
+        swapped.push(next);
+      }
+    }
     if (push) {
       history.pushState(HISTORY_STATE, '', href);
     }
     shown = href;
-    markSelected(app, parsed(href)?.pathname ?? '');
-    onSwap(next);
-    if (next.getAttribute('data-selected') === 'false') {
+    markSelected(app, href);
+    swapped.forEach(onSwap);
+    const opened = findRegion(app, OPENED_REGION);
+    if (opened === null) {
+      return;
+    }
+    if (opened.getAttribute('data-selected') === 'false') {
       const back = listRows(app)
         .map(rowLink)
         .find((link) => link !== null && wasSelected !== '' && samePath(link.href, wasSelected));
@@ -257,7 +136,7 @@ export function mountInspector(app, deps) {
       }
       return;
     }
-    focusOn(next.querySelector('[data-inspector-heading]'));
+    focusOn(opened.querySelector('[data-inspector-heading]'));
   };
 
   /**
@@ -274,7 +153,7 @@ export function mountInspector(app, deps) {
    * @param {boolean} push whether the address goes into the history
    */
   const navigate = async (href, push) => {
-    if (findRegion(app, 'inspector') === null) {
+    if (findRegion(app, OPENED_REGION) === null) {
       location.assign(href);
       return;
     }
@@ -283,10 +162,13 @@ export function mountInspector(app, deps) {
     inflight = mine;
     onNavigate();
     const wasSelected = currentRowLink(app)?.href ?? '';
+    const names = regionsToAsk(
+      Array.from(app.querySelectorAll('[data-region]'), (region) => region.getAttribute('data-region') ?? ''),
+    );
     /** @type {import('./regions.js').RegionsAnswer} */
     let answer;
     try {
-      answer = await fetchRegions(href, INSPECTOR_ONLY, { signal: AbortSignal.any([signal, mine.signal]) });
+      answer = await fetchRegions(href, names, { signal: AbortSignal.any([signal, mine.signal]) });
     } catch (error) {
       if (mine.signal.aborted || signal.aborted) {
         return;
@@ -303,12 +185,11 @@ export function mountInspector(app, deps) {
       return;
     }
     if (answer.kind === 'ok') {
-      const incoming = answer.regions.get('inspector');
-      if (incoming === undefined) {
+      if (!answer.regions.has(OPENED_REGION)) {
         location.assign(href);
         return;
       }
-      show(incoming, href, push, wasSelected);
+      show(answer.regions, names, href, push, wasSelected);
       return;
     }
     unanswered[answer.kind](href);
@@ -340,7 +221,7 @@ export function mountInspector(app, deps) {
   }, { signal });
 
   doc.addEventListener('keydown', (event) => {
-    const inspector = findRegion(app, 'inspector');
+    const inspector = findRegion(app, OPENED_REGION);
     const press = {
       key: event.key,
       inField: event.target instanceof Element && event.target.closest(FIELD) !== null,
@@ -354,7 +235,7 @@ export function mountInspector(app, deps) {
     const links = Array.from(inspector.querySelectorAll('a[data-inspect]')).filter(
       (link) => link instanceof HTMLAnchorElement,
     );
-    const close = links[closeLinkIndex(links.map((link) => link.href), parsed(location.href)?.pathname ?? '')];
+    const close = links[closeLinkIndex(links.map((link) => link.href), pathOf(address.readable()) ?? '')];
     if (close === undefined) {
       return;
     }
@@ -363,8 +244,8 @@ export function mountInspector(app, deps) {
   }, { signal });
 
   doc.defaultView?.addEventListener('popstate', () => {
-    const href = location.href;
-    if (sameAddress(href, shown)) {
+    const href = address.readable();
+    if (answerStillWanted(href, shown)) {
       return;
     }
     go(href, false);

@@ -694,8 +694,10 @@ status, the status, the brief and the Now screen say so.
 The server also serves pages for people at `/ui`, where you sign in with your token. Every page is drawn in one frame:
 
 - **The rail**: the project, one search (`⌘K`, `Ctrl+K` or `/`), the five screens with their counts, the people with
-  their claims and how many of them are silent, the slots (each opens to show its note and how long a hold may last)
-  and the worktrees held with their purpose.
+  their claims and how many of them are silent, the slots and the worktrees held. Each slot is marked free, held,
+  queued, stalled (its run stopped sending heartbeats) or offered, with its holder, and opens to show the hold's
+  purpose, when its holder was last seen and until when it lasts, who it is offered to, who waits for it, its note and
+  how long a hold may last. Each worktree held shows its holder, the host it is held on, its purpose and its ticket.
 - **The list and the inspector**: the screen's list, and beside it, on four screens, an inspector for the object you
   select, with *Copy link*. A click on a row opens it in place; `Escape` closes it.
 - **Now** (`/ui/`): what waits for a person's look, as cards that show only while they have something: unread
@@ -710,13 +712,17 @@ The server also serves pages for people at `/ui`, where you sign in with your to
   it over with a reason its holder is sent.
 - **Queue** (`/ui/queue`): the tickets that wait to be claimed, the ready ones by priority, then those that are not and
   why (a blocker, or an area someone holds). The inspector shows the areas a ticket will probably touch, who holds
-  them, and the `dibs claim` command to copy.
+  them, and the `dibs claim` command to copy, its words quoted for the shell wherever a reference holds anything a
+  shell would read. A Claims or Areas inspector's count of tickets leads to the queue narrowed to exactly those
+  tickets: the ones a claim keeps out (`?kept_by=<item>`) or the ones that will touch an area (`?area=<repo:area>`).
 - **Areas** (`/ui/areas`): the project's areas as a map by repository, the held ones first, each marked with its
   holder, and set apart when it is held for a finished ticket or for more than a week. The inspector shows an area's
   paths, the claims that hold it and the tickets that will probably touch it.
 - **Inbox** (`/ui/inbox`): the conversations. *People* lists what members wrote, *Grants* the requests waiting for your
-  agent's decision, *From dibs* what dibs reported, one row per ticket. The inspector shows the conversation and a
-  reply form; opening it marks it read. A message that asks for acknowledgement lists who has acknowledged, updated as
+  agent's decision (every one of them, and a grant request is never counted as a conversation), *From dibs* what dibs
+  reported, one row per ticket. A row says how many of its messages wait for your acknowledgement, read or not, until
+  you give it; Now's Answer card names those conversations too. The inspector shows the conversation and a reply form;
+  opening it marks it read, and the rail's counts drop on that very page. A message that asks for acknowledgement lists who has acknowledged, updated as
   they do, and offers you an *Acknowledge* button while it still asks (an ended wide claim's announcement no longer
   does), and a reply can ask everyone to acknowledge it. What dibs wrote itself is marked *from dibs*.
 - **Search** (`/ui/search`): finds claims, pull requests, tickets in the queue, branches, areas, people, conversations
@@ -731,9 +737,10 @@ The server also serves pages for people at `/ui`, where you sign in with your to
   old Board and Threads addresses lead to Claims and Inbox.
 - **What the pages do not do**: they are for watching and finding. Decisions are the agents' and the server's, and the
   pages keep only the take-over of a silent claim, replying in a conversation, acknowledging a message and signing out.
-- **Live**: the screens follow the event stream and read themselves again when claims, tickets, slots or conversations
-  change; a form you are writing in is kept, and a banner offers a reload instead. An open conversation shows new
-  messages as they arrive.
+- **Live**: the screens follow the event stream and read themselves again, rail included, on every event that changes
+  something they show: claims, their branches, pull requests and grants, tickets, slots, worktrees, and conversations
+  started, answered, acknowledged or deleted; a form you are writing in is kept, and a banner offers a reload
+  instead. An open conversation shows new messages as they arrive, those posted while it was opening included.
 
 The pages are rendered on the server and enhanced by a few scripts of its own, so every page also works without them.
 Light and dark follow the system. The fonts, IBM Plex Sans and Mono, are served by the server itself under the SIL

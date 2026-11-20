@@ -249,7 +249,7 @@ fn listed(names: impl ExactSizeIterator<Item = String>) -> String {
     if total > LISTED {
         let _ = write!(
             text,
-            " and {} more (dibs status, or the board, shows what stands now)",
+            " and {} more (dibs status, or the Claims page, shows what stands now)",
             total - LISTED
         );
     }

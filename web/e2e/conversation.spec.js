@@ -2,7 +2,11 @@
 /**
  * Conversations on the Inbox in a real browser: a reply posts through the form and a teammate's
  * message appears live, the conversation keeping itself current without the page's change notice
- * and over the page's one event stream; a reference in a message that arrives live becomes a link
+ * and over the page's one event stream; a message posted while a conversation opens in place shows
+ * once it is open; opening an unread conversation counts it read on the rail and in the list
+ * without a reload; on the page answering a refused reply, a message that arrives live takes its
+ * rendered form without a GET of the address the reply was posted to; a reference in a message
+ * that arrives live becomes a link
  * without a reload while a half-written reply stays in the form; a recipient acknowledges an urgent
  * message, and one that arrives live; the author sees an acknowledgement arrive; an escalation
  * reads as from dibs and leaves Now's Arbitrate card once acknowledged; a token the server does not
@@ -99,6 +103,116 @@ test('a reply posts, and a message posted meanwhile appears live over the one ev
   await expect(page.locator('[data-live-pill]')).toBeVisible();
   await expect(changed(page)).toBeHidden();
   await expect.poll(openStreams).toBe(1);
+  await expectSameDocument(page);
+});
+
+test('a message posted while a conversation opens in place shows once it is open, and only once', async ({
+  page,
+  dibs,
+}) => {
+  const threadId = await startThread(dibs.url, dibs.adminToken, {
+    subject: 'Rounding rules',
+    to: ['bob'],
+    body: 'May I touch round.rs?',
+  });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/inbox`);
+  await markDocument(page);
+  const address = `${dibs.url}/ui/inbox/${threadId}`;
+  // The server renders the conversation before the message is posted, and its answer reaches the
+  // page only after the page's stream has delivered the message to the screen.
+  await page.route(address, async (route) => {
+    const rendered = await route.fetch();
+    const screenSawIt = page.waitForRequest((request) => new URL(request.url()).pathname === '/ui/inbox');
+    await postMessage(dibs.url, dibs.adminToken, threadId, 'Posted while it opened.');
+    await screenSawIt;
+    await route.fulfill({ response: rendered });
+  });
+
+  await page.locator('[data-region="list"]').getByRole('link', { name: 'Rounding rules' }).click();
+  await expect(page).toHaveURL(address);
+  await expect(messages(page).getByText('May I touch round.rs?')).toBeVisible();
+  await expect(messages(page).getByText('Posted while it opened.')).toBeVisible();
+  await expect(messages(page).getByText('Posted while it opened.')).toHaveCount(1);
+  await page.unroute(address);
+  await expectSameDocument(page);
+});
+
+test('opening an unread conversation in place counts it read on the rail and in the list at once', async ({
+  page,
+  dibs,
+}) => {
+  await startThread(dibs.url, dibs.adminToken, {
+    subject: 'Rounding rules',
+    to: ['bob'],
+    body: 'May I touch round.rs?',
+  });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/inbox`);
+  const inboxCount = page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: /^Inbox/ }).locator('.k');
+  const peopleCount = page.getByRole('navigation', { name: 'Conversations' }).getByRole('link', { name: /^People/ });
+  const row = page.locator('[data-region="list"] [data-row]').filter({ hasText: 'Rounding rules' });
+  await expect(inboxCount).toHaveText('1');
+  await expect(peopleCount.locator('.k')).toHaveText('1');
+  await expect(row.locator('.s--review')).toHaveCount(1);
+  await markDocument(page);
+
+  await row.getByRole('link', { name: 'Rounding rules' }).click();
+  await expect(page.locator('[data-inspector-heading]')).toHaveText('Rounding rules');
+  await expect(inboxCount).toHaveText('0');
+  await expect(peopleCount.locator('.k')).toHaveText('0');
+  await expect(row.locator('.s--review')).toHaveCount(0);
+  await expect(row).toHaveAttribute('aria-current', 'true');
+  await expect(page.locator('[data-inspector-heading]')).toBeFocused();
+  await expectSameDocument(page);
+});
+
+/** The longest reply the service takes, in bytes. */
+const LONGEST_REPLY = 16_384;
+
+test('a message arriving on the page of a refused reply is rendered without a GET of the address posted to', async ({
+  page,
+  dibs,
+}) => {
+  const threadId = await startThread(dibs.url, dibs.adminToken, {
+    subject: 'Rounding rules',
+    to: ['bob'],
+    body: 'Which ticket holds the rounding?',
+  });
+  const postedTo = `/ui/threads/${threadId}/messages`;
+  /** @type {string[]} */
+  const fetchedWithGet = [];
+  page.on('request', (request) => {
+    if (request.method() === 'GET' && new URL(request.url()).pathname === postedTo) {
+      fetchedWithGet.push(request.url());
+    }
+  });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/inbox/${threadId}`);
+  const reply = page.getByRole('textbox', { name: 'Message' });
+  await reply.fill('x'.repeat(LONGEST_REPLY + 1));
+  const sent = page.waitForResponse((response) => new URL(response.url()).pathname === postedTo);
+  await page.getByRole('button', { name: 'Send' }).click();
+  expect((await sent).status()).toBe(422);
+  await expect(page).toHaveURL(`${dibs.url}${postedTo}`);
+  await markDocument(page);
+
+  const rendered = page.waitForResponse(
+    (response) => response.request().method() === 'GET' && new URL(response.url()).pathname === `/ui/inbox/${threadId}`,
+  );
+  const messageId = await postMessage(dibs.url, dibs.adminToken, threadId, 'It is gh:acme/widgets#7, see there.');
+  const live = page.locator(`#m-${messageId}`);
+  await expect(live.locator('.msg__body')).toHaveText('It is gh:acme/widgets#7, see there.');
+  expect((await rendered).status()).toBe(200);
+  await expect(live.getByRole('link', { name: 'gh:acme/widgets#7' })).toHaveAttribute(
+    'href',
+    'https://github.com/acme/widgets/issues/7',
+  );
+  expect(fetchedWithGet).toEqual([]);
+  await expect(reply).toHaveValue('x'.repeat(LONGEST_REPLY + 1));
   await expectSameDocument(page);
 });
 
@@ -249,4 +363,54 @@ test('the policy watch sees a script the policy forbids', async ({ browser, dibs
   } finally {
     await page.close();
   }
+});
+
+test('a conversation opened in place after a resync with no event since opens without reloading the page', async ({
+  page,
+  dibs,
+}) => {
+  await startThread(dibs.url, dibs.adminToken, {
+    subject: 'Rounding rules',
+    to: ['bob'],
+    body: 'May I touch round.rs?',
+  });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  let streams = 0;
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/ui/events/stream') {
+      streams += 1;
+    }
+  });
+  // The page's stream is refused once, and the session check then says that the log no longer
+  // reaches back to the page's cursor, as it does once the retention removed those events; the
+  // stream resumes from the newest event, and nothing happens in the project after that.
+  await page.route((url) => url.pathname === '/ui/events/stream', (route) => route.fulfill({ status: 410 }), {
+    times: 1,
+  });
+  await page.route(
+    (url) => url.pathname === '/ui/session',
+    async (route) => {
+      const after = Number(new URL(route.request().url()).searchParams.get('after') ?? '0');
+      await route.fulfill({
+        status: 410,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: { code: 'cursor_expired', message: 'The events are gone.', details: { latest: after } },
+        }),
+      });
+    },
+    { times: 1 },
+  );
+  await page.goto(`${dibs.url}/ui/inbox`);
+  await expect.poll(() => streams).toBeGreaterThanOrEqual(2);
+  await markDocument(page);
+
+  const row = page.locator('[data-region="list"] [data-row]').filter({ hasText: 'Rounding rules' });
+  await row.getByRole('link', { name: 'Rounding rules' }).click();
+  await expect(page.locator('[data-inspector-heading]')).toHaveText('Rounding rules');
+  // Longer than a reload would take to replace the document.
+  await page.waitForTimeout(1000);
+  await expectSameDocument(page);
+  await expect(page.locator('[data-inspector-heading]')).toHaveText('Rounding rules');
 });

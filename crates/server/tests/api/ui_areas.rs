@@ -329,6 +329,75 @@ async fn a_repository_that_declares_many_areas_leaves_its_free_ones_behind_a_lin
 }
 
 #[tokio::test]
+async fn a_repository_whose_areas_are_all_held_offers_no_free_ones() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let names: Vec<String> = (0..85).map(|number| format!("part-{number:02}")).collect();
+    let areas: Vec<Value> = names
+        .iter()
+        .map(|name| json!({"name": name, "paths": [format!("src/{name}/**")]}))
+        .collect();
+    world
+        .settings(
+            &alice,
+            json!({"repos": [{"id": "api", "remote": "https://github.com/acme/widgets",
+                              "areas": areas}]}),
+        )
+        .await;
+    let item = world
+        .item(&alice, Some("gh:acme/widgets#1"), "Everything")
+        .await;
+    let session = world.session(&alice, "alice-laptop").await;
+    let held: Vec<String> = names.iter().map(|name| format!("api:{name}")).collect();
+    claim(&world, &alice, session, item, json!(held)).await;
+    let browser = sign_in(&world, &alice).await;
+
+    let page = browser.get(&world, "/ui/areas").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    assert!(
+        page.text
+            .contains(r#"<h2>api<span class="faint">85 held · 0 free</span></h2>"#),
+        "{}",
+        page.text
+    );
+    assert_eq!(page.text.matches("data-row").count(), 85, "{}", page.text);
+    assert!(!page.text.contains(" free</a>"), "{}", page.text);
+
+    let narrowed = browser.get(&world, "/ui/areas?q=part-07").await;
+    assert_eq!(
+        narrowed.text.matches("data-row").count(),
+        1,
+        "{}",
+        narrowed.text
+    );
+    assert!(!narrowed.text.contains(" free</a>"), "{}", narrowed.text);
+}
+
+#[tokio::test]
+async fn an_area_held_by_two_claims_names_each_with_its_ticket() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    world.settings(&alice, settings()).await;
+    let session = world.session(&alice, "alice-laptop").await;
+    let first = world.item(&alice, Some("gh:acme/widgets#1"), "First").await;
+    let second = world
+        .item(&alice, Some("gh:acme/widgets#2"), "Second")
+        .await;
+    claim(&world, &alice, session, first, json!(["api:billing"])).await;
+    claim(&world, &alice, session, second, json!(["api:billing"])).await;
+    let browser = sign_in(&world, &alice).await;
+    let page = browser.get(&world, "/ui/areas").await;
+    let held = seat(&page, "api:billing");
+    assert!(
+        held.contains(
+            r#"title="api:billing · alice for gh:acme/widgets#1, alice for gh:acme/widgets#2""#
+        ),
+        "{held}"
+    );
+    assert!(held.contains(r#"<span class="k">2</span>"#), "{held}");
+}
+
+#[tokio::test]
 async fn the_text_leaves_the_areas_whose_name_or_path_it_matches() {
     let seeded = Seeded::new(0).await;
     let by_name = seeded.page("/ui/areas?q=bill").await;
@@ -557,9 +626,28 @@ async fn the_inspector_lists_six_tickets_that_will_touch_the_area_and_offers_the
     );
     assert!(
         shown.contains(
-            r#"<a class="mini" href="/ui/queue?q=api%3Abilling">See all 7 in the queue</a>"#
+            r#"<a class="mini" href="/ui/queue?area=api%3Abilling">See all 7 in the queue</a>"#
         ),
         "{shown}"
+    );
+    let queue = seven.page("/ui/queue?area=api%3Abilling").await;
+    let (ready, waiting) = queue
+        .text
+        .split_once(r#"<span class="dim">"#)
+        .and_then(|(_, rest)| rest.split_once("</span>"))
+        .and_then(|(counts, _)| counts.split_once(" ready · "))
+        .and_then(|(ready, rest)| {
+            Some((
+                ready.parse::<usize>().ok()?,
+                rest.strip_suffix(" not ready")?.parse::<usize>().ok()?,
+            ))
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        ready + waiting,
+        7,
+        "the link lists exactly the tickets it counts: {}",
+        queue.text
     );
 }
 

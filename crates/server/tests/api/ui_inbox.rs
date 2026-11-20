@@ -727,3 +727,152 @@ async fn a_message_from_dibs_reads_from_dibs_and_an_ended_announcement_offers_no
         "what dibs wrote is no member's own"
     );
 }
+
+/// The row of the list that opens `href`.
+fn row<'a>(page: &'a Page, href: &str) -> &'a str {
+    list(page)
+        .split(r#"<div class="row" data-row"#)
+        .find(|row| row.contains(&format!(r#"data-inspect href="{href}""#)))
+        .unwrap_or_else(|| panic!("no row opening {href} in {}", list(page)))
+}
+
+#[tokio::test]
+async fn twelve_waiting_grant_requests_are_all_grants_and_none_counts_as_a_message_from_people() {
+    let seeded = Seeded::new().await;
+    let world = &seeded.world;
+    let bob_laptop = world.session(&seeded.bob, "bob-laptop").await;
+    let mut asked = vec![seeded.grant];
+    for n in 50..61 {
+        world.fakes.clock.advance(time::Duration::minutes(7));
+        let item = world
+            .item(&seeded.alice, Some(&format!("gh:acme/widgets#{n}")), "More")
+            .await;
+        claim(world, &seeded.bob, bob_laptop, item, json!([])).await;
+        let request = world
+            .post(
+                &seeded.bob,
+                "/v1/grant-requests",
+                json!({"item": item, "area": "api:billing"}),
+            )
+            .await;
+        assert_eq!(request.status, StatusCode::CREATED, "{}", request.body);
+        asked.push(request.body["thread_id"].as_u64().unwrap());
+    }
+    let agents = world.get(&seeded.alice, "/v1/inbox").await;
+    assert_eq!(
+        agents.body["grant_asks"].as_array().map(Vec::len),
+        Some(10),
+        "an agent is handed the newest ten: {}",
+        agents.body
+    );
+
+    let people = seeded.page("/ui/inbox").await;
+    for count in [
+        r#"<a href="/ui/inbox" aria-current="true">People<span class="k">2</span></a>"#,
+        r#"<a href="/ui/inbox" aria-current="page">Inbox<span class="k k--hot">2</span>"#,
+    ] {
+        assert!(people.text.contains(count), "{count} in {}", people.text);
+    }
+    for thread in &asked {
+        assert!(
+            !lists(&people, &format!("/ui/inbox/{thread}")),
+            "request {thread} is not a message from people"
+        );
+    }
+    let opened = seeded.page(&format!("/ui/inbox/{}", asked[0])).await;
+    assert!(
+        opened
+            .text
+            .contains(r#"<a href="/ui/inbox?tab=grants" aria-current="true">Grants"#),
+        "the oldest request opens on Grants: {}",
+        opened.text
+    );
+
+    let grants = seeded.page("/ui/inbox?tab=grants").await;
+    assert!(
+        grants
+            .text
+            .contains(r#"aria-current="true">Grants<span class="k">12</span></a>"#),
+        "{}",
+        grants.text
+    );
+    for thread in &asked {
+        assert!(
+            lists(&grants, &format!("/ui/inbox/{thread}?tab=grants")),
+            "request {thread} in {}",
+            list(&grants)
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_message_waiting_for_the_viewers_acknowledgement_keeps_its_mark_once_read_until_acknowledged()
+ {
+    let seeded = Seeded::new().await;
+    let started = seeded
+        .world
+        .post(
+            &seeded.bob,
+            "/v1/threads",
+            json!({"subject": "Freeze", "to": ["alice"], "label": "desk/mcp",
+                   "body": "No merges today.", "ack_required": true}),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::CREATED, "{}", started.body);
+    let thread = started.body["thread"]["id"].as_u64().unwrap();
+    let message = started.body["message"]["id"].as_u64().unwrap();
+    let href = format!("/ui/inbox/{thread}");
+    let mark = r#"<span class="tag tag--warn" title="Messages waiting for your acknowledgement">1 to acknowledge</span>"#;
+
+    let unread = seeded.page("/ui/inbox").await;
+    assert!(
+        row(&unread, &href).contains(mark),
+        "{}",
+        row(&unread, &href)
+    );
+
+    let opened = seeded.page(&href).await;
+    let shown = inspector(&opened);
+    assert!(
+        shown.contains(
+            r#"<dt>Acknowledge</dt><dd><span class="tag tag--warn">1 message waits for yours</span></dd>"#
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(r#"<span aria-hidden="true">○</span> alice (you) waiting"#),
+        "the message itself says it waits: {shown}"
+    );
+    let read = seeded.page("/ui/inbox").await;
+    let shown = row(&read, &href);
+    assert!(
+        shown.starts_with(r#"><span aria-hidden="true"></span>"#),
+        "read: {shown}"
+    );
+    assert!(shown.contains(mark), "still waiting once read: {shown}");
+
+    let browser = &seeded.browser;
+    let acked = browser
+        .post(
+            &seeded.world,
+            &format!("/ui/threads/{thread}/messages/{message}/ack"),
+            &[("csrf", &browser.token)],
+        )
+        .await;
+    assert_eq!(acked.status, StatusCode::SEE_OTHER, "{}", acked.text);
+    let after = seeded.page("/ui/inbox").await;
+    assert!(
+        !row(&after, &href).contains("to acknowledge"),
+        "{}",
+        row(&after, &href)
+    );
+    assert!(!inspector(&seeded.page(&href).await).contains("<dt>Acknowledge</dt>"));
+
+    let bobs = sign_in(&seeded.world, &seeded.bob).await;
+    let written = bobs.get(&seeded.world, "/ui/inbox").await;
+    assert!(
+        !list(&written).contains("to acknowledge"),
+        "a conversation its author wrote never waits on itself: {}",
+        list(&written)
+    );
+}

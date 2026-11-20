@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { closeLinkIndex, closesOnKey, isPlainClick, samePath, selectedIndex } from '../src/inspector.js';
+import { closesOnKey, isPlainClick } from '../src/inspect-input.js';
+import { closeLinkIndex, selectedIndex } from '../src/list-selection.js';
+import { openingAction, regionsToAsk } from '../src/opening-regions.js';
+import { pathOf, sameOrigin, samePath } from '../src/page-addresses.js';
 
 const plain = {
   button: 0,
@@ -46,6 +49,18 @@ test('an address on another origin is never the same page', () => {
   assert.equal(samePath('http://dibs.example.com/ui/claims/7', '/ui/claims/7'), false);
 });
 
+test('two addresses are on one origin when scheme, host and port agree', () => {
+  assert.equal(sameOrigin('http://dibs.example.com/ui/claims', 'http://dibs.example.com/ui/inbox?tab=dibs'), true);
+  assert.equal(sameOrigin('http://dibs.example.com/ui/claims', 'http://dibs.example.com:8080/ui/claims'), false);
+  assert.equal(sameOrigin('http://dibs.example.com/ui/claims', 'not an address'), false);
+});
+
+test('only an absolute address has a path', () => {
+  assert.equal(pathOf('http://dibs.example.com/ui/areas/widgets:search?x=1#y'), '/ui/areas/widgets:search');
+  assert.equal(pathOf('/ui/claims'), null);
+  assert.equal(pathOf(''), null);
+});
+
 test('the selected row is the one whose link points at the page shown', () => {
   const rows = [
     'http://dibs.example.com/ui/claims/7?who=alice',
@@ -86,4 +101,23 @@ test('Escape is left alone in a field, under an open dialog, with nothing select
   assert.equal(closesOnKey({ ...escape, selected: false }), false);
   assert.equal(closesOnKey({ ...escape, defaultPrevented: true }), false);
   assert.equal(closesOnKey({ ...escape, key: 'Enter' }), false);
+});
+
+test('an opening asks for every region of the screen the page has, the inspector last', () => {
+  assert.deepEqual(regionsToAsk(['inspector', 'list', 'rail']), ['rail', 'list', 'inspector']);
+  assert.deepEqual(regionsToAsk(['list', 'inspector', 'results']), ['list', 'inspector']);
+  assert.deepEqual(regionsToAsk(['rail', 'rail', 'inspector']), ['rail', 'inspector']);
+  assert.deepEqual(regionsToAsk([]), []);
+});
+
+test('an opening always opens the inspector, even one the person was writing in', () => {
+  assert.equal(openingAction('inspector', false), 'open');
+  assert.equal(openingAction('inspector', true), 'open');
+});
+
+test('an opening refreshes the rail and the list where they were scrolled to, unless the person is using them', () => {
+  assert.equal(openingAction('rail', false), 'refresh');
+  assert.equal(openingAction('list', false), 'refresh');
+  assert.equal(openingAction('rail', true), 'keep');
+  assert.equal(openingAction('list', true), 'keep');
 });

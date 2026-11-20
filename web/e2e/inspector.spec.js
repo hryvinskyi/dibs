@@ -2,8 +2,9 @@
 /**
  * The inspector on Claims in a real browser: a click on a row shows its claim without a page load,
  * changes the address, puts the focus on the inspector's heading and leaves the list where it was
- * scrolled to; the browser's Back shows the claim selected before; `Escape` closes the inspector;
- * and `Copy link` copies the address of the claim shown.
+ * scrolled to; what is typed into the list's filter stays when a row is opened; the browser's Back
+ * shows the claim selected before; `Escape` closes the inspector; and `Copy link` copies the address
+ * of the claim shown.
  */
 
 import { applySettings, claimItem, importItems, openSession, widgetsSettings } from './dibs-api.js';
@@ -98,6 +99,20 @@ test('a click on a row shows its claim in place, with the focus on its heading a
   await expect(target).toHaveAttribute('aria-current', 'true');
   expect(await page.evaluate(() => Reflect.get(window, 'e2eStillHere'))).toBe('yes');
   expect(await list.evaluate((element) => element.scrollTop)).toBe(scrolled);
+});
+
+test("a row opened while the list's filter holds unsent text leaves the text where it is", async ({ page, dibs }) => {
+  const ids = await seedClaims(dibs);
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/claims`);
+  const filter = page.getByRole('searchbox', { name: 'Filter claims' });
+  await filter.fill('part 3');
+
+  await row(page, titleOf(5)).getByRole('link', { name: titleOf(5) }).click();
+  await expect(page).toHaveURL(`${dibs.url}/ui/claims/${itemAt(ids, 5)}`);
+  await expect(heading(page)).toHaveText(titleOf(5));
+  await expect(filter).toHaveValue('part 3');
+  await expect(row(page, titleOf(5))).toHaveAttribute('aria-current', 'true');
 });
 
 test("the browser's Back shows the claim selected before, and Escape closes the inspector", async ({

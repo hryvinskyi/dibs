@@ -15,7 +15,9 @@ import { localizeTimes, rememberZone } from './local-times.js';
 import { mountPalette } from './palette.js';
 import { mountRailMenu } from './rail-menu.js';
 import { fetchRegions } from './regions.js';
+import { pageAddress } from './readable-address.js';
 import { mountScreen } from './screen-view.js';
+import { catchingUp } from './stream-catch-up.js';
 import { mount as mountThread } from './thread-view.js';
 import { isLocalPath } from './view-config.js';
 
@@ -29,6 +31,12 @@ function regionsOfPages(loginPath) {
   const login = loginPath !== undefined && isLocalPath(loginPath) ? loginPath : undefined;
   return (url, names, options = {}) => fetchRegions(url, names, { ...options, loginPath: login });
 }
+
+/** How many of the stream's newest events a conversation mounted later can catch up on. */
+const CATCH_UP_EVENTS = 512;
+
+/** The system's clock, given to the modules that write times against the current one. */
+const clock = Object.freeze({ now: () => new Date() });
 
 /**
  * Shows every session-ended notice of the page.
@@ -52,6 +60,7 @@ function startScreen(app) {
   const doc = app.ownerDocument;
   const pages = regionsOfPages(app.dataset.loginUrl);
   const signedOut = () => showSignedOut(doc);
+  const address = pageAddress(app, window.location);
   const railMenu = mountRailMenu(app);
   const copy = mountCopy(doc.body, {
     clipboard: window.navigator.clipboard,
@@ -60,7 +69,7 @@ function startScreen(app) {
   });
   /** The conversations mounted, by root, with their teardowns. @type {Map<HTMLElement, () => void>} */
   const conversations = new Map();
-  /** @type {(listener: import('./screen-view.js').StreamListener) => () => void} */
+  /** @type {import('./stream-catch-up.js').SubscribeAfter} */
   let subscribe = () => () => {};
 
   /**
@@ -76,14 +85,17 @@ function startScreen(app) {
     }
     scope.querySelectorAll('[data-thread-view]').forEach((root) => {
       if (root instanceof HTMLElement && !conversations.has(root)) {
-        conversations.set(root, mountThread(root, { subscribe, fetchRegions: pages, location: window.location }));
+        conversations.set(
+          root,
+          mountThread(root, { clock, subscribe, fetchRegions: pages, address }),
+        );
       }
     });
   };
 
   /** @param {Element} region */
   const onSwap = (region) => {
-    localizeTimes(region);
+    localizeTimes(region, clock);
     copy.reveal(region);
     if (region.getAttribute('data-region') === 'rail') {
       railMenu.sync(region);
@@ -92,8 +104,9 @@ function startScreen(app) {
   };
 
   const screen = mountScreen(app, { fetchRegions: pages, location: window.location, onSwap });
-  subscribe = screen.subscribe;
+  subscribe = catchingUp(screen.subscribe, CATCH_UP_EVENTS);
   mountInspector(app, {
+    address,
     fetchRegions: pages,
     history: window.history,
     location: window.location,
@@ -111,8 +124,8 @@ function startScreen(app) {
 }
 
 function start() {
-  rememberZone(document);
-  localizeTimes(document);
+  rememberZone(document, clock);
+  localizeTimes(document, clock);
   const app = document.querySelector('.app');
   if (app instanceof HTMLElement) {
     startScreen(app);

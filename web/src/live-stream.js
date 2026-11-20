@@ -29,8 +29,8 @@ const SEEN_LIMIT = 512;
  * @property {AbortSignal} signal ends the stream and every listener
  * @property {(event: import('./events.js').StreamEvent) => void} onEvent called once per event id
  * @property {(state: StreamState) => void} onState
- * @property {() => void} onResync called when what the page shows may have missed events the log no
- *   longer holds: the page reads its state again
+ * @property {(from: number) => void} onResync called when what the page shows may have missed events the
+ *   log no longer holds, with the cursor the stream resumes from: the page reads its state again
  */
 
 /**
@@ -133,7 +133,7 @@ export function follow({ config, signal, onEvent, onState, onResync }) {
     if (verdict.kind === 'resync') {
       after = verdict.from;
       attempt = 0;
-      onResync();
+      onResync(verdict.from);
       open();
       return;
     }

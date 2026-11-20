@@ -3,10 +3,9 @@
 //! view is plain data the templates print — a label, a title, an address in this service, an
 //! address outside it — and never markup.
 //!
-//! An item has a place in this service while a live or stale claim holds it (Claims), or while it
-//! waits in the queue: in the ready list, or left out of it for another reason than a claim
-//! (Queue). A ticket links there when it has a place, with the tracker's page beside it; else to
-//! the tracker's page; else to the search for its name.
+//! An item has a place in this service while a live or stale claim holds it (Claims), or while the
+//! queue lists it (Queue). A ticket links there when it has a place, with the tracker's page beside
+//! it; else to the tracker's page; else to the search for its name.
 //!
 //! An address outside this service is only ever `https://` or `http://`, in any case: every other
 //! address a reference scheme, a forge or a scanned text gives is treated as no address, so the view
@@ -29,7 +28,7 @@ use dibs_domain::review::PrRef;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::text_refs::{RefContext, TextRef, scan};
 
-use crate::ui::queue::listing::waits;
+use crate::ui::queue::listing::listed;
 
 /// How the arrow beside a ticket names the page it leads to.
 const TRACKER: &str = "the tracker";
@@ -60,27 +59,16 @@ impl Place {
 }
 
 /// The place of every item the status shows, with its reference: the claimed items first, then the
-/// ready list, then the items left out of it for another reason than a claim.
+/// items the queue lists.
 pub fn places(status: &StatusView) -> Vec<(ItemId, Option<ExternalRef>, Place)> {
     let claimed = status
         .live
         .iter()
         .chain(&status.stale)
         .map(|held| (&held.item.item, Place::Claims));
-    let ready = status
-        .ready
-        .ready
-        .iter()
-        .map(|entry| (&entry.item.item, Place::Queue));
-    let waiting = status
-        .ready
-        .excluded
-        .iter()
-        .filter(|entry| waits(entry))
-        .map(|entry| (&entry.item.item, Place::Queue));
+    let queued = listed(status).map(|entry| (entry.item, Place::Queue));
     claimed
-        .chain(ready)
-        .chain(waiting)
+        .chain(queued)
         .map(|(item, place)| (item.id, item.external_ref.clone(), place))
         .collect()
 }
@@ -361,6 +349,11 @@ impl AreaView {
             full: area.to_string(),
             href: area_href(area),
         }
+    }
+
+    /// Where its name leads: its page.
+    pub fn link(&self) -> Link {
+        Link::inside(self.href.clone())
     }
 }
 
@@ -900,6 +893,7 @@ mod tests {
                 href: "/ui/areas/api:billing".to_owned(),
             }
         );
+        assert_eq!(view.link(), inside("/ui/areas/api:billing"));
     }
 
     #[test]

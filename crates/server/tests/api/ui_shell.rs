@@ -1,5 +1,6 @@
-//! The frame of the pages through the real router: every screen's address, the rail's counts, its
-//! people, slots and worktrees held until they are let go, the references in a member's text as
+//! The frame of the pages through the real router: every screen's address, the kinds of event
+//! every screen reads itself again on, the rail's counts, its people, slots with where they stand
+//! and worktrees held with their hosts until they are let go, the references in a member's text as
 //! links, the sign-out form, an inspector address that does not read, and a request without a
 //! session.
 
@@ -73,6 +74,10 @@ async fn every_screen_answers_in_the_frame_with_its_own_entry_current() {
                 page.text
             );
         }
+        assert!(
+            page.text.contains(r#"<p class="pal__hint" data-palette-failed hidden>The search did not answer. Press Enter to search on its page.</p></div>"#),
+            "the palette has words for a search that fails, hidden until it does"
+        );
         assert!(page.text.contains(r#"<div class="notices">"#));
         assert!(
             page.text
@@ -88,6 +93,62 @@ async fn every_screen_answers_in_the_frame_with_its_own_entry_current() {
             r#"<div class="banner banner--danger" role="alert" data-session-ended hidden>"#
         ));
         assert!(page.text.contains(r#"<div class="toast-region" data-toast role="status" aria-live="polite" data-copied="Copied" data-copy-failed="Copy failed"></div>"#));
+    }
+}
+
+/// The kinds of event a page reads itself again on.
+fn changed_kinds(page: &Page) -> Vec<&str> {
+    let marker = r#"data-changed-kinds=""#;
+    let start = page
+        .text
+        .find(marker)
+        .unwrap_or_else(|| panic!("no changed kinds in {}", page.text))
+        + marker.len();
+    let end = page.text[start..].find('"').unwrap() + start;
+    page.text[start..end].split_whitespace().collect()
+}
+
+#[tokio::test]
+async fn every_screen_reads_itself_again_on_every_event_that_changes_it_or_the_rail() {
+    let (world, alice, _) = team().await;
+    let browser = sign_in(&world, &alice).await;
+    for path in [
+        "/ui/",
+        "/ui/claims",
+        "/ui/queue",
+        "/ui/areas",
+        "/ui/inbox",
+        "/ui/search",
+    ] {
+        let page = browser.get(&world, path).await;
+        assert_eq!(page.status, StatusCode::OK, "{path}: {}", page.text);
+        let kinds = changed_kinds(&page);
+        for kind in [
+            "branch_recorded",
+            "pr_dropped",
+            "granted",
+            "thread_deleted",
+            "pruned",
+            "thread_started",
+            "message_posted",
+            "acked",
+            "claimed",
+            "slot_stalled",
+            "worktree_taken",
+        ] {
+            assert!(kinds.contains(&kind), "{path} misses {kind}: {kinds:?}");
+        }
+        for kind in [
+            "yield_unescalated",
+            "hook_reported",
+            "feedback_given",
+            "pr_state_reported",
+        ] {
+            assert!(
+                !kinds.contains(&kind),
+                "{path}: {kind} changes nothing shown"
+            );
+        }
     }
 }
 
@@ -259,14 +320,25 @@ async fn a_held_slot_shows_its_holder_and_the_query_opens_it() {
     take_slot(&world, &bob, desk, "deploy:prod").await;
     let browser = sign_in(&world, &alice).await;
 
+    world.fakes.clock.advance(Duration::minutes(5));
     let closed = browser.get(&world, "/ui/claims").await;
     let slots = section(&closed, "Slots");
     assert!(
-        slots.contains(r#"<li class="held"><details id="slot-deploy:prod"><summary><span>deploy:prod</span><span>bob</span></summary><p>say it in <a class="lnk" href="/ui/areas/api:billing">api:billing</a> first<br><span class="faint">Held for at most 30 min</span></p></details></li>"#),
+        slots.contains(r#"<li class="slot--held held"><details id="slot-deploy:prod"><summary><span>deploy:prod</span><span>bob <b class="st">held</b></span></summary><p>ship it<br><span class="seen">last seen <time datetime=""#),
         "{slots}"
     );
     assert!(
-        slots.contains(r#"<li><details id="slot-db:staging"><summary><span>db:staging</span><span>free</span></summary><p><span class="faint">Held for at most 1 h · group staging</span></p></details></li>"#),
+        slots
+            .contains(r#"<span class="faint">· 5 min ago</span></span><br>until <time datetime=""#),
+        "{slots}"
+    );
+    assert!(
+        slots.contains(r#"<br>say it in <a class="lnk" href="/ui/areas/api:billing">api:billing</a> first<br><span class="faint">Held for at most 30 min</span></p></details></li>"#),
+        "{slots}"
+    );
+    assert!(!slots.contains("waiting:"), "nobody waits: {slots}");
+    assert!(
+        slots.contains(r#"<li class="slot--free"><details id="slot-db:staging"><summary><span>db:staging</span><span><b class="st">free</b></span></summary><p><span class="faint">Held for at most 1 h · group staging</span></p></details></li>"#),
         "{slots}"
     );
 
@@ -287,6 +359,88 @@ async fn a_held_slot_shows_its_holder_and_the_query_opens_it() {
         "{}",
         open.text
     );
+}
+
+#[tokio::test]
+async fn a_stalled_slot_with_a_member_waiting_shows_its_state_its_queue_and_its_holders_last_sign_of_life()
+ {
+    let (world, alice, bob) = team().await;
+    world.settings(&alice, with_slots()).await;
+    let laptop = world.session(&alice, "laptop").await;
+    let run = world
+        .post(
+            &alice,
+            "/v1/slots/deploy:prod/take",
+            json!({"session_id": laptop, "purpose": "deploy the release", "mode": "run"}),
+        )
+        .await;
+    assert_eq!(run.status, StatusCode::OK, "{}", run.body);
+    let desk = world.session(&bob, "desk").await;
+    let queued = world
+        .post(
+            &bob,
+            "/v1/slots/deploy:prod/take",
+            json!({"session_id": desk, "purpose": "deploy the fix"}),
+        )
+        .await;
+    assert_eq!(queued.status, StatusCode::OK, "{}", queued.body);
+    assert_eq!(queued.body["outcome"], "queued", "{}", queued.body);
+    let browser = sign_in(&world, &alice).await;
+
+    let waiting = browser.get(&world, "/ui/queue").await;
+    let slots = section(&waiting, "Slots");
+    assert!(
+        slots.contains(r#"<li class="slot--queued held"><details id="slot-deploy:prod"><summary><span>deploy:prod</span><span>alice <b class="st">queued</b></span></summary>"#),
+        "{slots}"
+    );
+    assert!(slots.contains("<br>1 waiting: bob<br>"), "{slots}");
+
+    world.fakes.clock.advance(Duration::minutes(3));
+    let stalled = browser.get(&world, "/ui/queue").await;
+    let slots = section(&stalled, "Slots");
+    assert!(
+        slots.contains(r#"<li class="slot--stalled held"><details id="slot-deploy:prod"><summary><span>deploy:prod</span><span>alice <b class="st">stalled</b></span></summary><p>deploy the release<br><span class="seen">last seen <time datetime=""#),
+        "{slots}"
+    );
+    assert!(
+        slots.contains(r#"<span class="faint">· 3 min ago</span></span>"#),
+        "{slots}"
+    );
+    assert!(slots.contains("<br>1 waiting: bob<br>"), "{slots}");
+}
+
+#[tokio::test]
+async fn two_holds_of_one_worktree_on_two_hosts_show_each_host() {
+    let (world, alice, bob) = team().await;
+    for (host, machine, pool) in [
+        ("laptop", "0123456789abcdef0123456789abcdef", "c0ffee42"),
+        ("desktop", "fedcba9876543210fedcba9876543210", "decaf123"),
+    ] {
+        let session = world.session(&alice, host).await;
+        let taken = world
+            .post(
+                &alice,
+                "/v1/worktrees/take",
+                json!({
+                    "session_id": session, "machine": machine, "pool": pool,
+                    "names": ["worktree1"], "purpose": "review the fix",
+                }),
+            )
+            .await;
+        assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+    }
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/").await;
+    let held = section(&page, "Worktrees held");
+    assert_eq!(held.matches("<b>worktree1</b>").count(), 2, "{held}");
+    for host in ["laptop", "desktop"] {
+        assert!(
+            held.contains(&format!(
+                r#"<b>alice</b></a> on <span class="mono">{host}</span> · just now</span>"#
+            )),
+            "{host}: {held}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -319,7 +473,9 @@ async fn a_worktree_holds_purpose_links_its_references_and_escapes_the_rest() {
         "{held}"
     );
     assert!(
-        held.contains(r#"<b>alice</b></a>'s agent · 5 min</span>"#),
+        held.contains(
+            r#"<b>alice</b></a>'s agent on <span class="mono">laptop</span> · 5 min</span>"#
+        ),
         "{held}"
     );
     assert!(

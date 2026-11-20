@@ -6,7 +6,9 @@
  * there; focus alone never opens it, since closing it gives the focus back to where it was. The
  * hits are the server's: after a pause in the typing the palette asks the search for its compact
  * answer and shows a copy of its results region. The rail's search box still submits without
- * scripts, and so does the palette's when it has no hit to act on.
+ * scripts, and so does the palette's when it has no hit to act on. What it lists always answers
+ * the query in its box: a search that fails, or is still being asked, leaves no hit to open, and a
+ * failed one says so in place of the hint, politely announced, until the next answer.
  *
  * Every word shown comes from the markup; off a Mac, the keys' labels that name the command key
  * are rewritten with their `data-kbd-other` text.
@@ -14,6 +16,7 @@
 
 import { findRegion } from './regions.js';
 import { isMac, next } from './palette-keys.js';
+import { offerFor, offered } from './palette-offer.js';
 
 /** How long the typing must pause before the palette asks the server, in milliseconds. */
 const TYPING_PAUSE_MS = 200;
@@ -95,6 +98,9 @@ export function mountPalette(doc, app, { fetchRegions, location, open, onSignedO
   mounted.add(dialog);
   const controller = new AbortController();
   const { signal } = controller;
+  const failed = results.querySelector('[data-palette-failed]');
+  const failure = failed === null ? null : failed.cloneNode(true);
+  failed?.remove();
   const hint = Array.from(results.childNodes, (node) => node.cloneNode(true));
   let index = 0;
   /** @type {Element | null} */
@@ -133,6 +139,25 @@ export function mountPalette(doc, app, { fetchRegions, location, open, onSignedO
     select(0);
   };
 
+  /**
+   * Shows the line saying the search did not answer in place of any hits, announced politely; the
+   * hint when the markup has no such line.
+   */
+  const showFailure = () => {
+    if (!(failure instanceof HTMLElement)) {
+      showHint();
+      return;
+    }
+    const line = failure.cloneNode(true);
+    if (line instanceof HTMLElement) {
+      line.hidden = false;
+      line.setAttribute('role', 'status');
+      line.setAttribute('aria-live', 'polite');
+    }
+    results.replaceChildren(line);
+    select(0);
+  };
+
   /** Stops the wait and the request in flight. */
   const halt = () => {
     clearTimeout(timer);
@@ -142,7 +167,8 @@ export function mountPalette(doc, app, { fetchRegions, location, open, onSignedO
   };
 
   /**
-   * Asks the search for `query` and shows its hits, unless a newer query was asked meanwhile.
+   * Asks the search for `query` and shows its hits, unless a newer query was asked meanwhile. An
+   * answer that cannot be shown takes the hits of the earlier query away.
    * @param {string} query
    */
   const ask = async (query) => {
@@ -155,27 +181,26 @@ export function mountPalette(doc, app, { fetchRegions, location, open, onSignedO
         signal: AbortSignal.any([signal, mine.signal]),
       });
     } catch (error) {
-      if (!mine.signal.aborted && !signal.aborted) {
-        console.error('dibs: the search could not be read', error);
+      if (mine.signal.aborted || signal.aborted) {
+        return;
       }
-      return;
+      console.error('dibs: the search could not be read', error);
+      answer = { kind: 'failed' };
     }
     if (inflight !== mine || mine.signal.aborted || signal.aborted) {
       return;
     }
     inflight = null;
-    if (answer.kind === 'signed-out') {
+    const offer = offerFor(answer);
+    if (offer.kind === 'signed-out') {
       onSignedOut();
       return;
     }
-    if (answer.kind === 'failed') {
+    if (offer.kind === 'clear') {
+      showFailure();
       return;
     }
-    const region = answer.regions.get('results');
-    if (region === undefined) {
-      return;
-    }
-    results.replaceChildren(...Array.from(region.childNodes, (node) => doc.importNode(node, true)));
+    results.replaceChildren(...Array.from(offer.region.childNodes, (node) => doc.importNode(node, true)));
     select(0);
   };
 
@@ -274,7 +299,7 @@ export function mountPalette(doc, app, { fetchRegions, location, open, onSignedO
       {
         open: dialog.open,
         typing: event.target instanceof Element && event.target.closest(FIELD) !== null,
-        count: hits().length,
+        count: offered(hits().length, timer !== undefined || inflight !== null),
         index,
       },
       event.key,

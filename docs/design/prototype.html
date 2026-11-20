@@ -137,8 +137,16 @@ kbd { margin-left: auto; padding: 0 5px; border: 1px solid var(--line-2); border
 .slots summary::-webkit-details-marker { display: none; }
 .slots summary:hover { background: var(--line); }
 .slots summary::before { content: ""; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--line-2); }
-.slots .held summary { color: var(--text); } .slots .held summary::before { background: var(--p2); border-color: var(--p2); }
-.slots summary span:last-child { font-family: var(--sans); }
+.slots .held summary { color: var(--text); }
+.slots .slot--held summary::before { background: var(--p2); border-color: var(--p2); }
+.slots .slot--queued summary::before { background: linear-gradient(90deg, var(--p2) 50%, transparent 50%); border-color: var(--p2); }
+.slots .slot--stalled summary::before { border-radius: 1px; background: var(--danger); border-color: var(--danger); }
+.slots .slot--offered summary::before { border: 1.5px dashed var(--warn); }
+.slots summary span:last-child { font-family: var(--sans); white-space: nowrap; }
+.slots .st { font-weight: 500; color: var(--text-3); }
+.slots .slot--queued .st { color: var(--accent); }
+.slots .slot--stalled .st, .slots .slot--stalled .seen { color: var(--danger); }
+.slots .slot--offered .st { color: var(--warn); }
 .slots summary span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .slots p { margin: 2px 8px 8px 26px; font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; }
 .wts li { display: grid; gap: 1px; padding: 4px 8px 4px 26px; position: relative; font-size: 12px; color: var(--text-2); }
@@ -243,7 +251,7 @@ kbd { margin-left: auto; padding: 0 5px; border: 1px solid var(--line-2); border
 .moved li:first-child { border-top: 0; }
 .moved .files { display: grid; gap: 1px; }
 .cmd { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px; background: var(--sunk); font: 400 12px var(--mono); }
-.cmd span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
 .cmd button { color: var(--accent); font: 600 12px var(--sans); }
 
 /* ── Conversation: messages, who acknowledged, the reply form ───── */
@@ -585,6 +593,9 @@ const D = Object.freeze({
     { id: 314, subject: 'gh:acme/site#40 has been held for 15 days', author: null, to: ['alice'], item: 111, importance: 'normal', unread: 0, messages: [
       { id: 3141, author: null, at: '2026-11-18T08:00:00Z', text: 'Its 1 area, web:settings, stays taken while it waits.' },
     ] },
+    { id: 316, subject: 'Invoice numbers freeze on Friday', author: 'carol', to: ['alice', 'dave'], item: null, importance: 'normal', unread: 0, messages: [
+      { id: 3161, author: 'carol', label: 's-e4f0', at: '2026-11-18T10:05:00Z', text: 'No change to invoice numbering in api:invoices from Friday until the audit ends. Acknowledge so I know you saw it.', ack: [{ handle: 'alice', at: null }, { handle: 'dave', at: '2026-11-18T10:20:00Z' }] },
+    ] },
     { id: 315, subject: 'The slot staging-deploy is held until 15:00', author: null, to: null, item: null, importance: 'normal', unread: 0, messages: [
       { id: 3151, author: null, at: '2026-11-18T13:00:00Z', text: 'bob took staging-deploy for 2 h.' },
     ] },
@@ -595,10 +606,13 @@ const D = Object.freeze({
   ],
   escalations: [{ thread: 302, by: 'dave', at: '2026-11-17T17:21:00Z', arbiters: ['bob'] }],
   slots: [
-    { name: 'staging-deploy', holder: 'bob', note: 'Deploying gh:acme/site#22 to https://staging.example.com', maxHold: { days: 0, hours: 2, minutes: 0 }, group: 'deploys' },
-    { name: 'db-migrate', holder: null, note: 'One schema change at a time on the shared database', maxHold: { days: 0, hours: 0, minutes: 30 }, group: null },
+    { name: 'staging-deploy', holder: 'bob', hold: { purpose: 'Deploying gh:acme/site#22 to https://staging.example.com', through: null, seen: '2026-11-18T14:20:00Z', until: '2026-11-18T15:00:00Z', stalled: false }, offer: null, waiting: [], note: null, maxHold: { days: 0, hours: 2, minutes: 0 }, group: 'deploys' },
+    { name: 'load-test', holder: 'carol', hold: { purpose: 'Load test of the export for gh:acme/widgets#71', through: null, seen: '2026-11-18T14:12:00Z', until: '2026-11-18T16:00:00Z', stalled: false }, offer: null, waiting: ['dave', 'alice'], note: null, maxHold: { days: 0, hours: 2, minutes: 0 }, group: null },
+    { name: 'release-train', holder: 'dave', hold: { purpose: 'Cutting the 4.2 release', through: 'staging-deploy', seen: '2026-11-18T12:40:00Z', until: '2026-11-18T17:00:00Z', stalled: true }, offer: null, waiting: [], note: null, maxHold: { days: 0, hours: 4, minutes: 0 }, group: 'deploys' },
+    { name: 'demo-env', holder: null, hold: null, offer: { member: 'bob', until: '2026-11-18T14:45:00Z' }, waiting: ['carol'], note: null, maxHold: { days: 1, hours: 0, minutes: 0 }, group: null },
+    { name: 'db-migrate', holder: null, hold: null, offer: null, waiting: [], note: 'One schema change at a time on the shared database', maxHold: { days: 0, hours: 0, minutes: 30 }, group: null },
   ],
-  worktrees: [{ worktree: 'worktree2', holder: 'alice', byAgent: true, since: '2026-11-18T13:58:00Z', purpose: 'Rebasing onto acme/widgets#77 before review', item: 101 }],
+  worktrees: [{ worktree: 'worktree2', holder: 'alice', byAgent: true, host: 'alice-laptop', since: '2026-11-18T13:58:00Z', purpose: 'Rebasing onto acme/widgets#77 before review', item: 101 }],
   finished: [{ item: 120, by: 'bob', at: '2026-11-18T10:20:00Z' }],
 });
 
@@ -804,6 +818,7 @@ const AGES = Object.freeze([
 ]);
 const claimText = (claim) => [itemOf(claim).ref, itemOf(claim).title, claim.holder, ...itemOf(claim).areas, ...claim.branches.map((b) => b.name), ...claim.prs].join(' ');
 const holdersOf = (full) => D.claims.filter((c) => heldAreas(c).includes(full));
+const heldBy = (holding) => holding.map((c) => `${c.holder} for ${ticketView(c.item).title}`).join(', ');
 function areaState(full) {
   const holders = holdersOf(full);
   if (holders.length === 0) return { held: false, modifiers: '' };
@@ -844,6 +859,7 @@ function summaryOf(t) {
     subject: { subject: linkedText(t.subject, homeOf(item)), href: conversationHref(t.id) },
     messages: t.messages.length,
     unread: t.unread,
+    awaitingAck: t.messages.filter((m) => (m.ack ?? []).some((e) => e.handle === D.viewer && e.at === null)).length,
     importance: t.importance,
     last: lastAt(t),
     text: [t.subject, t.author ?? 'dibs', ...(t.to ?? ['everyone']), item ? item.ref : ''].join(' '),
@@ -888,6 +904,12 @@ function railPeople() {
     return { person: personView(handle), host: latest?.host ?? null, claims: mine.length, silent: mine.filter(silent).length };
   });
 }
+function slotState(slot) {
+  if (slot.offer) return 'offered';
+  if (slot.hold === null) return 'free';
+  if (slot.hold.stalled) return 'stalled';
+  return slot.waiting.length > 0 ? 'queued' : 'held';
+}
 function maxHold(span) {
   return [span.days > 0 && `${span.days} d`, span.hours > 0 && `${span.hours} h`, span.minutes > 0 && `${span.minutes} min`].filter(Boolean).join(' ');
 }
@@ -906,12 +928,17 @@ function rail() {
         h('span', {}, row.person.handle, row.host && h('small', {}, row.host)),
         h('span', { class: 'k' }, row.claims, row.silent > 0 && ` · ${row.silent} silent`)))))),
     D.slots.length > 0 && h('section', { 'aria-labelledby': 'rail-slots' }, h('h3', { class: 'label', id: 'rail-slots' }, 'Slots'), h('ul', { class: 'slots' }, D.slots.map((slot) =>
-      h('li', { class: slot.holder ? 'held' : null }, h('details', { id: `slot-${slot.name}`, open: openSlot === slot.name },
-        h('summary', {}, h('span', {}, slot.name), h('span', {}, slot.holder ?? 'free')),
-        h('p', {}, slot.note && [L.linked(linkedText(slot.note)), h('br')], h('span', { class: 'faint' }, `Held for at most ${maxHold(slot.maxHold)}`, slot.group && ` · group ${slot.group}`))))))),
+      h('li', { class: `slot--${slotState(slot)}${slot.holder ? ' held' : ''}` }, h('details', { id: `slot-${slot.name}`, open: openSlot === slot.name },
+        h('summary', {}, h('span', {}, slot.name), h('span', {}, slot.holder && `${slot.holder} `, h('b', { class: 'st' }, slotState(slot)))),
+        h('p', {},
+          slot.hold && [L.linked(linkedText(slot.hold.purpose)), slot.hold.through && ` · through ${slot.hold.through}`, h('br'), h('span', { class: 'seen' }, 'last seen ', since(slot.hold.seen)), h('br'), 'until ', timeEl(slot.hold.until), h('br')],
+          slot.offer && [`offered to ${slot.offer.member} until `, timeEl(slot.offer.until), h('br')],
+          slot.waiting.length > 0 && [`${slot.waiting.length} waiting: ${slot.waiting.join(', ')}`, h('br')],
+          slot.note && [L.linked(linkedText(slot.note)), h('br')],
+          h('span', { class: 'faint' }, `Held for at most ${maxHold(slot.maxHold)}`, slot.group && ` · group ${slot.group}`))))))),
     h('section', { 'aria-labelledby': 'rail-worktrees' }, h('h3', { class: 'label', id: 'rail-worktrees' }, 'Worktrees held'), h('ul', { class: 'wts' },
       D.worktrees.length === 0 ? h('li', { class: 'faint' }, 'None right now') : D.worktrees.map((hold) =>
-        h('li', {}, h('span', {}, h('b', {}, hold.worktree), ' · ', L.person(personView(hold.holder), true), hold.byAgent && "'s agent", ' · ', ago(hold.since)),
+        h('li', {}, h('span', {}, h('b', {}, hold.worktree), ' · ', L.person(personView(hold.holder), true), hold.byAgent && "'s agent", ' on ', h('span', { class: 'mono' }, hold.host), ' · ', ago(hold.since)),
           h('span', {}, L.linked(linkedText(hold.purpose)), hold.item !== null && [' · for ', L.ticket(ticketView(hold.item))]))))),
     h('form', { class: 'rail__foot', method: 'post', 'data-not-sent': true }, h('span', {}, `Signed in as ${D.viewer}`), h('button', { class: 'btn btn--small', type: 'submit' }, 'Sign out')),
   ];
@@ -931,14 +958,21 @@ const claimLine = (c) => [L.ticket(ticketView(c.item)), h('span', { class: 't' }
 const need = (label, tone, heading, body) => h('article', { class: 'need' }, h('span', { class: `label ${tone}` }, label), h('h2', {}, heading), body);
 const foot = (href, text) => h('div', { class: 'need__foot' }, h('a', { class: 'btn', href }, text));
 const answers = () => unreadFromPeople().filter((t) => !DISPUTED.has(t.id)).sort(newestFirst);
+const awaitingAcks = () => { const unread = new Set(answers().map((t) => t.id)); return D.threads.filter((t) => summaryOf(t).awaitingAck > 0 && !DISPUTED.has(t.id) && !unread.has(t.id)).sort(newestFirst); };
+const toAcknowledge = (n) => n > 0 && h('span', { class: 'tag tag--warn', title: 'Messages waiting for your acknowledgement' }, `${n} to acknowledge`);
+const acksHeading = (n) => `${n === 1 ? '1 conversation waits' : `${n} conversations wait`} for your acknowledgement`;
 const decisions = () => D.grants.filter((g) => NOW - Date.parse(g.askedAt) > 10 * MINUTE);
 const silentClaims = () => D.claims.filter(silent).sort((a, b) => Date.parse(a.seenAt) - Date.parse(b.seenAt));
 const longClaims = () => D.claims.filter(heldOverAWeek).sort((a, b) => Date.parse(a.claimedAt) - Date.parse(b.claimedAt));
 const NEEDS = Object.freeze([
-  { shown: () => answers().length > 0, card: () => { const all = answers(), l = lines(all, summaryOf); return need('Answer', 'k-accent', all.length === 1 ? '1 conversation from a person is unread' : `${all.length} conversations from people are unread`, [
-    h('ul', { class: 'lines' }, l.shown.map((s) => h('li', {}, s.author && L.person(s.author, true), L.conversation(s.subject), h('span', { class: 'e' }, since(s.last)))), more(l.more)),
+  { shown: () => answers().length > 0 || awaitingAcks().length > 0, card: () => { const all = answers(), l = lines(all, summaryOf), acks = awaitingAcks(), la = lines(acks, summaryOf);
+    const acknowledging = acks.length > 0 || all.some((t) => summaryOf(t).awaitingAck > 0);
+    return need('Answer', 'k-accent', all.length === 0 ? acksHeading(acks.length) : all.length === 1 ? '1 conversation from a person is unread' : `${all.length} conversations from people are unread`, [
+    all.length > 0 && h('ul', { class: 'lines' }, l.shown.map((s) => h('li', {}, s.author && L.person(s.author, true), L.conversation(s.subject), h('span', { class: 'e' }, s.awaitingAck > 0 && [toAcknowledge(s.awaitingAck), ' '], since(s.last)))), more(l.more)),
+    acks.length > 0 && [all.length > 0 && h('p', { class: 'sub' }, `${acksHeading(acks.length)}:`),
+      h('ul', { class: 'lines' }, la.shown.map((s) => h('li', {}, s.author ? L.person(s.author, true) : h('span', { class: 'tag' }, 'dibs'), L.conversation(s.subject), h('span', { class: 'e' }, toAcknowledge(s.awaitingAck)))), more(la.more))],
     h('p', { class: 'sub' }, 'Notices from dibs fold onto their claims and are not counted here.'),
-    h('p', { class: 'rule' }, 'A message to a member reaches the session working on its ticket, and its agent answers when a decision is needed.'),
+    h('p', { class: 'rule' }, 'A message to a member reaches the session working on its ticket, and its agent answers when a decision is needed.', acknowledging && ' A message asking to be acknowledged waits until it is acknowledged in its conversation; reading it is not enough.'),
     foot('#/inbox', 'Open the inbox')]); } },
   { shown: () => decisions().length > 0, card: () => { const all = decisions(), l = lines(all, (g) => g); return need('Decide', 'k-warn', all.length === 1 ? '1 grant request has waited for your agent for more than ten minutes' : `${all.length} grant requests have waited for your agent for more than ten minutes`, [
     h('ul', { class: 'lines' }, l.shown.map((g) => h('li', {}, L.person(personView(g.asker), true), h('span', { class: 't' }, h('a', { class: 'lnk', href: `${conversationHref(g.thread)}?tab=grants` }, 'asks for'), ' ', L.area(areaView(g.area), true), ' for ', L.ticket(ticketView(g.item))), h('span', { class: 'e' }, since(g.askedAt)))), more(l.more)),
@@ -1016,7 +1050,8 @@ const gone = (label, close, heading, extra) => h('aside', { class: 'insp', 'data
 const filterForm = (cls, hidden, q, placeholder, label) => h('form', { class: cls, method: 'get', role: 'search', 'data-list-filter': true },
   Object.entries(hidden).map(([name, value]) => value && h('input', { type: 'hidden', name, value })),
   h('input', { class: 'search', type: 'search', name: 'q', value: q, placeholder, 'aria-label': label }));
-const queueSearch = (text) => `#/queue?q=${encodeURIComponent(text)}`;
+const queueKeptBy = (item) => address('queue', null, { kept_by: String(item) });
+const queueTouching = (area) => address('queue', null, { area });
 const filesOf = (files, at) => [files.slice(0, 3).map((f) => L.file(fileView(f.repo, f.path, at))), files.length > 3 && h('span', { class: 'faint' }, `and ${plural(files.length - 3, 'more file')}`)];
 
 /* ── Claims ───── */
@@ -1076,7 +1111,7 @@ function claimInspector(state) {
   return h('aside', { class: 'insp', 'data-region': 'inspector', 'data-selected': 'true', 'aria-label': `Claim ${t.title}` }, h('div', { class: 'insp__in' },
     h('div', { class: 'insp__top' }, L.ticket(t), STATE_TAGS[act](), h('span', { class: 'r' }, copyLink(), closeLink(state.close))),
     h('h2', { 'data-inspector-heading': true, tabindex: '-1' }, L.linked(linkedText(item.title, homeOf(item)))),
-    finished(c) && h('div', { class: 'callout callout--bad' }, h('p', {}, h('b', {}, 'The ticket is finished.'), ` The claim still holds ${plural(n, 'area')}.`, kept > 0 && [' It keeps ', h('a', { class: 'lnk', href: queueSearch(t.title) }, plural(kept, 'ticket')), ' out of the queue.'])),
+    finished(c) && h('div', { class: 'callout callout--bad' }, h('p', {}, h('b', {}, 'The ticket is finished.'), ` The claim still holds ${plural(n, 'area')}.`, kept > 0 && [' It keeps ', h('a', { class: 'lnk', href: queueKeptBy(c.item) }, plural(kept, 'ticket')), ' out of the queue.'])),
     silent(c) && h('div', { class: 'callout' }, h('p', {}, h('b', {}, `No sign of life for ${ago(c.seenAt)}.`), !you && ` A silent claim can be taken over with a reason, which ${c.holder} is sent.`),
       !you && h('form', { class: 'reply', method: 'post', 'data-not-sent': true }, h('div', { class: 'field' }, h('label', { for: 'takeover-reason' }, 'Reason'), h('textarea', { class: 'textarea', id: 'takeover-reason', name: 'reason', required: true })), h('div', { class: 'acts' }, h('button', { class: 'btn btn--warn', type: 'submit' }, 'Take over the claim')))),
     heldOverAWeek(c) && h('div', { class: 'callout' }, h('p', {}, h('b', {}, `Held for ${heldDays(c.claimedAt)} days.`), ' ', n === 0 ? 'It holds no area, only the ticket.' : n === 1 ? 'Its 1 area stays taken while it waits.' : `Its ${n} areas stay taken while it waits.`)),
@@ -1093,7 +1128,7 @@ function claimInspector(state) {
     h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Areas · ${n}`),
       n === 0 ? h('p', { class: 'faint' }, "It holds no area, so it is in nobody's way.") : h('ul', { class: 'rowlist' }, areas.map((a) => {
         const waiting = D.queue.filter((q) => ITEMS.get(q.item).areas.includes(a)).length;
-        return h('li', {}, L.area(areaView(a), true), h('span', { class: 'r' }, waiting > 0 ? h('a', { class: 'lnk', href: queueSearch(a) }, `${plural(waiting, 'ticket')} will touch it`) : 'no ticket waits'));
+        return h('li', {}, L.area(areaView(a), true), h('span', { class: 'r' }, waiting > 0 ? h('a', { class: 'lnk', href: queueTouching(a) }, `${plural(waiting, 'ticket')} will touch it`) : 'no ticket waits'));
       }))),
     collisions.length > 0 && h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Overlaps · ${collisions.length}`), h('ul', { class: 'rowlist' }, collisions.map((x) => {
       const otherClaim = CLAIMS.get(x.claims.find((id) => id !== c.item));
@@ -1121,11 +1156,15 @@ const queueText = (q) => { const item = ITEMS.get(q.item); return [item.ref, ite
 const QUEUE_CAP = 25;
 function queueState() {
   const q = R.params.get('q') ?? '', all = R.params.get('all') === '1';
-  const at = (key, over = {}) => address('queue', key, { q, all, ...over });
-  return { q, all, at, close: at(null) };
+  const keptBy = R.params.get('kept_by'), area = R.params.get('area');
+  const at = (key, over = {}) => address('queue', key, { q, all, kept_by: keptBy, area, ...over });
+  return { q, all, keptBy, area, at, close: at(null) };
 }
+const keeps = (state, q) => (state.keptBy === null || (q.reasons ?? []).some((r) => String(r.claim) === state.keptBy))
+  && (state.area === null || ITEMS.get(q.item).areas.includes(state.area));
 function queueList(state) {
-  const left = D.queue.filter((q) => matches(state.q, queueText(q)));
+  const left = D.queue.filter((q) => keeps(state, q) && matches(state.q, queueText(q)));
+  const narrowed = [state.keptBy !== null && `waiting for the claim on ${ticketView(Number(state.keptBy)).label}`, state.area !== null && `touching ${state.area}`].filter(Boolean);
   const ready = left.filter((q) => !q.reasons), waiting = left.filter((q) => q.reasons);
   const priorities = [...new Set(ready.map((q) => ITEMS.get(q.item).priority))].sort((a, b) => a - b);
   const groups = [...priorities.map((p) => ({ heading: [h('span', { class: `pri pri--${p}` }, `P${p}`), h('b', {}, 'Ready')], rows: ready.filter((q) => ITEMS.get(q.item).priority === p) })),
@@ -1141,7 +1180,8 @@ function queueList(state) {
   const cap = state.all || state.q ? Infinity : QUEUE_CAP;
   return [
     h('div', { class: 'bar-top' }, h('h1', { tabindex: '-1' }, 'Queue'), h('span', { class: 'dim' }, `${ready.length} ready · ${waiting.length} not ready`),
-      filterForm('queue-filter', { all: state.all ? '1' : null }, state.q, 'Title, number, area, holder', 'Filter the queue')),
+      narrowed.length > 0 && [h('span', { class: 'faint' }, narrowed.join(' · ')), h('a', { class: 'mini', href: address('queue', null, { q: state.q, all: state.all }) }, 'every ticket')],
+      filterForm('queue-filter', { all: state.all ? '1' : null, kept_by: state.keptBy, area: state.area }, state.q, 'Title, number, area, holder', 'Filter the queue')),
     groups.map((g) => [h('div', { class: 'grp' }, g.heading, h('span', { class: 'r' }, g.rows.length)), g.rows.slice(0, cap).map(row), g.rows.length > cap && h('a', { class: 'more', href: state.at(null, { all: true }) }, `Show all ${g.rows.length}`)]),
     groups.length === 0 && h('p', { class: 'note' }, 'No ticket matches.'),
   ];
@@ -1160,8 +1200,8 @@ function queueInspector(state) {
     !r.ready && h('section', { class: 'blk' }, h('h3', { class: 'label' }, 'Why it waits'), h('ul', { class: 'rowlist' }, r.reasons.map((x) => h('li', {}, h('span', {}, reason(x)))))),
     h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Areas it will probably touch · ${item.areas.length}`),
       item.areas.length === 0 ? h('p', { class: 'faint' }, 'The tracker names no area for it.') : h('ul', { class: 'rowlist' }, item.areas.map((a) => {
-        const holder = holdersOf(a)[0];
-        return h('li', {}, L.area(areaView(a), true), h('span', { class: 'r' }, holder ? ['held by ', L.person(personView(holder.holder), true), ' for ', L.ticket(ticketView(holder.item))] : 'free'));
+        const holding = holdersOf(a);
+        return h('li', {}, L.area(areaView(a), true), h('span', { class: 'r', title: holding.length ? `held by ${heldBy(holding)}` : null }, holding.length ? holding.map((c, i) => [i === 0 ? 'held by ' : ', ', L.person(personView(c.holder), true), ' for ', L.ticket(ticketView(c.item))]) : 'free'));
       }))),
     h('section', { class: 'blk' }, h('h3', { class: 'label' }, 'To pick it up'), h('div', { class: 'cmd' }, h('span', {}, 'dibs claim ', L.ticket(t), item.areas.map((a) => [' --area ', L.area(areaView(a), true)])), h('button', { type: 'button', hidden: true, 'data-copy': command }, 'Copy')))));
 }
@@ -1177,7 +1217,7 @@ const areaText = (full) => [full, ...AREAS.get(full).paths].join(' ');
 function areasList(state) {
   const every = [...AREAS.keys()];
   const held = every.filter((a) => areaState(a).held).length;
-  const holders = [...new Set(every.flatMap((a) => holdersOf(a).slice(0, 1).map((c) => c.holder)))].sort();
+  const holders = [...new Set(every.flatMap((a) => holdersOf(a).map((c) => c.holder)))].sort();
   const sections = D.repos.map((repo) => {
     const left = repo.areas.map((a) => `${repo.id}:${a.name}`).filter((full) => matches(state.q, areaText(full))).sort((a, b) => areaView(a).label.localeCompare(areaView(b).label));
     if (left.length === 0) return null;
@@ -1185,7 +1225,7 @@ function areasList(state) {
     const leavesFreeOut = repo.areas.length > FREE_SHOWN_UP_TO && !(state.all || state.q);
     const seat = (full) => {
       const holding = holdersOf(full), first = holding[0], s = areaState(full);
-      return h('a', { class: `seat${s.modifiers}${first ? ` pc-${colour(first.holder)}` : ''}`, 'data-row': true, 'data-inspect': true, href: state.at(full), title: first ? `${full} · ${first.holder} for ${holding.map((c) => itemOf(c).ref).join(', ')}` : `${full} · free`, 'aria-current': R.key === full ? 'true' : null },
+      return h('a', { class: `seat${s.modifiers}${first ? ` pc-${colour(first.holder)}` : ''}`, 'data-row': true, 'data-inspect': true, href: state.at(full), title: first ? `${full} · ${heldBy(holding)}` : `${full} · free`, 'aria-current': R.key === full ? 'true' : null },
         areaView(full).label, holding.length > 1 && h('span', { class: 'k' }, holding.length));
     };
     return h('section', {}, h('h2', {}, repo.id, h('span', { class: 'faint' }, `${heldSeats.length} held · ${free.length} free`)),
@@ -1215,7 +1255,7 @@ function areaInspector(state) {
       h('span', { class: 'r' }, finished(c) ? h('span', { class: 'tag tag--bad' }, 'ticket closed') : heldOverAWeek(c) ? h('span', { class: 'tag tag--warn' }, 'held over a week') : `held ${ago(c.claimedAt)}`))))),
     h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Tickets that will probably touch it · ${wanted.length}`),
       wanted.length === 0 ? h('p', { class: 'faint' }, 'No open ticket names it.') : [h('ul', { class: 'rowlist' }, wanted.slice(0, SHOWN).map((q) => { const item = ITEMS.get(q.item); return h('li', {}, L.ticket(ticketView(q.item)), h('span', { class: 't' }, L.linked(linkedText(item.title, homeOf(item)))), h('span', { class: 'r' }, `P${item.priority}`)); })),
-        wanted.length > SHOWN && h('a', { class: 'mini', href: queueSearch(full) }, `See all ${wanted.length} in the queue`)])));
+        wanted.length > SHOWN && h('a', { class: 'mini', href: queueTouching(full) }, `See all ${wanted.length} in the queue`)])));
 }
 
 /* ── Inbox ───── */
@@ -1233,7 +1273,7 @@ function talkRow(t, state) {
   return h('div', { class: 'row', 'data-row': true, 'aria-current': R.key === String(t.id) ? 'true' : null }, h('span', { class: s.unread > 0 ? 's s--review' : null, 'aria-hidden': 'true' }),
     h('div', {}, h('a', { class: 'row__t', 'data-inspect': true, href: state.at(t.id) }, plainText(s.subject.subject)),
       h('div', { class: 'row__m' }, s.author ? L.person(s.author, true) : h('span', { class: 'tag' }, 'dibs'), h('span', {}, 'to ', s.recipients === null ? 'everyone' : s.recipients.map((p, i) => [i > 0 && ', ', h('a', { class: 'lnk', href: p.href }, p.handle)])), s.ticket && L.ticket(s.ticket), h('span', {}, plural(s.messages, 'message')))),
-    h('div', { class: 'row__e' }, raised(s.importance), h('span', { class: 'age', title: `Last message ${clock(s.last)} UTC` }, ago(s.last))));
+    h('div', { class: 'row__e' }, toAcknowledge(s.awaitingAck), raised(s.importance), h('span', { class: 'age', title: `Last message ${clock(s.last)} UTC` }, ago(s.last))));
 }
 const TAB_BODIES = Object.freeze({
   people: (state) => D.threads.filter((t) => fromPeople(t) && matches(state.q, summaryOf(t).text)).sort(newestFirst).map((t) => talkRow(t, state)),
@@ -1301,7 +1341,8 @@ function inboxInspector(state) {
     h('h2', { 'data-inspector-heading': true, tabindex: '-1' }, L.linked(linkedText(t.subject, homeOf(t.item === null ? null : ITEMS.get(t.item))))),
     h('dl', { class: 'kv' }, h('dt', {}, 'From'), h('dd', {}, s.author ? L.person(s.author, false) : 'dibs'),
       h('dt', {}, 'To'), h('dd', {}, s.recipients === null ? 'everyone' : s.recipients.map((p) => L.person(p, false))),
-      h('dt', {}, 'Last message'), h('dd', {}, since(s.last))),
+      h('dt', {}, 'Last message'), h('dd', {}, since(s.last)),
+      s.awaitingAck > 0 && [h('dt', {}, 'Acknowledge'), h('dd', {}, h('span', { class: 'tag tag--warn' }, s.awaitingAck === 1 ? '1 message waits for yours' : `${s.awaitingAck} messages wait for yours`))]),
     h('section', { class: 'talk', 'aria-label': 'Messages' },
       h('ol', { class: 'talk__messages', 'aria-label': 'Messages, oldest first' }, t.messages.map((m) => message(t, m))),
       h('form', { class: 'reply', method: 'post', 'aria-labelledby': 'reply-h', 'data-not-sent': true },
@@ -1330,7 +1371,7 @@ const INDEXERS = Object.freeze({
     for (const c of D.claims) for (const b of c.branches) { const at = seen.find((s) => s.repo === b.repo && s.name === b.name); if (at) at.tickets.push(itemOf(c).ref); else seen.push({ ...b, tickets: [itemOf(c).ref] }); }
     return seen.map((b) => { const v = branchView(b.repo, b.name); return { title: v.label, sub: `recorded on ${b.tickets.join(', ')}`, text: `branch ${b.repo} ${v.label}`, number: null, here: `#/claims?q=${encodeURIComponent(v.label)}`, out: outOf(v.main, FORGE_NAME) }; });
   },
-  areas: () => [...AREAS.keys()].map((full) => { const holding = holdersOf(full); return { title: full, sub: holding.length ? `held by ${holding[0].holder} for ${holding.map((c) => itemOf(c).ref).join(', ')}` : 'free', text: [`area ${full}`, ...AREAS.get(full).paths].join(' '), number: null, here: areaView(full).href, out: null }; }),
+  areas: () => [...AREAS.keys()].map((full) => { const holding = holdersOf(full); return { title: full, sub: holding.length ? `held by ${heldBy(holding)}` : 'free', text: [`area ${full}`, ...AREAS.get(full).paths].join(' '), number: null, here: areaView(full).href, out: null }; }),
   people: () => D.members.map((m) => ({ title: m, sub: plural(D.claims.filter((c) => c.holder === m).length, 'claim'), text: `person ${m}`, number: null, here: personView(m).href, out: null })),
   conversations: () => [...D.threads].sort(newestFirst).map((t) => { const s = summaryOf(t); return { title: plainText(s.subject.subject), sub: `${t.author ?? 'dibs'} to ${t.to === null ? 'everyone' : t.to.join(', ')} · ${clock(s.last)}`, text: s.text, number: null, here: s.subject.href, out: null }; }),
   slots: () => D.slots.map((slot) => ({ title: slot.name, sub: slot.holder ? `held by ${slot.holder}` : 'free', text: `slot ${slot.name} ${slot.note ?? ''}`, number: null, here: `#/?slot=${encodeURIComponent(slot.name)}`, out: null })),

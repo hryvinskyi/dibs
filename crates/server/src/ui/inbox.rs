@@ -213,7 +213,7 @@ async fn render(
         threads: &threads,
         summaries: &summaries,
         waiting: &waiting,
-        grants: &loaded.unread.grant_asks,
+        grants: &loaded.unread.every_grant_ask,
         items: &none,
         links: &links,
         now: loaded.now,
@@ -352,14 +352,9 @@ async fn notice_items(
     Ok(items)
 }
 
-/// The items waiting in the queue: the ready list and the items left out of it.
+/// The items the queue lists.
 fn queued(status: &StatusView) -> impl Iterator<Item = &ItemRecord> {
-    status
-        .ready
-        .ready
-        .iter()
-        .map(|entry| &entry.item.item)
-        .chain(status.ready.excluded.iter().map(|entry| &entry.item.item))
+    crate::ui::queue::listing::listed(status).map(|entry| entry.item)
 }
 
 /// An item no claim holds, as a row of From dibs names it.

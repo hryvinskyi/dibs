@@ -19,6 +19,7 @@ use dibs_domain::repo::RepoId;
 use dibs_domain::review::PrRef;
 use dibs_domain::settings::ProjectSettings;
 
+use crate::ui::areas::held_by;
 use crate::ui::claims::view::{Activity, ClaimView, Scene};
 use crate::ui::inbox::summary::ConversationSummary;
 use crate::ui::links::{
@@ -428,18 +429,21 @@ fn areas(corpus: &Corpus<'_>) -> Vec<Entry> {
                     .iter()
                     .filter(|hold| hold.area == qualified)
                     .collect();
-                let sub = match holds.first() {
-                    Some(first) => format!(
-                        "held by {} for {}",
-                        first.holder,
-                        holds
-                            .iter()
-                            .map(|hold| TicketView::of_item(hold.item, sources.links).title)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    None => "free".to_owned(),
-                };
+                let tickets: Vec<(&str, String)> = holds
+                    .iter()
+                    .map(|hold| {
+                        (
+                            hold.holder.as_str(),
+                            TicketView::of_item(hold.item, sources.links).title,
+                        )
+                    })
+                    .collect();
+                let sub = held_by(
+                    tickets
+                        .iter()
+                        .map(|(holder, ticket)| (*holder, ticket.as_str())),
+                )
+                .map_or_else(|| "free".to_owned(), |who| format!("held by {who}"));
                 Entry {
                     kind: Kind::Areas,
                     sub,
@@ -457,12 +461,14 @@ fn areas(corpus: &Corpus<'_>) -> Vec<Entry> {
         .collect()
 }
 
-/// One entry per member, with how many live and stale claims they hold.
+/// One entry per person, with how many live and stale claims they hold; an integration account
+/// holds none and is not listed.
 fn people(corpus: &Corpus<'_>) -> Vec<Entry> {
     corpus
         .sources
         .members
         .iter()
+        .filter(|member| member.role.is_person())
         .map(|member| {
             let person = PersonView::of(&member.handle);
             let held = corpus

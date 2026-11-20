@@ -741,8 +741,8 @@ impl SlotInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeTakeInput {
-    /// Why you take it, as every member reads it on the board; never a credential, a host or a
-    /// customer's data.
+    /// Why you take it, as every member reads it under Worktrees held on the pages; never a
+    /// credential, a host or a customer's data.
     pub purpose: String,
     /// The work item it is for: its local id or its reference.
     pub item: Option<ItemKeyInput>,

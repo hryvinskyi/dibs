@@ -1745,6 +1745,32 @@ mod tests {
         );
     }
 
+    /// The names the derived parser of [`EventKind`] knows, read from the answer it gives a name
+    /// it does not know: the parser is generated from the enum, so it lists every variant.
+    fn parsed_names() -> Vec<String> {
+        let unknown = serde_json::json!({"kind": "no_such_kind", "payload": {}});
+        let error = serde_json::from_value::<EventKind>(unknown)
+            .unwrap_err()
+            .to_string();
+        let (_, listed) = error
+            .split_once("expected one of ")
+            .unwrap_or_else(|| panic!("{error}"));
+        listed
+            .split(", ")
+            .map(|name| name.trim_matches('`').to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn each_kind_answers_to_a_name_the_parser_knows_and_the_parser_knows_each_name_once() {
+        let names = parsed_names();
+        let distinct: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(distinct.len(), names.len(), "{names:?}");
+        for kind in every_kind().iter().chain(review_kinds().iter()) {
+            assert!(distinct.contains(kind.name()), "{}", kind.name());
+        }
+    }
+
     #[test]
     fn every_kind_round_trips_under_its_name() {
         for kind in every_kind() {

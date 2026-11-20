@@ -383,7 +383,7 @@ fn lead(
     format!(
         "{by} asks the arbiters of this project ({}) to settle {about}: the agents involved do not agree.\
          \nHeld by: {holders}. Asked for by: {requester}.\
-         \nAn arbiter answers in this conversation and acknowledges this message (dibs_ack, or dibs ack {message}); until one does, the board shows it.\
+         \nAn arbiter answers in this conversation and acknowledges this message (dibs_ack, or dibs ack {message}); until one does, the Now page lists it under Arbitrate.\
          \nMeanwhile no agent settles it alone: do not take over the claim or the slot, do not edit in the area, pick other work, and follow the arbiter's answer here.",
         join(arbiters)
     )

@@ -621,3 +621,154 @@ async fn today_begins_at_the_viewers_midnight_or_else_at_utcs() {
         );
     }
 }
+
+#[tokio::test]
+async fn the_decide_card_shows_when_only_the_oldest_of_twelve_grant_requests_waited_too_long() {
+    let (world, alice, bob, _) = project().await;
+    let mut generous = settings();
+    generous["raised_per_hour"] = json!(100);
+    world.settings(&alice, generous).await;
+    let laptop = world.session(&alice, "laptop").await;
+    let desk = world.session(&bob, "desk").await;
+    let billing = world
+        .item(&alice, Some("gh:acme/widgets#1"), "Billing")
+        .await;
+    claim(&world, &alice, laptop, billing, json!(["api:billing"])).await;
+    let mut asked = Vec::new();
+    for n in 2..14 {
+        if n == 4 {
+            world.fakes.clock.advance(Duration::minutes(11));
+        }
+        let item = world
+            .item(&bob, Some(&format!("gh:acme/widgets#{n}")), "Search")
+            .await;
+        claim(&world, &bob, desk, item, json!([])).await;
+        let request = world
+            .post(
+                &bob,
+                "/v1/grant-requests",
+                json!({"item": item, "area": "api:billing"}),
+            )
+            .await;
+        assert_eq!(request.status, StatusCode::CREATED, "{}", request.body);
+        asked.push(request.body["thread_id"].as_u64().unwrap());
+    }
+    let page = sign_in(&world, &alice).await.get(&world, "/ui/").await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    assert_eq!(cards(&page), 1, "no request is a message: {}", page.text);
+    let decide = card(&page, "Decide");
+    assert!(
+        decide.contains(
+            "<h2>2 grant requests have waited for your agent for more than ten minutes</h2>"
+        ),
+        "{decide}"
+    );
+    for thread in &asked[..2] {
+        assert!(
+            decide.contains(&format!(
+                r#"<a class="lnk" href="/ui/inbox/{thread}">asks for</a>"#
+            )),
+            "{thread} in {decide}"
+        );
+    }
+    assert!(
+        page.text.contains(r#"<a href="/ui/" aria-current="page">Now<span class="k k--hot">1</span><span class="visually-hidden">waiting</span></a>"#),
+        "{}",
+        page.text
+    );
+    let inbox = sign_in(&world, &alice).await.get(&world, "/ui/inbox").await;
+    assert!(inbox.text.contains(&rail_now(1)), "{}", inbox.text);
+}
+
+#[tokio::test]
+async fn a_message_waiting_for_the_viewers_acknowledgement_stays_on_the_answer_card_until_acknowledged()
+ {
+    let (world, alice, bob, _) = project().await;
+    let started = world
+        .post(
+            &bob,
+            "/v1/threads",
+            json!({"subject": "Freeze", "to": ["alice"], "label": "desk/mcp",
+                   "body": "No merges today.", "ack_required": true}),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::CREATED, "{}", started.body);
+    let thread = started.body["thread"]["id"].as_u64().unwrap();
+    let message = started.body["message"]["id"].as_u64().unwrap();
+    let browser = sign_in(&world, &alice).await;
+    let opened = browser.get(&world, &format!("/ui/inbox/{thread}")).await;
+    assert_eq!(opened.status, StatusCode::OK, "{}", opened.text);
+
+    let page = browser.get(&world, "/ui/").await;
+    assert_eq!(cards(&page), 1, "{}", page.text);
+    let answer = card(&page, "Answer");
+    assert!(
+        answer.contains("<h2>1 conversation waits for your acknowledgement</h2>"),
+        "read, and still waiting: {answer}"
+    );
+    assert!(
+        answer.contains(&format!(
+            r#"<a class="lnk" href="/ui/inbox/{thread}">Freeze</a>"#
+        )),
+        "{answer}"
+    );
+    assert!(
+        answer.contains(r#"<span class="tag tag--warn" title="Messages waiting for your acknowledgement">1 to acknowledge</span>"#),
+        "{answer}"
+    );
+    let bobs = sign_in(&world, &bob).await.get(&world, "/ui/").await;
+    assert_eq!(cards(&bobs), 0, "its author's never waits: {}", bobs.text);
+
+    let acked = browser
+        .post(
+            &world,
+            &format!("/ui/threads/{thread}/messages/{message}/ack"),
+            &[("csrf", &browser.token)],
+        )
+        .await;
+    assert_eq!(acked.status, StatusCode::SEE_OTHER, "{}", acked.text);
+    let after = browser.get(&world, "/ui/").await;
+    assert_eq!(cards(&after), 0, "{}", after.text);
+    assert!(!after.text.contains("to acknowledge"));
+}
+
+#[tokio::test]
+async fn an_unread_message_asking_for_acknowledgement_is_one_line_of_the_answer_card() {
+    let (world, alice, bob, _) = project().await;
+    let started = world
+        .post(
+            &bob,
+            "/v1/threads",
+            json!({"subject": "Freeze", "to": ["alice"], "label": "desk/mcp",
+                   "body": "No merges today.", "ack_required": true}),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::CREATED, "{}", started.body);
+    let thread = started.body["thread"]["id"].as_u64().unwrap();
+    let browser = sign_in(&world, &alice).await;
+
+    let page = browser.get(&world, "/ui/").await;
+    assert_eq!(cards(&page), 1, "{}", page.text);
+    let answer = card(&page, "Answer");
+    assert!(
+        answer.contains("<h2>1 conversation from a person is unread</h2>"),
+        "{answer}"
+    );
+    assert_eq!(
+        answer
+            .matches(&format!(r#"href="/ui/inbox/{thread}""#))
+            .count(),
+        1,
+        "one conversation, one line: {answer}"
+    );
+    assert!(
+        !answer.contains("waits for your acknowledgement")
+            && !answer.contains("wait for your acknowledgement"),
+        "no acknowledgement sub-list: {answer}"
+    );
+    assert!(
+        answer.contains(r#"<span class="tag tag--warn" title="Messages waiting for your acknowledgement">1 to acknowledge</span>"#),
+        "the unread line says it waits: {answer}"
+    );
+    assert!(answer.contains("reading it is not enough"), "{answer}");
+}

@@ -22,22 +22,25 @@ export function localizeTime(element, now) {
 }
 
 /**
- * Localizes every `<time data-clock>` inside `scope`.
+ * Localizes every `<time data-clock>` inside `scope`, against the clock's current time.
  * @param {ParentNode} scope
+ * @param {{ now(): Date }} clock
  * @returns {void}
  */
-export function localizeTimes(scope) {
-  const now = new Date();
+export function localizeTimes(scope, clock) {
+  const now = clock.now();
   scope.querySelectorAll('time[data-clock]').forEach((element) => localizeTime(element, now));
 }
 
 /**
- * Records the viewer's current UTC offset in its cookie, when it is not recorded already.
- * @param {Document} doc
+ * Records the viewer's UTC offset at the clock's current time in its cookie, when it is not
+ * recorded already.
+ * @param {{ cookie: string }} doc
+ * @param {{ now(): Date }} clock
  * @returns {void}
  */
-export function rememberZone(doc) {
-  const cookie = zoneCookie(doc.cookie, -new Date().getTimezoneOffset());
+export function rememberZone(doc, clock) {
+  const cookie = zoneCookie(doc.cookie, -clock.now().getTimezoneOffset());
   if (cookie !== null) {
     doc.cookie = cookie;
   }

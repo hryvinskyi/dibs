@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use dibs_app::named::{AuthorName, NamedSummary};
 use dibs_app::records::ItemRecord;
-use dibs_app::use_cases::{HeldItem, NamedNotReady};
+use dibs_app::use_cases::HeldItem;
 use dibs_domain::forge::Revision;
 use dibs_domain::ids::ItemId;
 use dibs_domain::paths::RepoPath;
@@ -16,10 +16,11 @@ use dibs_domain::repo::RepoId;
 use crate::ui::claims::query::ListQuery;
 use crate::ui::claims::view::{ClaimView, Scene};
 use crate::ui::links::{
-    AreaView, ConversationView, FileView, PersonView, PullRequestView, TicketView, query_value,
+    AreaView, ConversationView, FileView, PersonView, PullRequestView, TicketView,
 };
 use crate::ui::moments::{Moment, moment};
-use crate::ui::queue::listing::{Listed, listed};
+use crate::ui::queue::listing::{Listed, Narrowing, listed};
+use crate::ui::queue::narrowed_address;
 
 /// How many files of a collision with another claim are listed.
 const COLLISION_FILES: usize = 5;
@@ -36,7 +37,7 @@ pub struct InspectorView {
     pub takeover: Option<String>,
     /// How many tickets of the queue wait for areas it holds.
     pub kept: usize,
-    /// The address of those tickets in the queue.
+    /// The address of the queue narrowed to exactly those tickets.
     pub kept_href: String,
     /// The areas it holds, with the tickets that will touch each.
     pub areas: Vec<AreaRow>,
@@ -57,7 +58,7 @@ pub struct AreaRow {
     pub area: AreaView,
     /// How many tickets of the queue will touch it.
     pub waiting: usize,
-    /// The address of those tickets in the queue.
+    /// The address of the queue narrowed to exactly those tickets.
     pub href: String,
 }
 
@@ -131,14 +132,9 @@ impl InspectorView {
         let id = claim.id;
         let status = scene.status;
         let queue: Vec<Listed<'_>> = listed(status).collect();
-        let kept = queue
-            .iter()
-            .filter(|entry| {
-                entry.reasons.iter().any(|reason| {
-                    matches!(reason, NamedNotReady::AreaHeld { item, .. } if item.id == id)
-                })
-            })
-            .count();
+        let count =
+            |narrowing: &Narrowing| queue.iter().filter(|entry| narrowing.keeps(entry)).count();
+        let keeping = Narrowing::kept_by(id);
         let held_areas = match claim.silent {
             Some(_) => None,
             None => Some(&held.claim.claim.areas),
@@ -146,21 +142,21 @@ impl InspectorView {
         let areas = held_areas
             .into_iter()
             .flatten()
-            .map(|area| AreaRow {
-                area: AreaView::of(area),
-                waiting: queue
-                    .iter()
-                    .filter(|entry| entry.item.areas_hint.contains(area))
-                    .count(),
-                href: queue_search(&area.to_string()),
+            .map(|area| {
+                let touching = Narrowing::touching(area.clone());
+                AreaRow {
+                    area: AreaView::of(area),
+                    waiting: count(&touching),
+                    href: narrowed_address(touching),
+                }
             })
             .collect();
         let (collisions, moved) = overlaps(held, scene);
         let (talk, notices) = conversations(threads, scene);
         Self {
             takeover: (claim.silent.is_some() && !claim.you).then(|| query.address(Some(id))),
-            kept,
-            kept_href: queue_search(&claim.ticket.title),
+            kept: count(&keeping),
+            kept_href: narrowed_address(keeping),
             areas,
             collisions,
             moved,
@@ -181,11 +177,6 @@ impl GoneView {
             queue: (item.is_some() && waits).then(|| format!("/ui/queue/{id}")),
         }
     }
-}
-
-/// The address of the queue filtered by `text`.
-fn queue_search(text: &str) -> String {
-    format!("/ui/queue?q={}", query_value(text))
 }
 
 /// The collisions with other claims and the moved bases the status shows on the claim's item.

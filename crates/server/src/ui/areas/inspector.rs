@@ -4,7 +4,9 @@
 use dibs_domain::repo::RepoId;
 
 use crate::ui::areas::index::AreaEntry;
-use crate::ui::links::{DirectoryView, LinkContext, query_value};
+use crate::ui::links::{DirectoryView, LinkContext};
+use crate::ui::queue::listing::Narrowing;
+use crate::ui::queue::narrowed_address;
 use crate::ui::queue::view::QueueItemView;
 
 /// How many of the tickets that will touch the area the inspector lists.
@@ -40,7 +42,7 @@ impl InspectorView {
             paths,
             wanted: entry.wanted_by.iter().take(WANTED_SHOWN).cloned().collect(),
             wanted_total: entry.wanted_by.len(),
-            queue: format!("/ui/queue?q={}", query_value(&entry.area.full)),
+            queue: narrowed_address(Narrowing::touching(entry.qualified.clone())),
             entry,
         }
     }

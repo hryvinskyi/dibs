@@ -1519,6 +1519,8 @@ and a value that does not read means the default:
 | `who` | Claims | A member's handle: only that member's claims. |
 | `q` | Claims, Queue, Areas, Inbox, Search | Words, each of which must occur in a row's text, whatever the case and the order; a leading `#` on a word is dropped. On Search, one number (`42` or `#42`) also brings the entries of that number first. |
 | `all` | Queue, Areas | `1` lists every row. By default Queue lists the first 25 rows of each group, and Areas leaves out the free areas of a repository that declares more than 80; a `q` lists every match. |
+| `kept_by` | Queue | A work item's local id: only the tickets that wait for an area the claim on that item holds. A narrowed list shows every row. |
+| `area` | Queue | An area as dibs writes it (`api:billing`): only the tickets whose area hints name it. With `kept_by`, a ticket must match both. |
 | `tab` | Inbox | `people` (the default), `grants` (grant requests waiting for the viewer's decision) or `dibs` (what dibs reported, one row per ticket). With a conversation selected and no `tab`, the list opens on the tab the conversation belongs to. |
 | `slot` | any page | A slot's name: that slot is open in the rail. |
 | `palette` | Search | `1`: the answer is the results alone, without the frame, with at most 5 hits per kind instead of 50. |

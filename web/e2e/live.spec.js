@@ -5,8 +5,10 @@
  * list follows the events, the page saying that something changed, and the inspector catches up
  * once the form is left; a click on another row while a refresh is on its way keeps the row
  * clicked; on a phone the rail stays collapsed across a refresh; a slot taken shows as held in the
- * rail; an overlap reported shows as a card on Now; and a feature claim's wait for an area debt
- * work holds shows on the claim, and goes once the area is handed over.
+ * rail; an overlap reported shows as a card on Now; a feature claim's wait for an area debt work
+ * holds shows on the claim, and goes once the area is handed over; a reply in an existing
+ * conversation raises the rail's Inbox count on Claims; and a branch a heartbeat records replaces
+ * the claim's branch on an open Claims page.
  */
 
 import { ageClaim } from './claim-age.js';
@@ -18,7 +20,9 @@ import {
   importItems,
   narrowClaim,
   openSession,
+  postMessage,
   reportFootprint,
+  startThread,
   takeSlot,
   widgetsSettings,
 } from './dibs-api.js';
@@ -286,5 +290,49 @@ test("a feature claim's wait for an area debt work holds shows on the claim, and
   await narrowClaim(dibs.url, dibs.adminToken, itemAt(ids, 0), ['api:billing']);
   await expect(waiting).toHaveCount(0);
   await expect(inspector(page).locator('.blk').filter({ hasText: 'Areas' })).toContainText('api:billing');
+  await expectSameDocument(page);
+});
+
+test("a reply in an existing conversation raises the rail's Inbox count on Claims without a reload", async ({
+  page,
+  dibs,
+}) => {
+  await applySettings(dibs.url, dibs.adminToken, widgetsSettings());
+  const thread = await startThread(dibs.url, dibs.memberToken, {
+    subject: 'The invoice totals',
+    to: ['alice'],
+    body: 'Are they rounded per line?',
+  });
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/claims`);
+  const inbox = page.locator('#rail nav a[href="/ui/inbox"] .k');
+  await expect(inbox).toHaveText('0');
+  await markDocument(page);
+
+  await postMessage(dibs.url, dibs.adminToken, thread, 'Per line, then summed.');
+  await expect(inbox).toHaveText('1');
+  await expect(changed(page)).toBeHidden();
+  await expectSameDocument(page);
+});
+
+test("a branch a heartbeat records replaces the claim's branch on an open Claims page without a reload", async ({
+  page,
+  dibs,
+}) => {
+  await applySettings(dibs.url, dibs.adminToken, widgetsSettings());
+  const ids = await importItems(dibs.url, dibs.adminToken, [{ ref: 'gh:acme/widgets#1', title: 'Rates in the ledger' }]);
+  const session = await claimFrom(dibs.url, dibs.memberToken, itemAt(ids, 0), 'bob-desk');
+  await heartbeatOn(dibs.url, dibs.memberToken, session, 'api', 'bob/1-rates');
+
+  await signIn(page, dibs.url, dibs.memberToken);
+  await page.goto(`${dibs.url}/ui/claims/${itemAt(ids, 0)}`);
+  const branch = inspector(page).locator('dt', { hasText: 'Branch' }).locator('xpath=following-sibling::dd[1]');
+  await expect(branch).toContainText('bob/1-rates');
+  await markDocument(page);
+
+  await heartbeatOn(dibs.url, dibs.memberToken, session, 'api', 'bob/7-other');
+  await expect(branch).toContainText('bob/7-other');
+  await expect(branch).not.toContainText('bob/1-rates');
   await expectSameDocument(page);
 });
