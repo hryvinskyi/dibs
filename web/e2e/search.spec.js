@@ -91,6 +91,36 @@ test("typing in the rail's search box opens the palette, tabbing onto it does no
   await expect(railSearch(page)).toHaveValue('');
 });
 
+test('a palette opened again before its closing is handled keeps what is typed in it', async ({ page, dibs }) => {
+  await seedWidgets(dibs);
+  await signIn(page, dibs.url, dibs.adminToken);
+  await page.goto(`${dibs.url}/ui/claims`);
+  await page.keyboard.press('ControlOrMeta+k');
+  await expect(palette(page)).toBeVisible();
+
+  // Escape, `/` and the typing reach the page in one task, as keys queued behind a busy page do, so
+  // the palette's closing is handled only once it is open again.
+  await page.evaluate(() => {
+    /** @param {string} key */
+    const press = (key) =>
+      document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    press('Escape');
+    press('/');
+    const field = document.querySelector('input[data-palette-input]');
+    if (!(field instanceof HTMLInputElement)) {
+      throw new Error('the palette has no input');
+    }
+    field.value = 'refund';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  const input = page.locator('input[data-palette-input]');
+  await expect(palette(page)).toBeVisible();
+  await expect(input).toHaveValue('refund');
+  await expect(input).toBeFocused();
+  await expect(palette(page).locator('[data-hit]').filter({ hasText: TITLES.review }).first()).toBeVisible();
+});
+
 test("a pull request's number finds it first, its outside link is GitHub's, and Enter opens its claim", async ({
   page,
   dibs,

@@ -308,6 +308,11 @@ export function mountPalette(doc, app, { fetchRegions, location, open, onSignedO
   }, { signal });
 
   dialog.addEventListener('close', () => {
+    // The close event arrives after the keys already queued behind the closing key; a palette one of
+    // them opened again is left as it is.
+    if (dialog.open) {
+      return;
+    }
     halt();
     const back = returnTo !== null && returnTo.isConnected ? returnTo : railInput();
     returnTo = null;
