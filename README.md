@@ -176,8 +176,9 @@ revokes their tokens and releases everything they held at once. With the Claude 
 - **Edit policy.** With `require-claim` (the default), a member may edit a governed path only under a live claim that
   covers it; with `advise` they may, and are told who else is in the area. A path no area or rule governs is free.
 - **Hot-file rules.** Policies for files many people touch, matched by glob: `regenerate` (anyone may change it, nobody
-  merges it by hand), `owner` (only the holder of a named area), `warn-shared` (anyone, with the other editors named) and
-  `free`.
+  merges it by hand, so two branches that share only such files do not overlap, and a merge that changes only such files
+  moves no claim's base), `owner` (only the holder of a named area), `warn-shared` (anyone, with the other editors named)
+  and `free`.
 - **Grant.** A holder lets another member edit inside an area they hold, for that member's own live claim. The holder's
   session that works under the claim holding the area decides a request itself, without asking its person: it gives
   the grant when that claim's work will change no file there, neither what it has changed nor what it still has to do,

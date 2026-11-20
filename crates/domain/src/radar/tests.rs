@@ -346,6 +346,132 @@ fn two_members_changing_one_path_overlap_on_the_shared_paths_only() {
     );
 }
 
+/// The radar settings with `composer.lock` of `api` declared `regenerate`; `web` has no hot-file
+/// rule.
+fn regenerated_settings() -> ProjectSettings {
+    settings(
+        r#"{"repos":[
+            {"id":"api","remote":"example.com/acme/api",
+             "areas":[{"name":"billing","paths":["packages/billing/**"]}],
+             "hot":[{"paths":["composer.lock"],"kind":"regenerate"}]},
+            {"id":"web","remote":"example.com/acme/web"}]}"#,
+    )
+}
+
+#[test]
+fn two_members_sharing_only_regenerated_files_do_not_overlap() {
+    let settings = regenerated_settings();
+    let claims = [claim(1, ALICE, &[], 0), claim(2, BOB, &[], 0)];
+    let (a, a_entries) = footprint(1, "api", &["composer.lock"], 0);
+    let (b, b_entries) = footprint(2, "api", &["composer.lock"], 0);
+    let footprints = [a, b];
+    let scene = RadarScene {
+        claims: &claims,
+        footprints: &footprints,
+        settings: &settings,
+        now: at(1),
+    };
+    let mine: BTreeSet<RepoPath> = a_entries.iter().map(|entry| entry.path.clone()).collect();
+    assert!(
+        scene.same_file(ItemId(1), &mine, &b_entries).is_empty(),
+        "nobody merges composer.lock by hand"
+    );
+
+    let (a, a_entries) = footprint(1, "api", &["composer.lock", "src/billing/round.rs"], 0);
+    let (b, b_entries) = footprint(2, "api", &["composer.lock", "src/billing/round.rs"], 0);
+    let (w, w_entries) = footprint(2, "web", &["composer.lock"], 0);
+    let (aw, aw_entries) = footprint(1, "web", &["composer.lock"], 0);
+    let footprints = [a, b, w, aw];
+    let scene = RadarScene {
+        footprints: &footprints,
+        ..scene
+    };
+    let mine: BTreeSet<RepoPath> = [a_entries, aw_entries]
+        .concat()
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    let others = [b_entries, w_entries].concat();
+    let expected = Overlap::new(
+        OverlapKind::SameFile,
+        [ItemId(1), ItemId(2)].into(),
+        None,
+        qualified_set(&["api:src/billing/round.rs", "web:composer.lock"]),
+    )
+    .unwrap();
+    assert_eq!(
+        scene.same_file(ItemId(1), &mine, &others),
+        [expected].into(),
+        "only the hand-merged paths, each by the rules of its own repository"
+    );
+}
+
+#[test]
+fn a_merge_through_regenerated_files_alone_moves_no_base() {
+    let settings = regenerated_settings();
+    let claims = [claim(2, BOB, &[], 0)];
+    let (behind, hits) = footprint(2, "api", &["composer.lock", "src/billing/round.rs"], 5);
+    let footprints = [behind];
+    let scene = RadarScene {
+        claims: &claims,
+        footprints: &footprints,
+        settings: &settings,
+        now: at(15),
+    };
+    let lock_only = rels(&["composer.lock"]);
+    let merge = Merge {
+        pr: &pr("acme/api#12"),
+        repo: &repo("api"),
+        base: &branch("main"),
+        merged_at: at(10),
+        files: &lock_only,
+        head: None,
+        author: None,
+    };
+    assert!(
+        scene.main_moved(&merge, &hits).is_empty(),
+        "nobody merges composer.lock by hand"
+    );
+    let both = rels(&["composer.lock", "src/billing/round.rs"]);
+    let through_both = Merge {
+        files: &both,
+        ..merge
+    };
+    let moved = scene.main_moved(&through_both, &hits);
+    assert_eq!(moved.len(), 1);
+    assert_eq!(
+        moved.first().map(Overlap::paths),
+        Some(&qualified_set(&["api:src/billing/round.rs"])),
+        "the moved base names the hand-merged path only"
+    );
+    let plain = radar_settings();
+    let without_rule = RadarScene {
+        settings: &plain,
+        ..scene
+    };
+    let moved = without_rule.main_moved(&merge, &hits);
+    assert_eq!(
+        moved.first().map(Overlap::paths),
+        Some(&qualified_set(&["api:composer.lock"])),
+        "without the rule composer.lock moves the base"
+    );
+    let (unknown, unknown_hits) = footprint(2, "other", &["composer.lock"], 5);
+    let unknown_footprints = [unknown];
+    let elsewhere = RadarScene {
+        footprints: &unknown_footprints,
+        ..scene
+    };
+    let into_unknown = Merge {
+        repo: &repo("other"),
+        ..merge
+    };
+    assert_eq!(
+        elsewhere.main_moved(&into_unknown, &unknown_hits).len(),
+        1,
+        "a repository the settings do not know keeps every path"
+    );
+}
+
 fn expected_overlap() -> Overlap {
     Overlap::new(
         OverlapKind::SameFile,

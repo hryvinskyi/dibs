@@ -1072,6 +1072,278 @@ mod use_cases {
         assert_eq!(tx.footprints(admin.project).await.unwrap().len(), 1);
     }
 
+    /// A project whose settings declare `composer.lock` `regenerate`, with an integration and two
+    /// members, bob and carol, each claiming an item with its work on a branch of its own.
+    struct Regenerated {
+        world: World,
+        admin: Actor,
+        bot: Actor,
+        people: Vec<Actor>,
+        items: Vec<ItemId>,
+    }
+
+    impl Regenerated {
+        async fn new() -> Self {
+            use dibs_app::use_cases::OnBranch;
+            use dibs_domain::radar::BranchName;
+            use dibs_domain::repo::RepoId;
+
+            let world = World::new().await;
+            let app = &world.app;
+            let admin = project(app, "widgets", "alice").await;
+            let document: SettingsDocument = serde_json::from_str(
+                r#"{"areas":[{"name":"billing","paths":["src/billing/**"]}],
+                    "hot":[{"paths":["composer.lock"],"kind":"regenerate"}]}"#,
+            )
+            .unwrap();
+            app.apply_settings.execute(&admin, document).await.unwrap();
+            let importer = app
+                .create_member
+                .execute(
+                    &admin,
+                    CreateMemberInput {
+                        member: member("worker"),
+                        role: Role::Importer,
+                    },
+                )
+                .await
+                .unwrap();
+            let bot = app
+                .authenticate
+                .execute(importer.token.expose())
+                .await
+                .unwrap();
+            let mut people = Vec::new();
+            let mut items = Vec::new();
+            for (n, handle) in ["bob", "carol"].into_iter().enumerate() {
+                let created = app
+                    .create_member
+                    .execute(
+                        &admin,
+                        CreateMemberInput {
+                            member: member(handle),
+                            role: Role::Member,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let person = app
+                    .authenticate
+                    .execute(created.token.expose())
+                    .await
+                    .unwrap();
+                let session = register(app, &person, n).await;
+                let item = create_item(app, &admin, n + 1).await;
+                app.claim_item
+                    .execute(
+                        &person,
+                        ClaimItemInput {
+                            item,
+                            session,
+                            areas: Vec::new(),
+                            wide: None,
+                            kind: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let on = OnBranch {
+                    repo: RepoId::implicit(),
+                    branch: BranchName::parse(&format!("work-{n}")).unwrap(),
+                };
+                app.heartbeat
+                    .execute(&person, session, Some(&on))
+                    .await
+                    .unwrap();
+                people.push(person);
+                items.push(item);
+            }
+            Self {
+                world,
+                admin,
+                bot,
+                people,
+                items,
+            }
+        }
+
+        /// Reports that the branch of claim `n` changes `paths` against `main`, from a merge base
+        /// committed at the epoch.
+        async fn report(&self, n: usize, paths: &[&str]) {
+            use dibs_app::use_cases::FootprintInput;
+            use dibs_domain::paths::RelPath;
+            use dibs_domain::radar::{BranchName, CommitSha, FootprintBase};
+
+            self.world
+                .app
+                .record_footprint
+                .execute(
+                    &self.bot,
+                    FootprintInput {
+                        item: self.items[n],
+                        repo: "default".to_owned(),
+                        branch: BranchName::parse(&format!("work-{n}")).unwrap(),
+                        base: FootprintBase {
+                            branch: BranchName::parse("main").unwrap(),
+                            sha: CommitSha::parse("abcd").unwrap(),
+                            at: OffsetDateTime::UNIX_EPOCH,
+                        },
+                        paths: paths.iter().map(|p| RelPath::parse(p).unwrap()).collect(),
+                        truncated: false,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        /// Reports that `pr` was merged into `main` now, changing `files`.
+        async fn merge(&self, pr: &str, files: &[&str]) {
+            use dibs_app::ports::Clock;
+            use dibs_app::use_cases::{PrReport, ReportedEnd};
+            use dibs_domain::paths::RelPath;
+            use dibs_domain::review::PrRef;
+
+            self.world
+                .app
+                .report_pr
+                .execute(
+                    &self.bot,
+                    PrReport {
+                        pr: PrRef::parse(pr).unwrap(),
+                        end: ReportedEnd::Merged {
+                            base: "main".to_owned(),
+                            merged_at: self.world.fakes.clock.now(),
+                            files: Some(files.iter().map(|p| RelPath::parse(p).unwrap()).collect()),
+                            head: None,
+                        },
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        async fn overlaps(&self) -> Vec<dibs_domain::radar::Overlap> {
+            let mut tx = self.world.store.begin().await.unwrap();
+            tx.overlaps(self.admin.project).await.unwrap()
+        }
+
+        /// The subject and first message of every thread member `n` can read.
+        async fn told(&self, n: usize) -> Vec<(String, String)> {
+            let app = &self.world.app;
+            let person = &self.people[n];
+            let mut told = Vec::new();
+            for summary in app.list_threads.execute(person, None).await.unwrap() {
+                let thread = app
+                    .read_thread
+                    .execute(person, summary.thread.record.id)
+                    .await
+                    .unwrap();
+                told.push((
+                    summary.thread.record.subject.to_string(),
+                    thread.messages[0].record.body.to_string(),
+                ));
+            }
+            told
+        }
+    }
+
+    #[tokio::test]
+    async fn footprints_on_the_file_sharing_only_a_regenerated_file_do_not_overlap() {
+        use dibs_domain::paths::RepoPath;
+        use dibs_domain::radar::OverlapKind;
+
+        let radar = Regenerated::new().await;
+        radar.report(0, &["composer.lock"]).await;
+        radar.report(1, &["composer.lock"]).await;
+        assert!(
+            radar.overlaps().await.is_empty(),
+            "nobody merges composer.lock by hand"
+        );
+        for n in 0..2 {
+            assert!(radar.told(n).await.is_empty());
+        }
+        let names = radar.world.event_names(radar.admin.project).await;
+        assert!(!names.contains(&"overlap_found"), "{names:?}");
+
+        let both = ["composer.lock", "src/billing/round.rs"];
+        radar.report(0, &both).await;
+        radar.report(1, &both).await;
+        let overlaps = radar.overlaps().await;
+        assert_eq!(overlaps.len(), 1, "{overlaps:?}");
+        assert_eq!(overlaps[0].kind(), OverlapKind::SameFile);
+        assert_eq!(
+            overlaps[0].paths(),
+            &[RepoPath::parse("default:src/billing/round.rs").unwrap()].into()
+        );
+        for n in 0..2 {
+            let told = radar.told(n).await;
+            assert_eq!(told.len(), 1, "{told:?}");
+            let (subject, text) = &told[0];
+            assert_eq!(
+                subject,
+                "Overlap: gh:acme/widgets#1 and gh:acme/widgets#2 change the same files"
+            );
+            assert!(
+                text.contains("change the same files: default:src/billing/round.rs. "),
+                "{text}"
+            );
+            assert!(!text.contains("composer.lock"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_merge_on_the_file_through_a_regenerated_file_alone_moves_no_base() {
+        use dibs_domain::paths::RepoPath;
+        use dibs_domain::radar::OverlapKind;
+
+        let radar = Regenerated::new().await;
+        radar
+            .report(0, &["composer.lock", "src/billing/round.rs"])
+            .await;
+        radar.report(1, &["composer.lock"]).await;
+        assert!(radar.overlaps().await.is_empty());
+        radar.world.fakes.clock.advance(Duration::minutes(1));
+        radar.merge("acme/widgets#9", &["composer.lock"]).await;
+        assert!(
+            radar.overlaps().await.is_empty(),
+            "nobody merges composer.lock by hand, so no branch is behind"
+        );
+        for n in 0..2 {
+            assert!(radar.told(n).await.is_empty());
+        }
+
+        radar
+            .merge(
+                "acme/widgets#10",
+                &["composer.lock", "src/billing/round.rs"],
+            )
+            .await;
+        let overlaps = radar.overlaps().await;
+        assert_eq!(overlaps.len(), 1, "{overlaps:?}");
+        assert_eq!(overlaps[0].kind(), OverlapKind::MainMoved);
+        assert_eq!(overlaps[0].items(), &[radar.items[0]].into());
+        assert_eq!(
+            overlaps[0].paths(),
+            &[RepoPath::parse("default:src/billing/round.rs").unwrap()].into()
+        );
+        let told = radar.told(0).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        let (subject, text) = &told[0];
+        assert_eq!(
+            subject,
+            "Base moved: acme/widgets#10 changed files of gh:acme/widgets#1"
+        );
+        assert!(
+            text.contains("changed files that branch changes too: default:src/billing/round.rs. "),
+            "{text}"
+        );
+        assert!(!text.contains("composer.lock"), "{text}");
+        assert!(
+            radar.told(1).await.is_empty(),
+            "carol's branch changes no hand-merged file of it"
+        );
+    }
+
     #[tokio::test]
     async fn an_ack_on_the_file_is_recorded_once_and_its_author_sees_it() {
         let world = World::new().await;

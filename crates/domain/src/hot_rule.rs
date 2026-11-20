@@ -125,6 +125,13 @@ impl<'a> HotContext<'a> {
 pub trait HotRule: Send + Sync + fmt::Debug {
     /// Decides one path the rule's globs matched.
     fn decide(&self, ctx: &HotContext<'_>) -> HotDecision;
+
+    /// Whether a file under the rule is merged by hand when two branches change it. Only such a
+    /// file makes two branches that change it collide, or leaves a branch behind when a merge into
+    /// its base changes it. A kind is, unless it says otherwise.
+    fn merged_by_hand(&self) -> bool {
+        true
+    }
 }
 
 /// The settings a rule is built from.
@@ -289,6 +296,12 @@ impl HotRuleSpec {
     pub(crate) fn decide(&self, ctx: &HotContext<'_>) -> HotDecision {
         self.rule.decide(ctx)
     }
+
+    /// Whether a file under the rule is merged by hand, as its kind answers: only such a file
+    /// makes branches collide or leaves a branch behind a merge into its base.
+    pub fn merged_by_hand(&self) -> bool {
+        self.rule.merged_by_hand()
+    }
 }
 
 impl fmt::Debug for HotRuleSpec {
@@ -341,6 +354,11 @@ impl HotRule for Regenerate {
             note: ctx.note().cloned(),
             touched_by: Vec::new(),
         })
+    }
+
+    /// No: the file is made again on the new base.
+    fn merged_by_hand(&self) -> bool {
+        false
     }
 }
 
@@ -475,6 +493,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_a_regenerated_file_is_not_merged_by_hand() {
+        let registry = HotRuleRegistry::standard();
+        let area = QualifiedArea::parse("api:billing").unwrap();
+        for (name, area, by_hand) in [
+            ("regenerate", None, false),
+            ("owner", Some(&area), true),
+            ("warn-shared", None, true),
+            ("free", None, true),
+        ] {
+            let kind = registry.kind(name).unwrap();
+            let rule = registry
+                .build(&HotRuleConfig {
+                    kind: &kind,
+                    area,
+                    note: None,
+                })
+                .unwrap();
+            assert_eq!(rule.merged_by_hand(), by_hand, "{name}");
+        }
+    }
+
     #[derive(Debug)]
     struct AlwaysNeedsClaim;
 
@@ -491,14 +531,16 @@ mod tests {
         }
         let registry = HotRuleRegistry::standard().with("strict", build);
         let kind = registry.kind("strict").unwrap();
+        let rule = registry
+            .build(&HotRuleConfig {
+                kind: &kind,
+                area: None,
+                note: None,
+            })
+            .unwrap();
         assert!(
-            registry
-                .build(&HotRuleConfig {
-                    kind: &kind,
-                    area: None,
-                    note: None
-                })
-                .is_ok()
+            rule.merged_by_hand(),
+            "a kind that does not say otherwise is merged by hand"
         );
     }
 }

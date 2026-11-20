@@ -275,11 +275,21 @@ impl RadarScene<'_> {
         })
     }
 
+    /// Whether the path is merged by hand under the hot-file rules of its repository. A path of a
+    /// repository the settings do not know is.
+    fn merged_by_hand(&self, path: &RepoPath) -> bool {
+        self.settings
+            .repo(&path.repo)
+            .is_none_or(|repo| repo.merged_by_hand(&path.path))
+    }
+
     /// The same-file overlaps of the claim on `subject`: every claim of another member whose
     /// footprint shares a path with `paths`, the subject's own footprints. `others` are footprint
     /// paths of other claims; those not among `paths` are ignored, so a store may hand over only
-    /// the ones that could match. Stale claims count here, so that an overlap holds while a claim
-    /// is stale; [`RadarScene::all_live`] decides what is announced.
+    /// the ones that could match. A shared path nobody merges by hand under its repository's
+    /// hot-file rules is left out too, so a pair sharing only such paths does not overlap. Stale
+    /// claims count here, so that an overlap holds while a claim is stale;
+    /// [`RadarScene::all_live`] decides what is announced.
     pub fn same_file(
         &self,
         subject: ItemId,
@@ -295,7 +305,7 @@ impl RadarScene<'_> {
             let theirs = claims
                 .get(&entry.item)
                 .filter(|claim| claim.item != subject && claim.member != mine.member);
-            if theirs.is_some() && paths.contains(&entry.path) {
+            if theirs.is_some() && paths.contains(&entry.path) && self.merged_by_hand(&entry.path) {
                 shared
                     .entry(entry.item)
                     .or_default()
@@ -421,7 +431,9 @@ impl RadarScene<'_> {
     /// their other branches are as far behind as anyone's. The footprint of the branch that was
     /// merged is left out: its work is in the base. `hits` are footprint paths of the project;
     /// those the merge did not change are ignored, so a store may hand over only the ones that
-    /// could match.
+    /// could match. A path nobody merges by hand under the hot-file rules of the merge's
+    /// repository is left out as well, so a claim whose shared paths are all such paths has no
+    /// moved base.
     pub fn main_moved(&self, merge: &Merge<'_>, hits: &[FootprintEntry]) -> BTreeSet<Overlap> {
         let stale_after = self.settings.stale_after();
         let behind: BTreeSet<ItemId> = self
@@ -442,7 +454,7 @@ impl RadarScene<'_> {
         let mut moved: BTreeMap<ItemId, BTreeSet<RepoPath>> = BTreeMap::new();
         for hit in hits {
             let changed = hit.path.repo == *merge.repo && merge.files.contains(&hit.path.path);
-            if changed && behind.contains(&hit.item) {
+            if changed && behind.contains(&hit.item) && self.merged_by_hand(&hit.path) {
                 moved.entry(hit.item).or_default().insert(hit.path.clone());
             }
         }

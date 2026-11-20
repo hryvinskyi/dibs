@@ -83,6 +83,13 @@ impl RepoSpec {
         self.hot.iter().find(|rule| rule.matches(path))
     }
 
+    /// Whether the path is merged by hand when two branches change it: as the first hot-file rule
+    /// matching it answers, and yes when none matches.
+    pub fn merged_by_hand(&self, path: &RelPath) -> bool {
+        self.hot_rule_for(path)
+            .is_none_or(HotRuleSpec::merged_by_hand)
+    }
+
     /// Whether an area or a hot-file rule matches the path.
     pub fn is_governed(&self, path: &RelPath) -> bool {
         self.hot_rule_for(path).is_some() || self.area_for(path).is_some()
@@ -1391,6 +1398,28 @@ mod tests {
         assert!(!parsed.is_governed(&path("web:packages/billing/a.php")));
         assert!(!parsed.is_governed(&path("web:composer.lock")));
         assert!(!parsed.is_governed(&path("search:composer.lock")));
+    }
+
+    #[test]
+    fn a_path_is_merged_by_hand_unless_the_first_hot_rule_matching_it_says_otherwise() {
+        let parsed = settings(
+            r#"{"areas":[{"name":"billing","paths":["src/billing/**"]}],
+                "hot":[{"paths":["composer.lock"],"kind":"regenerate"},
+                       {"paths":["src/billing/rates.lock"],"kind":"warn-shared"},
+                       {"paths":["**/*.lock"],"kind":"regenerate"}]}"#,
+        );
+        let repo = &parsed.repos()[0];
+        let rel = |text: &str| RelPath::parse(text).unwrap();
+        assert!(
+            repo.merged_by_hand(&rel("src/billing/round.rs")),
+            "no rule matches it"
+        );
+        assert!(!repo.merged_by_hand(&rel("composer.lock")));
+        assert!(!repo.merged_by_hand(&rel("web/yarn.lock")));
+        assert!(
+            repo.merged_by_hand(&rel("src/billing/rates.lock")),
+            "the first rule matching it decides, though a later regenerate glob matches it too"
+        );
     }
 
     #[test]

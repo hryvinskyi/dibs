@@ -16,8 +16,8 @@ use super::*;
 use crate::use_cases::testing::{Env, Person, START, document, session};
 use crate::use_cases::{
     ApplySettings, ClaimItem, ClaimItemInput, EditCheck, EditCheckInput, Heartbeat, ListThreads,
-    PrReport, Release, ReportPr, ReportedEnd, StartReview, StartReviewInput, Status, TakeOver,
-    TakeOverInput,
+    PrReport, ReadThread, Release, ReportPr, ReportedEnd, StartReview, StartReviewInput, Status,
+    TakeOver, TakeOverInput,
 };
 
 /// One repository with `billing` and `search`, where search depends on billing and every
@@ -29,6 +29,16 @@ const SETTINGS: &str = r#"{
     ],
     "contracts": [{"paths": ["packages/*/src/Api/**"]}],
     "area_deps": {"search": ["billing"]}
+}"#;
+
+/// The same areas, with `composer.lock` declared `regenerate`: made again on the new base, never
+/// merged by hand.
+const REGENERATED: &str = r#"{
+    "areas": [
+        {"name": "billing", "paths": ["src/billing/**"]},
+        {"name": "search", "paths": ["src/search/**"]}
+    ],
+    "hot": [{"paths": ["composer.lock"], "kind": "regenerate"}]
 }"#;
 
 fn repo() -> RepoId {
@@ -142,6 +152,27 @@ async fn told(env: &Env, who: &Person) -> Vec<(String, Importance)> {
             )
         })
         .collect()
+}
+
+/// The subject and the first message's text of each thread about an overlap that `who` can read.
+async fn told_texts(env: &Env, who: &Person) -> Vec<(String, String)> {
+    let threads = ListThreads::new(&env.deps)
+        .execute(&who.actor, None)
+        .await
+        .unwrap();
+    let mut texts = Vec::new();
+    for summary in threads {
+        let subject = summary.thread.record.subject.to_string();
+        if !(subject.contains("Overlap") || subject.starts_with("Base moved")) {
+            continue;
+        }
+        let thread = ReadThread::new(&env.deps)
+            .execute(&who.actor, summary.thread.record.id)
+            .await
+            .unwrap();
+        texts.push((subject, thread.messages[0].record.body.to_string()));
+    }
+    texts
 }
 
 fn found(kinds: &[EventKind]) -> usize {
@@ -1009,4 +1040,138 @@ async fn a_released_claim_takes_its_footprints_and_overlaps_with_it_and_status_s
         .await
         .unwrap();
     assert!(status.overlaps.is_empty());
+}
+
+#[tokio::test]
+async fn branches_sharing_only_a_regenerated_file_do_not_overlap_and_a_hand_merged_one_does() {
+    let env = Env::with_settings(REGENERATED).await;
+    let alices = env.item("gh:acme/widgets#1").await;
+    let bobs = env.item("gh:acme/widgets#2").await;
+    claim_on(&env, &env.alice, alices, "alice/1").await;
+    claim_on(&env, &env.bob, bobs, "bob/2").await;
+    report(
+        &env,
+        footprint(alices, "alice/1", "abcd", &["composer.lock"]),
+    )
+    .await;
+    let before = env.events().await.len();
+    report(&env, footprint(bobs, "bob/2", "abcd", &["composer.lock"])).await;
+    assert!(
+        overlaps(&env).await.is_empty(),
+        "nobody merges composer.lock by hand"
+    );
+    assert_eq!(found(&env.kinds_after(before).await), 0);
+    for who in [&env.alice, &env.bob] {
+        assert!(told_texts(&env, who).await.is_empty());
+    }
+
+    let both = ["composer.lock", "src/billing/round.rs"];
+    report(&env, footprint(alices, "alice/1", "abcd", &both)).await;
+    report(&env, footprint(bobs, "bob/2", "abcd", &both)).await;
+    let stored = overlaps(&env).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].kind(), OverlapKind::SameFile);
+    assert_eq!(stored[0].paths(), &[path("src/billing/round.rs")].into());
+    for who in [&env.alice, &env.bob] {
+        let texts = told_texts(&env, who).await;
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        let (_, text) = &texts[0];
+        assert!(
+            text.contains("change the same files: default:src/billing/round.rs. "),
+            "{text}"
+        );
+        assert!(!text.contains("composer.lock"), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn a_merge_through_a_regenerated_file_alone_moves_no_base_and_names_only_hand_merged_paths() {
+    let env = Env::with_settings(REGENERATED).await;
+    let alices = env.item("gh:acme/widgets#1").await;
+    let bobs = env.item("gh:acme/widgets#2").await;
+    claim_on(&env, &env.alice, alices, "alice/1").await;
+    claim_on(&env, &env.bob, bobs, "bob/2").await;
+    report(
+        &env,
+        footprint(
+            alices,
+            "alice/1",
+            "abcd",
+            &["composer.lock", "src/search/index.rs"],
+        ),
+    )
+    .await;
+    report(
+        &env,
+        footprint(
+            bobs,
+            "bob/2",
+            "abcd",
+            &["composer.lock", "src/billing/round.rs"],
+        ),
+    )
+    .await;
+    assert!(overlaps(&env).await.is_empty());
+    env.advance(time::Duration::minutes(1));
+    let before = env.events().await.len();
+    merged(
+        &env,
+        merge(
+            &env,
+            "acme/widgets#9",
+            "main",
+            Some(&["composer.lock"]),
+            None,
+        ),
+    )
+    .await;
+    assert!(
+        overlaps(&env).await.is_empty(),
+        "nobody merges composer.lock by hand, so no branch is behind"
+    );
+    assert_eq!(found(&env.kinds_after(before).await), 0);
+    for who in [&env.alice, &env.bob] {
+        assert!(told_texts(&env, who).await.is_empty());
+    }
+
+    merged(
+        &env,
+        merge(
+            &env,
+            "acme/widgets#10",
+            "main",
+            Some(&[
+                "composer.lock",
+                "src/billing/round.rs",
+                "src/search/index.rs",
+            ]),
+            None,
+        ),
+    )
+    .await;
+    let stored = overlaps(&env).await;
+    assert_eq!(moved_items(&stored), [alices, bobs], "{stored:?}");
+    for (overlap, only) in stored
+        .iter()
+        .zip(["src/search/index.rs", "src/billing/round.rs"])
+    {
+        assert_eq!(overlap.paths(), &[path(only)].into());
+    }
+    for (who, only) in [
+        (&env.alice, "default:src/search/index.rs"),
+        (&env.bob, "default:src/billing/round.rs"),
+    ] {
+        let texts = told_texts(&env, who).await;
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        let (subject, text) = &texts[0];
+        assert!(
+            subject.starts_with("Base moved: acme/widgets#10"),
+            "{subject}"
+        );
+        assert!(
+            text.contains(&format!("changed files that branch changes too: {only}. ")),
+            "{text}"
+        );
+        assert!(!text.contains("composer.lock"), "{text}");
+    }
 }

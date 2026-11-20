@@ -192,12 +192,14 @@ tells dibs the branch of the checkout it runs in. When your branch meets another
 writes to both of you, once:
 
 - **The same files** (`high`): both branches change one file. Rebase onto the base now, and settle in that conversation
-  who changes what, so the second merge does not meet a conflict.
+  who changes what, so the second merge does not meet a conflict. Files the project regenerates rather than merges by
+  hand (a `regenerate` rule) never count, so branches that share only those do not overlap.
 - **A published contract** (`high`): one branch changes paths the project declares as a contract, and the other works
   where that contract is used. Rebase onto the base now, and read the other change before going on, so both sides build
   on the same contract.
 - **The base moved** (`normal`): a merge into the base changed files your branch changes, after your branch left the
-  base — your own earlier pull request of a series included. Rebase onto the base now.
+  base — your own earlier pull request of a series included. Rebase onto the base now. Files the project regenerates
+  rather than merges by hand (a `regenerate` rule) never count, so a merge through them alone tells you nothing.
 
 Tell your person what the message says before you rebase in the middle of their work. `dibs status` lists the overlaps
 that still stand. Your own claims never overlap each other.

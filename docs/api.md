@@ -707,7 +707,9 @@ missing or malformed field or more than 3000 paths, `forbidden` for anyone but a
 
 **Overlaps.** From the footprints dibs derives three kinds of overlap:
 
-- `same_file` — two claims of different members change one path. Its `paths` are the shared ones.
+- `same_file` — two claims of different members change one path. Its `paths` are the shared ones, apart from those a
+  `regenerate` rule of their repository matches first: nobody merges such a file by hand, so two branches that share
+  only such paths do not overlap.
 - `contract` — a claim's branch changes a path a `contracts` entry of its repository covers, and a claim of another
   member changes a path of another area that consumes it: an area `area_deps` declares as depending on the contract
   path's area, or a consumer the contract names (`repo:*` for every path of a repository, `repo:area` for one area).
@@ -718,7 +720,9 @@ missing or malformed field or more than 3000 paths, `forbidden` for anyone but a
   author's other branches included — one member's series of pull requests is what it is for — but not the branch that
   was merged: the footprint of `head`, or, without `head`, the footprint of the claim that recorded the pull request.
   Its paths come from the merge report's `files`, or, without them, from the merged branch's footprint. A merge into
-  `release/2`, or into a feature branch, tells nobody whose footprint is against `main`.
+  `release/2`, or into a feature branch, tells nobody whose footprint is against `main`. A path a `regenerate` rule of
+  the repository matches first never makes a moved base: a moved base names only the paths merged by hand, and a merge
+  whose paths shared with a branch are all regenerated moves no base of that branch.
 
 One member's own claims never collide (`same_file`, `contract`).
 
@@ -1221,7 +1225,7 @@ in declaration order that contains a path governs it. A hot-file rule has `paths
 
 | `kind` | Effect on a matching path |
 |---|---|
-| `regenerate` | A generated file anyone may change and nobody merges by hand: always allowed, with the note. |
+| `regenerate` | A generated file anyone may change and nobody merges by hand: always allowed, with the note. It never makes a `same_file` overlap or a moved base (`main_moved`). |
 | `owner` | Only the holder of the `area` it names (an area of the same repository) edits it. |
 | `warn-shared` | Anyone may edit; the verdict names the other members' live claims that edited the same file. |
 | `free` | Anyone may edit, with nothing said. |
