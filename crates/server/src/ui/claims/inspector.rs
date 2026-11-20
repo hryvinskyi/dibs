@@ -191,8 +191,7 @@ fn overlaps(held: &HeldItem, scene: &Scene<'_>) -> (Vec<Collision>, Vec<Moved>) 
         .and_then(|external| scene.links.repository_of(external));
     let at_branch = |repo: &RepoId| {
         claim
-            .branches
-            .get(repo)
+            .branch(repo)
             .map_or(Revision::DefaultBranch, Revision::Branch)
     };
     let mut collisions = Vec::new();

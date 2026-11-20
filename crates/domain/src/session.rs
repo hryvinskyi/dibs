@@ -1,8 +1,11 @@
-//! What a session reports about itself: the machine it runs on and the kind of agent it runs.
+//! What a session reports about itself: the machine it runs on, the kind of agent it runs and the
+//! checkouts it works in.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use time::OffsetDateTime;
 
+use crate::ids::{MemberId, SessionId};
 use crate::text::{has_control, string_value};
 
 /// The name of the machine a session runs on, as the session reported it: 1 to 255 characters with
@@ -78,6 +81,54 @@ impl AgentLabel {
 
 string_value!(AgentLabel, AgentLabelError);
 
+/// Which checkout a session works in, as its client names it: 32 lowercase hexadecimal characters,
+/// a digest of the machine and the checkout's root directory. It tells one member's checkouts apart
+/// and says nothing of where they are; tokens are compared only between sessions of one member.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CheckoutToken(String);
+
+/// Why a text is not a checkout token.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CheckoutTokenError {
+    /// The text is not 32 lowercase hexadecimal characters.
+    #[error("a checkout is named by 32 lowercase hexadecimal characters")]
+    Malformed,
+}
+
+impl CheckoutToken {
+    /// How many characters a token has.
+    pub const CHARS: usize = 32;
+
+    /// Parses a token exactly as given.
+    ///
+    /// # Errors
+    /// [`CheckoutTokenError::Malformed`] when the text breaks the rule above.
+    pub fn parse(value: &str) -> Result<Self, CheckoutTokenError> {
+        let hex = |c: char| c.is_ascii_digit() || ('a'..='f').contains(&c);
+        if value.len() == Self::CHARS && value.chars().all(hex) {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err(CheckoutTokenError::Malformed)
+        }
+    }
+}
+
+string_value!(CheckoutToken, CheckoutTokenError);
+
+/// That a session of a member reported working in a checkout, and when it last did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionCheckout {
+    /// The session.
+    pub session: SessionId,
+    /// Its member.
+    pub member: MemberId,
+    /// The checkout.
+    pub checkout: CheckoutToken,
+    /// When the session last reported it.
+    pub reported_at: OffsetDateTime,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +179,32 @@ mod tests {
             assert_eq!(AgentLabel::parse(value).is_ok(), *ok, "{value:?}");
         }
         assert_eq!(AgentLabel::parse("agent").unwrap().as_str(), "agent");
+    }
+
+    #[test]
+    fn a_checkout_token_is_32_lowercase_hexadecimal_characters() {
+        let token = "0123456789abcdef0123456789abcdef";
+        let cases: &[(&str, bool)] = &[
+            (token, true),
+            ("ffffffffffffffffffffffffffffffff", true),
+            ("0123456789ABCDEF0123456789ABCDEF", false),
+            ("0123456789abcdef0123456789abcdeF", false),
+            (&token[..31], false),
+            ("0123456789abcdef0123456789abcdef0", false),
+            ("", false),
+            ("0123456789abcdef0123456789abcdeg", false),
+            ("0123456789abcdef 123456789abcdef", false),
+            ("0123456789abcdef0123456789abcd\u{e9}", false),
+        ];
+        for (value, ok) in cases {
+            assert_eq!(CheckoutToken::parse(value).is_ok(), *ok, "{value:?}");
+        }
+        assert_eq!(CheckoutToken::parse(token).unwrap().as_str(), token);
+        let read: CheckoutToken = serde_json::from_value(serde_json::json!(token)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            serde_json::json!(token)
+        );
+        assert!(serde_json::from_value::<CheckoutToken>(serde_json::json!("ABC")).is_err());
     }
 }

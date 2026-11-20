@@ -29,7 +29,7 @@ use dibs_domain::repo::RepoId;
 use dibs_domain::report::{DayCounts, DayReport, HookReport, MachineId, ReportDay};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::review::PrRef;
-use dibs_domain::session::HostName;
+use dibs_domain::session::{CheckoutToken, HostName, SessionCheckout};
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
@@ -56,6 +56,7 @@ struct State {
     members: BTreeMap<(ProjectId, MemberId), MemberRecord>,
     tokens: BTreeMap<TokenHash, InProject<TokenRecord>>,
     sessions: BTreeMap<(ProjectId, SessionId), SessionRecord>,
+    session_checkouts: BTreeMap<(ProjectId, SessionId, CheckoutToken), SessionCheckout>,
     items: BTreeMap<(ProjectId, ItemId), ItemRecord>,
     claims: BTreeMap<(ProjectId, ItemId), Claim>,
     dependencies: BTreeMap<(ProjectId, ItemId, ItemId), Dependency>,
@@ -152,7 +153,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 28] = [
+        let checks: [(&'static str, bool); 29] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -163,6 +164,12 @@ impl State {
             (
                 "a session",
                 self.sessions.iter().all(|((p, _), s)| member(*p, s.member)),
+            ),
+            (
+                "a session's checkout",
+                self.session_checkouts.iter().all(|((p, s, _), c)| {
+                    member(*p, c.member) && self.sessions.contains_key(&(*p, *s))
+                }),
             ),
             (
                 "an item",
@@ -595,6 +602,46 @@ impl SessionRows for MemoryTx {
         self.work
             .sessions
             .insert((project, session.id), session.clone());
+        Ok(())
+    }
+
+    async fn save_session_checkout(
+        &mut self,
+        project: ProjectId,
+        checkout: &SessionCheckout,
+    ) -> StoreResult<()> {
+        self.work.session_checkouts.insert(
+            (project, checkout.session, checkout.checkout.clone()),
+            checkout.clone(),
+        );
+        Ok(())
+    }
+
+    async fn session_checkouts(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        since: OffsetDateTime,
+    ) -> StoreResult<Vec<SessionCheckout>> {
+        let mut found: Vec<SessionCheckout> = self
+            .work
+            .session_checkouts
+            .iter()
+            .filter(|((p, _, _), c)| *p == project && c.member == member && c.reported_at >= since)
+            .map(|(_, c)| c.clone())
+            .collect();
+        found.sort_by(|a, b| (&a.checkout, a.session).cmp(&(&b.checkout, b.session)));
+        Ok(found)
+    }
+
+    async fn forget_session_checkouts(
+        &mut self,
+        project: ProjectId,
+        session: SessionId,
+    ) -> StoreResult<()> {
+        self.work
+            .session_checkouts
+            .retain(|(p, s, _), _| !(*p == project && *s == session));
         Ok(())
     }
 }

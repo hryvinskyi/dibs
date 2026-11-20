@@ -64,8 +64,28 @@ fn pr(text: &str) -> PrRef {
 /// A claim of `member` on `item`, last seen at minute 0, its work on `branch` in `api`.
 fn on_branch(item: u64, member: MemberId, name: &str) -> Claim {
     let mut made = claim(item, member, &[], 0);
-    made.branches.insert(repo("api"), branch(name));
+    made.branches.insert(repo("api"), checkout(name));
     made
+}
+
+/// `name`, learned from a checkout.
+fn checkout(name: &str) -> RecordedBranch {
+    RecordedBranch::new(branch(name), BranchSource::Checkout)
+}
+
+/// Holds no pool worktree.
+fn no_worktree(_: &WorktreeRef) -> bool {
+    false
+}
+
+/// The claim a recording that changes something stores.
+fn changed(recording: &BranchRecording) -> &Claim {
+    match recording {
+        BranchRecording::SourceChanged(claim) | BranchRecording::BranchChanged { claim, .. } => {
+            claim
+        }
+        BranchRecording::Kept => panic!("the recording changes nothing"),
+    }
 }
 
 /// A base on `main` whose merge base was committed at `minutes`.
@@ -124,22 +144,6 @@ fn report(item: u64, name: &str, base: &str, paths: &[&str]) -> FootprintReport 
 }
 
 #[test]
-fn a_branch_is_recorded_only_when_it_is_another_one() {
-    let mut made = claim(1, ALICE, &[], 0);
-    let first = record_branch(&made, &repo("api"), &branch("alice/1-x")).unwrap();
-    assert_eq!(first.branch(&repo("api")), Some(&branch("alice/1-x")));
-    assert_eq!(
-        record_branch(&first, &repo("api"), &branch("alice/1-x")),
-        None
-    );
-    let moved = record_branch(&first, &repo("api"), &branch("alice/1-y")).unwrap();
-    assert_eq!(moved.branch(&repo("api")), Some(&branch("alice/1-y")));
-    made.branches.insert(repo("web"), branch("main"));
-    let both = record_branch(&made, &repo("api"), &branch("alice/1-x")).unwrap();
-    assert_eq!(both.branches.len(), 2, "one branch per repository");
-}
-
-#[test]
 fn a_heartbeat_records_its_branch_on_the_claims_of_its_own_session_only() {
     let mut first = on_branch(1, ALICE, "old");
     first.session = SessionId(1);
@@ -148,26 +152,37 @@ fn a_heartbeat_records_its_branch_on_the_claims_of_its_own_session_only() {
     let mut other_worktree = on_branch(3, ALICE, "alice/3-search");
     other_worktree.session = SessionId(2);
     let kept = [first, second, other_worktree];
-    let set = heartbeat_branches(&kept, SessionId(1), &repo("api"), &branch("alice/1-rates"));
-    let items: Vec<ItemId> = set.iter().map(|claim| claim.item).collect();
+    let beat = |session: u64, name: &str| {
+        heartbeat_branches(
+            &kept,
+            SessionId(session),
+            &repo("api"),
+            &branch(name),
+            &no_worktree,
+        )
+    };
+    let set = beat(1, "alice/1-rates");
+    let items: Vec<ItemId> = set
+        .iter()
+        .map(|recording| changed(recording).item)
+        .collect();
     assert_eq!(
         items,
         [ItemId(1), ItemId(2)],
         "every claim of the session, none of another session on the same machine"
     );
+    assert!(set.iter().all(|recording| {
+        changed(recording).branch(&repo("api")) == Some(&branch("alice/1-rates"))
+            && changed(recording).branch_source(&repo("api")) == Some(&BranchSource::Checkout)
+    }));
     assert!(
-        set.iter()
-            .all(|claim| claim.branch(&repo("api")) == Some(&branch("alice/1-rates")))
-    );
-    let theirs = heartbeat_branches(&kept, SessionId(2), &repo("api"), &branch("alice/3-search"));
-    assert!(
-        theirs.is_empty(),
+        beat(2, "alice/3-search").is_empty(),
         "the other session's claim is on its branch already"
     );
-    let moved = heartbeat_branches(&kept, SessionId(2), &repo("api"), &branch("alice/3-next"));
+    let moved = beat(2, "alice/3-next");
     assert_eq!(moved.len(), 1);
-    assert_eq!(moved[0].item, ItemId(3));
-    assert!(heartbeat_branches(&kept, SessionId(9), &repo("api"), &branch("x")).is_empty());
+    assert_eq!(changed(&moved[0]).item, ItemId(3));
+    assert!(beat(9, "x").is_empty());
 }
 
 #[test]
@@ -695,7 +710,7 @@ fn the_merged_branch_is_known_by_its_head_so_the_next_branch_of_the_same_item_is
     let settings = radar_settings();
     let mut next = claim(1, ALICE, &[], 0);
     next.branches
-        .insert(repo("api"), branch("alice/1-part-two"));
+        .insert(repo("api"), checkout("alice/1-part-two"));
     let claims = [next];
     let (footprint_two, entries) = footprint(1, "api", &["a.rs"], 5);
     let footprint_two = Footprint {

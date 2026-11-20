@@ -87,7 +87,7 @@ mod sqlite_file {
         .await;
         assert_eq!(
             applied,
-            "1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1,9:1,10:1,11:1,12:1,13:1"
+            "1:1,2:1,3:1,4:1,5:1,6:1,7:1,8:1,9:1,10:1,11:1,12:1,13:1,14:1"
         );
         assert_eq!(scalar(&path, "PRAGMA journal_mode").await, "wal");
     }
@@ -113,6 +113,27 @@ mod sqlite_file {
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(plan.contains("messages_asking_ack"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn the_checkouts_a_members_sessions_reported_are_read_through_their_index() {
+        let (_dir, path) = file();
+        SqliteStore::open(&path).await.unwrap().close().await;
+        let mut connection = raw(&path).await;
+        let steps: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT session_id, member_id, checkout, reported_at \
+             FROM session_checkouts WHERE project_id = 1 AND member_id = 2 \
+             AND reported_at >= 1000 ORDER BY checkout, session_id",
+        )
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+        let plan = steps
+            .into_iter()
+            .map(|(_, _, _, detail)| detail)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(plan.contains("session_checkouts_by_checkout"), "{plan}");
     }
 
     #[tokio::test]

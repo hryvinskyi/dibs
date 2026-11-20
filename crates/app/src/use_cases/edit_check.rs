@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::edit::{self, EditCheckInput as DomainInput, Verdict, edit_verdicts};
-use dibs_domain::event::{BranchRecorded, EventKind, Reserved};
+use dibs_domain::event::{EventKind, Reserved};
 use dibs_domain::grant::Grant;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::paths::RepoPath;
-use dibs_domain::radar::record_branch;
+use dibs_domain::radar::{BranchRecording, BranchSource, WorktreeRef, record_branch};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::reservation::ReservationPlan;
 
@@ -97,9 +97,11 @@ impl EditVerdicts {
 /// that actually gained something, so a repeated check appends nothing. An area an edit adds to the
 /// caller's claim that another member's live wide claim names makes the caller one of that wide
 /// claim's holders, so its announcement is sent to them in the same transaction. The claims the
-/// edits are attributed to record the branch of the checkout the edits are made in, with a
-/// `BranchRecorded` event when it is another one than they recorded; the claim's footprint of the
-/// repository, which measured the branch before, goes with what it made.
+/// edits are attributed to record the branch of the checkout the edits are made in, learned from
+/// that checkout, unless they learned theirs from a stronger source; the pools are not read, so a
+/// branch learned from a pool worktree counts as still held. A `BranchRecorded` event marks each
+/// change of branch, and the claim's footprint of the repository, which measured the branch
+/// before, goes with what it made.
 pub struct EditCheck {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -195,16 +197,20 @@ impl EditCheck {
             }
             if check.touch.contains(&claim.item) {
                 claim.last_seen = now;
-                if let Some(on) = &input.branch
-                    && let Some(moved) = record_branch(&claim, &on.repo, &on.branch)
-                {
-                    claim = moved;
-                    branched.push(BranchRecorded {
-                        item: claim.item,
-                        member: actor.member,
-                        repo: on.repo.clone(),
-                        branch: on.branch.clone(),
-                    });
+                if let Some(on) = &input.branch {
+                    let held = |_: &WorktreeRef| true;
+                    match record_branch(&claim, &on.repo, &on.branch, BranchSource::Checkout, &held)
+                    {
+                        BranchRecording::Kept => {}
+                        BranchRecording::SourceChanged(moved) => claim = moved,
+                        BranchRecording::BranchChanged {
+                            claim: moved,
+                            recorded,
+                        } => {
+                            claim = moved;
+                            branched.push(recorded);
+                        }
+                    }
                 }
             }
             work.save_claim(project, &claim).await?;

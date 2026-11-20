@@ -95,6 +95,14 @@ impl Team {
     }
 }
 
+/// The fields of a JSON object, in order.
+fn keys(object: &Value) -> Vec<&str> {
+    object
+        .as_object()
+        .map(|fields| fields.keys().map(String::as_str).collect())
+        .unwrap_or_default()
+}
+
 #[tokio::test]
 async fn an_edit_and_a_heartbeat_record_the_branch_and_the_integration_reads_it() {
     let team = Team::new().await;
@@ -131,6 +139,33 @@ async fn an_edit_and_a_heartbeat_record_the_branch_and_the_integration_reads_it(
             json!({"api": "bob/2-refunds"})
         ]
     );
+    let sources: Vec<Value> = status.body["live"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|held| held["claim"]["branch_sources"].clone())
+        .collect();
+    assert_eq!(
+        sources,
+        [json!({"web": "checkout"}), json!({"api": "checkout"})],
+        "a claim says where each of its branches was learned from"
+    );
+    let listed = team.world.get(&team.worker, "/v1/claims").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let claims = listed.body["claims"].as_array().unwrap();
+    assert_eq!(claims.len(), 2, "{}", listed.body);
+    for (claim, branches) in claims.iter().zip([
+        json!({"web": "alice/1-rates"}),
+        json!({"api": "bob/2-refunds"}),
+    ]) {
+        assert_eq!(claim["branches"], branches, "{}", listed.body);
+        assert_eq!(
+            keys(claim),
+            ["branches", "holder", "item", "state"],
+            "the integration's list keeps its shape: {}",
+            listed.body
+        );
+    }
     let review = team
         .world
         .post(
@@ -145,6 +180,12 @@ async fn an_edit_and_a_heartbeat_record_the_branch_and_the_integration_reads_it(
         watched.body["claims"][0]["branches"],
         json!({"api": "bob/2-refunds"}),
         "{}",
+        watched.body
+    );
+    assert_eq!(
+        keys(&watched.body["claims"][0]),
+        ["branches", "holder", "item", "more", "prs", "since"],
+        "the claims in review keep their shape: {}",
         watched.body
     );
 

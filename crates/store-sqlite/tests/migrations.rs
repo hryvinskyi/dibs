@@ -765,7 +765,7 @@ mod migrations {
 
     #[tokio::test]
     async fn radar_carries_every_claim_over_with_no_branch_and_starts_with_no_footprint() {
-        use dibs_domain::radar::BranchName;
+        use dibs_domain::radar::{BranchName, BranchSource, RecordedBranch};
         use dibs_domain::repo::RepoId;
 
         let (_dir, path) = database_at(8, &rows_at_deliveries()).await;
@@ -781,7 +781,11 @@ mod migrations {
         assert!(tx.footprints(project).await.unwrap().is_empty());
         assert!(tx.overlaps(project).await.unwrap().is_empty());
         let branched = Claim {
-            branches: [(RepoId::implicit(), BranchName::parse("alice/51").unwrap())].into(),
+            branches: [(
+                RepoId::implicit(),
+                RecordedBranch::new(BranchName::parse("alice/51").unwrap(), BranchSource::Named),
+            )]
+            .into(),
             ..claims[0].clone()
         };
         tx.save_claim(project, &branched).await.unwrap();
@@ -1169,5 +1173,164 @@ mod migrations {
                 "{update}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn branch_sources_forget_every_branch_and_what_the_radar_derived_and_keep_the_rest() {
+        use dibs_domain::event::EventKind;
+        use dibs_domain::radar::{BranchName, BranchSourceKind};
+        use dibs_domain::repo::RepoId;
+        use dibs_domain::session::{CheckoutToken, SessionCheckout};
+        use time::OffsetDateTime;
+
+        let rows = format!(
+            "{}\n\
+             UPDATE claims SET branches = '{{\"default\": \"alice/51-rates\", \"web\": \"main\"}}' \
+             WHERE item_id = 51;\n\
+             UPDATE claims SET branches = '{{\"default\": \"bob/52-more\"}}' WHERE item_id = 52;\n\
+             INSERT INTO footprints (project_id, item_id, repo, branch, base_branch, base_sha, \
+             base_at, truncated, path_count, digest) VALUES \
+             (1, 51, 'default', 'alice/51-rates', 'main', 'abcd', 0, 0, 1, \
+             '{{\"areas\": [], \"unzoned\": true, \"contracts\": []}}'), \
+             (1, 52, 'default', 'bob/52-more', 'main', 'abcd', 0, 0, 1, \
+             '{{\"areas\": [], \"unzoned\": true, \"contracts\": []}}');\n\
+             INSERT INTO footprint_paths (project_id, item_id, repo, path) VALUES \
+             (1, 51, 'default', 'config/app.yaml'), (1, 52, 'default', 'config/app.yaml');\n\
+             INSERT INTO overlaps (project_id, overlap_key, kind, pr, merged_at, paths) VALUES \
+             (1, 'same_file 51 52', 'same_file', NULL, NULL, '[\"default:config/app.yaml\"]');\n\
+             INSERT INTO overlap_items (project_id, overlap_key, item_id) VALUES \
+             (1, 'same_file 51 52', 51), (1, 'same_file 51 52', 52);\n\
+             INSERT INTO events (project_id, kind, payload, at) VALUES (1, 'branch_recorded', \
+             '{{\"item\": 51, \"member\": 11, \"repo\": \"default\", \
+             \"branch\": \"alice/51-rates\"}}', 30);",
+            rows_at_deliveries()
+        );
+        let (_dir, path) = database_at(13, &rows).await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let project = ProjectId(1);
+        let claims = tx.claims(project).await.unwrap();
+        let carried: Vec<(u64, usize, usize)> = claims
+            .iter()
+            .map(|claim| (claim.item.get(), claim.areas.len(), claim.branches.len()))
+            .collect();
+        assert_eq!(
+            carried,
+            [(51, 1, 0), (52, 0, 0)],
+            "every claim stays with its areas, and no branch recorded before"
+        );
+        assert!(tx.footprints(project).await.unwrap().is_empty());
+        let paths = [dibs_domain::paths::RelPath::parse("config/app.yaml").unwrap()].into();
+        assert!(
+            tx.footprint_entries(project, &RepoId::implicit(), &paths)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(tx.overlaps(project).await.unwrap().is_empty());
+        let events = tx.events_after(project, None, 10).await.unwrap();
+        let [event] = events.as_slice() else {
+            panic!("the log keeps its events: {events:?}");
+        };
+        let EventKind::BranchRecorded(recorded) = &event.kind else {
+            panic!("the branch recorded before: {event:?}");
+        };
+        assert_eq!(
+            (recorded.branch.as_str(), recorded.source),
+            ("alice/51-rates", BranchSourceKind::Checkout),
+            "an event stored without a source reads as a checkout's"
+        );
+        assert!(tx.thread(project, ThreadId(81)).await.unwrap().is_some());
+        assert_eq!(tx.messages(project, ThreadId(81)).await.unwrap().len(), 2);
+        let alice = MemberId(11);
+        assert!(
+            tx.session_checkouts(project, alice, OffsetDateTime::UNIX_EPOCH)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let branched = Claim {
+            branches: [(
+                RepoId::implicit(),
+                dibs_domain::radar::RecordedBranch::new(
+                    BranchName::parse("alice/51-rates").unwrap(),
+                    dibs_domain::radar::BranchSource::Checkout,
+                ),
+            )]
+            .into(),
+            ..claims[0].clone()
+        };
+        tx.save_claim(project, &branched).await.unwrap();
+        let reported = SessionCheckout {
+            session: dibs_domain::ids::SessionId(31),
+            member: alice,
+            checkout: CheckoutToken::parse(&format!("{:032x}", 5)).unwrap(),
+            reported_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        tx.save_session_checkout(project, &reported).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim(project, branched.item).await.unwrap(),
+            Some(branched)
+        );
+        assert_eq!(
+            tx.session_checkouts(project, alice, OffsetDateTime::UNIX_EPOCH)
+                .await
+                .unwrap(),
+            [reported]
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        let insert = |checkout: &str| {
+            format!(
+                "INSERT INTO session_checkouts (project_id, session_id, member_id, checkout, \
+                 reported_at) VALUES (1, 32, 12, '{checkout}', 0)"
+            )
+        };
+        let token = format!("{:032x}", 6);
+        for (what, bad) in [
+            ("an uppercase token", token.to_uppercase().replace('0', "A")),
+            ("a token one character short", token[1..].to_owned()),
+            ("a token one character long", format!("{token}0")),
+            (
+                "a token that is no hexadecimal",
+                format!("{}g", &token[1..]),
+            ),
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(insert(&bad)))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{what}"
+            );
+        }
+        assert!(
+            sqlx::query(sqlx::AssertSqlSafe(insert(&token)))
+                .execute(&pool)
+                .await
+                .is_ok()
+        );
+        let missing_session = format!(
+            "INSERT INTO session_checkouts (project_id, session_id, member_id, checkout, \
+             reported_at) VALUES (1, 99, 12, '{token}', 0)"
+        );
+        assert!(
+            sqlx::query(sqlx::AssertSqlSafe(missing_session))
+                .execute(&pool)
+                .await
+                .is_err(),
+            "a checkout of a missing session"
+        );
     }
 }

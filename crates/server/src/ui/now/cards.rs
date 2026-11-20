@@ -586,7 +586,7 @@ fn check(facts: &Facts<'_>, links: &LinkContext) -> Card {
             let claim = &held.claim.claim;
             let item = &held.item.item;
             let (repo, number) = other_ticket(claim, item)?;
-            let branch = claim.branches.get(repo)?;
+            let branch = claim.branch(repo)?;
             Some(Misnamed {
                 ticket: TicketView::of(item.id, item.external_ref.as_ref(), links),
                 branch: BranchView::of(repo, branch, links),
@@ -632,7 +632,7 @@ mod tests {
     use dibs_domain::item::{ExternalRef, ItemRepository, ItemStatus, Title};
     use dibs_domain::message::{Author, Importance, Recipients, Subject};
     use dibs_domain::paths::RepoPath;
-    use dibs_domain::radar::{BranchName, Overlap};
+    use dibs_domain::radar::{BranchName, BranchSource, Overlap, RecordedBranch};
     use dibs_domain::ref_scheme::RefSchemeRegistry;
     use dibs_domain::repo::RepoId;
     use dibs_domain::review::{ClaimState, PrRef, Review};
@@ -1421,12 +1421,18 @@ mod tests {
         let mut on_other = working(5, "carol");
         on_other.claim.claim.branches = BTreeMap::from([(
             RepoId::parse("api").unwrap(),
-            BranchName::parse("bob/77-other").unwrap(),
+            RecordedBranch::new(
+                BranchName::parse("bob/77-other").unwrap(),
+                BranchSource::Checkout,
+            ),
         )]);
         let mut own = working(6, "bob");
         own.claim.claim.branches = BTreeMap::from([(
             RepoId::parse("api").unwrap(),
-            BranchName::parse("bob/6-own").unwrap(),
+            RecordedBranch::new(
+                BranchName::parse("bob/6-own").unwrap(),
+                BranchSource::Checkout,
+            ),
         )]);
         world.status.live = vec![on_other, own];
         let Card::Check { total, lines } = world.card() else {
@@ -1471,7 +1477,10 @@ mod tests {
         let mut misnamed = held(5, "carol", Duration::days(10), Duration::minutes(1), &[]);
         misnamed.claim.claim.branches = BTreeMap::from([(
             RepoId::parse("api").unwrap(),
-            BranchName::parse("bob/77-other").unwrap(),
+            RecordedBranch::new(
+                BranchName::parse("bob/77-other").unwrap(),
+                BranchSource::Checkout,
+            ),
         )]);
         world.status.live = vec![closed(working(1, "bob")), misnamed, reviewing];
         world.status.stale = vec![held(2, "bob", Duration::days(3), Duration::days(2), &[])];

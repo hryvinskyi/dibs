@@ -15,7 +15,7 @@ use crate::handover::WithdrawReason;
 use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
 use crate::item::{ExternalRef, Title};
 use crate::paths::RepoPath;
-use crate::radar::{BranchName, OverlapKind};
+use crate::radar::{BranchName, BranchSourceKind, OverlapKind};
 use crate::repo::RepoId;
 use crate::report::{DayCounts, Feedback, FeedbackReason, ReportDay};
 use crate::retention::PruneCounts;
@@ -943,6 +943,10 @@ pub struct BranchRecorded {
     pub repo: RepoId,
     /// The branch the claim records there now.
     pub branch: BranchName,
+    /// Where the branch was learned from; an event stored without one was learned from a
+    /// checkout.
+    #[serde(default)]
+    pub source: BranchSourceKind,
 }
 
 /// What a claim's branch changes was reported anew. Carries how many paths, never the paths: a
@@ -1433,6 +1437,7 @@ mod tests {
                 member: ALICE,
                 repo: repo.clone(),
                 branch: branch.clone(),
+                source: BranchSourceKind::Worktree,
             }),
             EventKind::FootprintChanged(FootprintChanged {
                 item,
@@ -1484,6 +1489,41 @@ mod tests {
             kinds[2].members().is_empty(),
             "an overlap names items, not members"
         );
+    }
+
+    #[test]
+    fn a_recorded_branch_names_its_source_and_one_stored_without_a_source_was_a_checkouts() {
+        let recorded = |source| {
+            EventKind::BranchRecorded(BranchRecorded {
+                item: ItemId(4),
+                member: ALICE,
+                repo: RepoId::parse("api").unwrap(),
+                branch: BranchName::parse("alice/4-rates").unwrap(),
+                source,
+            })
+        };
+        for (source, name) in [
+            (BranchSourceKind::PullRequest, "pull_request"),
+            (BranchSourceKind::Worktree, "worktree"),
+            (BranchSourceKind::Named, "named"),
+            (BranchSourceKind::Checkout, "checkout"),
+        ] {
+            let value = serde_json::to_value(recorded(source)).unwrap();
+            assert_eq!(
+                value["payload"],
+                serde_json::json!({"item": 4, "member": 1, "repo": "api",
+                                   "branch": "alice/4-rates", "source": name})
+            );
+            assert_eq!(source.code(), name);
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(back, recorded(source));
+        }
+        let before: EventKind = serde_json::from_value(serde_json::json!({
+            "kind": "branch_recorded",
+            "payload": {"item": 4, "member": 1, "repo": "api", "branch": "alice/4-rates"}
+        }))
+        .unwrap();
+        assert_eq!(before, recorded(BranchSourceKind::Checkout));
     }
 
     #[test]

@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use dibs_domain::event::{BranchRecorded, EventKind, HookReported};
+use dibs_domain::event::{EventKind, HookReported};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
-use dibs_domain::radar::heartbeat_branches;
+use dibs_domain::radar::{BranchRecording, WorktreeRef, heartbeat_branches};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::report::{HeartbeatReports, HookReport, ReportDay};
 
@@ -34,11 +34,14 @@ pub struct HeartbeatOutcome {
 /// here; a claim that already went stale is renewed only by claiming it again. The caller's places
 /// in slot queues, and the slot holds their heartbeats keep, are seen now too, from any machine.
 ///
-/// A heartbeat from a checkout on a branch records that branch on the claims it kept alive that its
-/// own session took or last renewed: one session works in one checkout, while another session of
-/// the same machine may work in another checkout on another branch. A `BranchRecorded` event marks
-/// each change, and the claim's footprint of the repository, which measured the branch before,
-/// goes with what it made. A repository the project does not list records nothing.
+/// A heartbeat from a checkout on a branch records that branch, learned from the checkout, on the
+/// claims it kept alive that its own session took or last renewed: one session works in one
+/// checkout, while another session of the same machine may work in another checkout on another
+/// branch. A branch a claim learned from a stronger source is kept; the pools are not read, so a
+/// branch learned from a pool worktree counts as still held. A `BranchRecorded` event marks each
+/// change of branch, and the claim's footprint of the repository, which measured the branch
+/// before, goes with what it made; a change of source alone is stored and nothing more. A
+/// repository the project does not list records nothing.
 ///
 /// The reports it carries are kept one per member, machine (by the id its dibs gave it, whatever it
 /// is called) and day: a report that differs from the one kept replaces it and appends a
@@ -115,21 +118,22 @@ impl Heartbeat {
                 settings: &settings,
                 now,
             };
-            for claim in heartbeat_branches(&kept, session.id, &on.repo, &on.branch) {
-                work.save_claim(actor.project, &claim).await?;
-                work.record(
-                    now,
-                    EventKind::BranchRecorded(BranchRecorded {
-                        item: claim.item,
-                        member: actor.member,
-                        repo: on.repo.clone(),
-                        branch: on.branch.clone(),
-                    }),
-                )
-                .await?;
-                radar
-                    .drop_footprint(&mut work, claim.item, &on.repo)
-                    .await?;
+            let held = |_: &WorktreeRef| true;
+            for recording in heartbeat_branches(&kept, session.id, &on.repo, &on.branch, &held) {
+                match recording {
+                    BranchRecording::Kept => {}
+                    BranchRecording::SourceChanged(claim) => {
+                        work.save_claim(actor.project, &claim).await?;
+                    }
+                    BranchRecording::BranchChanged { claim, recorded } => {
+                        work.save_claim(actor.project, &claim).await?;
+                        work.record(now, EventKind::BranchRecorded(recorded))
+                            .await?;
+                        radar
+                            .drop_footprint(&mut work, claim.item, &on.repo)
+                            .await?;
+                    }
+                }
             }
         }
         let mut board = work.slot_board(actor.project).await?;
@@ -186,6 +190,9 @@ impl Heartbeat {
 mod tests {
     use time::Duration;
 
+    use dibs_domain::radar::{BranchName, BranchSource, BranchSourceKind, RecordedBranch};
+    use dibs_domain::repo::RepoId;
+
     use super::*;
     use crate::use_cases::testing::{Env, session};
     use crate::use_cases::{ClaimItem, ClaimItemInput};
@@ -236,9 +243,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_heartbeat_from_a_checkout_on_a_branch_records_it_on_the_claim_once() {
-        use dibs_domain::radar::BranchName;
-        use dibs_domain::repo::RepoId;
-
         let env = Env::new().await;
         let item = env.item("gh:acme/widgets#1").await;
         claim(&env, item, env.bob.session).await;
@@ -262,7 +266,8 @@ mod tests {
         let kinds = env.kinds_after(before).await;
         assert!(
             matches!(kinds.as_slice(), [EventKind::BranchRecorded(recorded)]
-                if recorded.item == item && recorded.branch.as_str() == "bob/1-x"),
+                if recorded.item == item && recorded.branch.as_str() == "bob/1-x"
+                    && recorded.source == BranchSourceKind::Checkout),
             "once, and never for a repository the project does not list: {kinds:?}"
         );
         let mut tx = env.deps.store.begin().await.unwrap();
@@ -271,6 +276,39 @@ mod tests {
             stored.branch(&RepoId::implicit()).map(BranchName::as_str),
             Some("bob/1-x")
         );
+        assert_eq!(
+            stored.branch_source(&RepoId::implicit()),
+            Some(&BranchSource::Checkout)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_keeps_a_branch_the_claim_learned_from_a_stronger_source() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim(&env, item, env.bob.session).await;
+        let named = RecordedBranch::new(
+            BranchName::parse("bob/1-named").unwrap(),
+            BranchSource::Named,
+        );
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let mut stored = tx.claim(env.project, item).await.unwrap().unwrap();
+        stored.branches.insert(RepoId::implicit(), named.clone());
+        tx.save_claim(env.project, &stored).await.unwrap();
+        tx.commit().await.unwrap();
+        let before = env.events().await.len();
+        let on = OnBranch {
+            repo: RepoId::implicit(),
+            branch: BranchName::parse("bob/9-elsewhere").unwrap(),
+        };
+        Heartbeat::new(&env.deps)
+            .execute(&env.bob.actor, env.bob.session, Some(&on))
+            .await
+            .unwrap();
+        assert!(env.kinds_after(before).await.is_empty());
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let kept = tx.claim(env.project, item).await.unwrap().unwrap();
+        assert_eq!(kept.branches.get(&RepoId::implicit()), Some(&named));
     }
 
     #[tokio::test]

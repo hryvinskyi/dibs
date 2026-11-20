@@ -278,7 +278,12 @@ impl ReviewClaimView {
     fn of(claim: ReviewClaim) -> Self {
         Self {
             item: ItemNameView::of(claim.item),
-            branches: claim.claim.claim.branches,
+            branches: claim
+                .claim
+                .claim
+                .branch_names()
+                .map(|(repo, branch)| (repo.clone(), branch.clone()))
+                .collect(),
             holder: claim.claim.holder,
             prs: claim.prs,
             since: claim.since,

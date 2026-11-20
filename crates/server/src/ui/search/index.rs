@@ -381,7 +381,7 @@ fn branches(corpus: &Corpus<'_>) -> Vec<Entry> {
         .chain(&sources.status.stale)
         .zip(&corpus.claims)
     {
-        for recorded in &held.claim.claim.branches {
+        for recorded in held.claim.claim.branch_names() {
             match seen.iter_mut().find(|(key, _)| *key == recorded) {
                 Some((_, tickets)) => tickets.push(&claim.ticket.title),
                 None => seen.push((recorded, vec![&claim.ticket.title])),

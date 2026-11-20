@@ -10,16 +10,21 @@ mod contract;
 mod footprint;
 mod names;
 mod overlap;
+mod source;
 
 pub use contract::{Consumer, ConsumerError, Contract};
 pub use footprint::{
     Footprint, FootprintBase, FootprintDigest, FootprintEntry, FootprintOutcome, FootprintReport,
-    NotStored, decide_footprint, heartbeat_branches, record_branch,
+    NotStored, decide_footprint, heartbeat_branches,
 };
 pub use names::{BranchName, BranchNameError, CommitSha, CommitShaError};
 pub use overlap::{
     Merge, MergeMark, Overlap, OverlapChanges, OverlapError, OverlapKey, OverlapKind, RadarScene,
     reconcile,
+};
+pub use source::{
+    BranchRecording, BranchSource, BranchSourceError, BranchSourceKind, HeldWorktrees,
+    RecordedBranch, WorktreeRef, record_branch,
 };
 
 #[cfg(test)]

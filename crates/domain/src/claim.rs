@@ -10,7 +10,7 @@ use crate::area::QualifiedArea;
 use crate::handover::{ClaimKind, PendingArea, pending_elsewhere};
 use crate::ids::{ItemId, MemberId, SessionId, ThreadId};
 use crate::member::Role;
-use crate::radar::BranchName;
+use crate::radar::{BranchName, BranchSource, RecordedBranch};
 use crate::repo::RepoId;
 use crate::review::ClaimState;
 use crate::session::HostName;
@@ -42,9 +42,8 @@ pub struct Claim {
     pub last_seen: OffsetDateTime,
     /// Whether its holder works on it or its work waits in pull requests.
     pub state: ClaimState,
-    /// The branch its work is on in each repository, the last one its holder's checkout was seen
-    /// on there.
-    pub branches: BTreeMap<RepoId, BranchName>,
+    /// The branch its work is on in each repository, with where that branch was learned from.
+    pub branches: BTreeMap<RepoId, RecordedBranch>,
     /// Whether its work is a feature or debt work; fixed when the claim is made.
     pub kind: ClaimKind,
     /// The areas it declared that another member's debt claim holds, each waiting to be handed
@@ -102,9 +101,21 @@ impl Claim {
         self.wide.as_ref().is_some_and(|scope| scope.names(area))
     }
 
-    /// The branch its work is on in the repository, when one was seen.
+    /// The branch its work is on in the repository, when one was recorded.
     pub fn branch(&self, repo: &RepoId) -> Option<&BranchName> {
-        self.branches.get(repo)
+        self.branches.get(repo).map(|recorded| &recorded.branch)
+    }
+
+    /// Where the branch its work is on in the repository was learned from, when one was recorded.
+    pub fn branch_source(&self, repo: &RepoId) -> Option<&BranchSource> {
+        self.branches.get(repo).map(|recorded| &recorded.source)
+    }
+
+    /// The branch its work is on in each repository, in repository order.
+    pub fn branch_names(&self) -> impl Iterator<Item = (&RepoId, &BranchName)> {
+        self.branches
+            .iter()
+            .map(|(repo, recorded)| (repo, &recorded.branch))
     }
 
     /// The claim's member and item.

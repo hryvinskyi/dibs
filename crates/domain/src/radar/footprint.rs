@@ -9,35 +9,29 @@ use crate::area::QualifiedArea;
 use crate::claim::Claim;
 use crate::ids::{ItemId, MemberId, SessionId};
 use crate::paths::{RelPath, RepoPath};
-use crate::radar::{BranchName, CommitSha};
+use crate::radar::{
+    BranchName, BranchRecording, BranchSource, CommitSha, HeldWorktrees, record_branch,
+};
 use crate::repo::RepoId;
 use crate::settings::ProjectSettings;
 
-/// The claim with `branch` recorded for `repo`; `None` when that is the branch it records already.
-pub fn record_branch(claim: &Claim, repo: &RepoId, branch: &BranchName) -> Option<Claim> {
-    if claim.branch(repo) == Some(branch) {
-        return None;
-    }
-    let mut changed = claim.clone();
-    changed.branches.insert(repo.clone(), branch.clone());
-    Some(changed)
-}
-
-/// The claims a heartbeat of `session` from a checkout of `repo` on `branch` records the branch on,
-/// among the claims it kept alive: those taken or last renewed in that session. One session works
-/// in one checkout, so every claim of it is on that checkout's branch; a claim of another session
-/// of the same machine may be in another checkout on another branch, and is left alone. Each
-/// answer is the claim to store.
+/// What a heartbeat of `session` from a checkout of `repo` on `branch` records, as the checkout's
+/// branch, on the claims it kept alive that were taken or last renewed in that session; a claim of
+/// another session of the same machine may be in another checkout on another branch, and is left
+/// alone. Only the recordings that change something are answered, in the order of `refreshed`;
+/// `worktrees` answers whether a pool worktree a claim's branch was learned from is still held.
 pub fn heartbeat_branches(
     refreshed: &[Claim],
     session: SessionId,
     repo: &RepoId,
     branch: &BranchName,
-) -> Vec<Claim> {
+    worktrees: &impl HeldWorktrees,
+) -> Vec<BranchRecording> {
     refreshed
         .iter()
         .filter(|claim| claim.session == session)
-        .filter_map(|claim| record_branch(claim, repo, branch))
+        .map(|claim| record_branch(claim, repo, branch, BranchSource::Checkout, worktrees))
+        .filter(|recording| *recording != BranchRecording::Kept)
         .collect()
 }
 

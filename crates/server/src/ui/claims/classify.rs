@@ -50,7 +50,7 @@ pub fn other_ticket<'a>(claim: &'a Claim, item: &ItemRecord) -> Option<(&'a Repo
         .external_ref
         .as_ref()
         .and_then(|external| trailing_number(external.value()))?;
-    claim.branches.iter().find_map(|(repo, branch)| {
+    claim.branch_names().find_map(|(repo, branch)| {
         let segment = branch.as_str().rsplit('/').next().unwrap_or_default();
         let named = leading_number(segment)?;
         (named != own).then_some((repo, named))
@@ -90,7 +90,7 @@ mod tests {
     use dibs_domain::handover::ClaimKind;
     use dibs_domain::ids::{ItemId, MemberId, SessionId};
     use dibs_domain::item::{ExternalRef, ItemRepository, Title};
-    use dibs_domain::radar::BranchName;
+    use dibs_domain::radar::{BranchName, BranchSource, RecordedBranch};
     use dibs_domain::review::{ClaimState, PrRef, Review};
     use dibs_domain::session::HostName;
 
@@ -141,7 +141,7 @@ mod tests {
             .map(|(name, repo)| {
                 (
                     RepoId::parse(repo).unwrap(),
-                    BranchName::parse(name).unwrap(),
+                    RecordedBranch::new(BranchName::parse(name).unwrap(), BranchSource::Checkout),
                 )
             })
             .collect();

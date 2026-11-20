@@ -32,7 +32,7 @@ use dibs_domain::item::{
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
 use dibs_domain::paths::RepoPath;
-use dibs_domain::radar::{BranchName, OverlapKind};
+use dibs_domain::radar::{BranchName, BranchSourceKind, OverlapKind};
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::review::{PrRef, Review};
 use dibs_domain::session::{AgentLabel, HostName};
@@ -331,9 +331,11 @@ pub struct ClaimView {
     pub state: &'static str,
     /// While it is in review, the pull requests it recorded; `null` otherwise.
     pub review: Option<ReviewView>,
-    /// The branch its work is on in each repository, by repository id, as its holder's checkout
-    /// was last seen.
+    /// The branch its work is on in each repository, by repository id.
     pub branches: BTreeMap<RepoId, BranchName>,
+    /// Where each of those branches was learned from, by repository id: `pull_request`,
+    /// `worktree`, `named` or `checkout`.
+    pub branch_sources: BTreeMap<RepoId, BranchSourceKind>,
     /// `feature` or `debt`.
     pub kind: &'static str,
     /// The areas it waits for another member's debt claim to hand over, by area.
@@ -395,7 +397,16 @@ impl ClaimView {
             last_seen: claim.last_seen,
             state: claim.state.code(),
             review: claim.state.review().map(ReviewView::of),
-            branches: claim.branches,
+            branches: claim
+                .branches
+                .iter()
+                .map(|(repo, recorded)| (repo.clone(), recorded.branch.clone()))
+                .collect(),
+            branch_sources: claim
+                .branches
+                .iter()
+                .map(|(repo, recorded)| (repo.clone(), recorded.source.kind()))
+                .collect(),
             kind: claim.kind.code(),
             pending: claim
                 .pending
@@ -1064,6 +1075,7 @@ mod tests {
     use dibs_domain::hot_rule::HotRuleRegistry;
     use dibs_domain::ids::MemberId;
     use dibs_domain::paths::RepoPath;
+    use dibs_domain::radar::{BranchSource, RecordedBranch};
 
     use super::*;
 
@@ -1084,10 +1096,22 @@ mod tests {
             renewed_at: datetime!(2026-01-02 03:04:05 UTC),
             last_seen: datetime!(2026-01-02 03:05:00 UTC),
             state: dibs_domain::review::ClaimState::Working,
-            branches: std::collections::BTreeMap::from([(
-                RepoId::parse("api").unwrap(),
-                BranchName::parse("alice/5-rates").unwrap(),
-            )]),
+            branches: std::collections::BTreeMap::from([
+                (
+                    RepoId::parse("api").unwrap(),
+                    RecordedBranch::new(
+                        BranchName::parse("alice/5-rates").unwrap(),
+                        BranchSource::PullRequest(PrRef::parse("acme/api#12").unwrap()),
+                    ),
+                ),
+                (
+                    RepoId::parse("web").unwrap(),
+                    RecordedBranch::new(
+                        BranchName::parse("alice/5-ui").unwrap(),
+                        BranchSource::Checkout,
+                    ),
+                ),
+            ]),
             kind: dibs_domain::handover::ClaimKind::Feature,
             pending: std::collections::BTreeMap::new(),
         };
@@ -1107,7 +1131,8 @@ mod tests {
                 "last_seen": "2026-01-02T03:05:00Z",
                 "state": "working",
                 "review": null,
-                "branches": {"api": "alice/5-rates"},
+                "branches": {"api": "alice/5-rates", "web": "alice/5-ui"},
+                "branch_sources": {"api": "pull_request", "web": "checkout"},
                 "kind": "feature",
                 "pending": {}
             })

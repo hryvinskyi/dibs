@@ -134,7 +134,11 @@ impl LiveClaimView {
             item: named.claim.item,
             holder: named.holder,
             state: named.claim.state.code(),
-            branches: named.claim.branches,
+            branches: named
+                .claim
+                .branch_names()
+                .map(|(repo, branch)| (repo.clone(), branch.clone()))
+                .collect(),
         }
     }
 }

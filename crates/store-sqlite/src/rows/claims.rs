@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 
 use dibs_app::ports::{ClaimRows, StoreResult};
@@ -11,14 +12,66 @@ use dibs_domain::claim::Claim;
 use dibs_domain::handover::{ClaimKind, PendingArea};
 use dibs_domain::ids::{ItemId, MemberId, ProjectId, SessionId, ThreadId};
 use dibs_domain::paths::{RelPath, RepoPath};
+use dibs_domain::radar::{BranchName, BranchSource, BranchSourceKind, RecordedBranch, WorktreeRef};
 use dibs_domain::repo::RepoId;
+use dibs_domain::report::MachineId;
 use dibs_domain::reservation::SharedPath;
-use dibs_domain::review::{ClaimState, Review};
+use dibs_domain::review::{ClaimState, PrRef, Review};
 use dibs_domain::session::HostName;
 use dibs_domain::wide::{WideReason, WideScope};
+use dibs_domain::worktree::{PoolId, WorktreeName};
 
 use crate::SqliteTx;
 use crate::codec::{Fields, int, json, nanos, opt_nanos};
+
+/// One entry of `claims.branches` as the column holds it: the branch, where it was learned from,
+/// and what identifies that source — the pull request of a pull request's head, the machine, pool
+/// and worktree of a pool worktree's branch — written only for the source that has it.
+#[derive(Serialize, Deserialize)]
+struct BranchColumn {
+    branch: BranchName,
+    source: BranchSourceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pr: Option<PrRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    machine: Option<MachineId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pool: Option<PoolId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree: Option<WorktreeName>,
+}
+
+impl From<&RecordedBranch> for BranchColumn {
+    fn from(recorded: &RecordedBranch) -> Self {
+        let worktree = recorded.source.worktree();
+        Self {
+            branch: recorded.branch.clone(),
+            source: recorded.source.kind(),
+            pr: recorded.source.pr().cloned(),
+            machine: worktree.map(|worktree| worktree.machine.clone()),
+            pool: worktree.map(|worktree| worktree.pool.clone()),
+            worktree: worktree.map(|worktree| worktree.worktree.clone()),
+        }
+    }
+}
+
+impl BranchColumn {
+    /// The recorded branch it holds.
+    fn recorded(self) -> Result<RecordedBranch, String> {
+        let worktree = match (self.machine, self.pool, self.worktree) {
+            (None, None, None) => None,
+            (Some(machine), Some(pool), Some(worktree)) => Some(WorktreeRef {
+                machine,
+                pool,
+                worktree,
+            }),
+            _ => return Err("a worktree is named by its machine, its pool and its name".to_owned()),
+        };
+        let source = BranchSource::from_parts(self.source, self.pr, worktree)
+            .map_err(|error| error.to_string())?;
+        Ok(RecordedBranch::new(self.branch, source))
+    }
+}
 
 /// The columns a claim is read from.
 macro_rules! claim_columns {
@@ -45,6 +98,12 @@ fn claim(row: &SqliteRow, pending: BTreeMap<QualifiedArea, PendingArea>) -> Stor
             ));
         }
     };
+    let columns: BTreeMap<RepoId, BranchColumn> = f.json("branches")?;
+    let branches = columns
+        .into_iter()
+        .map(|(repo, column)| Ok((repo, column.recorded()?)))
+        .collect::<Result<_, String>>()
+        .map_err(|error| f.bad("branches", error))?;
     let state = match (
         f.opt_text("review_prs")?,
         f.opt_time("review_since")?,
@@ -75,7 +134,7 @@ fn claim(row: &SqliteRow, pending: BTreeMap<QualifiedArea, PendingArea>) -> Stor
         renewed_at: f.time("renewed_at")?,
         last_seen: f.time("last_seen")?,
         state,
-        branches: f.json("branches")?,
+        branches,
         kind: f.parse("kind", ClaimKind::parse)?,
         pending,
     })
@@ -222,7 +281,13 @@ impl ClaimRows for SqliteTx {
         .bind(review.map(|review| json(review.prs())).transpose()?)
         .bind(opt_nanos(review.map(Review::since))?)
         .bind(review.map(|review| i64::from(review.more())))
-        .bind(json(&record.branches)?)
+        .bind(json(
+            &record
+                .branches
+                .iter()
+                .map(|(repo, recorded)| (repo, BranchColumn::from(recorded)))
+                .collect::<BTreeMap<_, _>>(),
+        )?)
         .bind(record.kind.code());
         self.run(statement).await?;
         self.delete_pending(project, record.item).await?;

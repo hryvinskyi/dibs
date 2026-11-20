@@ -228,8 +228,7 @@ impl ClaimView {
             prs,
             moved_by: moved_by(scene.status, item.id),
             branches: claim
-                .branches
-                .iter()
+                .branch_names()
                 .map(|(repo, branch)| RepoBranch {
                     repo: repo.to_string(),
                     branch: BranchView::of(repo, branch, links),

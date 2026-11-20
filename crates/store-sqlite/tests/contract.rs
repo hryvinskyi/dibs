@@ -40,13 +40,13 @@ mod contract {
     use dibs_domain::paths::{RelPath, RepoPath};
     use dibs_domain::project::ProjectSlug;
     use dibs_domain::radar::{
-        BranchName, CommitSha, Footprint, FootprintBase, FootprintDigest, MergeMark, Overlap,
-        OverlapKind,
+        BranchName, BranchSource, CommitSha, Footprint, FootprintBase, FootprintDigest, MergeMark,
+        Overlap, OverlapKind, RecordedBranch, WorktreeRef,
     };
     use dibs_domain::repo::{RemoteUrl, RepoId};
     use dibs_domain::reservation::SharedPath;
     use dibs_domain::review::{ClaimState, PrRef, Review};
-    use dibs_domain::session::{AgentLabel, HostName};
+    use dibs_domain::session::{AgentLabel, CheckoutToken, HostName, SessionCheckout};
     use dibs_domain::settings::SettingsDocument;
     use dibs_domain::wide::{WideAsk, WideReason, WideScope};
     use dibs_store_sqlite::SqliteStore;
@@ -115,6 +115,7 @@ mod contract {
         claims_are_kept_live_or_stale_and_replaced_per_item,
         a_claim_in_review_keeps_its_pull_requests_start_and_whether_more_follow,
         a_claim_keeps_the_branch_of_each_repository,
+        session_checkouts_are_kept_per_checkout_read_by_member_and_time_and_forgotten,
         a_claim_keeps_its_kind_and_the_areas_it_waits_for,
         an_area_waits_for_one_claim_of_a_project_at_a_time,
         projects_with_a_waiting_claim_are_listed,
@@ -868,15 +869,34 @@ mod contract {
     async fn a_claim_keeps_the_branch_of_each_repository(store: Arc<dyn Store>) {
         seed(&store).await;
         let mut tx = store.begin().await.unwrap();
+        let recorded = |name: &str, source: BranchSource| {
+            RecordedBranch::new(BranchName::parse(name).unwrap(), source)
+        };
+        let worktree = WorktreeRef {
+            machine: dibs_domain::report::MachineId::from_bits(7),
+            pool: dibs_domain::worktree::PoolId::parse("a1").unwrap(),
+            worktree: dibs_domain::worktree::WorktreeName::parse("worktree2").unwrap(),
+        };
         let mut branched = claim(FIRST, ALICE, ALICE_LAPTOP, &[]);
-        branched.branches.insert(
-            RepoId::parse("api").unwrap(),
-            BranchName::parse("alice/1-rates").unwrap(),
-        );
-        branched.branches.insert(
-            RepoId::parse("web").unwrap(),
-            BranchName::parse("main").unwrap(),
-        );
+        for (repo, branch) in [
+            (
+                "api",
+                recorded(
+                    "alice/1-rates",
+                    BranchSource::PullRequest(PrRef::parse("acme/api#12").unwrap()),
+                ),
+            ),
+            (
+                "web",
+                recorded("alice/1-ui", BranchSource::Worktree(worktree)),
+            ),
+            ("docs", recorded("alice/1-docs", BranchSource::Named)),
+            ("ops", recorded("main", BranchSource::Checkout)),
+        ] {
+            branched
+                .branches
+                .insert(RepoId::parse(repo).unwrap(), branch);
+        }
         tx.save_claim(A, &branched).await.unwrap();
         tx.commit().await.unwrap();
         let mut tx = store.begin().await.unwrap();
@@ -884,13 +904,101 @@ mod contract {
         let fewer = Claim {
             branches: [(
                 RepoId::parse("api").unwrap(),
-                BranchName::parse("alice/1-next").unwrap(),
+                recorded("alice/1-next", BranchSource::Checkout),
             )]
             .into(),
             ..branched
         };
         tx.save_claim(A, &fewer).await.unwrap();
         assert_eq!(tx.claims(A).await.unwrap(), vec![fewer]);
+    }
+
+    async fn session_checkouts_are_kept_per_checkout_read_by_member_and_time_and_forgotten(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let alice_desktop = SessionId(33);
+        let token = |n: u128| CheckoutToken::parse(&format!("{n:032x}")).unwrap();
+        let reported = |session, member, checkout: u128, seconds| SessionCheckout {
+            session,
+            member,
+            checkout: token(checkout),
+            reported_at: at(seconds),
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.save_session(A, &session(alice_desktop, ALICE, "desktop/mcp"))
+            .await
+            .unwrap();
+        for checkout in [
+            reported(ALICE_LAPTOP, ALICE, 1, 10),
+            reported(ALICE_LAPTOP, ALICE, 2, 10),
+            reported(alice_desktop, ALICE, 1, 5),
+            reported(BOB_LAPTOP, BOB, 1, 20),
+            reported(DAVE_LAPTOP, DAVE, 1, 20),
+        ] {
+            let project = if checkout.member == DAVE { B } else { A };
+            tx.save_session_checkout(project, &checkout).await.unwrap();
+        }
+        tx.save_session_checkout(A, &reported(ALICE_LAPTOP, ALICE, 1, 30))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.session_checkouts(A, ALICE, at(0)).await.unwrap(),
+            [
+                reported(ALICE_LAPTOP, ALICE, 1, 30),
+                reported(alice_desktop, ALICE, 1, 5),
+                reported(ALICE_LAPTOP, ALICE, 2, 10),
+            ],
+            "one per session and checkout by checkout, the latest report kept, another member's \
+             left out"
+        );
+        assert_eq!(
+            tx.session_checkouts(A, ALICE, at(10)).await.unwrap(),
+            [
+                reported(ALICE_LAPTOP, ALICE, 1, 30),
+                reported(ALICE_LAPTOP, ALICE, 2, 10),
+            ],
+            "reported at the time asked or later"
+        );
+        assert_eq!(
+            tx.session_checkouts(B, DAVE, at(0)).await.unwrap(),
+            [reported(DAVE_LAPTOP, DAVE, 1, 20)],
+            "scoped to its project"
+        );
+        tx.forget_session_checkouts(A, ALICE_LAPTOP).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.session_checkouts(A, ALICE, at(0)).await.unwrap(),
+            [reported(alice_desktop, ALICE, 1, 5)],
+            "only the ended session's checkouts go"
+        );
+        assert_eq!(
+            tx.session_checkouts(A, BOB, at(0)).await.unwrap(),
+            [reported(BOB_LAPTOP, BOB, 1, 20)]
+        );
+        drop(tx);
+
+        let mut tx = store.begin().await.unwrap();
+        tx.save_session_checkout(A, &reported(SessionId(99), ALICE, 3, 40))
+            .await
+            .unwrap();
+        assert!(
+            matches!(tx.commit().await, Err(StoreError::Backend(_))),
+            "a checkout of a missing session fails the commit"
+        );
+        let mut tx = store.begin().await.unwrap();
+        tx.save_session_checkout(A, &reported(ALICE_LAPTOP, MemberId(98), 3, 40))
+            .await
+            .unwrap();
+        assert!(
+            matches!(tx.commit().await, Err(StoreError::Backend(_))),
+            "a checkout of a missing member fails the commit"
+        );
     }
 
     async fn a_claim_keeps_its_kind_and_the_areas_it_waits_for(store: Arc<dyn Store>) {

@@ -37,6 +37,7 @@ use dibs_domain::repo::RepoId;
 use dibs_domain::report::{DayCounts, HookReport, MachineId, ReportDay};
 use dibs_domain::reservation::SharedPath;
 use dibs_domain::review::PrRef;
+use dibs_domain::session::SessionCheckout;
 use dibs_domain::settings::SettingsDocument;
 use dibs_domain::slot::SlotBoard;
 use dibs_domain::wide::WideAsk;
@@ -233,6 +234,27 @@ pub trait SessionRows: Send {
         &mut self,
         project: ProjectId,
         session: &SessionRecord,
+    ) -> StoreResult<()>;
+    /// Stores that a session reported working in a checkout: one record per session and checkout,
+    /// whose member and time this one replaces.
+    async fn save_session_checkout(
+        &mut self,
+        project: ProjectId,
+        checkout: &SessionCheckout,
+    ) -> StoreResult<()>;
+    /// The checkouts the member's sessions reported at `since` or later, ordered by checkout and
+    /// session.
+    async fn session_checkouts(
+        &mut self,
+        project: ProjectId,
+        member: MemberId,
+        since: OffsetDateTime,
+    ) -> StoreResult<Vec<SessionCheckout>>;
+    /// Forgets every checkout the session reported.
+    async fn forget_session_checkouts(
+        &mut self,
+        project: ProjectId,
+        session: SessionId,
     ) -> StoreResult<()>;
 }
 
