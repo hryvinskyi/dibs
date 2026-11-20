@@ -208,9 +208,9 @@ summary  { thread, messages, unread, last_message_at | null, importance, awaitin
 the repository the reference names when the project does not list it. `priority` (0 is soonest, 4 latest, 2 when nothing
 said otherwise), `areas_hint` (the areas the work will probably touch; advisory, no claim declares them),
 `source_status` (the outside tracker's own state, as it shows it), `closed` (the tracker closed the item; the import
-that reports it closed completes a claim on it) and `source` (the importer's source that lists it) are what an importer reports. An *item ref* is how an answer
-mentions another item: `link` is the tracker's page for its reference (a `gh` reference links to its GitHub issue), or
-`null`.
+of its own source that reports it closed, listed or carried as a blocker, completes a claim on it) and `source` (the
+importer's source that lists it) are what an importer reports. An *item ref* is how an answer mentions another item:
+`link` is the tracker's page for its reference (a `gh` reference links to its GitHub issue), or `null`.
 
 A message's `importance` says how much it asks for its recipients' attention, and `ack_required` whether it asks each of
 them to acknowledge it; `acks` is in a thread read only, for a message that asks.
@@ -342,13 +342,14 @@ body is the whole view the worker read:
 
 `ref` and `title` are required; `priority` (default 2), `areas_hint`, `source_status`, `closed` (default `false`) and
 `blocked_by` are optional. An item marked `"blocker": true` is carried only because a listed item waits for it: it gets
-its title and `closed` from the batch, belongs to no source, and its own facts and edges are left as they are. Unknown
-fields are refused. One batch reports at most 500 items, each reference once (`batch_too_large`, `duplicate_ref`).
-The rules, applied in one transaction:
+its title and `closed` from the batch, keeps the source it had (none when the batch creates it), and its own facts and
+edges are left as they are; a closed blocker is marked closed, and completes the claim on it only when the batch's
+`source` is the item's own (below). Unknown fields are refused. One batch reports at most 500 items, each reference once
+(`batch_too_large`, `duplicate_ref`). The rules, applied in one transaction:
 
 - An item is keyed by its reference: one the project does not have is created (an event `item_created`), one it has is
   updated only when a fact changed (`item_updated`). A batch equal to what is stored writes nothing and appends no
-  event, unless a claim stands on an item it reports closed (below), so a worker may send its view as often as it
+  event, unless a claim stands on an item it finds closed (below), so a worker may send its view as often as it
   likes.
 - An area of `areas_hint` the project does not declare is left out and named in `dropped_hints`, never refused. A bare
   name is the item's own repository's area, else the one area of that name the project declares.
@@ -359,13 +360,17 @@ The rules, applied in one transaction:
   of the batch applies. A closed blocker the project does not know blocks nothing and is dropped.
 - With `"complete": true` (the worker read every page without an error; it needs `source`), every open item of that
   source the batch did not mention is marked closed. A partial read never sends `complete`.
-- A claim on an item the batch reports closed — listed or carried as a blocker, whether that changes the item or it was
-  closed already — or on an item a complete batch closes because it left it out, is **completed**, whatever its state
-  (working, in review, stale): its areas are free, the grants on it end, what other claims waited for it to hand over
-  moves to them, the item is `done`, an event `completed_by_close` is appended, and its holder is sent one message from
-  dibs, "Work item … was closed in its tracker; the claim on it is done". The items, closures and edges are written
-  first, all in the batch's transaction. A claim on an item the batch reports open or does not mention is left as it
-  is, and nothing in a batch claims or releases anything. The answer does not list the completed claims; the log does.
+- A claim on an item the batch's own source reports closed — by a batch that names its `source`, which lists the item
+  or carries it as a blocker whose stored source is that same `source`, whether that changes the item or it was closed
+  already — or on an item of that source a complete batch leaves out, whether it closes it now or it was closed
+  already, is **completed**, whatever its state (working, in review, stale): its areas are free, the grants on it end,
+  what other claims waited for it to hand over moves to them, the item is `done`, an event `completed_by_close` is
+  appended, and its holder is sent one message from dibs, "Work item … was closed in its tracker; the claim on it is
+  done". The items, closures and edges are written first, all in the batch's transaction. A claim on an item the batch
+  reports open, or that a partial batch does not mention, is left as it is. A closed blocker of another source or of
+  none, or an item reported closed by a batch with no `source`, is only marked closed: that is not its own tracker's
+  word, so its claim stands. Nothing in a batch claims or releases anything. The answer does not list the completed
+  claims; the log does.
 
 It answers `200`:
 
@@ -639,9 +644,10 @@ day's completions) and its holder is sent one message from dibs, "Pull request �
 when `more` was set, it is worked on again with its areas, seen now (`working`, `review_ended`).
 
 A claim also completes when the tracker closes its item, whatever its state, in review with more pull requests to come
-included: the next `PUT /v1/items` that reports the item closed completes it (event `completed_by_close`, with the same
-consequences and counted in the day's completions too), and its holder is sent one message from dibs, "Work item … was
-closed in its tracker; the claim on it is done". See [Items](#items).
+included: the next `PUT /v1/items` of its own source that reports the item closed (listed, or carried as a blocker), or
+a complete one that leaves it out, completes it (event `completed_by_close`, with the same consequences and counted in
+the day's completions too), and its holder is sent one message from dibs, "Work item … was closed in its tracker; the
+claim on it is done". See [Items](#items).
 
 `POST /v1/prs/closed`, body `{ "pr": "acme/api#12" }`: the pull request was closed without being merged and leaves its
 claim (`pr_closed`). Its work is not in, so the claim's other pull requests can no longer complete it: with others left

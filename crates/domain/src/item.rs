@@ -371,8 +371,11 @@ string_value!(SourceId, SourceIdError);
 /// The facts about an item an importer supplies: its title, the areas it will probably touch, how
 /// soon it should be done, the tracker's own state of it, and whether the tracker closed it.
 ///
-/// `closed` is the tracker's word: the import that reports an item closed completes the claim
-/// standing on it, and a closed item leaves the ready list.
+/// `closed` is the tracker's word, and a closed item leaves the ready list. The claim standing on
+/// it is completed by the import of its own source: a batch naming that source that reports it
+/// closed, listed or carried as a blocker, or a complete one that leaves it out. A closed blocker
+/// of another source or of none, or an item reported closed by a batch naming no source, is only
+/// marked closed, and its claim stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemMeta {
     /// The title.

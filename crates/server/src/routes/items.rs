@@ -319,9 +319,10 @@ impl RefusedEdgeView {
 
 /// Creates and updates the items an importer reports, keyed by reference, and replaces each listed
 /// item's imported dependencies: `200` with what happened to each item and each refused edge. A
-/// claim on an item the batch reports closed is completed and its holder told; besides that, a
-/// batch equal to what is stored changes nothing. Only an admin and the importer may send one; the
-/// role is checked before the body is read.
+/// claim is completed and its holder told when the item is one of the batch's source that the
+/// batch reports closed, listed or carried as a blocker, or that its complete batch leaves out;
+/// besides that, a batch equal to what is stored changes nothing. Only an admin and the importer
+/// may send one; the role is checked before the body is read.
 ///
 /// # Errors
 /// `forbidden` for a member; `invalid_request` naming the field at fault; `batch_too_large`,

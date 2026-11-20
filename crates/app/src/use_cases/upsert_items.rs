@@ -45,13 +45,19 @@ pub struct UpsertReport {
 /// The domain plans the batch; this use case writes what the plan changes and appends an event per
 /// change only. An edge refused for a cycle or an unknown blocker is reported on its own and the
 /// rest applies. Once the items, closures and edges are written, the claim standing on each item
-/// the batch reports closed, or closes because a complete batch left it out, is completed in the
-/// same transaction, whatever its state: the item is done, the end is recorded as
-/// `completed_by_close`, and its holder is told in a message from dibs. Each claim is read again
-/// just before it ends, since ending one settles handovers that can change another. A claim on an
-/// item the batch reports open or does not mention is left as it is, so a batch equal to what is
-/// stored, with no claim on an item it reports closed, writes nothing and appends nothing. Only an
-/// admin and the importer may send one.
+/// the batch speaks for as its source and finds closed is completed in the same transaction,
+/// whatever its state: the item is done, the end is recorded as `completed_by_close`, and its
+/// holder is told in a message from dibs. Those items are the ones a batch naming its source
+/// reports closed, listed or carried as a blocker whose stored source is that same source, and the
+/// ones of that source a complete batch leaves out, whether it closes them now or they were closed
+/// before. Each claim is read again just before it ends, since ending one settles handovers that
+/// can change another.
+///
+/// A claim on an item the batch reports open, or that a partial batch does not mention, is left as
+/// it is. So is one on an item the batch carries only as a closed blocker while it belongs to
+/// another source or to none, or reports closed without naming a source: that report only marks
+/// the item closed. A batch equal to what is stored, with no claim on an item it finds closed,
+/// writes nothing and appends nothing. Only an admin and the importer may send one.
 pub struct UpsertItems {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -186,7 +192,7 @@ impl UpsertItems {
         })
     }
 
-    /// Completes a claim whose item the batch reports closed, and tells its holder.
+    /// Completes a claim whose item the batch finds closed, and tells its holder.
     async fn complete(
         &self,
         work: &mut Work,
@@ -841,8 +847,73 @@ mod tests {
         assert_completed(&env, "gh:acme/web#2", env.alice.actor.member, &kinds).await;
     }
 
+    /// Asserts that the claim on the item is the one it was, the item still claimed and marked
+    /// closed, no end recorded among `kinds` and no message sent to `holder` since `told`.
+    async fn assert_claim_stands(
+        env: &Env,
+        text: &str,
+        claim_before: Option<Claim>,
+        kinds: &[EventKind],
+        holder: &Person,
+        told: usize,
+    ) {
+        let item = item(env, text).await;
+        assert!(claim_before.is_some());
+        assert_eq!(
+            stored_claim(env, item.id).await,
+            claim_before,
+            "the claim stands"
+        );
+        assert_eq!(item.status, ItemStatus::Claimed);
+        assert!(item.closed, "the item is marked closed upstream");
+        assert!(
+            !names(kinds).contains(&"completed_by_close"),
+            "no completion: {kinds:?}"
+        );
+        assert_eq!(messages(env, holder).await.len(), told, "nobody is told");
+    }
+
     #[tokio::test]
-    async fn a_known_item_reported_closed_only_as_a_blocker_has_its_claim_completed() {
+    async fn an_item_its_own_source_reports_closed_only_as_a_blocker_has_its_claim_completed() {
+        let env = Env::new().await;
+        import(
+            &env,
+            batch(vec![
+                listed("gh:acme/widgets#40", &[]),
+                listed("gh:acme/widgets#41", &["gh:acme/widgets#40"]),
+            ]),
+        )
+        .await;
+        let held = item(&env, "gh:acme/widgets#40").await;
+        assert_eq!(held.source, Some(SourceId::parse("board").unwrap()));
+        claim(&env, &env.bob, held.id, &["billing"], None).await;
+        let told = messages(&env, &env.bob).await.len();
+        let before = env.events().await.len();
+        import(
+            &env,
+            complete(vec![
+                listed("gh:acme/widgets#41", &["gh:acme/widgets#40"]),
+                blocker("gh:acme/widgets#40", true),
+            ]),
+        )
+        .await;
+        let kinds = env.kinds_after(before).await;
+        assert_completed(&env, "gh:acme/widgets#40", env.bob.actor.member, &kinds).await;
+        assert_eq!(
+            names(&kinds)
+                .iter()
+                .filter(|name| **name == "completed_by_close")
+                .count(),
+            1,
+            "{kinds:?}"
+        );
+        let new = messages(&env, &env.bob).await.split_off(told);
+        assert_eq!(new.len(), 1, "one message to the holder: {new:?}");
+        assert_eq!(new[0].0, "Done in the tracker: Work on gh:acme/widgets#40");
+    }
+
+    #[tokio::test]
+    async fn an_item_no_source_lists_reported_closed_only_as_a_blocker_keeps_its_claim() {
         let env = Env::new().await;
         import(
             &env,
@@ -854,6 +925,8 @@ mod tests {
         .await;
         let held = item(&env, "gh:acme/api#8").await.id;
         claim(&env, &env.bob, held, &["billing"], None).await;
+        let claim_before = stored_claim(&env, held).await;
+        let told = messages(&env, &env.bob).await.len();
         let before = env.events().await.len();
         import(
             &env,
@@ -864,7 +937,165 @@ mod tests {
         )
         .await;
         let kinds = env.kinds_after(before).await;
-        assert_completed(&env, "gh:acme/api#8", env.bob.actor.member, &kinds).await;
+        assert_claim_stands(&env, "gh:acme/api#8", claim_before, &kinds, &env.bob, told).await;
+    }
+
+    #[tokio::test]
+    async fn an_item_a_person_made_closed_only_as_a_blocker_keeps_its_claim_and_comes_back_open() {
+        let env = Env::new().await;
+        let held = env.item("gh:acme/api#8").await;
+        claim(&env, &env.bob, held, &["billing"], None).await;
+        let claim_before = stored_claim(&env, held).await;
+        let told = messages(&env, &env.bob).await.len();
+        let before = env.events().await.len();
+        import(
+            &env,
+            batch(vec![
+                listed("gh:acme/web#1", &["gh:acme/api#8"]),
+                blocker("gh:acme/api#8", true),
+            ]),
+        )
+        .await;
+        let kinds = env.kinds_after(before).await;
+        assert_claim_stands(
+            &env,
+            "gh:acme/api#8",
+            claim_before.clone(),
+            &kinds,
+            &env.bob,
+            told,
+        )
+        .await;
+        assert_eq!(item(&env, "gh:acme/api#8").await.source, None);
+        import(
+            &env,
+            batch(vec![
+                listed("gh:acme/web#1", &["gh:acme/api#8"]),
+                blocker("gh:acme/api#8", false),
+            ]),
+        )
+        .await;
+        let reopened = item(&env, "gh:acme/api#8").await;
+        assert!(!reopened.closed);
+        assert_eq!(reopened.status, ItemStatus::Claimed);
+        assert_eq!(stored_claim(&env, held).await, claim_before);
+    }
+
+    #[tokio::test]
+    async fn a_claim_on_an_item_one_source_lists_survives_another_carrying_it_as_a_closed_blocker()
+    {
+        let env = Env::new().await;
+        let tracker = |items| {
+            ImportBatch::new(Some(SourceId::parse("tracker").unwrap()), false, items).unwrap()
+        };
+        import(&env, tracker(vec![listed("gh:acme/api#8", &[])])).await;
+        let held = item(&env, "gh:acme/api#8").await.id;
+        claim(&env, &env.bob, held, &["billing"], None).await;
+        let claim_before = stored_claim(&env, held).await;
+        let told = messages(&env, &env.bob).await.len();
+        let before = env.events().await.len();
+        import(
+            &env,
+            batch(vec![
+                listed("gh:acme/web#1", &["gh:acme/api#8"]),
+                blocker("gh:acme/api#8", true),
+            ]),
+        )
+        .await;
+        let kinds = env.kinds_after(before).await;
+        assert_claim_stands(
+            &env,
+            "gh:acme/api#8",
+            claim_before.clone(),
+            &kinds,
+            &env.bob,
+            told,
+        )
+        .await;
+        import(&env, tracker(vec![listed("gh:acme/api#8", &[])])).await;
+        let listed_again = item(&env, "gh:acme/api#8").await;
+        assert!(!listed_again.closed, "its own source has it open");
+        assert_eq!(listed_again.status, ItemStatus::Claimed);
+        assert_eq!(stored_claim(&env, held).await, claim_before);
+    }
+
+    #[tokio::test]
+    async fn a_listed_item_reported_closed_by_a_batch_naming_no_source_keeps_its_claim() {
+        let env = Env::new().await;
+        import(&env, batch(vec![listed("gh:acme/web#1", &[])])).await;
+        let held = item(&env, "gh:acme/web#1").await.id;
+        claim(&env, &env.bob, held, &["billing"], None).await;
+        let claim_before = stored_claim(&env, held).await;
+        let told = messages(&env, &env.bob).await.len();
+        let before = env.events().await.len();
+        let sourceless =
+            ImportBatch::new(None, false, vec![closed(listed("gh:acme/web#1", &[]))]).unwrap();
+        import(&env, sourceless).await;
+        let kinds = env.kinds_after(before).await;
+        assert_claim_stands(&env, "gh:acme/web#1", claim_before, &kinds, &env.bob, told).await;
+    }
+
+    #[tokio::test]
+    async fn an_imported_item_completed_by_close_and_reported_open_again_is_claimed_again() {
+        let env = Env::new().await;
+        import(&env, batch(vec![listed("gh:acme/web#1", &[])])).await;
+        let held = item(&env, "gh:acme/web#1").await.id;
+        claim(&env, &env.bob, held, &["billing"], None).await;
+        import(&env, batch(vec![closed(listed("gh:acme/web#1", &[]))])).await;
+        assert_eq!(item(&env, "gh:acme/web#1").await.status, ItemStatus::Done);
+        import(&env, batch(vec![listed("gh:acme/web#1", &[])])).await;
+        claim(&env, &env.alice, held, &["billing"], None).await;
+        let back = item(&env, "gh:acme/web#1").await;
+        assert_eq!(back.status, ItemStatus::Claimed, "the claim brings it back");
+        assert_eq!(
+            stored_claim(&env, held).await.map(|claim| claim.member),
+            Some(env.alice.actor.member)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_complete_batch_completes_a_claim_made_on_an_item_it_closed_while_nobody_held_it() {
+        let env = Env::new().await;
+        import(
+            &env,
+            batch(vec![
+                listed("gh:acme/web#1", &[]),
+                listed("gh:acme/web#5", &[]),
+            ]),
+        )
+        .await;
+        let view = complete(vec![listed("gh:acme/web#1", &[])]);
+        import(&env, view.clone()).await;
+        let gone = item(&env, "gh:acme/web#5").await;
+        assert!(gone.closed);
+        assert_eq!(
+            gone.status,
+            ItemStatus::Open,
+            "an open item stays claimable"
+        );
+        claim(&env, &env.bob, gone.id, &["billing"], None).await;
+        let told = messages(&env, &env.bob).await.len();
+        let before = env.events().await.len();
+        let report = import(&env, view.clone()).await;
+        assert!(report.closed.is_empty(), "closed already, not closed again");
+        let kinds = env.kinds_after(before).await;
+        assert_completed(&env, "gh:acme/web#5", env.bob.actor.member, &kinds).await;
+        assert!(
+            !names(&kinds).contains(&"item_updated"),
+            "its facts already said closed: {kinds:?}"
+        );
+        let new = messages(&env, &env.bob).await.split_off(told);
+        assert_eq!(new.len(), 1, "one message to the holder: {new:?}");
+        assert_eq!(new[0].0, "Done in the tracker: Work on gh:acme/web#5");
+        let events = env.events().await.len();
+        let wakes = env.fakes.notifier.calls().len();
+        import(&env, view).await;
+        assert_eq!(
+            env.events().await.len(),
+            events,
+            "the repeat appends nothing"
+        );
+        assert_eq!(env.fakes.notifier.calls().len(), wakes, "and wakes nobody");
     }
 
     #[tokio::test]

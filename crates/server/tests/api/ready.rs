@@ -256,6 +256,125 @@ async fn a_batch_reporting_a_claimed_item_closed_completes_the_claim_and_tells_i
     );
 }
 
+impl Board {
+    /// Claims the item for bob, on his desktop session, with the search area.
+    async fn bob_claims(&self, item: u64) {
+        let session = self.world.session(&self.bob, "desktop").await;
+        let claimed = self
+            .world
+            .post(
+                &self.bob,
+                &format!("/v1/items/{item}/claim"),
+                json!({"session_id": session, "areas": ["search"]}),
+            )
+            .await;
+        assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    }
+
+    async fn completions(&self) -> usize {
+        self.world.get(&self.alice, "/v1/events").await.body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "completed_by_close")
+            .count()
+    }
+
+    async fn holds(&self, item: u64) -> bool {
+        let claims = self.world.get(&self.alice, "/v1/claims").await;
+        assert_eq!(claims.status, StatusCode::OK, "{}", claims.body);
+        claims.body["claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|claim| claim["item"] == item)
+    }
+}
+
+#[tokio::test]
+async fn a_closed_blocker_that_belongs_to_no_source_is_marked_closed_and_keeps_its_claim() {
+    let board = Board::new().await;
+    board.import(two_items()).await;
+    let blocker = board.id("gh:acme/api#7").await;
+    board.bob_claims(blocker).await;
+    board
+        .import(json!({"source": "board", "items": [
+            {"ref": "gh:acme/web#1", "title": "Invoices round wrong", "priority": 1,
+             "areas_hint": ["billing", "payroll"], "source_status": "Todo",
+             "blocked_by": ["gh:acme/api#7"]},
+            {"ref": "gh:acme/api#7", "title": "Rate table", "blocker": true, "closed": true}
+        ]}))
+        .await;
+    assert!(board.holds(blocker).await, "the claim stands");
+    let shown = board
+        .world
+        .get(&board.alice, &format!("/v1/items/{blocker}"))
+        .await;
+    assert_eq!(shown.body["item"]["closed"], true);
+    assert_eq!(shown.body["item"]["status"], "claimed");
+    assert_eq!(board.completions().await, 0);
+}
+
+#[tokio::test]
+async fn a_closed_blocker_of_the_batchs_own_source_completes_the_claim_on_it() {
+    let board = Board::new().await;
+    board
+        .import(json!({"source": "board", "items": [
+            {"ref": "gh:acme/api#7", "title": "Rate table"},
+            {"ref": "gh:acme/web#1", "title": "Invoices round wrong"}
+        ]}))
+        .await;
+    let item = board.id("gh:acme/api#7").await;
+    board.bob_claims(item).await;
+    board
+        .import(json!({"source": "board", "items": [
+            {"ref": "gh:acme/web#1", "title": "Invoices round wrong",
+             "blocked_by": ["gh:acme/api#7"]},
+            {"ref": "gh:acme/api#7", "title": "Rate table", "blocker": true, "closed": true}
+        ]}))
+        .await;
+    assert!(!board.holds(item).await, "the claim is completed");
+    let shown = board
+        .world
+        .get(&board.alice, &format!("/v1/items/{item}"))
+        .await;
+    assert_eq!(shown.body["item"]["status"], "done");
+    assert_eq!(shown.body["item"]["closed"], true);
+    assert_eq!(board.completions().await, 1);
+    let inbox = board.world.get(&board.bob, "/v1/inbox").await;
+    assert_eq!(
+        inbox.body["threads"][0]["thread"]["subject"],
+        "Done in the tracker: Rate table"
+    );
+}
+
+#[tokio::test]
+async fn a_complete_batch_completes_a_claim_on_an_item_it_closed_while_nobody_held_it() {
+    let board = Board::new().await;
+    board.import(two_items()).await;
+    let view = json!({"source": "board", "complete": true, "items": [
+        {"ref": "gh:acme/web#1", "title": "Invoices round wrong", "priority": 1,
+         "areas_hint": ["billing", "payroll"], "source_status": "Todo",
+         "blocked_by": ["gh:acme/api#7"]},
+        {"ref": "gh:acme/api#7", "title": "Rate table", "blocker": true}
+    ]});
+    let item = board.id("gh:acme/web#2").await;
+    assert_eq!(board.import(view.clone()).await["closed"], json!([item]));
+    board.bob_claims(item).await;
+    let answer = board.import(view.clone()).await;
+    assert_eq!(answer["closed"], json!([]), "it was closed already");
+    assert!(!board.holds(item).await, "the claim is completed");
+    let shown = board
+        .world
+        .get(&board.alice, &format!("/v1/items/{item}"))
+        .await;
+    assert_eq!(shown.body["item"]["status"], "done");
+    assert_eq!(board.completions().await, 1);
+    let events = board.events().await;
+    board.import(view).await;
+    assert_eq!(board.events().await, events, "the repeat appends nothing");
+}
+
 #[tokio::test]
 async fn a_batch_is_refused_whole_for_its_shape_and_by_field_for_its_values() {
     let board = Board::new().await;

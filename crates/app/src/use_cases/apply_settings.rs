@@ -28,8 +28,9 @@ pub struct AppliedSettings {
 /// repositories under `repos` — and makes it the project's settings. The document is stored in its
 /// normal form, so applying the same settings again changes nothing and appends no event. A slot
 /// the new settings no longer declare loses its hold, its queue and its offer in the same
-/// transaction, each recorded as ended by the admin. The contract overlaps are derived again under
-/// the new areas, contracts and area dependencies, and those that are new are announced.
+/// transaction, each recorded as ended by the admin. The contract and same-file overlaps are
+/// derived again under the new areas, contracts, area dependencies and hot-file rules: those no
+/// longer found end, and those that are new are announced.
 pub struct ApplySettings {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -90,7 +91,7 @@ impl ApplySettings {
                 settings: &settings,
                 now,
             }
-            .refresh_contracts(&mut work)
+            .adopt_settings(&mut work)
             .await?;
         }
         work.commit(&*self.notifier).await?;

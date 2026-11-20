@@ -41,6 +41,14 @@ const REGENERATED: &str = r#"{
     "hot": [{"paths": ["composer.lock"], "kind": "regenerate"}]
 }"#;
 
+/// The same areas with no hot-file rule, so `composer.lock` is merged by hand.
+const HAND_MERGED: &str = r#"{
+    "areas": [
+        {"name": "billing", "paths": ["src/billing/**"]},
+        {"name": "search", "paths": ["src/search/**"]}
+    ]
+}"#;
+
 fn repo() -> RepoId {
     RepoId::implicit()
 }
@@ -451,6 +459,111 @@ async fn a_settings_change_that_declares_a_contract_finds_the_overlaps_it_makes(
         overlaps(&env).await.is_empty(),
         "without the contract the overlap is gone"
     );
+}
+
+/// Claims `alices` and `bobs` on their own branches, each changing only `composer.lock`.
+async fn both_change_the_lock_file(env: &Env, alices: ItemId, bobs: ItemId) {
+    claim_on(env, &env.alice, alices, "alice/1").await;
+    claim_on(env, &env.bob, bobs, "bob/2").await;
+    report(
+        env,
+        footprint(alices, "alice/1", "abcd", &["composer.lock"]),
+    )
+    .await;
+    report(env, footprint(bobs, "bob/2", "abcd", &["composer.lock"])).await;
+}
+
+#[tokio::test]
+async fn a_settings_change_that_declares_a_file_regenerated_ends_the_overlap_it_alone_made() {
+    let env = Env::with_settings(HAND_MERGED).await;
+    let alices = env.item("gh:acme/widgets#1").await;
+    let bobs = env.item("gh:acme/widgets#2").await;
+    both_change_the_lock_file(&env, alices, bobs).await;
+    let stored = overlaps(&env).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].kind(), OverlapKind::SameFile);
+    assert_eq!(stored[0].paths(), &[path("composer.lock")].into());
+    env.advance(time::Duration::minutes(1));
+    merged(
+        &env,
+        merge(
+            &env,
+            "acme/widgets#9",
+            "main",
+            Some(&["composer.lock"]),
+            None,
+        ),
+    )
+    .await;
+    let mut moved = moved_items(&overlaps(&env).await);
+    moved.sort();
+    assert_eq!(moved, [alices, bobs]);
+
+    ApplySettings::new(&env.deps)
+        .execute(&env.alice.actor, document(REGENERATED))
+        .await
+        .unwrap();
+    let left = overlaps(&env).await;
+    assert!(
+        left.iter()
+            .all(|overlap| overlap.kind() == OverlapKind::MainMoved),
+        "nobody merges composer.lock by hand any more: {left:?}"
+    );
+    let mut kept = moved_items(&left);
+    kept.sort();
+    assert_eq!(kept, [alices, bobs], "the merge already happened: {left:?}");
+}
+
+#[tokio::test]
+async fn a_settings_change_that_drops_a_regenerate_rule_finds_and_announces_the_overlap_once() {
+    let env = Env::with_settings(REGENERATED).await;
+    let alices = env.item("gh:acme/widgets#1").await;
+    let bobs = env.item("gh:acme/widgets#2").await;
+    both_change_the_lock_file(&env, alices, bobs).await;
+    assert!(overlaps(&env).await.is_empty());
+
+    let before = env.events().await.len();
+    let apply = ApplySettings::new(&env.deps);
+    apply
+        .execute(&env.alice.actor, document(HAND_MERGED))
+        .await
+        .unwrap();
+    let stored = overlaps(&env).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].kind(), OverlapKind::SameFile);
+    assert_eq!(stored[0].items(), &[alices, bobs].into());
+    assert_eq!(stored[0].paths(), &[path("composer.lock")].into());
+    assert_eq!(found(&env.kinds_after(before).await), 1);
+    let subject = "Overlap: gh:acme/widgets#1 and gh:acme/widgets#2 change the same files";
+    for who in [&env.alice, &env.bob] {
+        let texts = told_texts(&env, who).await;
+        assert_eq!(texts.len(), 1, "{texts:?}");
+        let (told_subject, text) = &texts[0];
+        assert_eq!(told_subject, subject);
+        assert!(
+            text.contains("change the same files: default:composer.lock. "),
+            "{text}"
+        );
+    }
+
+    let again = env.events().await.len();
+    let applied = apply
+        .execute(&env.alice.actor, document(HAND_MERGED))
+        .await
+        .unwrap();
+    assert!(!applied.changed);
+    assert_eq!(
+        overlaps(&env).await,
+        stored,
+        "the same settings change nothing"
+    );
+    assert!(
+        env.kinds_after(again).await.is_empty(),
+        "and append nothing"
+    );
+    for who in [&env.alice, &env.bob] {
+        assert_eq!(told_texts(&env, who).await.len(), 1, "told once");
+    }
 }
 
 /// A merge of `pr` into `base` now, with `files` and `head` when given.

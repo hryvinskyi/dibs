@@ -309,11 +309,20 @@ impl ReportPr {
                             .join(", ")
                     })
                     .unwrap_or_default();
-                tell_holder(&mut work, &*self.ids, &self.ref_schemes, &claim, "Set aside in review: ", |item, title| {
+                let text = |item: &str, title: &str| {
                     format!(
                         "Pull request {pr} {how}. Your claim on work item {item} \"{title}\" stays in review on {waiting}, but their merges no longer complete it: record the pull request that brings this work in (dibs claim review {item} --pr <owner>/<repo>#<number>), or mark the item done yourself once it is in."
                     )
-                }, now)
+                };
+                tell_holder(
+                    &mut work,
+                    &*self.ids,
+                    &self.ref_schemes,
+                    &claim,
+                    "Set aside in review: ",
+                    text,
+                    now,
+                )
                 .await?;
                 PrReportOutcome::SetAside(claim.item)
             }
@@ -328,11 +337,20 @@ impl ReportPr {
                 )
                 .await?;
                 if !end.delivers() {
-                    tell_holder(&mut work, &*self.ids, &self.ref_schemes, &claim, "Back from review: ", |item, title| {
+                    let text = |item: &str, title: &str| {
                         format!(
                             "Pull request {pr} {how}, so your claim on work item {item} \"{title}\" is no longer in review. You still hold it and its areas; work on it again, record the pull request that brings the work in, or release it."
                         )
-                    }, now)
+                    };
+                    tell_holder(
+                        &mut work,
+                        &*self.ids,
+                        &self.ref_schemes,
+                        &claim,
+                        "Back from review: ",
+                        text,
+                        now,
+                    )
                     .await?;
                 }
                 Announcer {
@@ -365,11 +383,20 @@ impl ReportPr {
                     },
                 )
                 .await?;
-                tell_holder(&mut work, &*self.ids, &self.ref_schemes, &claim, "Done by merge: ", |item, title| {
+                let text = |item: &str, title: &str| {
                     format!(
                         "Pull request {pr} merged; the claim on work item {item} \"{title}\" is done. Its areas are free and the item is done."
                     )
-                }, now)
+                };
+                tell_holder(
+                    &mut work,
+                    &*self.ids,
+                    &self.ref_schemes,
+                    &claim,
+                    "Done by merge: ",
+                    text,
+                    now,
+                )
                 .await?;
                 PrReportOutcome::Completed(claim.item)
             }

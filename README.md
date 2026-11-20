@@ -156,9 +156,12 @@ revokes their tokens and releases everything they held at once. With the Claude 
   never goes stale while it waits. The merge of its last recorded pull request completes it, reported by an integration
   that watches the forge; with `--more`, the merge returns it to work for the next pull request of the item. A pull
   request closed without a merge, or merged into a branch that is not protected, delivers nothing and returns the claim
-  to its holder. A ticket its tracker closes completes its claim at the next import, whatever the claim's state, and its
-  holder is told. Branch names and how a pull request names its ticket are a team's own conventions; the agents'
-  workflow suggests defaults (`bob/42-slug`, `Refs #42`) that many teams use.
+  to its holder. A ticket its tracker closes completes its claim at the next import of that tracker that lists it
+  closed, carries it as a closed blocker, or reads the whole tracker without it, whatever the claim's state, and its
+  holder is told; a ticket that belongs to no importer's source, such as one only ever seen as another tracker's
+  blocker, keeps its claim. Branch names and how a pull request
+  names its ticket are a team's own conventions; the agents' workflow suggests defaults (`bob/42-slug`, `Refs #42`)
+  that many teams use.
 - **Overlap.** Each claim records the branch its holder's checkout is on, and an integration reports what each branch
   changes against its base (its *footprint*). When two members' branches change one file, when one changes a published
   contract (`contracts`) that the other's area depends on (`area_deps`), or when a merge into the base changes files a

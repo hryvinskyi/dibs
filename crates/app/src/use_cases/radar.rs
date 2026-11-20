@@ -250,19 +250,24 @@ impl Radar<'_> {
         self.apply(work, &claims, changes).await
     }
 
-    /// Brings the radar up to settings that changed: the footprints of a repository the project no
-    /// longer lists are dropped with what they made, what each other footprint's paths mean under
-    /// the new areas and contracts is read again, and every contract overlap is derived again.
-    pub(crate) async fn refresh_contracts(&self, work: &mut Work) -> Result<(), AppError> {
+    /// Brings the radar up to settings that changed. The footprints of a repository the project no
+    /// longer lists are dropped with what they made, and what each other footprint's paths mean
+    /// under the new areas and contracts is read again. Then every overlap the settings decide is
+    /// derived again: the same-file and contract overlaps of every claim that has or had a
+    /// footprint, as [`Radar::refresh_item`] derives them, and every contract overlap of the
+    /// project. An overlap the new settings no longer find ends, and one they now find is stored
+    /// and announced as any new overlap is. Moved bases in a repository still listed stay: they
+    /// are about merges that already happened.
+    pub(crate) async fn adopt_settings(&self, work: &mut Work) -> Result<(), AppError> {
         let project = work.project_id();
-        let mut dropped = BTreeSet::new();
+        let mut refreshed = BTreeSet::new();
         for footprint in work.footprints(project).await? {
+            refreshed.insert(footprint.item);
             if self.settings.repo(&footprint.repo).is_none() {
                 work.delete_footprint(project, footprint.item, &footprint.repo)
                     .await?;
                 self.end_moved_bases(work, footprint.item, &footprint.repo)
                     .await?;
-                dropped.insert(footprint.item);
                 continue;
             }
             let Some((_, paths)) = work
@@ -277,7 +282,7 @@ impl Radar<'_> {
                     .await?;
             }
         }
-        for item in dropped {
+        for item in refreshed {
             self.refresh_item(work, item).await?;
         }
         let claims = work.claims(project).await?;

@@ -1,17 +1,21 @@
 //! An importer's batch: the items an outside source lists, with the blockers they wait for, and
 //! the plan that brings the project's items and imported dependencies in line with it.
 //!
-//! The plan changes only what differs from what is stored, and it also names the known items the
-//! source reports closed, whose claims the caller ends; a batch equal to the stored state changes
-//! no item. An importer sends its whole view again and again; each rule below keeps a repeated or
-//! partial view from doing harm:
+//! The plan changes only what differs from what is stored, and it also names the known items whose
+//! claims the caller ends: those the batch speaks for as their source and finds closed. A batch
+//! equal to the stored state changes no item. An importer sends its whole view again and again;
+//! each rule below keeps a repeated or partial view from doing harm:
 //!
 //! - an item the source closed that the project does not know is not created;
 //! - an edge to a reference neither the project nor the batch knows is refused on its own, while a
 //!   closed blocker the project does not know blocks nothing and is dropped;
 //! - only the importer's own edges of an item are replaced, so an edge a person added stays;
 //! - an edge that would close a cycle is refused on its own, and the rest of the batch applies;
-//! - a batch that read the whole source closes that source's open items it did not mention.
+//! - a batch that read the whole source closes that source's open items it did not mention;
+//! - a closed blocker of another source or of none, or an item a batch naming no source reports
+//!   closed, is only marked closed: such a report is not the item's own tracker's word, so the
+//!   claim on it stands; a closed blocker whose stored source is the batch's own is that tracker's
+//!   word, and the claim on it ends as on a listed item.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -53,7 +57,8 @@ pub struct ReportedItem {
     /// Whether the source closed it.
     pub closed: bool,
     /// What the source lists about it; `None` for a blocker the batch carries only because a listed
-    /// item waits for it, which belongs to no source and whose own edges are left as they are.
+    /// item waits for it, which keeps the source it had (none when the batch creates it) and whose
+    /// own edges are left as they are.
     pub listing: Option<Listing>,
 }
 
@@ -211,6 +216,9 @@ pub struct PlannedItem {
     pub reference: ExternalRef,
     /// Whether the batch reports it closed, as a listed item or as a blocker.
     pub closed: bool,
+    /// Whether the batch speaks for it as its source: the batch names a source, and either lists
+    /// it or carries it as a blocker while the item's stored source is that same source.
+    pub spoken_for_by_source: bool,
     /// What happens to it.
     pub change: ItemChange,
     /// The areas of its hint left out.
@@ -258,6 +266,10 @@ pub struct ImportPlan {
     pub items: Vec<PlannedItem>,
     /// The source's items closed because a complete batch did not mention them.
     pub closed: Vec<Closure>,
+    /// The source's claimed items a complete batch did not mention that were closed already: their
+    /// facts say so, so nothing is written for them, but the claims on them end. An open item has
+    /// no claim to end, so it is not in it.
+    pub left_out_closed: Vec<ItemId>,
     /// The imported edges to add.
     pub added: Vec<Dependency>,
     /// The imported edges to remove.
@@ -267,17 +279,27 @@ pub struct ImportPlan {
 }
 
 impl ImportPlan {
-    /// The known items the batch reports closed: each reported item that exists and that the batch
-    /// reports closed, whether that changes it or it was closed already, in the order reported,
-    /// then each item a complete batch closes because it left it out. Each id comes once. An item
-    /// the plan creates is not in it, nor one it skips or refuses.
+    /// The known items the batch finds closed as their source, whose claims end: each known item a
+    /// batch naming its source reports closed, whether that changes it or it was closed already,
+    /// when the batch lists it or carries it as a blocker of that same stored source, in the order
+    /// reported; then each open or claimed item of the source a complete batch leaves out and
+    /// closes now, and each claimed one it leaves out that was closed before. Each id comes once.
+    ///
+    /// An item the plan creates is not in it, nor one it skips or refuses. Neither is a known item
+    /// the batch carries only as a closed blocker while it belongs to another source or to none,
+    /// nor one reported closed by a batch that names no source: such a report only marks the item
+    /// closed, since it is not its own tracker's word.
     pub fn closed_items(&self) -> Vec<ItemId> {
         let reported = self
             .items
             .iter()
-            .filter(|planned| planned.closed)
+            .filter(|planned| planned.closed && planned.spoken_for_by_source)
             .filter_map(|planned| planned.change.known_id());
-        let omitted = self.closed.iter().map(|closure| closure.id);
+        let omitted = self
+            .closed
+            .iter()
+            .map(|closure| closure.id)
+            .chain(self.left_out_closed.iter().copied());
         let mut ids = Vec::new();
         for id in reported.chain(omitted) {
             push_once(&mut ids, id);
@@ -328,26 +350,27 @@ pub fn plan_import(
     {
         let mentioned: BTreeSet<&ExternalRef> =
             batch.items().iter().map(|item| &item.reference).collect();
-        plan.closed = context
-            .known
-            .iter()
-            .filter(|item| {
-                item.source.as_ref() == Some(source)
-                    && !item.meta.closed
-                    && matches!(item.status, ItemStatus::Open | ItemStatus::Claimed)
-                    && item
-                        .reference
-                        .as_ref()
-                        .is_none_or(|reference| !mentioned.contains(reference))
-            })
-            .map(|item| Closure {
-                id: item.id,
-                meta: ItemMeta {
-                    closed: true,
-                    ..item.meta.clone()
-                },
-            })
-            .collect();
+        let left_out = context.known.iter().filter(|item| {
+            item.source.as_ref() == Some(source)
+                && matches!(item.status, ItemStatus::Open | ItemStatus::Claimed)
+                && item
+                    .reference
+                    .as_ref()
+                    .is_none_or(|reference| !mentioned.contains(reference))
+        });
+        for item in left_out {
+            if !item.meta.closed {
+                plan.closed.push(Closure {
+                    id: item.id,
+                    meta: ItemMeta {
+                        closed: true,
+                        ..item.meta.clone()
+                    },
+                });
+            } else if item.status == ItemStatus::Claimed {
+                plan.left_out_closed.push(item.id);
+            }
+        }
     }
     plan
 }
@@ -360,11 +383,16 @@ fn plan_item(
     new_id: &mut dyn FnMut() -> ItemId,
 ) -> PlannedItem {
     let reference = reported.reference.clone();
+    let spoken_for_by_source = batch.source().is_some_and(|source| {
+        reported.listing.is_some()
+            || known.is_some_and(|known| known.source.as_ref() == Some(source))
+    });
     let Some(known) = known else {
         if reported.closed {
             return PlannedItem {
                 reference,
                 closed: reported.closed,
+                spoken_for_by_source,
                 change: ItemChange::SkippedClosed,
                 dropped_hints: Vec::new(),
             };
@@ -380,6 +408,7 @@ fn plan_item(
                 return PlannedItem {
                     reference,
                     closed: reported.closed,
+                    spoken_for_by_source,
                     change: ItemChange::Refused(refused),
                     dropped_hints: Vec::new(),
                 };
@@ -391,6 +420,7 @@ fn plan_item(
         return PlannedItem {
             reference,
             closed: reported.closed,
+            spoken_for_by_source,
             change: ItemChange::Create {
                 id: new_id(),
                 repository,
@@ -418,6 +448,7 @@ fn plan_item(
     PlannedItem {
         reference,
         closed: reported.closed,
+        spoken_for_by_source,
         change,
         dropped_hints,
     }
@@ -987,27 +1018,149 @@ mod tests {
         assert_eq!(
             planned.closed_items(),
             [ItemId(2), ItemId(1), ItemId(5), ItemId(4)],
-            "the reported ones in the order reported, then the one the batch left out"
+            "the ones of its source it reports closed in the order reported, listed or carried as \
+             a blocker, then the one the batch left out"
+        );
+        assert_eq!(
+            planned
+                .closed
+                .iter()
+                .map(|closure| closure.id)
+                .collect::<Vec<_>>(),
+            [ItemId(4)],
+            "the one it carries only as a blocker is mentioned, so not left out"
         );
     }
 
     #[test]
-    fn a_known_item_reported_closed_only_as_a_blocker_is_a_closed_item() {
+    fn a_known_item_its_own_source_reports_closed_only_as_a_blocker_is_a_closed_item() {
         let stored = [
-            known(1, "gh:acme/web#1", board()),
-            known(2, "gh:acme/api#8", None),
+            known(1, "gh:acme/widgets#41", board()),
+            known(2, "gh:acme/widgets#40", board()),
         ];
         let planned = plan(
-            &batch(vec![
-                listed("gh:acme/web#1", &["gh:acme/api#8"]),
-                blocker("gh:acme/api#8", true),
-            ]),
+            &ImportBatch::new(
+                board(),
+                true,
+                vec![
+                    listed("gh:acme/widgets#41", &["gh:acme/widgets#40"]),
+                    blocker("gh:acme/widgets#40", true),
+                ],
+            )
+            .unwrap(),
             &stored,
             &[],
         )
         .plan;
-        assert!(planned.items[1].closed);
-        assert_eq!(planned.closed_items(), [ItemId(2)]);
+        let ItemChange::Update { meta, source, .. } = &planned.items[1].change else {
+            panic!("not an update: {planned:?}");
+        };
+        assert!(meta.closed, "the blocker is marked closed");
+        assert_eq!(source, &board(), "its stored source stays");
+        assert!(planned.closed.is_empty(), "mentioned, so not left out");
+        assert_eq!(
+            planned.closed_items(),
+            [ItemId(2)],
+            "its own source speaks for it, whatever role it plays in the batch"
+        );
+    }
+
+    #[test]
+    fn a_known_item_closed_only_as_a_blocker_of_another_source_or_none_is_not_a_closed_item() {
+        let stored = [
+            known(1, "gh:acme/web#1", board()),
+            known(2, "gh:acme/api#8", None),
+            known(3, "gh:acme/web#9", Some(SourceId::parse("other").unwrap())),
+        ];
+        let reported = vec![
+            listed("gh:acme/web#1", &["gh:acme/api#8", "gh:acme/web#9"]),
+            blocker("gh:acme/api#8", true),
+            blocker("gh:acme/web#9", true),
+        ];
+        for batch in [
+            batch(reported.clone()),
+            ImportBatch::new(None, false, reported).unwrap(),
+        ] {
+            let planned = plan(&batch, &stored, &[]).plan;
+            for planned_blocker in &planned.items[1..] {
+                assert!(planned_blocker.closed);
+                let ItemChange::Update { meta, .. } = &planned_blocker.change else {
+                    panic!("not an update: {planned:?}");
+                };
+                assert!(meta.closed, "the blocker is marked closed");
+            }
+            assert!(
+                planned.closed_items().is_empty(),
+                "not its own source's word: {planned:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listed_closed_item_in_a_batch_naming_no_source_is_not_a_closed_item() {
+        let stored = [known(1, "gh:acme/web#1", board())];
+        let sourceless =
+            ImportBatch::new(None, false, vec![closed(listed("gh:acme/web#1", &[]))]).unwrap();
+        let planned = plan(&sourceless, &stored, &[]).plan;
+        let ItemChange::Update { meta, source, .. } = &planned.items[0].change else {
+            panic!("not an update: {planned:?}");
+        };
+        assert!(meta.closed);
+        assert_eq!(source, &board(), "the stored source stays");
+        assert!(planned.closed_items().is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_listed_closed_item_in_a_batch_naming_a_source_is_a_closed_item_whatever_its_source_was() {
+        let stored = [known(1, "gh:acme/web#1", None)];
+        let planned = plan(
+            &batch(vec![closed(listed("gh:acme/web#1", &[]))]),
+            &stored,
+            &[],
+        )
+        .plan;
+        let ItemChange::Update { source, .. } = &planned.items[0].change else {
+            panic!("not an update: {planned:?}");
+        };
+        assert_eq!(source, &board(), "the batch's source lists it now");
+        assert_eq!(planned.closed_items(), [ItemId(1)]);
+    }
+
+    #[test]
+    fn a_complete_batch_names_the_closed_items_of_its_source_it_leaves_out_and_closes_none_again() {
+        let closed_already = |id, text: &str, source, status| {
+            let mut item = known(id, text, source);
+            item.meta.closed = true;
+            item.status = status;
+            item
+        };
+        let stored = [
+            known(1, "gh:acme/web#1", board()),
+            closed_already(5, "gh:acme/web#5", board(), ItemStatus::Open),
+            closed_already(6, "gh:acme/web#6", board(), ItemStatus::Claimed),
+            closed_already(7, "gh:acme/web#7", board(), ItemStatus::Done),
+            closed_already(
+                8,
+                "gh:acme/web#8",
+                Some(SourceId::parse("other").unwrap()),
+                ItemStatus::Claimed,
+            ),
+            closed_already(9, "gh:acme/web#9", None, ItemStatus::Claimed),
+        ];
+        let complete = ImportBatch::new(board(), true, vec![listed("gh:acme/web#1", &[])]).unwrap();
+        let planned = plan(&complete, &stored, &[]).plan;
+        assert!(
+            planned.closed.is_empty(),
+            "their facts already say closed: {planned:?}"
+        );
+        assert_eq!(
+            planned.left_out_closed,
+            [ItemId(6)],
+            "only a claimed one of the batch's own source has a claim to end"
+        );
+        assert_eq!(planned.closed_items(), [ItemId(6)]);
+        let partial = batch(vec![listed("gh:acme/web#1", &[])]);
+        assert!(plan(&partial, &stored, &[]).plan.closed_items().is_empty());
     }
 
     #[test]
