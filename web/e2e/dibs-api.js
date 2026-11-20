@@ -1,12 +1,13 @@
 // @ts-check
 /**
- * The server's JSON API as the cases use it: start a conversation and post a message as a member,
- * each optionally raised in importance or asking to be acknowledged; acknowledge a message; import
+ * The server's JSON API as the cases use it: apply settings, among them the project's own
+ * repository and areas; start a conversation and post a message as a member, each
+ * optionally raised in importance or asking to be acknowledged; acknowledge a message; import
  * items as an integration does; open a session and claim an item from it, or give areas of a
- * claim up; send a session's
- * heartbeat from a checkout on a branch; report what a claim's branch changes as an integration
- * does; apply settings, take a slot, and escalate a work item to the project's arbiters.
- * Answers are parsed into the few values a case needs; a body of another shape is an error.
+ * claim up; record a pull request on a claim; send a session's heartbeat from a checkout on a
+ * branch; report what a claim's branch changes as an integration does; take a slot; and escalate
+ * a work item to the project's arbiters. Answers are parsed into the few values a case needs; a
+ * body of another shape is an error.
  */
 
 /** How long a request may take, in milliseconds. */
@@ -178,6 +179,34 @@ export async function claimItem(baseUrl, token, itemId, sessionId, claim = {}) {
 }
 
 /**
+ * Opens a session of a member on a machine and claims an item from it.
+ * @param {string} baseUrl
+ * @param {string} token the member's token
+ * @param {number} itemId
+ * @param {string} host
+ * @param {{ areas?: string[], kind?: 'feature' | 'debt' }} [claim]
+ * @returns {Promise<number>} the session's id
+ */
+export async function claimFrom(baseUrl, token, itemId, host, claim = {}) {
+  const session = await openSession(baseUrl, token, host);
+  await claimItem(baseUrl, token, itemId, session, claim);
+  return session;
+}
+
+/**
+ * Records a pull request (`owner/name#N`) on the caller's claim of an item, which puts the claim
+ * in review.
+ * @param {string} baseUrl
+ * @param {string} token the holder's token
+ * @param {number} itemId
+ * @param {string} pr
+ * @returns {Promise<void>}
+ */
+export async function startReview(baseUrl, token, itemId, pr) {
+  await send(baseUrl, token, 'POST', `/v1/items/${itemId}/review`, { pr }, 200);
+}
+
+/**
  * Gives areas of the caller's claim up.
  * @param {string} baseUrl
  * @param {string} token the holder's token
@@ -217,6 +246,30 @@ export async function reportFootprint(baseUrl, token, itemId, footprint) {
     throw new Error('the answer says nothing of whether the footprint was stored');
   }
   return stored;
+}
+
+/**
+ * The settings of the project every case runs in: its repository `api`, at
+ * `https://github.com/acme/widgets` on GitHub, with the areas `billing` (`src/billing/**`) and
+ * `search` (`src/search/**`); `bob` is its arbiter; and the slots given.
+ * @param {{ slots?: { name: string, max_hold: string }[] }} [extra]
+ * @returns {Record<string, unknown>}
+ */
+export function widgetsSettings(extra = {}) {
+  return {
+    repos: [
+      {
+        id: 'api',
+        remote: 'https://github.com/acme/widgets',
+        areas: [
+          { name: 'billing', paths: ['src/billing/**'] },
+          { name: 'search', paths: ['src/search/**'] },
+        ],
+      },
+    ],
+    arbiters: ['bob'],
+    ...(extra.slots ? { slots: extra.slots } : {}),
+  };
 }
 
 /**

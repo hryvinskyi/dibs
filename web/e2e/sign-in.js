@@ -1,10 +1,9 @@
 // @ts-check
 /** Signing a member in through the login page, as every case starts. */
 
-import { expect } from './fixtures.js';
-
 /**
- * Signs in on the login page with `token` and waits for the status page.
+ * Signs in on the login page with `token` and waits for Now, where signing in lands, to have
+ * loaded, its scripts with it.
  * @param {import('@playwright/test').Page} page
  * @param {string} baseUrl
  * @param {string} token
@@ -14,5 +13,5 @@ export async function signIn(page, baseUrl, token) {
   await page.goto(`${baseUrl}/ui/login`);
   await page.getByLabel('Paste your token').fill(token);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(`${baseUrl}/ui/`);
+  await page.waitForURL(`${baseUrl}/ui/`, { waitUntil: 'load' });
 }

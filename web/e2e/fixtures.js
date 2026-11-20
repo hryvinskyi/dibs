@@ -1,8 +1,11 @@
 // @ts-check
 /**
- * The cases' fixtures, and the composition root of the browser suite: one server per worker, the
- * path of its binary read from the environment here and nowhere else, and a page that fails its
- * test when the browser reports a content security policy violation.
+ * The cases' fixtures, and the composition root of the browser suite: a server of its own for each
+ * case, the path of its binary read from the environment here and nowhere else, and a page that
+ * fails its test when the browser reports a content security policy violation.
+ *
+ * Each case starts from an empty project, so that areas, slots and claims one case takes never
+ * stand in another's way, and what a page shows depends on that case alone.
  */
 
 import { existsSync } from 'node:fs';
@@ -38,12 +41,13 @@ function serverBinary() {
  * @typedef {{ dibs: import('./server-process.js').RunningServer }} ServerFixture
  */
 
-/**
- * One server per worker: its binary is resolved when the worker starts.
- * @type {[(fixtures: object, use: (server: import('./server-process.js').RunningServer) => Promise<void>) => Promise<void>, { scope: 'worker' }]}
- */
-const serverFixture = [
-  async ({}, use) => {
+const fixtures = {
+  /**
+   * A server of the case's own, stopped when the case ends.
+   * @param {object} _fixtures
+   * @param {(server: import('./server-process.js').RunningServer) => Promise<void>} use
+   */
+  dibs: async ({}, use) => {
     const server = await startServer(serverBinary());
     try {
       await use(server);
@@ -51,11 +55,6 @@ const serverFixture = [
       await server.stop();
     }
   },
-  { scope: 'worker' },
-];
-
-const fixtures = {
-  dibs: serverFixture,
 
   /**
    * @param {{ page: import('@playwright/test').Page }} fixtures
@@ -69,9 +68,9 @@ const fixtures = {
 };
 
 /**
- * `base` extended with the fixtures above; `extend` cannot infer the worker fixture's type in
+ * `base` extended with the fixtures above; `extend` cannot infer the fixtures' types in
  * JavaScript, so the result is typed here.
- * @type {import('@playwright/test').TestType<TestArgs, WorkerArgs & ServerFixture>}
+ * @type {import('@playwright/test').TestType<TestArgs & ServerFixture, WorkerArgs>}
  */
 export const test = base.extend(fixtures);
 
