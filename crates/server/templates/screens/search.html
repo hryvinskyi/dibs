@@ -1,4 +1,8 @@
 {% extends "shell.html" %}
 {% block title %}Search{% endblock %}
-{% block list %}<div class="bar-top"><h1 tabindex="-1">Search</h1></div>
-<p class="note">Nothing is shown here yet.</p>{% endblock %}
+{% block list %}<div class="bar-top"><h1 tabindex="-1">Search</h1>
+<form class="search-form" method="get" action="/ui/search" role="search"><input class="search" type="search" name="q" value="{{ results.q }}" aria-label="Search everything"></form></div>
+{% block results %}<div class="results" data-region="results">{% match results.shown %}{% when Shown::Hint %}{% call search_hint() %}{% endcall %}{% when Shown::Nothing %}<div class="pal__hint">Nothing in this project matches.</div>{% when Shown::Groups(groups) %}{% for group in groups %}{% if results.palette %}<div role="group" aria-labelledby="hits-{{ group.code }}"><div class="pal__grp label" id="hits-{{ group.code }}">{{ group.heading }}</div>{% else %}<section aria-labelledby="results-{{ group.code }}"><h2 class="pal__grp label" id="results-{{ group.code }}">{{ group.heading }}</h2>{% endif %}
+{% for hit in group.hits %}<div class="pal__row" data-hit{% if results.palette %} role="option" id="hit-{{ hit.n }}" aria-selected="false"{% endif %}><a href="{{ hit.here }}" data-hit-here><div class="t">{{ hit.title }}</div><div class="u">{{ hit.sub }}</div></a>{% if let Some(out) = hit.out %}<a class="ext" href="{{ out.href }}" target="_blank" rel="noopener noreferrer" data-hit-out aria-label="{{ hit.title }} on {{ out.owner }}">↗</a>{% endif %}</div>
+{% endfor %}{% if group.more > 0 %}<p class="pal__more">{{ group.more }} more</p>{% endif %}{% if results.palette %}</div>{% else %}</section>{% endif %}
+{% endfor %}{% endmatch %}</div>{% endblock %}{% endblock %}
