@@ -1,0 +1,1534 @@
+<!--
+  dibs: a static design reference of the web pages, over made-up data.
+
+  Open it from a checkout of this repository (it reads the fonts under web/fonts by relative path);
+  it needs no server and makes no request. The pages themselves are rendered by the server from
+  crates/server/templates and styled by web/src/dibs.css, and they are the source of truth: where
+  this file and they differ, they are right. The stylesheet below is a copy of web/src/dibs.css with
+  its font addresses pointed at web/fonts. Every project, person, ticket, branch and sentence in the
+  data is invented.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Now · widgets · dibs</title>
+<style>
+/* dibs.css — the only stylesheet. Fonts, tokens, base, the shell, the shared components, then one
+   section per screen between its markers. A page without scripts keeps every section visible. */
+
+/* ── Fonts: IBM Plex, Latin-1 subsets, served beside this file ───── */
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("../../web/fonts/IBMPlexSans-Regular-Latin1.woff2") format("woff2");
+  unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02;
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("../../web/fonts/IBMPlexSans-Medium-Latin1.woff2") format("woff2");
+  unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02;
+}
+@font-face {
+  font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("../../web/fonts/IBMPlexSans-SemiBold-Latin1.woff2") format("woff2");
+  unicode-range: U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap;
+  src: url("../../web/fonts/IBMPlexMono-Regular-Latin1.woff2") format("woff2");
+  unicode-range: U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 500; font-display: swap;
+  src: url("../../web/fonts/IBMPlexMono-Medium-Latin1.woff2") format("woff2");
+  unicode-range: U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02;
+}
+@font-face {
+  font-family: "IBM Plex Mono"; font-style: normal; font-weight: 600; font-display: swap;
+  src: url("../../web/fonts/IBMPlexMono-SemiBold-Latin1.woff2") format("woff2");
+  unicode-range: U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02;
+}
+
+/* ── Tokens: every colour is a token; dark follows the system setting ───── */
+:root {
+  color-scheme: light;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --bg: #f6f5fa; --rail: #eeedf5; --surface: #ffffff; --sunk: #f1f0f7;
+  --line: #e2e0ec; --line-2: #cbc8dc;
+  --text: #17162a; --text-2: #55546b; --text-3: #6f6e88;
+  --accent: #6a3de0; --accent-soft: #ece6ff; --on-accent: #ffffff;
+  --ok: #17803f; --warn: #a15c07; --warn-soft: #fdf0d5; --danger: #c0271d; --danger-soft: #fde6e3;
+  --p1: #2f62e0; --p2: #0e8a82; --p3: #c2317d; --p4: #a15c07; --p5: #6a3de0; --p6: #3c7a1e;
+  --shadow: 0 1px 2px rgb(23 22 42 / .06); --float: 0 18px 50px rgb(23 22 42 / .22);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #111119; --rail: #0c0c13; --surface: #181822; --sunk: #14141d;
+    --line: #262635; --line-2: #3a3a50;
+    --text: #eceaf6; --text-2: #a8a6bd; --text-3: #8583a0;
+    --accent: #a78bfa; --accent-soft: #261f47; --on-accent: #14121f;
+    --ok: #4ad67f; --warn: #f5b942; --warn-soft: #33270c; --danger: #f87b70; --danger-soft: #3a1614;
+    --p1: #74a2ff; --p2: #41cfc3; --p3: #f07ab4; --p4: #f5b942; --p5: #a78bfa; --p6: #8fd35f;
+    --shadow: 0 1px 2px rgb(0 0 0 / .4); --float: 0 18px 60px rgb(0 0 0 / .6);
+  }
+}
+
+/* ── Base ───────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 400 14px/1.45 var(--sans); -webkit-font-smoothing: antialiased; }
+h1, h2, h3, p, ul, ol, dl, dd { margin: 0; padding: 0; } ul, ol { list-style: none; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+a { color: inherit; text-decoration: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.skip { position: absolute; left: 8px; top: -100px; z-index: 30; padding: 8px 12px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; }
+.skip:focus { top: 8px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.label { font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--text-3); }
+.dim { color: var(--text-2); } .faint { color: var(--text-3); }
+.pc-1 { --pc: var(--p1); } .pc-2 { --pc: var(--p2); } .pc-3 { --pc: var(--p3); } .pc-4 { --pc: var(--p4); } .pc-5 { --pc: var(--p5); } .pc-6 { --pc: var(--p6); }
+
+/* ── Links: an in-app link underlines on hover, an outside one is the arrow beside the name ───── */
+.lnk:hover, .ref a:hover, .who:hover b, .br a:hover, .file:hover { text-decoration: underline; text-underline-offset: 2px; }
+.ref { font: 500 12px var(--mono); color: var(--text-2); white-space: nowrap; }
+.ref i { font-style: normal; color: var(--text-3); font-weight: 400; }
+.ext { margin-left: 3px; font: 500 12px var(--sans); color: var(--text-3); }
+.ext:hover { color: var(--accent); }
+.who { display: inline-flex; align-items: center; gap: 6px; }
+.who b { font-weight: 500; }
+.area { padding: 0 6px; border-radius: 4px; background: var(--sunk); font: 400 11.5px/1.7 var(--mono); color: var(--text-2); white-space: nowrap; }
+a.area:hover { color: var(--accent); }
+.br { font: 400 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+.file { font: 400 12px var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+
+/* ── Shell: the rail always shows search, people, slots and worktrees; the centre pane holds the view ───── */
+.app { display: grid; grid-template-columns: 272px minmax(0, 1fr); height: 100%; }
+.rail { display: flex; flex-direction: column; gap: 20px; padding: 16px 12px; background: var(--rail); border-right: 1px solid var(--line); overflow-y: auto; }
+.brand { display: flex; align-items: baseline; gap: 8px; padding: 2px 8px 0; }
+.brand b { font: 600 19px/1 var(--mono); letter-spacing: -.03em; }
+.brand b::after { content: "."; color: var(--accent); }
+.brand span span { color: var(--text-3); font-size: 13px; }
+.rail form[data-search] { position: relative; display: flex; align-items: center; gap: 8px; width: 100%; height: 34px; padding: 0 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--surface); color: var(--text-3); font-size: 13px; }
+.rail form[data-search]:hover { border-color: var(--text-3); color: var(--text-2); }
+.rail form[data-search]:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.searchbtn { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; border-radius: 0; background: none; color: var(--text); font: inherit; font-size: 13px; outline: none; appearance: none; -webkit-appearance: none; }
+.searchbtn::placeholder { color: var(--text-3); opacity: 1; }
+.searchbtn::-webkit-search-cancel-button { display: none; }
+kbd { margin-left: auto; padding: 0 5px; border: 1px solid var(--line-2); border-radius: 4px; font: 500 11px var(--mono); color: var(--text-3); }
+.rail form[data-search] kbd { pointer-events: none; }
+.rail h3 { padding: 0 8px 6px; }
+.nav a, .ppl a { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 7px; color: var(--text-2); font-weight: 500; }
+.nav a:hover, .ppl a:hover { background: var(--line); color: var(--text); }
+.nav a[aria-current="page"], .ppl a[aria-current="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.nav .k, .ppl .k { margin-left: auto; font: 500 12px var(--mono); color: var(--text-3); white-space: nowrap; }
+.nav .k--hot { padding: 0 7px; border-radius: 99px; background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.ppl a > span:nth-child(2) { min-width: 0; }
+.ppl small { display: block; font: 400 11px var(--mono); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.av { flex: none; display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; font: 600 10px var(--sans); letter-spacing: .02em; color: var(--pc); background: color-mix(in srgb, var(--pc) 18%, transparent); }
+.av--s { width: 18px; height: 18px; font-size: 9px; }
+.slots summary { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 6px; font: 400 12px var(--mono); color: var(--text-3); cursor: pointer; list-style: none; }
+.slots summary::-webkit-details-marker { display: none; }
+.slots summary:hover { background: var(--line); }
+.slots summary::before { content: ""; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--line-2); }
+.slots .held summary { color: var(--text); } .slots .held summary::before { background: var(--p2); border-color: var(--p2); }
+.slots summary span:last-child { font-family: var(--sans); }
+.slots summary span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slots p { margin: 2px 8px 8px 26px; font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; }
+.wts li { display: grid; gap: 1px; padding: 4px 8px 4px 26px; position: relative; font-size: 12px; color: var(--text-2); }
+.wts li::before { content: ""; position: absolute; left: 9px; top: 9px; width: 7px; height: 7px; border-radius: 50%; background: var(--p1); }
+.wts b { font: 500 12px var(--mono); color: var(--text); }
+.rail__foot { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 0 8px; font-size: 12px; color: var(--text-3); }
+.rail__foot button { margin-left: auto; color: var(--text-2); }
+[data-rail-toggle] { display: none; }
+
+.main { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; }
+.main.split { grid-template-columns: minmax(0, 1fr) 440px; }
+.pane { overflow-y: auto; min-width: 0; }
+.insp { border-left: 1px solid var(--line); background: var(--surface); overflow-y: auto; min-width: 0; }
+
+/* ── State marks: a filled dot works, a ringed one waits in review, a dashed one went silent ───── */
+.s { flex: none; width: 10px; height: 10px; border-radius: 50%; }
+.s--working { background: var(--ok); }
+.s--review { border: 3px solid var(--accent); }
+.s--stale { border: 1.5px dashed var(--warn); }
+
+/* ── Tags and buttons ───────────────────────────────── */
+.tag { display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border-radius: 99px; font-size: 11.5px; font-weight: 500; line-height: 1.75; background: var(--sunk); color: var(--text-2); white-space: nowrap; }
+.tag--warn { background: var(--warn-soft); color: var(--warn); }
+.tag--bad { background: var(--danger-soft); color: var(--danger); }
+.tag--review { background: var(--accent-soft); color: var(--accent); }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px; padding: 0 12px; border: 1px solid var(--line-2); border-radius: 7px; background: var(--surface); font-size: 13px; font-weight: 500; white-space: nowrap; }
+.btn:hover { border-color: var(--text-3); }
+.btn--pri { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.btn--warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.btn--small { height: 24px; padding: 0 9px; border-radius: 6px; font-size: 12px; }
+
+/* ── Forms ──────────────────────────────────────────── */
+.field { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.field label { font-size: 13px; font-weight: 500; }
+.field .hint { font-size: 12px; color: var(--text-3); }
+.input, .textarea { width: 100%; padding: 0 10px; border: 1px solid var(--line-2); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
+.input { height: 34px; }
+.input.mono { font-family: var(--mono); font-size: 13px; }
+.textarea { min-height: 64px; padding: 8px 10px; background: var(--bg); resize: vertical; }
+.input:focus-visible, .textarea:focus-visible { outline-offset: 0; border-color: var(--accent); }
+[aria-invalid="true"] { border-color: var(--danger); }
+.check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; }
+.check input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+
+/* ── Rows: lists of things, one line each ───────────── */
+.bar-top { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 12px 24px; background: color-mix(in srgb, var(--bg) 90%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+.bar-top h1 { font-size: 18px; font-weight: 600; letter-spacing: -.01em; margin-right: 4px; }
+.seg { display: inline-flex; flex-wrap: wrap; padding: 2px; border-radius: 8px; background: var(--sunk); border: 1px solid var(--line); }
+.seg a { padding: 3px 10px; border-radius: 6px; font-size: 13px; font-weight: 500; color: var(--text-2); white-space: nowrap; }
+.seg a[aria-current="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.seg .k { margin-left: 5px; font: 400 11px var(--mono); color: var(--text-3); }
+.search { margin-left: auto; height: 30px; width: 240px; max-width: 100%; padding: 0 10px; border: 1px solid var(--line-2); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; font-size: 13px; }
+.grp { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 18px 24px 6px; }
+.grp .r { margin-left: auto; font-size: 12px; color: var(--text-3); }
+.row { position: relative; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 9px 24px; }
+.row:hover { background: var(--sunk); }
+.row[aria-current="true"] { background: var(--accent-soft); }
+.row__t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.row__t::after { content: ""; position: absolute; inset: 0; }
+.row a:not(.row__t), .row .ext { position: relative; z-index: 1; }
+.row__m { display: flex; gap: 8px; align-items: center; margin-top: 2px; font-size: 12px; color: var(--text-3); overflow: hidden; white-space: nowrap; }
+.row__e { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-3); white-space: nowrap; }
+.row__e .age { min-width: 38px; text-align: right; font-family: var(--mono); }
+.row__e .age--long { color: var(--warn); font-weight: 600; }
+.pri { display: inline-grid; place-items: center; width: 26px; height: 18px; border-radius: 4px; font: 600 11px var(--mono); background: var(--sunk); color: var(--text-3); }
+.pri--1 { background: var(--warn-soft); color: var(--warn); }
+.note { padding: 14px 24px 40px; color: var(--text-3); font-size: 13px; }
+.more { display: block; padding: 8px 24px; font-size: 13px; font-weight: 500; color: var(--accent); }
+.sec { display: grid; gap: 12px; }
+.sec__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.sec__head h2 { font-size: 15px; font-weight: 600; }
+.sec__head p { color: var(--text-3); font-size: 13px; }
+.lines li { display: flex; align-items: baseline; gap: 10px; padding: 3px 0; min-width: 0; font-size: 13px; }
+.lines .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.lines .e { font: 400 12px var(--mono); color: var(--text-3); white-space: nowrap; }
+.rule { padding-top: 10px; border-top: 1px dashed var(--line-2); font-size: 12.5px; color: var(--text-2); }
+.empty { display: grid; place-items: center; height: 100%; padding: 40px; text-align: center; color: var(--text-3); }
+
+/* ── Inspector: one object and every link that leads from it ───── */
+.insp__in { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 18px 22px 32px; }
+.insp__in > *, .blk > *, .callout > * { min-width: 0; }
+.insp__top { display: flex; align-items: center; gap: 10px; }
+.insp__top .r { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.insp__top .x { color: var(--text-3); font-size: 20px; line-height: 1; padding: 2px 4px; }
+.mini { font-size: 12px; font-weight: 500; color: var(--accent); }
+.insp h2 { font-size: 19px; font-weight: 600; letter-spacing: -.015em; line-height: 1.3; text-wrap: balance; }
+.kv { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 8px 12px; font-size: 13px; }
+.kv dt { color: var(--text-3); } .kv dd { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; min-width: 0; }
+.blk { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; }
+.rowlist li { display: flex; align-items: baseline; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; min-width: 0; }
+.rowlist li:first-child { border-top: 0; }
+.rowlist .r { margin-left: auto; font-size: 12px; color: var(--text-3); white-space: nowrap; }
+.rowlist .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+
+/* ── Callouts ───────────────────────────────────────── */
+.callout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 14px; border-radius: 10px; background: var(--warn-soft); font-size: 13px; }
+.callout b { color: var(--warn); font-weight: 600; }
+.callout--bad { background: var(--danger-soft); } .callout--bad b { color: var(--danger); }
+.callout--info { background: var(--accent-soft); } .callout--info b { color: var(--accent); }
+.callout .acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.moved li { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; padding: 5px 0; border-top: 1px solid color-mix(in srgb, var(--warn) 22%, transparent); }
+.moved li:first-child { border-top: 0; }
+.moved .files { display: grid; gap: 1px; }
+.cmd { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px; background: var(--sunk); font: 400 12px var(--mono); }
+.cmd span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmd button { color: var(--accent); font: 600 12px var(--sans); }
+
+/* ── Conversation: messages, who acknowledged, the reply form ───── */
+.msg { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; font-size: 13px; }
+.msg time { color: var(--text-3); font-size: 12px; margin-left: 6px; }
+.msg p { color: var(--text-2); margin-top: 3px; overflow-wrap: anywhere; }
+.msg--high, .msg--urgent { padding-left: 10px; border-left: 3px solid var(--warn); }
+.msg--urgent { border-left-color: var(--danger); }
+.acks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ack-form { display: inline-flex; align-items: center; margin: 0; }
+.reply { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.reply .acts { display: flex; align-items: center; gap: 10px; }
+.pill { position: sticky; bottom: 16px; z-index: 2; justify-self: center; display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 99px; background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 600; box-shadow: var(--float); }
+.conn { display: flex; align-items: center; gap: 8px; width: fit-content; padding: 3px 12px; border-radius: 99px; background: var(--warn-soft); color: var(--warn); font-size: 12px; font-weight: 500; }
+
+/* ── Banners, page notices, toasts ───────────────────── */
+.banner { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 500; }
+.banner__icon { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--text-3); color: var(--on-accent); font-size: 11px; }
+.banner__text { flex: 1 1 14rem; }
+.banner__action { font-weight: 600; color: var(--accent); }
+.banner__action:hover { text-decoration: underline; text-underline-offset: 2px; }
+.banner--warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+.banner--warn .banner__icon { background: var(--warn); }
+.banner--danger { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
+.banner--danger .banner__icon { background: var(--danger); }
+.notices { position: fixed; top: 12px; left: calc(136px + 50%); z-index: 25; display: flex; flex-direction: column; gap: 8px; width: min(560px, calc(100% - 32px)); transform: translateX(-50%); pointer-events: none; }
+.notices .banner { box-shadow: var(--float); pointer-events: auto; }
+.toast-region:not(:empty) { position: fixed; left: 50%; bottom: 24px; z-index: 30; transform: translateX(-50%); padding: 9px 14px; border-radius: 8px; background: var(--text); color: var(--bg); font-size: 13px; box-shadow: var(--float); }
+.notice-page { display: grid; align-content: center; justify-items: center; gap: 12px; min-height: 100%; padding: 40px 24px; text-align: center; color: var(--text-2); }
+.notice-page .banner { width: min(560px, 100%); text-align: left; }
+
+/* ── Sign-in and the ended-session page ─────────────── */
+.login { display: grid; align-content: start; gap: 20px; width: min(380px, 100%); margin: 0 auto; padding: 12vh 0 40px; }
+.login .brand { justify-content: center; padding: 0; }
+.login .brand b { font-size: 26px; }
+.login__card { display: grid; gap: 16px; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+.login__card h1 { font-size: 20px; font-weight: 600; letter-spacing: -.015em; }
+.login__card .btn { width: 100%; height: 36px; }
+.bar-top .nav { display: flex; flex-wrap: wrap; gap: 4px; }
+.bar-top .account { margin-left: auto; font-size: 13px; }
+.bar-top .account a { color: var(--accent); font-weight: 500; }
+
+@media (max-width: 1180px) {
+  .main.split { grid-template-columns: minmax(0, 1fr); }
+  .main.split .insp[data-selected="false"] { display: none; }
+  .main.split .insp[data-selected="true"] { display: block; position: fixed; inset: 0 0 0 auto; z-index: 10; width: min(460px, 100%); box-shadow: var(--float); }
+}
+@media (max-width: 760px) {
+  html, body { height: auto; } .app { display: block; height: auto; }
+  .rail { gap: 10px; padding: 10px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .rail[data-collapsible="true"]:not([data-open="true"]) > section, .rail[data-collapsible="true"]:not([data-open="true"]) .rail__foot { display: none; }
+  .rail .nav { display: block; } .nav ul { display: flex; flex-wrap: wrap; }
+  .brand { justify-content: space-between; }
+  [data-rail-toggle] { display: inline-flex; }
+  .bar-top, .grp, .row, .note, .more { padding-left: 16px; padding-right: 16px; } .search { width: 100%; margin-left: 0; }
+  .row { grid-template-columns: 10px minmax(0, 1fr); } .row__e { grid-column: 2; flex-wrap: wrap; }
+  .notices { left: 50%; }
+}
+
+/* Screen: now */
+.now { max-width: 1240px; margin: 0 auto; padding: 36px 32px 56px; display: grid; gap: 36px; }
+.hello h1 { font-size: 28px; font-weight: 600; letter-spacing: -.02em; }
+.hello p { margin-top: 4px; color: var(--text-2); }
+.needs { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.need { display: flex; flex-direction: column; gap: 12px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); min-width: 0; }
+.need h2 { font-size: 17px; font-weight: 600; letter-spacing: -.01em; line-height: 1.3; text-wrap: balance; }
+.need .label.k-accent { color: var(--accent); } .need .label.k-warn { color: var(--warn); } .need .label.k-bad { color: var(--danger); }
+.need__foot { margin-top: auto; display: flex; flex-wrap: wrap; gap: 8px; padding-top: 4px; }
+.need .sub { font-size: 12.5px; color: var(--text-3); }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 36px; align-items: start; }
+.hb { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow-x: auto; }
+.hb__row { display: grid; grid-template-columns: 150px repeat(6, minmax(92px, 1fr)); align-items: stretch; border-top: 1px solid var(--line); min-width: 720px; }
+.hb__row:first-child { border-top: 0; }
+.hb__row > * { padding: 10px 12px; min-width: 0; }
+.hb__row > * + * { border-left: 1px solid var(--line); }
+.hb__head > * { padding-block: 7px; font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); white-space: nowrap; }
+.hb .old { background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.hb__head .old { color: var(--warn); }
+.dots { display: flex; flex-wrap: wrap; align-content: center; gap: 8px; }
+.sq { width: 16px; height: 16px; border-radius: 4px; background: var(--ok); }
+.sq--review { background: none; border: 4px solid var(--accent); }
+.sq--stale { background: none; border: 1.5px dashed var(--warn); }
+.sq--fin { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3.5px var(--danger); }
+a.sq:hover { transform: scale(1.2); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; color: var(--text-3); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.feed li { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.feed li:first-child { border-top: 0; }
+.feed time { font: 400 12px var(--mono); color: var(--text-3); padding-top: 1px; }
+.feed .t { display: block; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1180px) {
+  .two { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .now { padding: 24px 16px 40px; }
+}
+/* End of screen: now */
+
+/* Screen: claims */
+.claims-filter { margin-left: auto; max-width: 100%; }
+.claims-filter .search { margin-left: 0; }
+.kv .claims-wide { flex-basis: 100%; }
+.claims-overlap { flex-wrap: wrap; }
+.claims-files { display: grid; gap: 1px; flex-basis: 100%; min-width: 0; }
+/* End of screen: claims */
+
+/* Screen: queue */
+.queue-filter { margin-left: auto; max-width: 100%; }
+.queue-filter .search { margin-left: 0; }
+.row--queue { grid-template-columns: 26px minmax(0, 1fr) auto; }
+.pri--0 { background: var(--danger-soft); color: var(--danger); }
+@media (max-width: 760px) {
+  .row--queue { grid-template-columns: 26px minmax(0, 1fr); }
+}
+/* End of screen: queue */
+
+/* Screen: areas */
+.areas-filter { margin-left: auto; max-width: 100%; }
+.areas-filter .search { margin-left: 0; }
+.map { padding: 12px 24px 40px; display: grid; gap: 26px; }
+.map h2 { font-size: 13px; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
+.seats { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.seat { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line); font: 400 12px var(--mono); color: var(--text-3); }
+.seat:hover { border-color: var(--text-3); }
+.seat--held { border-color: transparent; background: color-mix(in srgb, var(--pc) 16%, transparent); color: var(--text); }
+.seat--held::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--pc); }
+.seat--fin { background: none; border: 1px dashed var(--danger); }
+.seat--parked { box-shadow: inset 0 -2px 0 var(--warn); }
+.seat[aria-current="true"] { outline: 2px solid var(--accent); outline-offset: 2px; }
+.seat.off { opacity: .28; }
+.seat .k { font-weight: 600; color: var(--text-2); }
+@media (max-width: 760px) {
+  .map { padding-left: 16px; padding-right: 16px; }
+}
+/* End of screen: areas */
+
+/* Screen: inbox */
+.inbox-filter { margin-left: auto; max-width: 100%; }
+.inbox-filter .search { margin-left: 0; }
+.inbox-newest { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-2); }
+.talk { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.talk__messages { display: grid; gap: 16px; }
+.msg__in { min-width: 0; }
+.msg__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.msg__head time { margin-left: 0; }
+.msg__body { white-space: pre-wrap; }
+.msg--system .msg__head b { color: var(--text-3); font-weight: 500; }
+.talk__ack { display: grid; gap: 6px; margin-top: 8px; }
+.talk .field-error { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--danger); }
+/* End of screen: inbox */
+
+/* Screen: search */
+.pal { position: fixed; inset: 0; z-index: 20; width: 100%; max-width: none; height: 100%; max-height: none; margin: 0; padding: 12vh 16px 16px; border: 0; background: rgb(10 10 20 / .5); color: inherit; align-items: start; justify-items: center; }
+.pal[open] { display: grid; }
+.pal::backdrop { background: transparent; }
+.pal__box { width: min(680px, 100%); max-height: 70vh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; border: 1px solid var(--line-2); border-radius: 12px; background: var(--surface); box-shadow: var(--float); overflow: hidden; }
+.pal input { width: 100%; height: 50px; padding: 0 18px; border: 0; border-bottom: 1px solid var(--line); background: none; color: var(--text); font: inherit; font-size: 16px; outline: none; }
+.pal__list { overflow-y: auto; padding: 6px; }
+.pal__grp { padding: 10px 12px 4px; }
+.pal__row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 7px 12px; border-radius: 7px; }
+.pal__row[aria-selected="true"] { background: var(--accent-soft); }
+.pal__row .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.pal__row .u { font-size: 12px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pal__foot { display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--line); font-size: 12px; color: var(--text-3); }
+.pal__foot kbd { margin: 0 4px 0 0; }
+.pal__hint { padding: 18px; color: var(--text-3); font-size: 13px; display: grid; gap: 6px; }
+.pal__row > a { min-width: 0; color: inherit; text-decoration: none; }
+.pal__more { padding: 4px 12px 8px; font-size: 12px; color: var(--text-3); }
+.search-form { margin-left: auto; }
+.search-form .search { margin-left: 0; }
+.results { max-width: 760px; padding: 8px 12px 24px; }
+.results section + section { margin-top: 4px; }
+.results .pal__row:hover { background: var(--accent-soft); }
+/* End of screen: search */
+
+/* Hidden always wins over a component's own display rule. */
+:root [hidden][hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="app" data-screen="now">
+<aside id="rail" class="rail" data-region="rail" aria-label="Project"></aside>
+<main id="main" class="main"></main>
+</div>
+<dialog class="pal" data-palette aria-label="Search everything"><div class="pal__box">
+  <form method="get" role="search" data-palette-form><input data-palette-input name="q" type="search" role="combobox" aria-expanded="true" aria-controls="palette-results" aria-autocomplete="list" autocomplete="off" placeholder="Search tickets, pull requests, branches, areas, people…" aria-label="Search"></form>
+  <div id="palette-results" class="pal__list" role="listbox" aria-label="Results" data-palette-results><div class="pal__hint"><span>A ticket or pull request number: <span class="mono">42</span>, <span class="mono">#17</span></span><span>An area: <span class="mono">billing</span>, <span class="mono">api:search</span></span><span>A branch, a person, a slot, or words from a title or a conversation</span></div></div>
+  <div class="pal__foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open here</span><span><kbd data-kbd-mac="⌘↵" data-kbd-other="Ctrl ↵">⌘↵</kbd> open outside</span><span><kbd>esc</kbd> close</span></div>
+</div></dialog>
+<div class="notices">
+  <div class="banner banner--warn" role="status" data-changed hidden><span class="banner__icon" aria-hidden="true">↻</span><p class="banner__text">Something changed.</p><a class="banner__action" href="#/">Reload</a></div>
+  <div class="banner banner--danger" role="alert" data-session-ended hidden><span class="banner__icon" aria-hidden="true">▲</span><p class="banner__text">Your session ended.</p><a class="banner__action" href="#/">Sign in</a></div>
+</div>
+<div class="toast-region" data-toast role="status" aria-live="polite" data-copied="Copied" data-copy-failed="Copy failed" data-not-sent="This copy sends nothing."></div>
+<template data-search-hint><div class="pal__hint"><span>A ticket or pull request number: <span class="mono">42</span>, <span class="mono">#17</span></span><span>An area: <span class="mono">billing</span>, <span class="mono">api:search</span></span><span>A branch, a person, a slot, or words from a title or a conversation</span></div></template>
+<script type="module">
+/* The made-up project the pages are drawn over. Times are UTC; "now" is fixed so the page reads the
+   same on every day it is opened. */
+const D = Object.freeze({
+  project: 'widgets',
+  viewer: 'alice',
+  now: '2026-11-18T14:30:00Z',
+  repos: [
+    { id: 'api', remote: 'acme/widgets', areas: [
+      { name: 'accounts', paths: ['src/accounts'] },
+      { name: 'auth', paths: ['src/auth'] },
+      { name: 'billing', paths: ['src/billing'] },
+      { name: 'exports', paths: ['src/exports'] },
+      { name: 'invoices', paths: ['src/invoices', 'templates/invoices'] },
+      { name: 'ledger', paths: ['src/ledger'] },
+      { name: 'notifications', paths: ['src/notify'] },
+      { name: 'payouts', paths: ['src/payouts'] },
+      { name: 'rate-limits', paths: ['src/limits'] },
+      { name: 'refunds', paths: ['src/refunds'], dependsOn: ['api:ledger', 'api:billing'] },
+      { name: 'search', paths: ['src/search'] },
+      { name: 'webhooks', paths: ['src/webhooks'], dependsOn: ['api:notifications'] },
+    ] },
+    { id: 'web', remote: 'acme/site', areas: [
+      { name: 'assets', paths: ['public/assets'] },
+      { name: 'checkout', paths: ['app/checkout'], dependsOn: ['api:billing'] },
+      { name: 'dashboard', paths: ['app/dashboard'] },
+      { name: 'help', paths: ['app/help', 'content/help'] },
+      { name: 'i18n', paths: ['locales'] },
+      { name: 'onboarding', paths: ['app/onboarding'] },
+      { name: 'pages', paths: ['app/pages'] },
+      { name: 'search', paths: ['app/search'] },
+      { name: 'settings', paths: ['app/settings'] },
+      { name: 'styles', paths: ['styles'] },
+    ] },
+  ],
+  members: ['alice', 'bob', 'carol', 'dave'],
+  items: [
+    { id: 101, ref: 'gh:acme/widgets#42', title: 'Refunds reach the ledger the same day', priority: 1, areas: ['api:refunds', 'api:ledger'], status: 'In progress' },
+    { id: 102, ref: 'gh:acme/widgets#57', title: 'Search ranks exact invoice numbers first', priority: 2, areas: ['api:search'], status: 'In review' },
+    { id: 103, ref: 'gh:acme/site#18', title: 'Checkout keeps the basket after sign-in', priority: 1, areas: ['web:checkout', 'web:pages', 'web:styles'], status: 'In progress' },
+    { id: 104, ref: 'gh:acme/widgets#33', title: 'Webhook retries back off', priority: 2, areas: ['api:webhooks', 'api:notifications'], status: 'Closed', closed: true },
+    { id: 105, ref: 'gh:acme/widgets#71', title: 'Export ledger entries as CSV', priority: 3, areas: ['api:exports'], status: 'In progress' },
+    { id: 106, ref: 'gh:acme/widgets#48', title: 'Invoices show the tax line', priority: 2, areas: ['api:invoices'], status: null },
+    { id: 107, ref: 'gh:acme/site#22', title: 'Dashboard loads in under a second', priority: 1, areas: ['web:dashboard', 'web:assets'], status: 'In review' },
+    { id: 108, ref: 'gh:acme/site#25', title: 'Onboarding copy in every locale', priority: 3, areas: ['web:onboarding', 'web:i18n'], status: 'In progress' },
+    { id: 109, ref: 'gh:acme/widgets#64', title: 'Rate limits per account', priority: 2, areas: ['api:rate-limits'], status: 'In progress' },
+    { id: 110, ref: 'gh:acme/widgets#29', title: 'Sign-in tokens expire after a day', priority: 1, areas: ['api:auth', 'api:accounts'], status: 'Closed', closed: true },
+    { id: 111, ref: 'gh:acme/site#40', title: 'Settings page follows the keyboard order', priority: 3, areas: ['web:settings'], status: 'In progress' },
+    { id: 112, ref: 'gh:acme/widgets#80', title: 'Billing emails link the invoice', priority: 2, areas: ['api:billing', 'api:notifications'], status: 'In progress' },
+    { id: 113, ref: 'gh:acme/widgets#86', title: 'Ledger amounts round to the cent', priority: 1, areas: ['api:ledger'], status: 'In review' },
+    { id: 120, ref: 'gh:acme/widgets#91', title: 'Ledger export skips voided entries', priority: 2, areas: [], status: 'Closed', closed: true },
+    { id: 201, ref: 'gh:acme/widgets#97', title: 'Payout batches retry after a bank timeout', priority: 1, areas: ['api:payouts'], status: 'Ready' },
+    { id: 202, ref: 'gh:acme/site#41', title: 'Help pages link to the status page', priority: 2, areas: ['web:help'], status: 'Ready' },
+    { id: 203, ref: 'gh:acme/widgets#102', title: 'Log the request id on every error', priority: 3, areas: [], status: null },
+    { id: 204, ref: 'gh:acme/site#44', title: 'Search page remembers the last query', priority: 1, areas: ['web:search'], status: 'Ready' },
+    { id: 205, ref: 'gh:acme/widgets#104', title: 'Exports stream instead of buffering', priority: 2, areas: ['api:exports'], status: 'Ready' },
+    { id: 206, ref: 'gh:acme/widgets#106', title: 'Rate-limit headers on every answer', priority: 1, areas: ['api:rate-limits'], status: 'Ready' },
+    { id: 207, ref: 'gh:acme/widgets#108', title: 'Payout report per month', priority: 3, areas: ['api:payouts'], status: 'Ready' },
+    { id: 208, ref: 'gh:acme/site#47', title: 'Help search highlights the matched words', priority: 3, areas: ['web:help', 'web:search'], status: 'Ready' },
+    { id: 209, ref: 'gh:acme/widgets#110', title: 'Reject a refund larger than the payment', priority: 0, areas: [], status: 'Ready' },
+    { id: 210, ref: 'gh:acme/widgets#112', title: 'Refund reasons in the ledger', priority: 1, areas: ['api:refunds', 'api:ledger'], status: 'Ready' },
+    { id: 211, ref: 'gh:acme/widgets#114', title: 'Webhook signatures rotate monthly', priority: 2, areas: ['api:webhooks'], status: 'Ready' },
+    { id: 212, ref: 'gh:acme/widgets#116', title: 'Retry a failed webhook from the logs', priority: 2, areas: [], status: 'Ready' },
+    { id: 213, ref: 'gh:acme/site#49', title: 'Checkout shows saved cards', priority: 1, areas: ['web:checkout'], status: 'Ready' },
+    { id: 214, ref: 'gh:acme/site#51', title: 'Dashboard charts in dark mode', priority: 2, areas: ['web:dashboard', 'web:styles'], status: 'Ready' },
+    { id: 215, ref: 'gh:acme/widgets#118', title: 'Account deletion ends every session', priority: 1, areas: ['api:accounts', 'api:auth'], status: 'Ready' },
+    { id: 216, ref: 'gh:acme/widgets#120', title: 'Invoice numbers per country', priority: 2, areas: ['api:invoices'], status: 'Ready' },
+    { id: 217, ref: 'gh:acme/site#53', title: 'Translate the settings page', priority: 3, areas: ['web:settings', 'web:i18n'], status: null },
+    { id: 218, ref: 'gh:acme/widgets#122', title: 'Billing address on the invoice PDF', priority: 2, areas: ['api:billing'], status: 'Ready' },
+    { id: 219, ref: 'gh:acme/site#55', title: 'Onboarding checklist remembers progress', priority: 3, areas: ['web:onboarding'], status: 'Ready' },
+    { id: 220, ref: 'gh:acme/widgets#124', title: 'Notify on a failed payout', priority: 2, areas: ['api:notifications', 'api:payouts'], status: 'Ready' },
+  ],
+  claims: [
+    { item: 101, holder: 'alice', host: 'alice-laptop', claimedAt: '2026-11-16T09:20:00Z', seenAt: '2026-11-18T14:26:00Z', branches: [{ repo: 'api', name: 'alice/42-refunds' }], prs: [] },
+    { item: 102, holder: 'alice', host: 'alice-laptop', claimedAt: '2026-11-14T15:00:00Z', seenAt: '2026-11-18T13:10:00Z', branches: [{ repo: 'api', name: 'alice/57-search-rank' }], prs: ['acme/widgets#61'], review: true },
+    { item: 111, holder: 'alice', host: 'alice-laptop', claimedAt: '2026-11-03T10:00:00Z', seenAt: '2026-11-18T14:26:00Z', branches: [{ repo: 'web', name: 'alice/40-settings-focus' }], prs: [] },
+    { item: 103, holder: 'bob', host: 'bob-desk', claimedAt: '2026-11-09T10:00:00Z', seenAt: '2026-11-18T14:20:00Z', branches: [{ repo: 'web', name: 'bob/18-basket' }], prs: [] },
+    { item: 104, holder: 'bob', host: 'bob-desk', claimedAt: '2026-11-06T08:30:00Z', seenAt: '2026-11-18T14:20:00Z', branches: [{ repo: 'api', name: 'bob/33-webhook-retries' }], prs: [] },
+    { item: 109, holder: 'bob', host: 'bob-desk', claimedAt: '2026-11-16T12:00:00Z', seenAt: '2026-11-18T09:15:00Z', branches: [{ repo: 'api', name: 'main' }], prs: [], silent: true },
+    { item: 105, holder: 'carol', host: 'carol-laptop', claimedAt: '2026-11-12T11:00:00Z', seenAt: '2026-11-16T17:45:00Z', branches: [{ repo: 'api', name: 'carol/71-export-csv' }], prs: [], silent: true },
+    { item: 106, holder: 'carol', host: 'carol-laptop', claimedAt: '2026-11-17T09:00:00Z', seenAt: '2026-11-18T14:28:00Z', branches: [{ repo: 'api', name: 'carol/45-invoice-tax' }], prs: [], debt: true },
+    { item: 110, holder: 'carol', host: 'carol-laptop', claimedAt: '2026-10-27T10:00:00Z', seenAt: '2026-11-18T14:28:00Z', branches: [{ repo: 'api', name: 'carol/29-token-expiry' }], prs: [] },
+    { item: 113, holder: 'carol', host: 'carol-laptop', claimedAt: '2026-11-13T10:30:00Z', seenAt: '2026-11-18T14:15:00Z', branches: [{ repo: 'api', name: 'carol/90-ledger-rounding' }], prs: ['acme/widgets#88'], review: true },
+    { item: 107, holder: 'dave', host: 'dave-laptop', claimedAt: '2026-11-15T13:40:00Z', seenAt: '2026-11-18T14:00:00Z', branches: [{ repo: 'web', name: 'dave/22-dashboard-speed' }], prs: ['acme/site#30'], review: true,
+      wide: { reason: 'Every chart script moves under web:assets, and the charts take their colours from web:styles.', areas: [{ area: 'web:styles', holder: 'bob', granted: true }, { area: 'web:help', holder: null }] } },
+    { item: 108, holder: 'dave', host: 'dave-laptop', claimedAt: '2026-11-18T08:45:00Z', seenAt: '2026-11-18T14:29:00Z', branches: [{ repo: 'web', name: 'dave/25-onboarding-copy' }], prs: [] },
+    { item: 112, holder: 'dave', host: 'build-02', claimedAt: '2026-11-18T11:30:00Z', seenAt: '2026-11-18T14:25:00Z', branches: [{ repo: 'api', name: 'dave/80_billing-emails' }], prs: [] },
+  ],
+  collisions: [
+    { claims: [101, 113], contract: false, files: [{ repo: 'api', path: 'src/ledger/entry.rs' }, { repo: 'api', path: 'src/ledger/round.rs' }] },
+    { claims: [103, 107], contract: true, files: [{ repo: 'web', path: 'app/checkout/basket.ts' }] },
+  ],
+  merged: [
+    { pr: 'acme/widgets#77', claims: [101, 113], files: [{ repo: 'api', path: 'src/ledger/post.rs' }, { repo: 'api', path: 'src/ledger/entry.rs' }, { repo: 'api', path: 'src/ledger/balance.rs' }, { repo: 'api', path: 'src/ledger/mod.rs' }] },
+  ],
+  queue: [
+    { item: 209 }, { item: 201 }, { item: 204 }, { item: 206, wasHeldBy: 'bob' }, { item: 202 }, { item: 205, wasHeldBy: 'carol' },
+    { item: 203 }, { item: 207 }, { item: 208 },
+    { item: 210, reasons: [{ area: 'api:refunds', holder: 'alice', claim: 101 }, { area: 'api:ledger', holder: 'carol', claim: 113 }] },
+    { item: 211, reasons: [{ area: 'api:webhooks', holder: 'bob', claim: 104 }] },
+    { item: 212, reasons: [{ waitsFor: [211] }] },
+    { item: 213, reasons: [{ area: 'web:checkout', holder: 'bob', claim: 103 }] },
+    { item: 214, reasons: [{ area: 'web:dashboard', holder: 'dave', claim: 107 }, { area: 'web:styles', holder: 'bob', claim: 103 }] },
+    { item: 215, reasons: [{ area: 'api:accounts', holder: 'carol', claim: 110 }] },
+    { item: 216, reasons: [{ area: 'api:invoices', holder: 'carol', claim: 106 }] },
+    { item: 217, reasons: [{ area: 'web:settings', holder: 'alice', claim: 111 }, { area: 'web:i18n', holder: 'dave', claim: 108 }] },
+    { item: 218, reasons: [{ area: 'api:billing', holder: 'dave', claim: 112 }, { waitsFor: [216] }] },
+    { item: 219, reasons: [{ area: 'web:onboarding', holder: 'dave', claim: 108 }] },
+    { item: 220, reasons: [{ area: 'api:notifications', holder: 'bob', claim: 104 }] },
+  ],
+  threads: [
+    { id: 301, subject: 'Does the refund event keep amount_cents?', author: 'bob', to: ['alice'], item: 101, importance: 'normal', unread: 1, messages: [
+      { id: 3011, author: 'bob', label: 's-41c2', at: '2026-11-18T13:52:00Z', text: 'api:refunds adds ledger_id to the refund event. Does the site still read amount_cents? The payload is described at https://docs.example.com/events#refund.' },
+    ] },
+    { id: 303, subject: 'Staging after 15:00', author: 'dave', to: ['alice', 'bob'], item: null, importance: 'normal', unread: 1, messages: [
+      { id: 3031, author: 'dave', label: 's-77d0', at: '2026-11-18T12:10:00Z', text: 'I hold staging-deploy until 15:00 for gh:acme/site#22. Acknowledge if you need it after that.', ack: [{ handle: 'alice', at: null }, { handle: 'bob', at: '2026-11-18T12:31:00Z' }] },
+    ] },
+    { id: 302, subject: 'Ledger rounding: half up or half to even?', author: 'carol', to: null, item: 113, importance: 'high', unread: 2, messages: [
+      { id: 3021, author: 'carol', label: 's-9a07', at: '2026-11-17T16:05:00Z', text: 'gh:acme/widgets#86 rounds half to even; #42 expects half up. acme/widgets#88 holds the change.' },
+      { id: 3022, author: 'dave', label: 's-c3e1', at: '2026-11-17T17:20:00Z', text: 'Half to even matches the bank files in api:ledger. This needs an arbiter.' },
+    ] },
+    { id: 304, subject: 'Wording of the tax line', author: 'alice', to: ['carol'], item: 106, importance: 'normal', unread: 0, messages: [
+      { id: 3041, author: 'alice', label: 's-2b18', at: '2026-11-17T10:00:00Z', text: 'Should the tax line on site invoices say VAT or tax?' },
+      { id: 3042, author: 'carol', label: 's-e4f0', at: '2026-11-17T10:40:00Z', text: 'Tax: some countries call it GST. The wording lives in api:invoices.' },
+    ] },
+    { id: 307, subject: 'Webhook retries are merged', author: 'bob', to: null, item: 104, importance: 'normal', unread: 0, messages: [
+      { id: 3071, author: 'bob', label: 's-41c2', at: '2026-11-17T18:02:00Z', text: 'acme/widgets#70 merged the retries. I complete the claim after the release.' },
+    ] },
+    { id: 305, subject: 'Grant api:ledger to widgets#80', author: 'dave', to: ['alice'], item: 112, importance: 'normal', unread: 1, messages: [
+      { id: 3051, author: 'dave', label: 's-5d91', at: '2026-11-18T14:05:00Z', text: 'Billing emails read posted entries through api:ledger for gh:acme/widgets#80. May the claim on gh:acme/widgets#42 grant it?' },
+    ] },
+    { id: 306, subject: 'Grant web:settings to site#18', author: 'bob', to: ['alice'], item: 103, importance: 'normal', unread: 1, messages: [
+      { id: 3061, author: 'bob', label: 's-41c2', at: '2026-11-18T14:24:00Z', text: 'Checkout links to the settings page in web:settings for gh:acme/site#18.' },
+    ] },
+    { id: 310, subject: 'The base moved under gh:acme/widgets#42', author: null, to: ['alice'], item: 101, importance: 'normal', unread: 1, messages: [
+      { id: 3101, author: null, at: '2026-11-18T11:02:00Z', text: 'acme/widgets#77 merged and changed 2 files gh:acme/widgets#42 also changes: src/ledger/entry.rs and src/ledger/post.rs.' },
+    ] },
+    { id: 311, subject: 'gh:acme/widgets#86 changes the same files as gh:acme/widgets#42', author: null, to: ['alice'], item: 101, importance: 'normal', unread: 0, messages: [
+      { id: 3111, author: null, at: '2026-11-18T09:40:00Z', text: 'Both claims change src/ledger/entry.rs and src/ledger/round.rs. The second to merge rebases onto the first.' },
+    ] },
+    { id: 314, subject: 'gh:acme/site#40 has been held for 15 days', author: null, to: ['alice'], item: 111, importance: 'normal', unread: 0, messages: [
+      { id: 3141, author: null, at: '2026-11-18T08:00:00Z', text: 'Its 1 area, web:settings, stays taken while it waits.' },
+    ] },
+    { id: 315, subject: 'The slot staging-deploy is held until 15:00', author: null, to: null, item: null, importance: 'normal', unread: 0, messages: [
+      { id: 3151, author: null, at: '2026-11-18T13:00:00Z', text: 'bob took staging-deploy for 2 h.' },
+    ] },
+  ],
+  grants: [
+    { thread: 305, asker: 'dave', area: 'api:ledger', item: 112, holder: 101, askedAt: '2026-11-18T14:05:00Z' },
+    { thread: 306, asker: 'bob', area: 'web:settings', item: 103, holder: 111, askedAt: '2026-11-18T14:24:00Z' },
+  ],
+  escalations: [{ thread: 302, by: 'dave', at: '2026-11-17T17:21:00Z', arbiters: ['bob'] }],
+  slots: [
+    { name: 'staging-deploy', holder: 'bob', note: 'Deploying gh:acme/site#22 to https://staging.example.com', maxHold: { days: 0, hours: 2, minutes: 0 }, group: 'deploys' },
+    { name: 'db-migrate', holder: null, note: 'One schema change at a time on the shared database', maxHold: { days: 0, hours: 0, minutes: 30 }, group: null },
+  ],
+  worktrees: [{ worktree: 'worktree2', holder: 'alice', byAgent: true, since: '2026-11-18T13:58:00Z', purpose: 'Rebasing onto acme/widgets#77 before review', item: 101 }],
+  finished: [{ item: 120, by: 'bob', at: '2026-11-18T10:20:00Z' }],
+});
+
+/* ── Nodes: every piece of data becomes a text node; nothing is parsed as markup ───── */
+function add(parent, kids) {
+  for (const kid of kids.flat(Infinity)) {
+    if (kid === null || kid === undefined || kid === false || kid === '') continue;
+    parent.append(kid instanceof Node ? kid : String(kid));
+  }
+  return parent;
+}
+function h(tag, attrs, ...kids) {
+  const node = document.createElement(tag);
+  for (const [name, value] of Object.entries(attrs ?? {})) {
+    if (value === null || value === undefined || value === false) continue;
+    node.setAttribute(name, value === true ? '' : String(value));
+  }
+  return add(node, kids);
+}
+const frag = (...kids) => add(document.createDocumentFragment(), kids);
+const outsideAttrs = (link) => (link.outside ? { target: '_blank', rel: 'noopener noreferrer' } : {});
+const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
+
+/* ── Moments: a UTC wall clock, and how long ago in the units a person reads at a glance ───── */
+const NOW = Date.parse(D.now);
+const MINUTE = 60_000, HOUR = 60 * MINUTE, DAY = 24 * HOUR;
+const pad = (n) => String(n).padStart(2, '0');
+function ago(iso) {
+  const elapsed = NOW - Date.parse(iso);
+  const minutes = Math.floor(elapsed / MINUTE);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(elapsed / HOUR);
+  return hours < 24 ? `${hours} h` : `${Math.floor(elapsed / DAY)} d`;
+}
+function clock(iso) {
+  const at = new Date(iso), now = new Date(NOW);
+  const time = `${pad(at.getUTCHours())}:${pad(at.getUTCMinutes())}`;
+  const day = (d) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+  return day(at) === day(now) ? time : `${day(at)} ${time}`;
+}
+const timeEl = (iso) => h('time', { datetime: iso, 'data-clock': true }, clock(iso));
+function since(iso) {
+  const text = ago(iso);
+  return frag(timeEl(iso), ' ', h('span', { class: 'faint' }, '· ', text === 'just now' ? text : `${text} ago`));
+}
+const heldDays = (iso) => Math.floor((NOW - Date.parse(iso)) / DAY);
+
+/* ── People: initials and a colour that depend on the handle alone ───── */
+const SEPARATORS = ['-', '_', '.'];
+function initials(handle) {
+  const chars = [...handle];
+  if (chars.length === 0) return '';
+  let second = null;
+  for (let i = 0; i + 1 < chars.length && second === null; i += 1) {
+    if (SEPARATORS.includes(chars[i]) && !SEPARATORS.includes(chars[i + 1])) second = chars[i + 1];
+  }
+  second ??= chars.slice(1).find((c) => !SEPARATORS.includes(c)) ?? '';
+  return (chars[0] + second).toUpperCase();
+}
+function colour(handle) {
+  let hash = 0x811c9dc5;
+  for (const byte of new TextEncoder().encode(handle)) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+  return (hash % 6) + 1;
+}
+const personView = (handle) => ({ handle, initials: initials(handle), colour: colour(handle), href: `#/claims?who=${encodeURIComponent(handle)}` });
+
+/* ── The project: repositories, items, claims, the queue ───── */
+const FORGE = 'https://github.com/';
+const FORGE_NAME = 'GitHub', TRACKER_NAME = 'the tracker';
+const REPOS = new Map(D.repos.map((r) => [r.id, r]));
+const REPO_OF_REMOTE = new Map(D.repos.map((r) => [r.remote, r]));
+const AREAS = new Map(D.repos.flatMap((r) => r.areas.map((a) => [`${r.id}:${a.name}`, { repo: r.id, ...a }])));
+const ITEMS = new Map(D.items.map((i) => [i.id, i]));
+const CLAIMS = new Map(D.claims.map((c) => [c.item, c]));
+const QUEUED = new Map(D.queue.map((q) => [q.item, q]));
+const THREADS = new Map(D.threads.map((t) => [t.id, t]));
+const encodePath = (path) => path.split('/').map(encodeURIComponent).join('/');
+const search = (text) => ({ href: `#/search?q=${encodeURIComponent(text)}`, outside: false });
+const inside = (href) => ({ href, outside: false });
+const outside = (href) => ({ href, outside: true });
+function parseNumbered(text) {
+  const found = /^(?:gh:)?([\w.-]+\/[\w.-]+)#(\d+)$/.exec(text);
+  return found ? { path: found[1], number: Number(found[2]) } : null;
+}
+const homeOf = (item) => {
+  const ref = item && parseNumbered(item.ref);
+  return ref ? REPO_OF_REMOTE.get(ref.path)?.id ?? null : null;
+};
+
+/* ── Link views: each reference carries a label, a title, an address here and one outside ───── */
+function ticketView(id) {
+  const item = ITEMS.get(id);
+  const title = item ? item.ref : `#${id}`;
+  const ref = item ? parseNumbered(item.ref) : null;
+  const label = ref ? `${ref.path.split('/').pop()}#${ref.number}` : title;
+  const tracker = ref ? outside(`${FORGE}${ref.path}/issues/${ref.number}`) : null;
+  const place = CLAIMS.has(id) ? `#/claims/${id}` : QUEUED.has(id) ? `#/queue/${id}` : null;
+  const main = place ? inside(place) : tracker ?? search(title);
+  return { id, label, title, main, out: place ? tracker : null, outName: TRACKER_NAME };
+}
+function pullRequestView(text) {
+  const pr = parseNumbered(text);
+  const reviewing = D.claims.find((c) => c.prs.includes(text));
+  const forge = pr && REPO_OF_REMOTE.has(pr.path) ? outside(`${FORGE}${pr.path}/pull/${pr.number}`) : null;
+  const merged = D.merged.some((m) => m.pr === text) ? `#/claims?q=${encodeURIComponent(text)}` : null;
+  const here = reviewing ? `#/claims/${reviewing.item}` : merged;
+  return {
+    label: pr ? `${pr.path.split('/').pop()}#${pr.number}` : text,
+    title: text,
+    number: pr?.number ?? null,
+    main: here ? inside(here) : forge ?? search(text),
+    out: here && forge ? { link: forge, name: FORGE_NAME } : null,
+  };
+}
+const forgeOf = (repo) => REPOS.get(repo)?.remote ?? null;
+function branchView(repo, name) {
+  const remote = forgeOf(repo);
+  return { label: name, main: remote ? outside(`${FORGE}${remote}/tree/${encodePath(name)}`) : inside(`#/claims?q=${encodeURIComponent(name)}`) };
+}
+function fileView(repo, path, at) {
+  const remote = forgeOf(repo);
+  return { label: path, title: `${repo}:${path}`, main: remote ? outside(`${FORGE}${remote}/blob/${encodePath(at)}/${encodePath(path)}`) : search(`${repo}:${path}`) };
+}
+function directoryView(repo, directory) {
+  const remote = forgeOf(repo);
+  const label = directory === '' ? '/' : directory;
+  return { label, title: `${repo}:${label}`, main: remote ? outside(`${FORGE}${remote}/tree/HEAD/${encodePath(directory)}`) : search(`${repo}:${label}`) };
+}
+const areaView = (full) => ({ label: full.slice(full.indexOf(':') + 1), full, href: `#/areas/${full}` });
+const conversationHref = (id) => `#/inbox/${id}`;
+
+/* ── References inside free text: found in order, linked where an address can be built ───── */
+const REFERENCE = /(https?:\/\/[^\s<>"]+)|\bgh:([\w.-]+\/[\w.-]+#\d+)\b|\b([\w.-]+\/[\w.-]+)#(\d+)\b|\b([a-z][\w-]*:[a-z][\w-]*)\b|(?<![\w/#])#(\d+)\b/g;
+const TRAILING = /[.,;:!?)\]]+$/;
+const FINDER_GROUPS = Object.freeze([1, 2, 3, 5, 6]);
+const FINDERS = [
+  (m) => { const url = m[1].replace(TRAILING, ''); return { text: url, link: outside(url) }; },
+  (m) => { const item = D.items.find((i) => i.ref === `gh:${m[2]}`); const ref = parseNumbered(m[2]); return { text: m[0], link: item ? ticketView(item.id).main : outside(`${FORGE}${ref.path}/issues/${ref.number}`) }; },
+  (m) => (REPO_OF_REMOTE.has(m[3]) ? { text: m[0], link: outside(`${FORGE}${m[3]}/issues/${m[4]}`) } : { text: m[0], link: null }),
+  (m) => (AREAS.has(m[5]) ? { text: m[0], link: inside(areaView(m[5]).href) } : { text: m[0], link: null }),
+  (m, home) => (home ? { text: m[0], link: outside(`${FORGE}${forgeOf(home)}/issues/${m[6]}`) } : { text: m[0], link: null }),
+];
+function linkedText(text, home = null) {
+  const pieces = [];
+  const push = (piece) => {
+    const last = pieces.at(-1);
+    if (piece.link === null && last && last.link === null) last.text += piece.text;
+    else pieces.push(piece);
+  };
+  let at = 0;
+  for (const m of text.matchAll(REFERENCE)) {
+    const found = FINDERS[FINDER_GROUPS.findIndex((g) => m[g] !== undefined)](m, home);
+    if (m.index > at) push({ text: text.slice(at, m.index), link: null });
+    push(found);
+    at = m.index + found.text.length;
+  }
+  if (at < text.length) push({ text: text.slice(at), link: null });
+  return pieces;
+}
+const plainText = (pieces) => pieces.map((p) => p.text).join('');
+
+/* ── The link macros, as the templates write them ───── */
+const L = {
+  out: (link, title, name) => h('a', { class: 'ext', href: link.href, target: '_blank', rel: 'noopener noreferrer', title: `${title} on ${name}`, 'aria-label': `${title} on ${name}` }, '↗'),
+  ticket: (t) => h('span', { class: 'ref' }, h('a', { href: t.main.href, title: t.title, ...outsideAttrs(t.main) }, t.label), t.out && L.out(t.out, t.title, t.outName)),
+  person: (p, small) => h('a', { class: 'who', href: p.href }, h('span', { class: `av${small ? ' av--s' : ''} pc-${p.colour}`, 'aria-hidden': 'true' }, p.initials), h('b', {}, p.handle)),
+  linked: (pieces) => pieces.map((p) => (p.link ? h('a', { class: 'lnk', href: p.link.href, ...outsideAttrs(p.link) }, p.text) : p.text)),
+  area: (a, full) => h('a', { class: 'area', href: a.href, title: a.full }, full ? a.full : a.label),
+  pullRequest: (p) => h('span', { class: 'ref' }, h('a', { href: p.main.href, title: p.title, ...outsideAttrs(p.main) }, p.label), p.out && L.out(p.out.link, p.title, p.out.name)),
+  branch: (b) => h('span', { class: 'br' }, h('a', { href: b.main.href, title: b.label, ...outsideAttrs(b.main) }, b.label)),
+  file: (f) => h('a', { class: 'file', href: f.main.href, title: f.title, ...outsideAttrs(f.main) }, f.label),
+  directory: (d) => h('span', { class: 'file' }, h('a', { href: d.main.href, title: d.title, ...outsideAttrs(d.main) }, d.label)),
+  conversation: (c) => h('span', { class: 't' }, c.subject.map((p) => (p.link ? h('a', { class: 'lnk', href: p.link.href, ...outsideAttrs(p.link) }, p.text) : h('a', { class: 'lnk', href: c.href }, p.text)))),
+};
+
+/* ── Classifications of a claim ───── */
+const itemOf = (claim) => ITEMS.get(claim.item);
+const finished = (claim) => itemOf(claim).closed === true;
+const silent = (claim) => claim.silent === true;
+const activity = (claim) => (claim.review ? 'review' : silent(claim) ? 'silent' : 'working');
+const MARKS = Object.freeze({ working: 'working', review: 'review', silent: 'stale' });
+const heldOverAWeek = (claim) => !silent(claim) && !claim.review && !finished(claim) && NOW - Date.parse(claim.claimedAt) > 7 * DAY;
+function otherTicket(claim) {
+  const own = parseNumbered(itemOf(claim).ref)?.number;
+  for (const branch of claim.branches) {
+    const found = /^(\d+)(?:[-_.]|$)/.exec(branch.name.split('/').pop());
+    if (found && own !== undefined && Number(found[1]) !== own) {
+      const ref = parseNumbered(itemOf(claim).ref);
+      return { number: Number(found[1]), link: outside(`${FORGE}${ref.path}/issues/${found[1]}`), branch };
+    }
+  }
+  return null;
+}
+const heldAreas = (claim) => (silent(claim) ? [] : itemOf(claim).areas);
+const AGES = Object.freeze([
+  { name: 'In review', old: false, holds: (c) => c.review },
+  { name: 'Under a day', old: false, holds: (c, d) => !c.review && d < 1 },
+  { name: '1–7 days', old: false, holds: (c, d) => !c.review && d >= 1 && d < 7 },
+  { name: '1–2 weeks', old: true, holds: (c, d) => !c.review && d >= 7 && d < 14 },
+  { name: '2–3 weeks', old: true, holds: (c, d) => !c.review && d >= 14 && d < 21 },
+  { name: 'Over 3 weeks', old: true, holds: (c, d) => !c.review && d >= 21 },
+]);
+const claimText = (claim) => [itemOf(claim).ref, itemOf(claim).title, claim.holder, ...itemOf(claim).areas, ...claim.branches.map((b) => b.name), ...claim.prs].join(' ');
+const holdersOf = (full) => D.claims.filter((c) => heldAreas(c).includes(full));
+function areaState(full) {
+  const holders = holdersOf(full);
+  if (holders.length === 0) return { held: false, modifiers: '' };
+  if (holders.every(finished)) return { held: true, modifiers: ' seat--held seat--fin' };
+  if (holders.every((c) => heldOverAWeek(c) || finished(c))) return { held: true, modifiers: ' seat--held seat--parked' };
+  return { held: true, modifiers: ' seat--held' };
+}
+
+/* ── The matching rule every list and the search share ───── */
+function matches(query, text) {
+  const haystack = text.toLowerCase();
+  return query.split(/\s+/).filter(Boolean).every((word) => haystack.includes(word.toLowerCase().replace(/^#/, '')));
+}
+function numberOf(query) {
+  const found = /^#?(\d+)$/.exec(query.trim());
+  return found ? Number(found[1]) : null;
+}
+
+/* ── The conversations: who started them, which tab they belong to, what is unread ───── */
+const WAITING = new Set(D.grants.map((g) => g.thread));
+const DISPUTED = new Set(D.escalations.map((e) => e.thread));
+const fromPeople = (t) => t.author !== null && !WAITING.has(t.id);
+const lastAt = (t) => t.messages.at(-1).at;
+const unreadFromPeople = () => D.threads.filter((t) => fromPeople(t) && t.unread > 0);
+const TABS = Object.freeze([
+  { code: 'people', label: 'People', owns: (t) => fromPeople(t), count: () => unreadFromPeople().length },
+  { code: 'grants', label: 'Grants', owns: (t) => WAITING.has(t.id), count: () => D.grants.length },
+  { code: 'dibs', label: 'From dibs', owns: (t) => t.author === null, count: () => D.threads.filter((t) => t.author === null && t.unread > 0).length },
+]);
+const tabOf = (t) => TABS.find((tab) => tab.owns(t)) ?? TABS[0];
+function summaryOf(t) {
+  const item = t.item === null ? null : ITEMS.get(t.item);
+  return {
+    id: t.id,
+    author: t.author === null ? null : personView(t.author),
+    recipients: t.to === null ? null : t.to.map(personView),
+    ticket: t.item === null ? null : ticketView(t.item),
+    subject: { subject: linkedText(t.subject, homeOf(item)), href: conversationHref(t.id) },
+    messages: t.messages.length,
+    unread: t.unread,
+    importance: t.importance,
+    last: lastAt(t),
+    text: [t.subject, t.author ?? 'dibs', ...(t.to ?? ['everyone']), item ? item.ref : ''].join(' '),
+  };
+}
+const newestFirst = (a, b) => Date.parse(lastAt(b)) - Date.parse(lastAt(a)) || b.id - a.id;
+
+/* ── Addresses inside this file: a screen, an object, the list's state ───── */
+const SCREEN_PATH = Object.freeze({ now: '#/', claims: '#/claims', queue: '#/queue', areas: '#/areas', inbox: '#/inbox', search: '#/search' });
+function parseRoute(hash) {
+  const raw = hash.replace(/^#\/?/, '');
+  const cut = raw.indexOf('?');
+  const path = cut < 0 ? raw : raw.slice(0, cut);
+  const params = new URLSearchParams(cut < 0 ? '' : raw.slice(cut + 1));
+  const [first = '', ...rest] = path.split('/');
+  const screen = Object.hasOwn(SCREEN_PATH, first) ? first : 'now';
+  const key = rest.length && rest[0] !== '' ? decodeURIComponent(rest.join('/')) : null;
+  return { screen, key, params };
+}
+function address(screen, key, params) {
+  const query = new URLSearchParams();
+  for (const [name, value] of Object.entries(params)) if (value) query.set(name, value === true ? '1' : value);
+  const text = query.toString();
+  return `${SCREEN_PATH[screen]}${key === null || key === undefined ? '' : `/${key}`}${text ? `?${text}` : ''}`;
+}
+let R = parseRoute(location.hash);
+
+/* ── The rail ───── */
+function nowCount() { return cardsOf().length; }
+const NAV = Object.freeze([
+  { screen: 'now', label: 'Now', count: () => { const n = nowCount(); return [h('span', { class: `k${n > 0 ? ' k--hot' : ''}` }, n), h('span', { class: 'visually-hidden' }, 'waiting')]; } },
+  { screen: 'claims', label: 'Claims', count: () => h('span', { class: 'k' }, D.claims.length) },
+  { screen: 'queue', label: 'Queue', count: () => h('span', { class: 'k' }, D.queue.filter((q) => !q.reasons).length) },
+  { screen: 'areas', label: 'Areas', count: () => h('span', { class: 'k' }, `${[...AREAS.keys()].filter((a) => areaState(a).held).length} held`) },
+  { screen: 'inbox', label: 'Inbox', count: () => { const n = TABS[0].count(); return [h('span', { class: `k${n > 0 ? ' k--hot' : ''}` }, n), h('span', { class: 'visually-hidden' }, 'unread')]; } },
+]);
+function railPeople() {
+  const holders = [...new Set(D.claims.map((c) => c.holder))].filter((x) => x !== D.viewer).sort();
+  return [D.viewer, ...holders].map((handle) => {
+    const mine = D.claims.filter((c) => c.holder === handle);
+    const latest = [...mine].sort((a, b) => Date.parse(b.seenAt) - Date.parse(a.seenAt))[0];
+    return { person: personView(handle), host: latest?.host ?? null, claims: mine.length, silent: mine.filter(silent).length };
+  });
+}
+function maxHold(span) {
+  return [span.days > 0 && `${span.days} d`, span.hours > 0 && `${span.hours} h`, span.minutes > 0 && `${span.minutes} min`].filter(Boolean).join(' ');
+}
+function rail() {
+  const openSlot = R.params.get('slot');
+  return [
+    h('div', { class: 'brand' }, h('span', {}, h('a', { href: '#/' }, h('b', {}, 'dibs')), ' ', h('span', {}, D.project)),
+      h('button', { class: 'btn btn--small', type: 'button', 'data-rail-toggle': true, 'aria-controls': 'rail', 'aria-expanded': 'false', hidden: true }, 'Menu')),
+    h('form', { 'data-search': true, method: 'get', role: 'search' },
+      h('input', { class: 'searchbtn', name: 'q', type: 'search', 'aria-label': 'Search everything', placeholder: 'Search everything' }),
+      h('kbd', { 'data-kbd-mac': '⌘K', 'data-kbd-other': 'Ctrl K' }, '⌘K')),
+    h('nav', { class: 'nav', 'aria-label': 'Main' }, h('ul', {}, NAV.map((entry) =>
+      h('li', {}, h('a', { href: SCREEN_PATH[entry.screen], 'aria-current': R.screen === entry.screen ? 'page' : null }, entry.label, entry.count()))))),
+    h('section', { class: 'ppl', 'aria-labelledby': 'rail-people' }, h('h3', { class: 'label', id: 'rail-people' }, 'People'), h('ul', {}, railPeople().map((row) =>
+      h('li', {}, h('a', { href: row.person.href }, h('span', { class: `av pc-${row.person.colour}`, 'aria-hidden': 'true' }, row.person.initials),
+        h('span', {}, row.person.handle, row.host && h('small', {}, row.host)),
+        h('span', { class: 'k' }, row.claims, row.silent > 0 && ` · ${row.silent} silent`)))))),
+    D.slots.length > 0 && h('section', { 'aria-labelledby': 'rail-slots' }, h('h3', { class: 'label', id: 'rail-slots' }, 'Slots'), h('ul', { class: 'slots' }, D.slots.map((slot) =>
+      h('li', { class: slot.holder ? 'held' : null }, h('details', { id: `slot-${slot.name}`, open: openSlot === slot.name },
+        h('summary', {}, h('span', {}, slot.name), h('span', {}, slot.holder ?? 'free')),
+        h('p', {}, slot.note && [L.linked(linkedText(slot.note)), h('br')], h('span', { class: 'faint' }, `Held for at most ${maxHold(slot.maxHold)}`, slot.group && ` · group ${slot.group}`))))))),
+    h('section', { 'aria-labelledby': 'rail-worktrees' }, h('h3', { class: 'label', id: 'rail-worktrees' }, 'Worktrees held'), h('ul', { class: 'wts' },
+      D.worktrees.length === 0 ? h('li', { class: 'faint' }, 'None right now') : D.worktrees.map((hold) =>
+        h('li', {}, h('span', {}, h('b', {}, hold.worktree), ' · ', L.person(personView(hold.holder), true), hold.byAgent && "'s agent", ' · ', ago(hold.since)),
+          h('span', {}, L.linked(linkedText(hold.purpose)), hold.item !== null && [' · for ', L.ticket(ticketView(hold.item))]))))),
+    h('form', { class: 'rail__foot', method: 'post', 'data-not-sent': true }, h('span', {}, `Signed in as ${D.viewer}`), h('button', { class: 'btn btn--small', type: 'submit' }, 'Sign out')),
+  ];
+}
+
+/* ── Now ───── */
+const MOST_LINES = 4;
+const lines = (all, view) => ({ shown: all.slice(0, MOST_LINES).map(view), more: Math.max(0, all.length - MOST_LINES) });
+const more = (n) => n > 0 && h('li', { class: 'faint' }, `and ${n} more`);
+function holderCounts(claims) {
+  const counts = new Map();
+  for (const c of claims) counts.set(c.holder, (counts.get(c.holder) ?? 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([handle, n], i) => [i > 0 && ' · ', L.person(personView(handle), true), ` ${n}`]);
+}
+const areasTogether = (claims) => new Set(claims.flatMap(heldAreas)).size;
+const claimLine = (c) => [L.ticket(ticketView(c.item)), h('span', { class: 't' }, L.linked(linkedText(itemOf(c).title, homeOf(itemOf(c)))))];
+const need = (label, tone, heading, body) => h('article', { class: 'need' }, h('span', { class: `label ${tone}` }, label), h('h2', {}, heading), body);
+const foot = (href, text) => h('div', { class: 'need__foot' }, h('a', { class: 'btn', href }, text));
+const answers = () => unreadFromPeople().filter((t) => !DISPUTED.has(t.id)).sort(newestFirst);
+const decisions = () => D.grants.filter((g) => NOW - Date.parse(g.askedAt) > 10 * MINUTE);
+const silentClaims = () => D.claims.filter(silent).sort((a, b) => Date.parse(a.seenAt) - Date.parse(b.seenAt));
+const longClaims = () => D.claims.filter(heldOverAWeek).sort((a, b) => Date.parse(a.claimedAt) - Date.parse(b.claimedAt));
+const NEEDS = Object.freeze([
+  { shown: () => answers().length > 0, card: () => { const all = answers(), l = lines(all, summaryOf); return need('Answer', 'k-accent', all.length === 1 ? '1 conversation from a person is unread' : `${all.length} conversations from people are unread`, [
+    h('ul', { class: 'lines' }, l.shown.map((s) => h('li', {}, s.author && L.person(s.author, true), L.conversation(s.subject), h('span', { class: 'e' }, since(s.last)))), more(l.more)),
+    h('p', { class: 'sub' }, 'Notices from dibs fold onto their claims and are not counted here.'),
+    h('p', { class: 'rule' }, 'A message to a member reaches the session working on its ticket, and its agent answers when a decision is needed.'),
+    foot('#/inbox', 'Open the inbox')]); } },
+  { shown: () => decisions().length > 0, card: () => { const all = decisions(), l = lines(all, (g) => g); return need('Decide', 'k-warn', all.length === 1 ? '1 grant request has waited for your agent for more than ten minutes' : `${all.length} grant requests have waited for your agent for more than ten minutes`, [
+    h('ul', { class: 'lines' }, l.shown.map((g) => h('li', {}, L.person(personView(g.asker), true), h('span', { class: 't' }, h('a', { class: 'lnk', href: `${conversationHref(g.thread)}?tab=grants` }, 'asks for'), ' ', L.area(areaView(g.area), true), ' for ', L.ticket(ticketView(g.item))), h('span', { class: 'e' }, since(g.askedAt)))), more(l.more)),
+    h('p', { class: 'sub' }, 'No session of yours has decided it yet.'),
+    h('p', { class: 'rule' }, "A grant asked of you is your agent's to decide: a session of yours working on the claim's ticket decides it when it next hears from dibs."),
+    foot('#/inbox?tab=grants', 'See them')]); } },
+  { shown: () => D.escalations.length > 0, card: () => { const all = D.escalations, l = lines(all, (e) => e); const arbiters = [...new Set(all.flatMap((e) => e.arbiters))]; return need('Arbitrate', 'k-accent', all.length === 1 ? '1 disagreement waits for an arbiter' : `${all.length} disagreements wait for an arbiter`, [
+    h('ul', { class: 'lines' }, l.shown.map((e) => h('li', {}, L.person(personView(e.by), true), L.conversation(summaryOf(THREADS.get(e.thread)).subject), h('span', { class: 'e' }, since(e.at)))), more(l.more)),
+    arbiters.length > 0 && h('p', { class: 'sub' }, 'Waiting for ', arbiters.map((a, i) => [i > 0 && ', ', L.person(personView(a), true)]), '.'),
+    h('p', { class: 'rule' }, 'An arbiter decides it in its conversation; acknowledging the escalation closes it.')]); } },
+  { shown: () => D.collisions.length > 0, card: () => { const all = D.collisions, l = lines(all, (c) => c); return need('Overlap', 'k-warn', all.length === 1 ? '1 pair of claims touches the same code' : `${all.length} pairs of claims touch the same code`, [
+    h('ul', { class: 'lines' }, l.shown.map((c) => h('li', {}, h('span', { class: 't' }, c.claims.map((id, i) => [i > 0 && ' and ', L.ticket(ticketView(id))])), h('span', { class: 'e' }, c.contract ? 'a contract' : plural(c.files.length, 'file')))), more(l.more)),
+    h('p', { class: 'rule' }, 'The second to merge rebases onto the first.')]); } },
+  { shown: () => D.claims.some(finished), card: () => { const all = D.claims.filter(finished), l = lines(all, (c) => c); const n = areasTogether(all); return need('Release', 'k-bad', all.length === 1 ? '1 claim holds a ticket that is already finished' : `${all.length} claims hold tickets that are already finished`, [
+    h('ul', { class: 'lines' }, l.shown.map((c) => h('li', {}, claimLine(c), h('span', { class: 'e' }, plural(heldAreas(c).length, 'area')))), more(l.more)),
+    h('p', { class: 'sub' }, holderCounts(all), `. They hold ${plural(n, 'area')}.`),
+    h('p', { class: 'rule' }, 'A claim ends when its holder completes or releases it; an admin can force-release one.'),
+    foot('#/claims?filter=finished', 'See them')]); } },
+  { shown: () => D.claims.some(silent), card: () => { const all = silentClaims(), l = lines(all, (c) => c); const longest = ago(all[0].seenAt); return need('Take over', 'k-warn', all.length === 1 ? `1 claim went silent ${longest} ago` : `${all.length} claims went silent, the longest ${longest} ago`, [
+    h('ul', { class: 'lines' }, l.shown.map((c) => h('li', {}, claimLine(c), h('span', { class: 'e' }, ago(c.seenAt)))), more(l.more)),
+    h('p', { class: 'sub' }, holderCounts(all), '. A silent claim holds no area, but its ticket stays taken.'),
+    h('p', { class: 'rule' }, 'Anyone may take a silent claim over with a reason, which its holder is sent.'),
+    foot('#/claims?filter=silent', 'See them')]); } },
+  { shown: () => D.claims.some(heldOverAWeek), card: () => { const all = longClaims(), l = lines(all, (c) => c); const n = areasTogether(all); return need('Narrow', 'k-warn', all.length === 1 ? '1 claim has been held for more than a week' : `${all.length} claims have been held for more than a week`, [
+    h('ul', { class: 'lines' }, l.shown.map((c) => h('li', {}, claimLine(c), h('span', { class: 'e' }, `${heldDays(c.claimedAt)} d`))), more(l.more)),
+    h('p', { class: 'sub' }, holderCounts(all), `. Together they hold ${plural(n, 'area')}.`),
+    h('p', { class: 'rule' }, 'Its holder gives back the areas the work no longer needs.'),
+    foot('#/claims?filter=held', 'See them')]); } },
+  { shown: () => D.claims.some((c) => otherTicket(c) !== null), card: () => { const all = D.claims.filter((c) => otherTicket(c) !== null), l = lines(all, (c) => c); return need('Check', 'k-warn', all.length === 1 ? '1 claim records a branch named after another ticket' : `${all.length} claims record branches named after another ticket`, [
+    h('ul', { class: 'lines' }, l.shown.map((c) => { const other = otherTicket(c); return h('li', {}, L.ticket(ticketView(c.item)), h('span', { class: 't' }, L.branch(branchView(other.branch.repo, other.branch.name))), h('span', { class: 'e' }, 'names ', h('a', { class: 'lnk', href: other.link.href, ...outsideAttrs(other.link) }, `#${other.number}`))); }), more(l.more)),
+    h('p', { class: 'sub' }, 'Overlap notices on such a claim describe that branch.'),
+    h('p', { class: 'rule' }, 'dibs records the branch of the checkout a session works in; a session in a worktree of its own records its own.'),
+    foot('#/claims?filter=branch', 'See them')]); } },
+]);
+const cardsOf = () => NEEDS.filter((n) => n.shown());
+function nowScreen() {
+  const cards = cardsOf();
+  const holders = new Set(D.claims.map((c) => c.holder)).size;
+  const ready = D.queue.filter((q) => !q.reasons).length;
+  const date = D.now.slice(0, 10);
+  const people = railPeople();
+  const startOfDay = Date.parse(`${date}T00:00:00Z`);
+  const today = [
+    ...D.claims.filter((c) => Date.parse(c.claimedAt) >= startOfDay).map((c) => ({ at: c.claimedAt, person: c.holder, done: 'claimed', item: c.item })),
+    ...D.finished.filter((f) => Date.parse(f.at) >= startOfDay).map((f) => ({ at: f.at, person: f.by, done: 'finished', item: f.item })),
+  ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  const square = (c) => {
+    const act = activity(c), item = itemOf(c), t = ticketView(c.item);
+    const cls = `sq${act === 'review' ? ' sq--review' : act === 'silent' ? ' sq--stale' : ''}${finished(c) ? ' sq--fin' : ''}`;
+    const words = { working: 'working', review: 'in review', silent: 'silent' }[act];
+    return h('a', { class: cls, href: `#/claims/${c.item}`, title: `${t.title} · ${item.title}`, 'aria-label': `${t.title}: ${item.title}, ${words}, held ${ago(c.claimedAt)}` });
+  };
+  return h('div', { class: 'now' },
+    h('header', { class: 'hello' }, h('h1', { tabindex: '-1' }, cards.length === 0 ? 'Nothing waits for a person' : cards.length === 1 ? '1 thing waits for a look' : `${cards.length} things wait for a look`),
+      h('p', {}, h('time', { datetime: date }, date), ` · ${plural(D.claims.length, 'claim')} by ${holders} ${holders === 1 ? 'person' : 'people'} · ${plural(ready, 'ticket')} ready`)),
+    cards.length > 0 && h('div', { class: 'needs' }, cards.map((n) => n.card())),
+    h('div', { class: 'two' },
+      h('section', { class: 'sec', 'aria-labelledby': 'now-ages' }, h('div', { class: 'sec__head' }, h('h2', { id: 'now-ages' }, 'Claims by age'), h('p', {}, 'How long each claim has been held.')),
+        h('div', { class: 'hb' },
+          h('div', { class: 'hb__row hb__head' }, h('span'), AGES.map((a) => h('span', { class: a.old ? 'old' : null }, a.name))),
+          people.map((row) => h('div', { class: 'hb__row' }, h('span', {}, L.person(row.person, false)), AGES.map((age) =>
+            h('span', { class: `dots${age.old ? ' old' : ''}` }, D.claims.filter((c) => c.holder === row.person.handle && age.holds(c, (NOW - Date.parse(c.claimedAt)) / DAY)).sort((a, b) => Date.parse(a.claimedAt) - Date.parse(b.claimedAt)).map(square)))))),
+        h('div', { class: 'legend' }, h('span', {}, h('i', { class: 'sq', 'aria-hidden': 'true' }), 'working'), h('span', {}, h('i', { class: 'sq sq--review', 'aria-hidden': 'true' }), 'in review'), h('span', {}, h('i', { class: 'sq sq--stale', 'aria-hidden': 'true' }), 'silent'), h('span', {}, h('i', { class: 'sq sq--fin', 'aria-hidden': 'true' }), 'its ticket is finished'))),
+      h('section', { class: 'sec', 'aria-labelledby': 'now-today' }, h('div', { class: 'sec__head' }, h('h2', { id: 'now-today' }, 'Today')),
+        h('ul', { class: 'feed' }, today.length === 0 ? h('li', { class: 'faint' }, 'Nothing yet today.') : today.map((e) =>
+          h('li', {}, timeEl(e.at), h('span', {}, L.person(personView(e.person), true), ` ${e.done} `, L.ticket(ticketView(e.item)), h('span', { class: 't' }, L.linked(linkedText(ITEMS.get(e.item).title, homeOf(ITEMS.get(e.item))))))))))));
+}
+
+/* ── Inspector frame pieces ───── */
+const closeLink = (href) => h('a', { class: 'x', 'data-inspect': true, href, 'aria-label': 'Close' }, '×');
+const copyLink = () => h('button', { class: 'mini', type: 'button', 'data-copy-link': true, hidden: true }, 'Copy link');
+const hint = (label, text) => h('aside', { class: 'insp', 'data-region': 'inspector', 'data-selected': 'false', 'aria-label': label }, h('div', { class: 'empty' }, h('p', {}, text)));
+const gone = (label, close, heading, extra) => h('aside', { class: 'insp', 'data-region': 'inspector', 'data-selected': 'true', 'aria-label': label }, h('div', { class: 'insp__in' },
+  h('div', { class: 'insp__top' }, extra?.top, h('span', { class: 'r' }, closeLink(close))), h('h2', { 'data-inspector-heading': true, tabindex: '-1' }, heading), extra?.after));
+const filterForm = (cls, hidden, q, placeholder, label) => h('form', { class: cls, method: 'get', role: 'search', 'data-list-filter': true },
+  Object.entries(hidden).map(([name, value]) => value && h('input', { type: 'hidden', name, value })),
+  h('input', { class: 'search', type: 'search', name: 'q', value: q, placeholder, 'aria-label': label }));
+const queueSearch = (text) => `#/queue?q=${encodeURIComponent(text)}`;
+const filesOf = (files, at) => [files.slice(0, 3).map((f) => L.file(fileView(f.repo, f.path, at))), files.length > 3 && h('span', { class: 'faint' }, `and ${plural(files.length - 3, 'more file')}`)];
+
+/* ── Claims ───── */
+const CLAIM_FILTERS = Object.freeze([
+  { code: 'all', label: 'All', keeps: () => true },
+  { code: 'working', label: 'Working', keeps: (c) => activity(c) === 'working' },
+  { code: 'review', label: 'In review', keeps: (c) => activity(c) === 'review' },
+  { code: 'silent', label: 'Silent', keeps: silent },
+  { code: 'held', label: 'Held over a week', keeps: heldOverAWeek },
+  { code: 'finished', label: 'Ticket finished', keeps: finished },
+  { code: 'branch', label: "Other ticket's branch", keeps: (c) => otherTicket(c) !== null },
+]);
+function claimsState() {
+  const filter = CLAIM_FILTERS.find((f) => f.code === R.params.get('filter')) ?? CLAIM_FILTERS[0];
+  const who = R.params.get('who');
+  const q = R.params.get('q') ?? '';
+  const at = (key, over = {}) => address('claims', key, { filter: filter.code === 'all' ? null : filter.code, who, q, ...over });
+  return { filter, who, q, at, close: at(null) };
+}
+function claimsList(state) {
+  const left = D.claims.filter((c) => (state.who === null || c.holder === state.who) && matches(state.q, claimText(c)));
+  const shown = left.filter(state.filter.keeps).sort((a, b) =>
+    Number(a.holder !== D.viewer) - Number(b.holder !== D.viewer) || a.holder.localeCompare(b.holder) || Date.parse(a.claimedAt) - Date.parse(b.claimedAt) || a.item - b.item);
+  const groups = [];
+  for (const c of shown) { const last = groups.at(-1); if (last && last.holder === c.holder) last.rows.push(c); else groups.push({ holder: c.holder, rows: [c] }); }
+  return [
+    h('div', { class: 'bar-top' }, h('h1', { tabindex: '-1' }, 'Claims', state.who && [' ', h('span', { class: 'faint' }, `· ${state.who}`)]), state.who && h('a', { class: 'mini', href: state.at(null, { who: null }) }, 'everyone'),
+      h('nav', { class: 'seg', 'aria-label': 'Filter' }, CLAIM_FILTERS.map((f) => h('a', { href: state.at(null, { filter: f.code === 'all' ? null : f.code }), 'aria-current': f === state.filter ? 'true' : null }, f.label, h('span', { class: 'k' }, left.filter(f.keeps).length)))),
+      filterForm('claims-filter', { filter: state.filter.code === 'all' ? null : state.filter.code, who: state.who }, state.q, 'Title, number, area, branch, pull request', 'Filter claims')),
+    groups.map((g) => {
+      const latest = [...g.rows].sort((a, b) => Date.parse(b.seenAt) - Date.parse(a.seenAt))[0];
+      const areas = new Set(g.rows.flatMap(heldAreas)).size;
+      return [h('div', { class: 'grp' }, L.person(personView(g.holder), false), h('span', { class: 'faint mono' }, latest.host), h('span', { class: 'r' }, `${plural(g.rows.length, 'claim')} · ${plural(areas, 'area')} held`)),
+        g.rows.map((c) => {
+          const item = itemOf(c), t = ticketView(c.item), tracker = t.out ?? t.main;
+          return h('div', { class: 'row', 'data-row': true, 'aria-current': R.key === String(c.item) ? 'true' : null }, h('span', { class: `s s--${MARKS[activity(c)]}`, 'aria-hidden': 'true' }),
+            h('div', {}, h('a', { class: 'row__t', 'data-inspect': true, href: state.at(c.item) }, item.title),
+              h('div', { class: 'row__m' }, h('span', { class: 'ref' }, h('a', { href: tracker.href, title: t.title, ...outsideAttrs(tracker) }, t.label)), item.areas.slice(0, 3).map((a) => L.area(areaView(a), false)), item.areas.length > 3 && h('span', { class: 'faint' }, `+${item.areas.length - 3}`))),
+            h('div', { class: 'row__e' }, c.prs.map((p) => L.pullRequest(pullRequestView(p))), finished(c) && h('span', { class: 'tag tag--bad' }, 'ticket closed'), silent(c) && h('span', { class: 'tag tag--warn' }, `silent ${ago(c.seenAt)}`), otherTicket(c) && h('span', { class: 'tag' }, "other ticket's branch"),
+              h('span', { class: `age${heldOverAWeek(c) ? ' age--long' : ''}`, title: `Claimed ${clock(c.claimedAt)} UTC` }, ago(c.claimedAt))));
+        })];
+    }),
+    groups.length === 0 && h('p', { class: 'note' }, 'No claim matches.'),
+  ];
+}
+function claimInspector(state) {
+  if (R.key === null) return hint('Claim', 'Pick a claim to see its ticket, pull request, branch, areas and conversations.');
+  const c = CLAIMS.get(Number(R.key));
+  if (!c) return gone('Claim', state.close, 'That claim is not open any more.', ITEMS.has(Number(R.key)) && QUEUED.has(Number(R.key)) ? { after: h('p', {}, h('a', { class: 'lnk', href: `#/queue/${R.key}` }, 'See the queue')) } : null);
+  const item = itemOf(c), t = ticketView(c.item), areas = heldAreas(c), n = areas.length, act = activity(c), you = c.holder === D.viewer, other = otherTicket(c);
+  const kept = D.queue.filter((q) => (q.reasons ?? []).some((r) => r.claim === c.item)).length;
+  const STATE_TAGS = { working: () => h('span', { class: 'tag' }, h('span', { class: 's s--working', 'aria-hidden': 'true' }), 'Working'), review: () => h('span', { class: 'tag tag--review' }, 'In review'), silent: () => h('span', { class: 'tag tag--warn' }, `Silent ${ago(c.seenAt)}`) };
+  const collisions = D.collisions.filter((x) => x.claims.includes(c.item));
+  const moved = D.merged.filter((m) => m.claims.includes(c.item));
+  const talk = D.threads.filter((x) => x.item === c.item && x.author !== null && !WAITING.has(x.id));
+  const notices = D.threads.filter((x) => x.item === c.item && x.author === null).sort(newestFirst);
+  return h('aside', { class: 'insp', 'data-region': 'inspector', 'data-selected': 'true', 'aria-label': `Claim ${t.title}` }, h('div', { class: 'insp__in' },
+    h('div', { class: 'insp__top' }, L.ticket(t), STATE_TAGS[act](), h('span', { class: 'r' }, copyLink(), closeLink(state.close))),
+    h('h2', { 'data-inspector-heading': true, tabindex: '-1' }, L.linked(linkedText(item.title, homeOf(item)))),
+    finished(c) && h('div', { class: 'callout callout--bad' }, h('p', {}, h('b', {}, 'The ticket is finished.'), ` The claim still holds ${plural(n, 'area')}.`, kept > 0 && [' It keeps ', h('a', { class: 'lnk', href: queueSearch(t.title) }, plural(kept, 'ticket')), ' out of the queue.'])),
+    silent(c) && h('div', { class: 'callout' }, h('p', {}, h('b', {}, `No sign of life for ${ago(c.seenAt)}.`), !you && ` A silent claim can be taken over with a reason, which ${c.holder} is sent.`),
+      !you && h('form', { class: 'reply', method: 'post', 'data-not-sent': true }, h('div', { class: 'field' }, h('label', { for: 'takeover-reason' }, 'Reason'), h('textarea', { class: 'textarea', id: 'takeover-reason', name: 'reason', required: true })), h('div', { class: 'acts' }, h('button', { class: 'btn btn--warn', type: 'submit' }, 'Take over the claim')))),
+    heldOverAWeek(c) && h('div', { class: 'callout' }, h('p', {}, h('b', {}, `Held for ${heldDays(c.claimedAt)} days.`), ' ', n === 0 ? 'It holds no area, only the ticket.' : n === 1 ? 'Its 1 area stays taken while it waits.' : `Its ${n} areas stay taken while it waits.`)),
+    other && h('div', { class: 'callout callout--info' }, h('p', {}, h('b', {}, 'This branch is named after ticket ', h('a', { class: 'lnk', href: other.link.href, ...outsideAttrs(other.link) }, `#${other.number}`), '.'), ' dibs records the branch of the checkout a session works in, and several sessions can share one. Overlap notices on this claim describe that branch.')),
+    h('dl', { class: 'kv' },
+      h('dt', {}, 'Holder'), h('dd', {}, L.person(personView(c.holder), false), you && h('span', { class: 'faint' }, 'you'), h('span', { class: 'faint mono' }, c.host)),
+      h('dt', {}, 'Ticket'), h('dd', {}, L.ticket(t), item.status ? h('span', { class: 'tag' }, item.status) : h('span', { class: 'faint' }, 'no tracker status'), h('span', { class: 'faint' }, `priority ${item.priority}`)),
+      h('dt', {}, 'Claimed'), h('dd', {}, since(c.claimedAt)),
+      h('dt', {}, 'Last seen'), h('dd', {}, since(c.seenAt)),
+      h('dt', {}, 'Pull request'), h('dd', {}, c.prs.length ? c.prs.map((p) => L.pullRequest(pullRequestView(p))) : h('span', { class: 'faint' }, 'none recorded')),
+      h('dt', {}, 'Branch'), h('dd', {}, c.branches.length ? c.branches.map((b) => [c.branches.length > 1 && h('span', { class: 'faint' }, b.repo), L.branch(branchView(b.repo, b.name))]) : h('span', { class: 'faint' }, 'none recorded')),
+      c.debt && [h('dt', {}, 'Kind'), h('dd', {}, 'Debt')],
+      c.wide && [h('dt', {}, 'Wide'), h('dd', {}, h('span', {}, L.linked(linkedText(c.wide.reason, homeOf(item)))), h('ul', { class: 'rowlist claims-wide' }, c.wide.areas.map((s) => h('li', {}, L.area(areaView(s.area), true), h('span', { class: 'r' }, s.holder === null ? 'free' : s.granted ? [L.person(personView(s.holder), true), ' agreed'] : ['waits for ', L.person(personView(s.holder), true)])))))]),
+    h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Areas · ${n}`),
+      n === 0 ? h('p', { class: 'faint' }, "It holds no area, so it is in nobody's way.") : h('ul', { class: 'rowlist' }, areas.map((a) => {
+        const waiting = D.queue.filter((q) => ITEMS.get(q.item).areas.includes(a)).length;
+        return h('li', {}, L.area(areaView(a), true), h('span', { class: 'r' }, waiting > 0 ? h('a', { class: 'lnk', href: queueSearch(a) }, `${plural(waiting, 'ticket')} will touch it`) : 'no ticket waits'));
+      }))),
+    collisions.length > 0 && h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Overlaps · ${collisions.length}`), h('ul', { class: 'rowlist' }, collisions.map((x) => {
+      const otherClaim = CLAIMS.get(x.claims.find((id) => id !== c.item));
+      const branch = otherClaim.branches[0]?.name ?? 'HEAD';
+      return h('li', { class: 'claims-overlap' }, h('span', {}, x.contract ? 'Meets at a published contract with' : 'Changes the same files as', ' ', L.ticket(ticketView(otherClaim.item)), ' ', L.person(personView(otherClaim.holder), true)), h('span', { class: 'claims-files' }, filesOf(x.files, branch)));
+    }))),
+    moved.length > 0 && h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Base moved · ${moved.length}`), h('div', { class: 'callout' },
+      h('ul', { class: 'moved' }, moved.map((m) => h('li', {}, L.pullRequest(pullRequestView(m.pr)), h('span', { class: 'files' }, filesOf(m.files, 'HEAD'))))), h('p', {}, 'Rebase onto the base branch.'))),
+    h('section', { class: 'blk' }, h('h3', { class: 'label' }, 'Conversations'), h('ul', { class: 'rowlist' },
+      talk.map((x) => { const s = summaryOf(x); return h('li', {}, L.person(s.author, true), L.conversation(s.subject), h('a', { class: 'r', href: s.subject.href }, timeEl(s.last))); }),
+      notices.length > 0 && h('li', {}, h('span', { class: 'tag' }, 'dibs'), h('a', { class: 't lnk', href: conversationHref(notices[0].id) }, `${plural(notices.length, 'notice')} from dibs, ${notices.filter((x) => x.unread > 0).length} unread`)),
+      talk.length === 0 && notices.length === 0 && h('li', { class: 'faint' }, 'Nothing was written about it.')))));
+}
+
+/* ── Queue ───── */
+function readinessOf(q) { return q.reasons ? { ready: false, reasons: q.reasons } : { ready: true, wasHeldBy: q.wasHeldBy ?? null }; }
+const REASONS = Object.freeze({
+  waits: (r) => ['waits for ', r.waitsFor.map((id, i) => [i > 0 && ', ', L.ticket(ticketView(id))])],
+  held: (r) => [L.area(areaView(r.area), true), ' is held by ', L.person(personView(r.holder), true), ' for ', L.ticket(ticketView(r.claim)), finished(CLAIMS.get(r.claim)) && [' ', h('span', { class: 'tag tag--bad' }, 'ticket closed')]],
+});
+const reasonKind = (r) => (r.waitsFor ? 'waits' : 'held');
+const reason = (r) => REASONS[reasonKind(r)](r);
+const reasonWords = (r) => (r.waitsFor ? r.waitsFor.map((id) => ticketView(id).title) : [r.holder, ticketView(r.claim).title]);
+const queueText = (q) => { const item = ITEMS.get(q.item); return [item.ref, item.title, ...item.areas, ...(q.reasons ?? []).flatMap(reasonWords)].join(' '); };
+const QUEUE_CAP = 25;
+function queueState() {
+  const q = R.params.get('q') ?? '', all = R.params.get('all') === '1';
+  const at = (key, over = {}) => address('queue', key, { q, all, ...over });
+  return { q, all, at, close: at(null) };
+}
+function queueList(state) {
+  const left = D.queue.filter((q) => matches(state.q, queueText(q)));
+  const ready = left.filter((q) => !q.reasons), waiting = left.filter((q) => q.reasons);
+  const priorities = [...new Set(ready.map((q) => ITEMS.get(q.item).priority))].sort((a, b) => a - b);
+  const groups = [...priorities.map((p) => ({ heading: [h('span', { class: `pri pri--${p}` }, `P${p}`), h('b', {}, 'Ready')], rows: ready.filter((q) => ITEMS.get(q.item).priority === p) })),
+    ...(waiting.length ? [{ heading: [h('b', {}, 'Not ready')], rows: waiting }] : [])];
+  const row = (q) => {
+    const item = ITEMS.get(q.item), t = ticketView(q.item), tracker = t.out ?? t.main, r = readinessOf(q);
+    return h('div', { class: 'row row--queue', 'data-row': true, 'aria-current': R.key === String(q.item) ? 'true' : null }, h('span', { class: `pri pri--${item.priority}` }, `P${item.priority}`),
+      h('div', {}, h('a', { class: 'row__t', 'data-inspect': true, href: state.at(q.item) }, item.title),
+        h('div', { class: 'row__m' }, h('span', { class: 'ref' }, h('a', { href: tracker.href, title: t.title, ...outsideAttrs(tracker) }, t.label)), item.areas.length ? item.areas.map((a) => L.area(areaView(a), false)) : h('span', {}, 'no areas named'))),
+      h('div', { class: 'row__e' }, r.ready ? (r.wasHeldBy ? h('span', {}, 'was held by ', L.person(personView(r.wasHeldBy), true)) : h('span', { class: 'tag' }, 'ready'))
+        : h('span', {}, r.reasons.length === 1 ? reason(r.reasons[0]) : `${r.reasons.length} reasons`)));
+  };
+  const cap = state.all || state.q ? Infinity : QUEUE_CAP;
+  return [
+    h('div', { class: 'bar-top' }, h('h1', { tabindex: '-1' }, 'Queue'), h('span', { class: 'dim' }, `${ready.length} ready · ${waiting.length} not ready`),
+      filterForm('queue-filter', { all: state.all ? '1' : null }, state.q, 'Title, number, area, holder', 'Filter the queue')),
+    groups.map((g) => [h('div', { class: 'grp' }, g.heading, h('span', { class: 'r' }, g.rows.length)), g.rows.slice(0, cap).map(row), g.rows.length > cap && h('a', { class: 'more', href: state.at(null, { all: true }) }, `Show all ${g.rows.length}`)]),
+    groups.length === 0 && h('p', { class: 'note' }, 'No ticket matches.'),
+  ];
+}
+function queueInspector(state) {
+  if (R.key === null) return hint('Ticket', 'Pick a ticket to see which areas it will touch, who holds them and how to claim it.');
+  const q = QUEUED.get(Number(R.key));
+  if (!q) return gone('Ticket', state.close, 'That ticket is not in the queue.', CLAIMS.has(Number(R.key)) ? { after: h('p', {}, h('a', { class: 'lnk', href: `#/claims/${R.key}` }, 'See its claim')) } : null);
+  const item = ITEMS.get(q.item), t = ticketView(q.item), r = readinessOf(q);
+  const command = `dibs claim ${item.ref}${item.areas.map((a) => ` --area ${a}`).join('')}`;
+  return h('aside', { class: 'insp', 'data-region': 'inspector', 'data-selected': 'true', 'aria-label': `Ticket ${t.title}` }, h('div', { class: 'insp__in' },
+    h('div', { class: 'insp__top' }, L.ticket(t), h('span', { class: `pri pri--${item.priority}` }, `P${item.priority}`), r.ready ? h('span', { class: 'tag' }, 'Ready') : h('span', { class: 'tag tag--warn' }, 'Not ready'), h('span', { class: 'r' }, copyLink(), closeLink(state.close))),
+    h('h2', { 'data-inspector-heading': true, tabindex: '-1' }, L.linked(linkedText(item.title, homeOf(item)))),
+    h('dl', { class: 'kv' }, h('dt', {}, 'Ticket'), h('dd', {}, L.ticket(t), item.status ? h('span', { class: 'tag' }, item.status) : h('span', { class: 'faint' }, 'no tracker status')),
+      r.ready && r.wasHeldBy && [h('dt', {}, 'Was held by'), h('dd', {}, L.person(personView(r.wasHeldBy), false), h('span', { class: 'faint' }, 'a silent claim, open to a take-over'))]),
+    !r.ready && h('section', { class: 'blk' }, h('h3', { class: 'label' }, 'Why it waits'), h('ul', { class: 'rowlist' }, r.reasons.map((x) => h('li', {}, h('span', {}, reason(x)))))),
+    h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Areas it will probably touch · ${item.areas.length}`),
+      item.areas.length === 0 ? h('p', { class: 'faint' }, 'The tracker names no area for it.') : h('ul', { class: 'rowlist' }, item.areas.map((a) => {
+        const holder = holdersOf(a)[0];
+        return h('li', {}, L.area(areaView(a), true), h('span', { class: 'r' }, holder ? ['held by ', L.person(personView(holder.holder), true), ' for ', L.ticket(ticketView(holder.item))] : 'free'));
+      }))),
+    h('section', { class: 'blk' }, h('h3', { class: 'label' }, 'To pick it up'), h('div', { class: 'cmd' }, h('span', {}, 'dibs claim ', L.ticket(t), item.areas.map((a) => [' --area ', L.area(areaView(a), true)])), h('button', { type: 'button', hidden: true, 'data-copy': command }, 'Copy')))));
+}
+
+/* ── Areas ───── */
+const FREE_SHOWN_UP_TO = 80;
+function areasState() {
+  const q = R.params.get('q') ?? '', all = R.params.get('all') === '1';
+  const at = (key, over = {}) => address('areas', key, { q, all, ...over });
+  return { q, all, at, close: at(null) };
+}
+const areaText = (full) => [full, ...AREAS.get(full).paths].join(' ');
+function areasList(state) {
+  const every = [...AREAS.keys()];
+  const held = every.filter((a) => areaState(a).held).length;
+  const holders = [...new Set(every.flatMap((a) => holdersOf(a).slice(0, 1).map((c) => c.holder)))].sort();
+  const sections = D.repos.map((repo) => {
+    const left = repo.areas.map((a) => `${repo.id}:${a.name}`).filter((full) => matches(state.q, areaText(full))).sort((a, b) => areaView(a).label.localeCompare(areaView(b).label));
+    if (left.length === 0) return null;
+    const heldSeats = left.filter((a) => areaState(a).held), free = left.filter((a) => !areaState(a).held);
+    const leavesFreeOut = repo.areas.length > FREE_SHOWN_UP_TO && !(state.all || state.q);
+    const seat = (full) => {
+      const holding = holdersOf(full), first = holding[0], s = areaState(full);
+      return h('a', { class: `seat${s.modifiers}${first ? ` pc-${colour(first.holder)}` : ''}`, 'data-row': true, 'data-inspect': true, href: state.at(full), title: first ? `${full} · ${first.holder} for ${holding.map((c) => itemOf(c).ref).join(', ')}` : `${full} · free`, 'aria-current': R.key === full ? 'true' : null },
+        areaView(full).label, holding.length > 1 && h('span', { class: 'k' }, holding.length));
+    };
+    return h('section', {}, h('h2', {}, repo.id, h('span', { class: 'faint' }, `${heldSeats.length} held · ${free.length} free`)),
+      h('div', { class: 'seats' }, heldSeats.map(seat), leavesFreeOut ? h('a', { class: 'seat', href: state.at(R.key, { all: true }) }, `+${free.length} free`) : free.map(seat)));
+  }).filter(Boolean);
+  return [
+    h('div', { class: 'bar-top' }, h('h1', { tabindex: '-1' }, 'Areas'), h('span', { class: 'dim' }, `${held} of ${every.length} held`),
+      filterForm('areas-filter', { all: state.all ? '1' : null }, state.q, 'Find an area', 'Find an area')),
+    sections.length > 0 ? h('div', { class: 'map' },
+      h('div', { class: 'legend' }, holders.map((p) => h('span', {}, L.person(personView(p), true))), h('span', {}, h('i', { class: 'seat seat--fin' }), 'held for a finished ticket'), h('span', {}, h('i', { class: 'seat seat--held seat--parked pc-1' }), 'held over a week'), h('span', {}, h('i', { class: 'seat' }), 'free')),
+      sections) : h('p', { class: 'note' }, every.length === 0 ? 'The project declares no areas.' : 'No area matches.'),
+  ];
+}
+function areaInspector(state) {
+  if (R.key === null) return hint('Area', 'Pick an area to see who holds it, for which tickets, and which tickets wait for it.');
+  const declared = AREAS.get(R.key);
+  if (!declared) return gone('Area', state.close, 'The project declares no such area.');
+  const full = R.key, a = areaView(full), holding = holdersOf(full), held = holding.length;
+  const wanted = D.queue.filter((q) => ITEMS.get(q.item).areas.includes(full));
+  const SHOWN = 6;
+  return h('aside', { class: 'insp', 'data-region': 'inspector', 'data-selected': 'true', 'aria-label': `Area ${full}` }, h('div', { class: 'insp__in' },
+    h('div', { class: 'insp__top' }, h('span', { class: 'ref' }, full), h('span', { class: 'tag' }, held ? 'Held' : 'Free'), h('span', { class: 'r' }, copyLink(), closeLink(state.close))),
+    h('h2', { 'data-inspector-heading': true, tabindex: '-1' }, held === 0 ? `${a.label} is free to claim` : held === 1 ? [L.person(personView(holding[0].holder), false), ` holds ${a.label}`] : `${a.label} is held by ${held} claims`),
+    h('dl', { class: 'kv' }, h('dt', {}, 'Paths'), h('dd', {}, declared.paths.map((p) => L.directory(directoryView(declared.repo, p)))),
+      declared.dependsOn && [h('dt', {}, 'Depends on'), h('dd', {}, declared.dependsOn.map((d) => L.area(areaView(d), true)))]),
+    held > 0 && h('section', { class: 'blk' }, h('h3', { class: 'label' }, 'Held for'), h('ul', { class: 'rowlist' }, holding.map((c) => h('li', {}, held > 1 && L.person(personView(c.holder), true), L.ticket(ticketView(c.item)), h('span', { class: 't' }, L.linked(linkedText(itemOf(c).title, homeOf(itemOf(c))))), h('a', { class: 'mini', href: `#/claims/${c.item}` }, 'See the claim'),
+      h('span', { class: 'r' }, finished(c) ? h('span', { class: 'tag tag--bad' }, 'ticket closed') : heldOverAWeek(c) ? h('span', { class: 'tag tag--warn' }, 'held over a week') : `held ${ago(c.claimedAt)}`))))),
+    h('section', { class: 'blk' }, h('h3', { class: 'label' }, `Tickets that will probably touch it · ${wanted.length}`),
+      wanted.length === 0 ? h('p', { class: 'faint' }, 'No open ticket names it.') : [h('ul', { class: 'rowlist' }, wanted.slice(0, SHOWN).map((q) => { const item = ITEMS.get(q.item); return h('li', {}, L.ticket(ticketView(q.item)), h('span', { class: 't' }, L.linked(linkedText(item.title, homeOf(item)))), h('span', { class: 'r' }, `P${item.priority}`)); })),
+        wanted.length > SHOWN && h('a', { class: 'mini', href: queueSearch(full) }, `See all ${wanted.length} in the queue`)])));
+}
+
+/* ── Inbox ───── */
+const raised = (importance) => ({ urgent: h('span', { class: 'tag tag--warn' }, 'urgent'), high: h('span', { class: 'tag tag--warn' }, 'high'), normal: null }[importance]);
+function inboxState() {
+  const named = TABS.find((t) => t.code === R.params.get('tab'));
+  const selected = R.key === null ? null : THREADS.get(Number(R.key)) ?? null;
+  const tab = named ?? (selected ? tabOf(selected) : TABS[0]);
+  const q = R.params.get('q') ?? '';
+  const at = (key, over = {}) => address('inbox', key, { tab: tab === TABS[0] ? null : tab.code, q, ...over });
+  return { tab, q, at, close: at(null), selected };
+}
+function talkRow(t, state) {
+  const s = summaryOf(t);
+  return h('div', { class: 'row', 'data-row': true, 'aria-current': R.key === String(t.id) ? 'true' : null }, h('span', { class: s.unread > 0 ? 's s--review' : null, 'aria-hidden': 'true' }),
+    h('div', {}, h('a', { class: 'row__t', 'data-inspect': true, href: state.at(t.id) }, plainText(s.subject.subject)),
+      h('div', { class: 'row__m' }, s.author ? L.person(s.author, true) : h('span', { class: 'tag' }, 'dibs'), h('span', {}, 'to ', s.recipients === null ? 'everyone' : s.recipients.map((p, i) => [i > 0 && ', ', h('a', { class: 'lnk', href: p.href }, p.handle)])), s.ticket && L.ticket(s.ticket), h('span', {}, plural(s.messages, 'message')))),
+    h('div', { class: 'row__e' }, raised(s.importance), h('span', { class: 'age', title: `Last message ${clock(s.last)} UTC` }, ago(s.last))));
+}
+const TAB_BODIES = Object.freeze({
+  people: (state) => D.threads.filter((t) => fromPeople(t) && matches(state.q, summaryOf(t).text)).sort(newestFirst).map((t) => talkRow(t, state)),
+  grants: (state) => D.grants.filter((g) => matches(state.q, [g.asker, g.area, ITEMS.get(g.item).ref, ITEMS.get(g.holder).ref, THREADS.get(g.thread).subject].join(' '))).map((g) => {
+    const t = THREADS.get(g.thread);
+    return h('div', { class: 'row', 'data-row': true, 'aria-current': R.key === String(g.thread) ? 'true' : null }, h('span', { 'aria-hidden': 'true' }),
+      h('div', {}, h('a', { class: 'row__t', 'data-inspect': true, href: state.at(g.thread) }, t ? t.subject : 'A grant request'),
+        h('div', { class: 'row__m' }, L.person(personView(g.asker), true), h('span', {}, 'asks for ', L.area(areaView(g.area), true), ' for ', L.ticket(ticketView(g.item)), ' · your claim ', L.ticket(ticketView(g.holder))))),
+      h('div', { class: 'row__e' }, h('span', { class: 'age', title: `Asked ${clock(g.askedAt)} UTC` }, ago(g.askedAt))));
+  }),
+  dibs: (state) => {
+    const mine = D.threads.filter((t) => t.author === null && matches(state.q, summaryOf(t).text)).sort(newestFirst);
+    const folded = [];
+    for (const t of mine.filter((x) => x.item !== null)) {
+      const row = folded.find((f) => f.item === t.item);
+      if (row) { row.count += 1; row.unread += Number(t.unread > 0); row.current ||= R.key === String(t.id); }
+      else folded.push({ item: t.item, count: 1, unread: Number(t.unread > 0), newest: t, current: R.key === String(t.id) });
+    }
+    const rows = [
+      folded.map((f) => {
+        const item = ITEMS.get(f.item), t = ticketView(f.item), claim = CLAIMS.get(f.item), s = summaryOf(f.newest);
+        return h('div', { class: 'row', 'data-row': true, 'aria-current': f.current ? 'true' : null }, h('span', { class: claim ? `s s--${MARKS[activity(claim)]}` : null, 'aria-hidden': 'true' }),
+          h('div', {}, h('a', { class: 'row__t', href: t.main.href, ...outsideAttrs(t.main) }, item ? item.title : t.label),
+            h('div', { class: 'row__m' }, L.ticket(t), h('span', {}, `${plural(f.count, 'notice')} · ${f.unread} unread`), h('a', { class: 'lnk inbox-newest', 'data-inspect': true, href: state.at(f.newest.id) }, plainText(s.subject.subject)))),
+          h('div', { class: 'row__e' }, h('span', { class: 'age', title: `Last notice ${clock(s.last)} UTC` }, ago(s.last))));
+      }),
+      mine.filter((x) => x.item === null).map((t) => talkRow(t, state)),
+    ].flat();
+    return rows.length ? [rows, h('p', { class: 'note' }, 'A notice from dibs also shows on its claim.')] : [];
+  },
+});
+function inboxList(state) {
+  const body = TAB_BODIES[state.tab.code](state);
+  return [
+    h('div', { class: 'bar-top' }, h('h1', { tabindex: '-1' }, 'Inbox'),
+      h('nav', { class: 'seg', 'aria-label': 'Conversations' }, TABS.map((tab) => h('a', { href: address('inbox', null, { tab: tab === TABS[0] ? null : tab.code, q: state.q }), 'aria-current': tab === state.tab ? 'true' : null }, tab.label, h('span', { class: 'k' }, tab.count())))),
+      filterForm('inbox-filter', { tab: state.tab === TABS[0] ? null : state.tab.code }, state.q, 'Subject, person, ticket', 'Filter conversations')),
+    body,
+    body.length === 0 && h('p', { class: 'note' }, 'Nothing here.'),
+  ];
+}
+function message(t, m) {
+  const person = m.author === null ? null : personView(m.author);
+  const mine = m.author === D.viewer;
+  return h('li', { class: `msg${m.author === null ? ' msg--system' : ''}${mine ? ' msg--mine' : ''}${t.importance === 'urgent' ? ' msg--urgent' : t.importance === 'high' ? ' msg--high' : ''}`, id: `m-${m.id}` },
+    person ? h('span', { class: `av pc-${person.colour}`, 'aria-hidden': 'true' }, person.initials) : h('span', { class: 'av', 'aria-hidden': 'true' }),
+    h('div', { class: 'msg__in' },
+      h('div', { class: 'msg__head' }, person ? [h('a', { class: 'who', href: person.href }, h('b', {}, person.handle)), ' ', h('span', { class: 'faint mono' }, m.label)] : h('b', {}, 'from dibs'), raised(t.importance), timeEl(m.at)),
+      h('p', { class: 'msg__body' }, L.linked(linkedText(m.text, homeOf(t.item === null ? null : ITEMS.get(t.item))))),
+      m.ack && h('div', { class: 'talk__ack' }, h('span', { class: 'label' }, 'Acknowledgement requested'),
+        h('ul', { class: 'acks', 'aria-label': 'Acknowledgements', 'data-ack-list': true }, m.ack.map((e) => {
+          const you = e.handle === D.viewer ? ' (you)' : '';
+          return e.at ? h('li', { class: 'tag', 'data-ack-member': e.handle }, h('span', { 'aria-hidden': 'true' }, '✓'), ` ${e.handle}${you} acked `, timeEl(e.at))
+            : h('li', { class: 'tag tag--warn', 'data-ack-member': e.handle }, h('span', { 'aria-hidden': 'true' }, '○'), ` ${e.handle}${you} waiting`);
+        })),
+        m.ack.some((e) => e.handle === D.viewer && e.at === null) && h('form', { class: 'ack-form', method: 'post', 'data-not-sent': true }, h('button', { class: 'btn btn--pri btn--small', type: 'submit' }, 'Acknowledge')))));
+}
+function inboxInspector(state) {
+  if (R.key === null) return hint('Conversation', 'Pick a conversation. Messages from people come first; what dibs reports is folded onto each claim.');
+  const t = state.selected;
+  if (!t) return gone('Conversation', state.close, 'That conversation is not one you can read.');
+  const s = summaryOf(t);
+  return h('aside', { class: 'insp', 'data-region': 'inspector', 'data-selected': 'true', 'data-live': 'own', 'aria-label': 'Conversation' }, h('div', { class: 'insp__in' },
+    h('div', { class: 'insp__top' }, s.ticket ? L.ticket(s.ticket) : h('span', { class: 'faint' }, 'no ticket'), raised(s.importance), h('span', { class: 'r' }, copyLink(), closeLink(state.close))),
+    h('h2', { 'data-inspector-heading': true, tabindex: '-1' }, L.linked(linkedText(t.subject, homeOf(t.item === null ? null : ITEMS.get(t.item))))),
+    h('dl', { class: 'kv' }, h('dt', {}, 'From'), h('dd', {}, s.author ? L.person(s.author, false) : 'dibs'),
+      h('dt', {}, 'To'), h('dd', {}, s.recipients === null ? 'everyone' : s.recipients.map((p) => L.person(p, false))),
+      h('dt', {}, 'Last message'), h('dd', {}, since(s.last))),
+    h('section', { class: 'talk', 'aria-label': 'Messages' },
+      h('ol', { class: 'talk__messages', 'aria-label': 'Messages, oldest first' }, t.messages.map((m) => message(t, m))),
+      h('form', { class: 'reply', method: 'post', 'aria-labelledby': 'reply-h', 'data-not-sent': true },
+        h('h3', { id: 'reply-h', class: 'label' }, 'Reply'),
+        h('label', { class: 'visually-hidden', for: 'reply-body' }, 'Message'),
+        h('textarea', { class: 'textarea', id: 'reply-body', name: 'body', required: true }),
+        h('div', { class: 'acts' }, h('button', { class: 'btn btn--pri', type: 'submit' }, 'Send'), h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'require_ack', value: '1' }), 'Ask everyone to acknowledge'))))));
+}
+
+/* ── Search: one index, the matching rule, eight kinds in a fixed order ───── */
+const KINDS = Object.freeze([
+  { code: 'claims', heading: 'Claims' }, { code: 'pull-requests', heading: 'Pull requests' }, { code: 'queue', heading: 'Tickets in the queue' }, { code: 'branches', heading: 'Branches' },
+  { code: 'areas', heading: 'Areas' }, { code: 'people', heading: 'People' }, { code: 'conversations', heading: 'Conversations' }, { code: 'slots', heading: 'Slots' },
+]);
+const DOING = Object.freeze({ working: 'working', review: 'in review', silent: 'silent' });
+const outOf = (link, name) => (link && link.outside ? { href: link.href, owner: name } : null);
+const INDEXERS = Object.freeze({
+  claims: () => D.claims.map((c) => { const t = ticketView(c.item); return { title: `${t.title}  ${itemOf(c).title}`, sub: `${c.holder} · ${DOING[activity(c)]} · held ${ago(c.claimedAt)}`, text: claimText(c), number: parseNumbered(t.title)?.number ?? null, here: `#/claims/${c.item}`, out: outOf(t.out, TRACKER_NAME) }; }),
+  'pull-requests': () => [
+    ...D.claims.flatMap((c) => c.prs.map((p) => { const v = pullRequestView(p); return { title: `PR ${v.title}`, sub: `in review for ${itemOf(c).ref} · ${c.holder}`, text: `pr pull ${v.title} ${itemOf(c).ref} ${itemOf(c).title}`, number: v.number, here: `#/claims/${c.item}`, out: v.out ? { href: v.out.link.href, owner: v.out.name } : null }; })),
+    ...D.merged.map((m) => { const v = pullRequestView(m.pr); return { title: `PR ${v.title}`, sub: `merged · moved the base under ${plural(m.claims.length, 'claim')}`, text: `pr pull merged ${v.title}`, number: v.number, here: v.main.href, out: v.out ? { href: v.out.link.href, owner: v.out.name } : null }; }),
+  ],
+  queue: () => D.queue.map((q) => { const item = ITEMS.get(q.item), t = ticketView(q.item); return { title: `${t.title}  ${item.title}`, sub: `${q.reasons ? 'not ready' : 'ready'} · P${item.priority}`, text: [t.title, item.title, ...item.areas].join(' '), number: parseNumbered(t.title)?.number ?? null, here: `#/queue/${q.item}`, out: outOf(t.out, TRACKER_NAME) }; }),
+  branches: () => {
+    const seen = [];
+    for (const c of D.claims) for (const b of c.branches) { const at = seen.find((s) => s.repo === b.repo && s.name === b.name); if (at) at.tickets.push(itemOf(c).ref); else seen.push({ ...b, tickets: [itemOf(c).ref] }); }
+    return seen.map((b) => { const v = branchView(b.repo, b.name); return { title: v.label, sub: `recorded on ${b.tickets.join(', ')}`, text: `branch ${b.repo} ${v.label}`, number: null, here: `#/claims?q=${encodeURIComponent(v.label)}`, out: outOf(v.main, FORGE_NAME) }; });
+  },
+  areas: () => [...AREAS.keys()].map((full) => { const holding = holdersOf(full); return { title: full, sub: holding.length ? `held by ${holding[0].holder} for ${holding.map((c) => itemOf(c).ref).join(', ')}` : 'free', text: [`area ${full}`, ...AREAS.get(full).paths].join(' '), number: null, here: areaView(full).href, out: null }; }),
+  people: () => D.members.map((m) => ({ title: m, sub: plural(D.claims.filter((c) => c.holder === m).length, 'claim'), text: `person ${m}`, number: null, here: personView(m).href, out: null })),
+  conversations: () => [...D.threads].sort(newestFirst).map((t) => { const s = summaryOf(t); return { title: plainText(s.subject.subject), sub: `${t.author ?? 'dibs'} to ${t.to === null ? 'everyone' : t.to.join(', ')} · ${clock(s.last)}`, text: s.text, number: null, here: s.subject.href, out: null }; }),
+  slots: () => D.slots.map((slot) => ({ title: slot.name, sub: slot.holder ? `held by ${slot.holder}` : 'free', text: `slot ${slot.name} ${slot.note ?? ''}`, number: null, here: `#/?slot=${encodeURIComponent(slot.name)}`, out: null })),
+});
+function rank(query, cap) {
+  if (query.trim() === '') return [];
+  const wanted = numberOf(query);
+  const numbered = (e) => wanted !== null && e.number === wanted;
+  return KINDS.map((kind) => {
+    const hits = INDEXERS[kind.code]().filter((e) => matches(query, e.text)).sort((a, b) => Number(numbered(b)) - Number(numbered(a)));
+    return { kind, leads: hits.length > 0 && numbered(hits[0]), hits: hits.slice(0, cap), more: Math.max(0, hits.length - cap) };
+  }).filter((g) => g.hits.length > 0).sort((a, b) => Number(b.leads) - Number(a.leads));
+}
+const searchHint = () => document.querySelector('template[data-search-hint]').content.cloneNode(true);
+function results(query, palette) {
+  const groups = rank(query, palette ? 5 : 50);
+  if (query.trim() === '') return searchHint();
+  if (groups.length === 0) return h('div', { class: 'pal__hint' }, 'Nothing in this project matches.');
+  let n = 0;
+  return frag(groups.map((g) => {
+    const hits = g.hits.map((hit) => {
+      n += 1;
+      return h('div', { class: 'pal__row', 'data-hit': true, ...(palette ? { role: 'option', id: `hit-${n}`, 'aria-selected': 'false' } : {}) },
+        h('a', { href: hit.here, 'data-hit-here': true }, h('div', { class: 't' }, hit.title), h('div', { class: 'u' }, hit.sub)),
+        hit.out && h('a', { class: 'ext', href: hit.out.href, target: '_blank', rel: 'noopener noreferrer', 'data-hit-out': true, 'aria-label': `${hit.title} on ${hit.out.owner}` }, '↗'));
+    });
+    const tail = g.more > 0 && h('p', { class: 'pal__more' }, `${g.more} more`);
+    return palette
+      ? h('div', { role: 'group', 'aria-labelledby': `hits-${g.kind.code}` }, h('div', { class: 'pal__grp label', id: `hits-${g.kind.code}` }, g.kind.heading), hits, tail)
+      : h('section', { 'aria-labelledby': `results-${g.kind.code}` }, h('h2', { class: 'pal__grp label', id: `results-${g.kind.code}` }, g.kind.heading), hits, tail);
+  }));
+}
+function searchList() {
+  const q = R.params.get('q') ?? '';
+  return [
+    h('div', { class: 'bar-top' }, h('h1', { tabindex: '-1' }, 'Search'), h('form', { class: 'search-form', method: 'get', role: 'search', 'data-list-filter': true }, h('input', { class: 'search', type: 'search', name: 'q', value: q, 'aria-label': 'Search everything' }))),
+    h('div', { class: 'results', 'data-region': 'results' }, results(q, false)),
+  ];
+}
+
+/* ── The screens, each a list and, on four of them, an inspector ───── */
+const SCREENS = Object.freeze({
+  now: { title: 'Now', state: () => null, list: () => nowScreen(), inspector: null },
+  claims: { title: 'Claims', state: claimsState, list: claimsList, inspector: claimInspector },
+  queue: { title: 'Queue', state: queueState, list: queueList, inspector: queueInspector },
+  areas: { title: 'Areas', state: areasState, list: areasList, inspector: areaInspector },
+  inbox: { title: 'Inbox', state: inboxState, list: inboxList, inspector: inboxInspector },
+  search: { title: 'Search', state: () => null, list: searchList, inspector: null },
+});
+
+/* ── Rendering, focus and the shell's enhancements ───── */
+const app = document.querySelector('.app');
+const railEl = document.getElementById('rail');
+const mainEl = document.getElementById('main');
+const toastEl = document.querySelector('[data-toast]');
+const isMac = /mac/i.test(navigator.userAgentData?.platform ?? navigator.platform ?? '');
+function relabel(scope) {
+  if (isMac) return;
+  scope.querySelectorAll('kbd[data-kbd-other]').forEach((kbd) => { kbd.textContent = kbd.getAttribute('data-kbd-other'); });
+}
+let railOpen = false;
+function enhanceRail() {
+  const toggle = railEl.querySelector('button[data-rail-toggle]');
+  railEl.setAttribute('data-collapsible', 'true');
+  railEl.setAttribute('data-open', String(railOpen));
+  toggle.hidden = false;
+  toggle.setAttribute('aria-expanded', String(railOpen));
+  relabel(railEl);
+}
+let previous = { screen: null, key: null };
+const rowLink = (key) => [...mainEl.querySelectorAll('[data-row] a[data-inspect], a[data-row]')].find((a) => parseRoute(a.getAttribute('href')).key === key);
+function render() {
+  const screen = SCREENS[R.screen];
+  const state = screen.state();
+  const listScroll = previous.screen === R.screen ? mainEl.querySelector('.pane')?.scrollTop ?? 0 : 0;
+  const openSlots = new Set([...railEl.querySelectorAll('details[open]')].map((d) => d.id));
+  app.dataset.screen = R.screen;
+  railEl.replaceChildren();
+  add(railEl, rail());
+  if (!R.params.get('slot')) railEl.querySelectorAll('details').forEach((d) => { if (openSlots.has(d.id)) d.open = true; });
+  enhanceRail();
+  mainEl.className = `main${screen.inspector ? ' split' : ''}`;
+  mainEl.replaceChildren();
+  add(mainEl, [h('div', { class: 'pane', 'data-region': 'list' }, screen.list(state)), screen.inspector && screen.inspector(state)]);
+  mainEl.querySelector('.pane').scrollTop = listScroll;
+  mainEl.querySelectorAll('[data-copy-link], [data-copy]').forEach((b) => { b.hidden = false; });
+  document.title = `${screen.title} · ${D.project} · dibs`;
+  const opened = R.key !== null && R.key !== previous.key && previous.screen === R.screen;
+  const closed = R.key === null && previous.key !== null && previous.screen === R.screen;
+  if (opened) mainEl.querySelector('[data-inspector-heading]')?.focus({ preventScroll: true });
+  else if (closed) (rowLink(previous.key) ?? mainEl.querySelector('h1'))?.focus({ preventScroll: true });
+  else if (previous.screen !== null && previous.screen !== R.screen) mainEl.querySelector('h1')?.focus({ preventScroll: true });
+  if (R.params.get('slot')) railEl.querySelector('details[open]')?.scrollIntoView({ block: 'nearest' });
+  previous = { screen: R.screen, key: R.key };
+}
+function toast(attribute) {
+  toastEl.textContent = toastEl.getAttribute(attribute);
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { toastEl.textContent = ''; }, 2400);
+}
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); toast('data-copied'); } catch { toast('data-copy-failed'); }
+}
+
+/* ── The palette: its keys, its results, opening a hit here or outside ───── */
+const dialog = document.querySelector('dialog[data-palette]');
+const palInput = dialog.querySelector('input[data-palette-input]');
+const palResults = dialog.querySelector('[data-palette-results]');
+let palIndex = 0;
+const palHits = () => [...palResults.querySelectorAll('[data-hit]')];
+function palSelect(at) {
+  palIndex = at;
+  const hits = palHits();
+  hits.forEach((hit, i) => hit.setAttribute('aria-selected', i === at ? 'true' : 'false'));
+  const selected = hits[at];
+  if (selected) { palInput.setAttribute('aria-activedescendant', selected.id); selected.scrollIntoView({ block: 'nearest' }); }
+  else palInput.removeAttribute('aria-activedescendant');
+}
+function palShow(text) {
+  if (dialog.open) return;
+  dialog.showModal();
+  palInput.value = text;
+  palResults.replaceChildren(results(text, true));
+  palSelect(0);
+  palInput.focus();
+}
+const WHILE_OPEN = Object.freeze({
+  Escape: () => ({ action: 'close' }),
+  ArrowDown: () => ({ action: 'move', index: Math.min(palHits().length - 1, palIndex + 1) }),
+  ArrowUp: () => ({ action: 'move', index: Math.max(0, palIndex - 1) }),
+  Enter: (command) => (palHits().length > 0 ? { action: command ? 'out' : 'here', index: palIndex } : { action: 'none' }),
+});
+const PAL_ACTIONS = Object.freeze({
+  none: () => false,
+  open: () => { palShow(''); return true; },
+  close: () => { dialog.close(); return true; },
+  move: (step) => { if (step.index >= 0) palSelect(step.index); return true; },
+  here: (step) => { const link = palHits()[step.index]?.querySelector('a[data-hit-here]'); if (!link) return false; dialog.close(); location.hash = link.getAttribute('href'); return true; },
+  out: (step) => { const link = palHits()[step.index]?.querySelector('a[data-hit-out]'); if (!link) return false; window.open(link.href, '_blank', 'noopener'); return true; },
+});
+const typingIn = (target) => target instanceof Element && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') !== null;
+function paletteStep(event) {
+  const command = event.metaKey || event.ctrlKey;
+  if (command && event.key.toLowerCase() === 'k') return { action: dialog.open ? 'close' : 'open' };
+  if (!dialog.open) return event.key === '/' && !typingIn(event.target) && !command ? { action: 'open' } : { action: 'none' };
+  return Object.hasOwn(WHILE_OPEN, event.key) ? WHILE_OPEN[event.key](command) : { action: 'none' };
+}
+
+/* ── Delegated listeners: everything the pages do in place ───── */
+document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || event.isComposing) return;
+  const step = paletteStep(event);
+  if (PAL_ACTIONS[step.action](step)) { event.preventDefault(); return; }
+  if (event.key === 'Escape' && !dialog.open && !typingIn(event.target)) {
+    const close = mainEl.querySelector('.insp[data-selected="true"] a.x[data-inspect]');
+    if (close) { event.preventDefault(); location.hash = close.getAttribute('href'); }
+  }
+});
+palInput.addEventListener('input', () => { palResults.replaceChildren(results(palInput.value, true)); palSelect(0); });
+dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+dialog.addEventListener('close', () => {
+  if (dialog.open) return;
+  palInput.value = '';
+  palResults.replaceChildren(searchHint());
+});
+app.addEventListener('click', (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  const box = target.closest('form[data-search] input[name="q"]');
+  if (box) { const text = box.value; box.value = ''; palShow(text); return; }
+  const toggle = target.closest('button[data-rail-toggle]');
+  if (toggle) { railOpen = !railOpen; enhanceRail(); return; }
+  const copyButton = target.closest('button[data-copy]');
+  if (copyButton) { copy(copyButton.getAttribute('data-copy')); return; }
+  if (target.closest('button[data-copy-link]')) copy(location.href);
+});
+app.addEventListener('input', (event) => {
+  const box = event.target;
+  if (box instanceof HTMLInputElement && box.matches('form[data-search] input[name="q"]') && box.value !== '') { const text = box.value; box.value = ''; palShow(text); }
+});
+document.addEventListener('submit', (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  event.preventDefault();
+  if (form.matches('[data-list-filter]')) {
+    const params = new URLSearchParams();
+    new FormData(form).forEach((value, name) => { if (typeof value === 'string' && value !== '') params.set(name, value); });
+    const text = params.toString();
+    location.hash = `${SCREEN_PATH[R.screen]}${text ? `?${text}` : ''}`;
+  } else if (form.matches('[data-palette-form]')) {
+    PAL_ACTIONS.here({ index: palIndex });
+  } else if (form.matches('[data-search]')) {
+    palShow(new FormData(form).get('q') ?? '');
+  } else {
+    toast('data-not-sent');
+  }
+});
+window.addEventListener('hashchange', () => { R = parseRoute(location.hash); if (dialog.open) dialog.close(); render(); });
+relabel(dialog);
+render();
+</script>
+</body>
+</html>
