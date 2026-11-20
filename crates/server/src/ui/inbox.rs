@@ -40,7 +40,7 @@ use crate::ui::inbox::query::{ListQuery, RawQuery};
 use crate::ui::inbox::summary::{ConversationSummary, waiting_grants};
 use crate::ui::links::{LinkContext, TicketView};
 use crate::ui::live::latest_event;
-use crate::ui::moments::{Ago, Moment, moment};
+use crate::ui::moments::{Moment, moment};
 use crate::ui::render::html;
 use crate::ui::session::{PageSession, UiSession};
 use crate::ui::shell::{self, Here, Loaded, Screen, ShellView};
@@ -52,8 +52,6 @@ struct InboxPage {
     shell: ShellView,
     list: ListView,
     inspector: Inspector,
-    /// The time the page is rendered at.
-    rendered: Moment,
 }
 
 /// The list of conversations.
@@ -201,6 +199,9 @@ async fn render(
         shell.after = *cursor;
         loaded.after = *cursor;
     }
+    if draft.is_some() {
+        shell = shell.answering_a_form();
+    }
     let threads = state.app.list_threads.execute(actor, None).await?;
     let summaries: Vec<ConversationSummary> = threads
         .iter()
@@ -276,7 +277,6 @@ async fn render(
         },
     };
     let page = InboxPage {
-        rendered: moment(loaded.now, loaded.now),
         shell,
         list,
         inspector,

@@ -57,16 +57,6 @@ impl Page {
     pub(crate) fn location(&self) -> &str {
         self.headers[header::LOCATION].to_str().unwrap()
     }
-
-    /// The markup of the board column labelled `id`.
-    pub(crate) fn column(&self, id: &str) -> &str {
-        let start = self
-            .text
-            .find(&format!(r#"aria-labelledby="{id}""#))
-            .unwrap();
-        let end = self.text[start..].find("</section>").unwrap() + start;
-        &self.text[start..end]
-    }
 }
 
 /// Form-encodes the pairs.

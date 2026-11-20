@@ -29,13 +29,13 @@ use crate::ui::session::UiSession;
 use crate::ui::slots::SlotRow;
 
 /// The kinds of event that change the project's claims and holds.
-pub const STATUS_CHANGES: &str = "claimed renewed taken_over released completed force_released \
+const STATUS_CHANGES: &str = "claimed renewed taken_over released completed force_released \
      reserved wide_claimed wide_granted_by_ack grant_revoked review_started pr_merged pr_closed \
      review_ended completed_by_merge area_handed_over wait_withdrawn claim_narrowed";
 
 /// The kinds of event that change the items, the slots, the worktrees, the escalations and the
 /// overlaps between claims.
-pub const BOARD_CHANGES: &str = "item_created item_updated dependency_added dependency_removed \
+const PROJECT_CHANGES: &str = "item_created item_updated dependency_added dependency_removed \
      settings_changed slot_taken slot_renewed slot_queued slot_left slot_offered \
      slot_offer_lapsed slot_released slot_expired slot_force_released slot_stalled slot_resumed \
      slot_stall_taken_over escalated acked thread_started member_removed overlap_found \
@@ -113,7 +113,7 @@ impl Screen {
             Self::Claims | Self::Queue | Self::Areas | Self::Search => "",
         };
         let mut seen = BTreeSet::new();
-        [STATUS_CHANGES, BOARD_CHANGES, messages]
+        [STATUS_CHANGES, PROJECT_CHANGES, messages]
             .iter()
             .flat_map(|kinds| kinds.split_whitespace())
             .filter(|kind| seen.insert(*kind))
@@ -198,6 +198,20 @@ pub struct ShellView {
     pub after: u64,
     /// The page's own address, which reloading it asks for again.
     pub address: String,
+    /// The kinds of event after which the page's script refreshes it, space separated.
+    pub changed_kinds: String,
+}
+
+impl ShellView {
+    /// The frame of a page that answers a form: the browser's address is the form's, which the
+    /// page's script cannot ask for again, so no change refreshes it; the stream still tells it when
+    /// the session ends.
+    pub fn answering_a_form(self) -> Self {
+        Self {
+            changed_kinds: String::new(),
+            ..self
+        }
+    }
 }
 
 /// The rail of a page.
@@ -335,6 +349,7 @@ pub async fn load(
         rail: RailView::of(&loaded, &links, screen, here.slot.as_deref()),
         after: loaded.after,
         address: here.address.clone(),
+        changed_kinds: screen.changed_kinds(),
     };
     Ok((shell, loaded, links))
 }
@@ -369,10 +384,10 @@ impl RailView {
                 .slots
                 .iter()
                 .map(|line| {
-                    let row = SlotRow::of(line, loaded.now);
+                    let row = SlotRow::of(line);
                     SlotView {
                         open: slot == Some(row.name.as_str()),
-                        holder: row.hold.map(|hold| hold.holder),
+                        holder: row.holder,
                         note: row.note.map(|note| LinkedText::of(&note, None, links)),
                         max_hold: span(line.spec.max_hold),
                         group: row.group,
@@ -466,7 +481,7 @@ mod tests {
             assert_eq!(listed.len(), distinct.len(), "{screen:?}: {kinds}");
             for kind in STATUS_CHANGES
                 .split_whitespace()
-                .chain(BOARD_CHANGES.split_whitespace())
+                .chain(PROJECT_CHANGES.split_whitespace())
             {
                 assert!(distinct.contains(kind), "{screen:?} misses {kind}");
             }

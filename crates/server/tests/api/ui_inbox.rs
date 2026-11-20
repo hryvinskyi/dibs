@@ -1,7 +1,7 @@
 //! Inbox (`/ui/inbox`) through the real router: the tabs and their counts, the messages from
 //! people, the grant requests waiting for the viewer, dibs's notices folded onto their item, the text
-//! filter, a conversation in the inspector with what its live view needs, where a reply and an
-//! acknowledgement land, and a conversation the viewer cannot read.
+//! filter, a conversation in the inspector with what its live view needs, a message dibs wrote,
+//! where a reply and an acknowledgement land, and a conversation the viewer cannot read.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use dibs_domain::member::Role;
 
 use crate::support::{Person, World};
-use crate::ui_support::{Browser, Page, claim, sign_in};
+use crate::ui_support::{Browser, Page, claim, sign_in, team};
 
 /// A project whose repository `api` is `acme/widgets` on GitHub, with the areas `billing` and
 /// `search`.
@@ -463,7 +463,6 @@ async fn the_inspector_links_a_message_carries_what_its_live_view_needs_and_mark
         "data-live-pill hidden",
         "data-live-pill-text",
         "data-conn",
-        "data-session-ended",
         r#"data-field="author""#,
         r#"data-field="session""#,
         r#"data-field="body""#,
@@ -567,6 +566,11 @@ async fn a_reply_and_an_acknowledgement_land_on_their_message_in_the_inbox() {
         "{}",
         blank.text
     );
+    assert!(
+        blank.text.contains(r#"data-changed-kinds="""#),
+        "the browser's address is the reply's, so no change refreshes the page: {}",
+        blank.text
+    );
     let shown = inspector(&blank);
     assert!(
         shown.contains(&format!(r#"data-thread-id="{}""#, seeded.from_bob)),
@@ -637,17 +641,89 @@ async fn a_conversation_between_two_other_members_answers_404_with_the_whole_pag
 }
 
 #[tokio::test]
-async fn the_old_thread_page_still_renders_its_conversation() {
+async fn an_inbox_page_holds_one_session_ended_notice_with_a_conversation_open_or_not() {
     let seeded = Seeded::new().await;
-    let page = seeded
-        .page(&format!("/ui/threads/{}", seeded.from_bob))
+    for path in [
+        "/ui/inbox".to_owned(),
+        format!("/ui/inbox/{}", seeded.from_bob),
+    ] {
+        let page = seeded.page(&path).await;
+        assert_eq!(page.status, StatusCode::OK, "{path}: {}", page.text);
+        assert_eq!(
+            page.text.matches("data-session-ended").count(),
+            1,
+            "{path}: {}",
+            page.text
+        );
+        assert!(
+            page.text.contains(
+                r#"<div class="banner banner--danger" role="alert" data-session-ended hidden>"#
+            ),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_message_from_dibs_reads_from_dibs_and_an_ended_announcement_offers_no_ack() {
+    let (world, alice, bob) = team().await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let held = world.item(&alice, Some("gh:acme/api#1"), "Invoices").await;
+    claim(&world, &alice, alice_session, held, json!(["api:billing"])).await;
+    let wide = world
+        .item(&bob, Some("gh:acme/api#2"), "Upgrade the HTTP client")
         .await;
+    let made = world
+        .post(
+            &bob,
+            &format!("/v1/items/{wide}/claim"),
+            json!({"session_id": bob_session,
+                   "wide": {"areas": ["api:billing"], "reason": "One client everywhere"}}),
+        )
+        .await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.body);
+    let thread = made.body["announced"][0]["thread_id"].as_u64().unwrap();
+    let message = made.body["announced"][0]["message_id"].as_u64().unwrap();
+    let action = format!(r#"action="/ui/threads/{thread}/messages/{message}/ack""#);
+    let address = format!("/ui/inbox/{thread}");
+
+    let browser = sign_in(&world, &alice).await;
+    let page = browser.get(&world, &address).await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.text);
+    let shown = inspector(&page);
     assert!(
-        page.text
-            .contains(&format!(r#"data-thread-id="{}""#, seeded.from_bob)),
-        "{}",
-        page.text
+        shown.contains(&format!(
+            r#"<li class="msg msg--system msg--high" id="m-{message}"><span class="av" aria-hidden="true"></span><div class="msg__in">
+  <div class="msg__head"><b>from dibs</b><span class="tag tag--warn">high</span><time"#
+        )),
+        "from dibs, with no session: {shown}"
     );
-    assert!(page.text.contains("Which rounding mode?"), "{}", page.text);
+    assert!(shown.contains(r#"data-sender="bob""#), "{shown}");
+    assert!(shown.contains(r#"data-system-author="from dibs""#));
+    assert!(shown.contains(&action), "the holder may acknowledge it");
+
+    let released = world
+        .post(&bob, &format!("/v1/items/{wide}/release"), json!({}))
+        .await;
+    assert_eq!(released.status, StatusCode::OK, "{}", released.body);
+    let after = browser.get(&world, &address).await;
+    let shown = inspector(&after);
+    assert!(
+        !shown.contains(&action),
+        "the wide claim ended, so its announcement asks for nothing: {shown}"
+    );
+    assert!(shown.contains("msg--system"));
+
+    let starter = sign_in(&world, &bob).await;
+    let his = starter.get(&world, &address).await;
+    let shown = inspector(&his);
+    assert!(
+        !shown.contains(&action),
+        "dibs wrote it for bob, who is not asked"
+    );
+    assert!(
+        !shown.contains("msg--mine"),
+        "what dibs wrote is no member's own"
+    );
 }

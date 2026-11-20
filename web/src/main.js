@@ -1,31 +1,122 @@
 // @ts-check
 /**
- * The entry point of every page: records the viewer's offset, localizes the page's times and
- * mounts the live views it carries.
+ * The entry point of every page: records the viewer's offset and localizes the page's times; on a
+ * page drawn in the frame (its `.app` element), it also makes the rail a menu on narrow screens,
+ * serves the copy buttons, keeps the screen's regions current from the page's one event stream,
+ * swaps the inspector in place, opens the search palette and keeps each conversation live on that
+ * same stream. Each region swapped in is localized, its copy buttons shown, the rail's menu state
+ * applied, and the conversation in it mounted, while the one of the region it replaced is torn down.
+ * Whatever finds the session ended shows the page's session-ended notice.
  */
 
-import { mount as mountBoard } from './board-view.js';
+import { mountCopy } from './copy.js';
+import { mountInspector } from './inspector.js';
 import { localizeTimes, rememberZone } from './local-times.js';
+import { mountPalette } from './palette.js';
+import { mountRailMenu } from './rail-menu.js';
+import { fetchRegions } from './regions.js';
+import { mountScreen } from './screen-view.js';
 import { mount as mountThread } from './thread-view.js';
+import { isLocalPath } from './view-config.js';
 
 /**
- * @param {string} selector
- * @param {(root: HTMLElement) => unknown} mount
+ * Fetching the regions of a page of this service, telling an answer that lands on the sign-in page
+ * at `loginPath` as an ended session.
+ * @param {string | undefined} loginPath
+ * @returns {import('./regions.js').FetchRegions}
+ */
+function regionsOfPages(loginPath) {
+  const login = loginPath !== undefined && isLocalPath(loginPath) ? loginPath : undefined;
+  return (url, names, options = {}) => fetchRegions(url, names, { ...options, loginPath: login });
+}
+
+/**
+ * Shows every session-ended notice of the page.
+ * @param {Document} doc
  * @returns {void}
  */
-function mountAll(selector, mount) {
-  document.querySelectorAll(selector).forEach((element) => {
+function showSignedOut(doc) {
+  doc.querySelectorAll('[data-session-ended]').forEach((element) => {
     if (element instanceof HTMLElement) {
-      mount(element);
+      element.hidden = false;
     }
   });
+}
+
+/**
+ * Wires the live behaviour of a page drawn in the frame.
+ * @param {HTMLElement} app the `.app` element
+ * @returns {void}
+ */
+function startScreen(app) {
+  const doc = app.ownerDocument;
+  const pages = regionsOfPages(app.dataset.loginUrl);
+  const signedOut = () => showSignedOut(doc);
+  const railMenu = mountRailMenu(app);
+  const copy = mountCopy(doc.body, {
+    clipboard: window.navigator.clipboard,
+    location: window.location,
+    toast: doc.querySelector('[data-toast]'),
+  });
+  /** The conversations mounted, by root, with their teardowns. @type {Map<HTMLElement, () => void>} */
+  const conversations = new Map();
+  /** @type {(listener: import('./screen-view.js').StreamListener) => () => void} */
+  let subscribe = () => () => {};
+
+  /**
+   * Tears down the conversations no longer on the page and mounts those inside `scope`.
+   * @param {ParentNode} scope
+   */
+  const mountConversations = (scope) => {
+    for (const [root, teardown] of conversations) {
+      if (!root.isConnected) {
+        teardown();
+        conversations.delete(root);
+      }
+    }
+    scope.querySelectorAll('[data-thread-view]').forEach((root) => {
+      if (root instanceof HTMLElement && !conversations.has(root)) {
+        conversations.set(root, mountThread(root, { subscribe, fetchRegions: pages, location: window.location }));
+      }
+    });
+  };
+
+  /** @param {Element} region */
+  const onSwap = (region) => {
+    localizeTimes(region);
+    copy.reveal(region);
+    if (region.getAttribute('data-region') === 'rail') {
+      railMenu.sync(region);
+    }
+    mountConversations(region);
+  };
+
+  const screen = mountScreen(app, { fetchRegions: pages, location: window.location, onSwap });
+  subscribe = screen.subscribe;
+  mountInspector(app, {
+    fetchRegions: pages,
+    history: window.history,
+    location: window.location,
+    onSwap,
+    onNavigate: screen.onNavigate,
+    showSignedOut: signedOut,
+  });
+  mountPalette(doc, app, {
+    fetchRegions: pages,
+    location: window.location,
+    open: (url, target, features) => window.open(url, target, features),
+    onSignedOut: signedOut,
+  });
+  mountConversations(doc);
 }
 
 function start() {
   rememberZone(document);
   localizeTimes(document);
-  mountAll('[data-thread-view]', mountThread);
-  mountAll('[data-board-view]', mountBoard);
+  const app = document.querySelector('.app');
+  if (app instanceof HTMLElement) {
+    startScreen(app);
+  }
 }
 
 if (document.readyState === 'loading') {

@@ -82,6 +82,12 @@ test('without change kinds the screen follows every change', () => {
   assert.equal(parseScreenConfig(without).kinds, null);
 });
 
+test('an empty list of change kinds refreshes on no change at all', () => {
+  const { kinds } = parseScreenConfig({ ...shell, changedKinds: '' });
+  assert.deepEqual([...(kinds ?? ['every change'])], []);
+  assert.equal(isRelevant(event('claimed'), kinds), false);
+});
+
 test('a missing or malformed address or cursor is a contract error', () => {
   for (const broken of [
     { ...shell, streamUrl: undefined },

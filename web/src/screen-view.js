@@ -16,7 +16,7 @@
  * any more.
  */
 
-import { whenDue } from './board-refresh.js';
+import { whenDue } from './refresh-timing.js';
 import { coalesce } from './coalesce.js';
 import { ContractError, isChange } from './events.js';
 import { follow } from './live-stream.js';
@@ -439,13 +439,12 @@ export function mountScreen(app, deps) {
       });
   };
 
-  /** @type {{ [K in import('./board-refresh.js').DueAction]: () => void }} */
+  /** @type {{ [K in import('./refresh-timing.js').DueAction]: () => void }} */
   const due = {
     fetch: start,
     owe: () => {
       owed = true;
     },
-    hold: showChanged,
     stop: () => {},
   };
 
@@ -455,7 +454,7 @@ export function mountScreen(app, deps) {
       set: (run, ms) => setTimeout(run, ms),
       clear: (handle) => clearTimeout(handle),
     },
-    run: () => due[whenDue({ ended, hidden: doc.hidden, typing: false })](),
+    run: () => due[whenDue({ ended, hidden: doc.hidden })](),
   });
 
   app.addEventListener('focusout', (event) => {

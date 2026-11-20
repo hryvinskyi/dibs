@@ -10,7 +10,7 @@
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="app" data-screen="{{ shell.screen.name() }}" data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-login-url="/ui/login" data-after="{{ shell.after }}" data-changed-kinds="{{ shell.screen.changed_kinds() }}">
+<div class="app" data-screen="{{ shell.screen.name() }}" data-stream-url="/ui/events/stream" data-session-url="/ui/session" data-login-url="/ui/login" data-after="{{ shell.after }}" data-changed-kinds="{{ shell.changed_kinds }}">
 <aside id="rail" class="rail" data-region="rail" aria-label="Project">
   <div class="brand"><span><a href="/ui/"><b>dibs</b></a> <span>{{ shell.project }}</span></span><button class="btn btn--small" type="button" data-rail-toggle aria-controls="rail" aria-expanded="false" hidden>Menu</button></div>
   <form data-search method="get" action="/ui/search" role="search"><input class="searchbtn" name="q" type="search" aria-label="Search everything" placeholder="Search everything"><kbd data-kbd-mac="⌘K" data-kbd-other="Ctrl K">⌘K</kbd></form>

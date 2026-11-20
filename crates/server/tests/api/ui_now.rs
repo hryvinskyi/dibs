@@ -1,15 +1,17 @@
 //! Now (`/ui/`) through the real router: the cards of what waits for a look with their links, the
 //! heading and the rail counting them alike, a grant request left waiting for the viewer's agent,
-//! the claims by age, the viewer's day, and the escaping of what members wrote.
+//! the claims by age, the viewer's day from their own midnight, and the escaping of what members
+//! wrote.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use time::Duration;
 
 use dibs_domain::member::Role;
+use dibs_server::ui::ZONE_COOKIE;
 
 use crate::support::{Person, World};
-use crate::ui_support::{Page, claim, sign_in};
+use crate::ui_support::{Browser, Page, claim, sign_in};
 
 /// A project whose repository `api` is `acme/widgets` on GitHub, with the areas `billing` and
 /// `search`, alice as its arbiter; a claim goes silent after nine days.
@@ -580,4 +582,42 @@ async fn today_lists_the_claims_taken_and_the_items_finished_since_the_day_began
     assert!(today.contains(r#"<span class="t">Done today</span>"#));
     assert!(!today.contains("From yesterday"), "{today}");
     assert!(!today.contains("Nothing yet today."));
+}
+
+#[tokio::test]
+async fn today_begins_at_the_viewers_midnight_or_else_at_utcs() {
+    let (world, alice, bob, _) = project().await;
+    world.fakes.clock.advance(Duration::hours(2));
+    let desk = world.session(&bob, "desk").await;
+    let done = world
+        .item(&bob, Some("gh:acme/widgets#3"), "Done item")
+        .await;
+    claim(&world, &bob, desk, done, json!([])).await;
+    let finished = world
+        .post(&bob, &format!("/v1/items/{done}/done"), json!({}))
+        .await;
+    assert_eq!(finished.status, StatusCode::OK, "{}", finished.body);
+    world.fakes.clock.advance(Duration::minutes(1));
+    let browser = sign_in(&world, &alice).await;
+    let zoned = |minutes: &str| Browser {
+        cookie: format!("{}; {ZONE_COOKIE}={minutes}", browser.cookie),
+        token: browser.token.clone(),
+    };
+    let shows = |page: &Page| section(page, "now-today").contains("Done item");
+    assert!(shows(&browser.get(&world, "/ui/").await), "UTC's day");
+    assert!(
+        shows(&zoned("780").get(&world, "/ui/").await),
+        "done at 11:00 UTC, the viewer's midnight"
+    );
+    assert!(
+        !shows(&zoned("779").get(&world, "/ui/").await),
+        "done a minute before the viewer's midnight"
+    );
+    assert!(shows(&zoned("-300").get(&world, "/ui/").await));
+    for unreadable in ["+60", "841", "abc", ""] {
+        assert!(
+            shows(&zoned(unreadable).get(&world, "/ui/").await),
+            "{unreadable:?} falls back to UTC's day"
+        );
+    }
 }

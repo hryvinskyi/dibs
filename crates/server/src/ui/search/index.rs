@@ -531,13 +531,12 @@ fn slots(corpus: &Corpus<'_>) -> Vec<Entry> {
         .slots
         .iter()
         .map(|line| {
-            let row = SlotRow::of(line, sources.now);
+            let row = SlotRow::of(line);
             Entry {
                 kind: Kind::Slots,
-                sub: row.hold.map_or_else(
-                    || "free".to_owned(),
-                    |hold| format!("held by {}", hold.holder),
-                ),
+                sub: row
+                    .holder
+                    .map_or_else(|| "free".to_owned(), |holder| format!("held by {holder}")),
                 text: format!("slot {} {}", row.name, row.note.unwrap_or_default()),
                 number: None,
                 here: format!("/ui/?slot={}", query_value(&row.name)),

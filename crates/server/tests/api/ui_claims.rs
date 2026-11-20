@@ -1,7 +1,7 @@
 //! Claims (`/ui/claims`) through the real router: the claims grouped by holder, the filters and
 //! their counts, the holder and text filters, a claim in the inspector with every reference a link,
-//! the take-over of a silent claim, a wide claim's areas, an address of no open claim, and the
-//! escaping of what members wrote.
+//! the take-over of a silent claim, a wide claim's areas, debt work and the areas a claim waits for,
+//! an address of no open claim, and the escaping of what members wrote.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -696,5 +696,47 @@ async fn the_conversations_about_a_claim_list_what_members_wrote_and_fold_dibss_
         inspector(&quiet).contains(r#"<li class="faint">Nothing was written about it.</li>"#),
         "{}",
         inspector(&quiet)
+    );
+}
+
+#[tokio::test]
+async fn debt_work_is_marked_and_a_claim_names_the_debt_work_it_waits_for() {
+    let (world, alice, bob) = team().await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let debt = world
+        .item(&alice, Some("gh:acme/api#7"), "Tidy the invoices")
+        .await;
+    let feature = world
+        .item(&bob, Some("gh:acme/api#42"), "Currency on invoices")
+        .await;
+    let held = world
+        .post(
+            &alice,
+            &format!("/v1/items/{debt}/claim"),
+            json!({"session_id": alice_session, "areas": ["api:billing"], "kind": "debt"}),
+        )
+        .await;
+    assert_eq!(held.status, StatusCode::OK, "{}", held.body);
+    claim(&world, &bob, bob_session, feature, json!(["api:billing"])).await;
+    let browser = sign_in(&world, &bob).await;
+
+    let tidy = browser.get(&world, &format!("/ui/claims/{debt}")).await;
+    assert_eq!(tidy.status, StatusCode::OK, "{}", tidy.text);
+    assert!(
+        inspector(&tidy).contains("<dt>Kind</dt><dd>Debt</dd>"),
+        "{}",
+        inspector(&tidy)
+    );
+    let waiting = browser.get(&world, &format!("/ui/claims/{feature}")).await;
+    let shown = inspector(&waiting);
+    assert!(!shown.contains("<dt>Kind</dt>"), "{shown}");
+    assert!(
+        shown.contains(r#"<a class="area" href="/ui/areas/api:billing" title="api:billing">api:billing</a><span class="r">waiting for <a class="who" href="/ui/claims?who=alice">"#),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("<b>alice</b></a>'s debt work</span>"),
+        "{shown}"
     );
 }

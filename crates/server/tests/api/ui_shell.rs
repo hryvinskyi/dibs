@@ -1,6 +1,7 @@
 //! The frame of the pages through the real router: every screen's address, the rail's counts, its
-//! people, slots and worktrees held, the references in a member's text as links, the sign-out form,
-//! an inspector address that does not read, and a request without a session.
+//! people, slots and worktrees held until they are let go, the references in a member's text as
+//! links, the sign-out form, an inspector address that does not read, and a request without a
+//! session.
 
 use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -344,9 +345,9 @@ async fn a_worktree_holds_purpose_links_its_references_and_escapes_the_rest() {
 async fn the_sign_out_form_carries_the_sessions_form_token_and_ends_the_session() {
     let (world, alice, _) = team().await;
     let browser = sign_in(&world, &alice).await;
-    let board = browser.get(&world, "/ui/board").await;
+    let claims = browser.get(&world, "/ui/claims").await;
     let page = browser.get(&world, "/ui/").await;
-    let token = board.form_token();
+    let token = claims.form_token();
     assert!(
         page.text.contains(&format!(
             r#"<form class="rail__foot" method="post" action="/ui/logout"><input type="hidden" name="csrf" value="{token}"><span>Signed in as alice</span><button class="btn btn--small" type="submit">Sign out</button></form>"#
@@ -394,4 +395,41 @@ async fn now_without_a_session_sends_the_browser_to_the_sign_in_page() {
     let page = fetch(&world, Method::GET, "/ui/", None, None).await;
     assert_eq!(page.status, StatusCode::SEE_OTHER);
     assert_eq!(page.location(), "/ui/login");
+}
+
+#[tokio::test]
+async fn a_held_worktree_leaves_the_rail_when_its_session_ends() {
+    let (world, alice, bob) = team().await;
+    let laptop = world.session(&alice, "laptop").await;
+    let taken = world
+        .post(
+            &alice,
+            "/v1/worktrees/take",
+            json!({
+                "session_id": laptop, "machine": "0123456789abcdef0123456789abcdef",
+                "pool": "c0ffee42", "names": ["worktree1"], "purpose": "review the fix",
+            }),
+        )
+        .await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+    let browser = sign_in(&world, &bob).await;
+    let page = browser.get(&world, "/ui/").await;
+    let held = section(&page, "Worktrees held");
+    assert!(
+        held.contains("<b>worktree1</b>") && held.contains("review the fix"),
+        "{held}"
+    );
+    assert!(!held.contains("'s agent"), "a session holds it: {held}");
+
+    let ended = world
+        .post(&alice, &format!("/v1/sessions/{laptop}/end"), json!({}))
+        .await;
+    assert_eq!(ended.status, StatusCode::OK, "{}", ended.body);
+    let after = browser.get(&world, "/ui/").await;
+    let held = section(&after, "Worktrees held");
+    assert!(!held.contains("worktree1"), "{held}");
+    assert!(
+        held.contains(r#"<li class="faint">None right now</li>"#),
+        "{held}"
+    );
 }

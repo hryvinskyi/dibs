@@ -29,6 +29,7 @@ use crate::ui::cookies;
 use crate::ui::notice::{Problem, notice};
 use crate::ui::render::{html, see_other};
 use crate::ui::session::{Resolved, SESSION_COOKIE, resolve, same_text};
+use crate::ui::shell::Screen;
 
 /// The cookie that ties a sign-in to the form rendered for it.
 pub const LOGIN_COOKIE: &str = "dibs_login";
@@ -87,7 +88,7 @@ pub struct SignInForm {
     token: Option<String>,
 }
 
-/// `POST /ui/login`: opens a browser session for the pasted token and goes to the status page; a
+/// `POST /ui/login`: opens a browser session for the pasted token and goes to Now (`/ui/`); a
 /// refused token, an expired form or too many attempts show the form again with one sentence.
 pub async fn sign_in(
     State(state): State<AppState>,
@@ -174,6 +175,7 @@ pub async fn sign_out(
             &session,
             StatusCode::FORBIDDEN,
             Problem::FormExpired,
+            Screen::Now,
             "/ui/",
         )
         .await;

@@ -30,7 +30,6 @@ use dibs_domain::settings::ProjectSettings;
 use dibs_domain::text_refs::{RefContext, TextRef, scan};
 
 use crate::ui::queue::listing::waits;
-use crate::ui::rows::reference;
 
 /// How the arrow beside a ticket names the page it leads to.
 const TRACKER: &str = "the tracker";
@@ -218,6 +217,11 @@ impl Link {
     fn search(value: &str) -> Self {
         Self::inside(format!("/ui/search?q={}", query_value(value)))
     }
+}
+
+/// How an item is named in full: its reference in a tracker, or its local id.
+fn reference(id: ItemId, external: Option<&ExternalRef>) -> String {
+    external.map_or_else(|| format!("#{id}"), ToString::to_string)
 }
 
 /// Whether an address starts with `https://` or `http://`, in any case.

@@ -1,4 +1,6 @@
-//! The page that tells a signed-in person why what they asked for was not done, with a way back.
+//! The page that tells a signed-in person why what they asked for was not done, with a way back,
+//! in the frame of the screen the request belongs to. A sentence of the service's refusal is
+//! printed with the references in it linked.
 
 use askama::Template;
 use axum::http::StatusCode;
@@ -6,9 +8,10 @@ use axum::response::{IntoResponse, Response};
 
 use crate::error::ApiError;
 use crate::http::AppState;
-use crate::ui::chrome::{self, Chrome, Section};
+use crate::ui::links::LinkedText;
 use crate::ui::render::html;
 use crate::ui::session::UiSession;
+use crate::ui::shell::{self, Here, Screen, ShellView};
 
 /// Why it was not done. The wording of each is the template's.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,45 +37,77 @@ impl Problem {
     }
 }
 
+/// A problem as the page prints it.
+#[derive(Debug, Clone)]
+enum Shown {
+    /// The form expired.
+    FormExpired,
+    /// The take-over had no reason.
+    ReasonMissing,
+    /// Nothing to show.
+    NotFound,
+    /// The service's sentence, its references linked.
+    Refused(LinkedText),
+}
+
 #[derive(Template)]
 #[template(path = "notice.html")]
 struct NoticePage<'a> {
-    chrome: Chrome,
-    problem: Problem,
+    shell: ShellView,
+    problem: Shown,
     back: &'a str,
 }
 
-/// The notice page for `problem`, of this status, linking back to `back`. A failure to read the
-/// page's frame answers that failure instead.
+/// The notice page for `problem`, of this status, in the frame of `screen`, linking back to
+/// `back`. A failure to read the page's frame answers that failure instead.
 pub async fn notice(
     state: &AppState,
     session: &UiSession,
     status: StatusCode,
     problem: Problem,
+    screen: Screen,
     back: &str,
 ) -> Response {
-    match chrome::load(state, session, Section::Other).await {
-        Ok(signed) => html(
-            status,
-            &NoticePage {
-                chrome: signed.chrome,
-                problem,
-                back,
-            },
-        ),
-        Err(error) => error.into_response(),
-    }
+    let here = Here::at(back.to_owned());
+    let (shell, _, links) = match shell::load(state, session, screen, &here).await {
+        Ok(loaded) => loaded,
+        Err(error) => return error.into_response(),
+    };
+    let problem = match problem {
+        Problem::FormExpired => Shown::FormExpired,
+        Problem::ReasonMissing => Shown::ReasonMissing,
+        Problem::NotFound => Shown::NotFound,
+        Problem::Refused(sentence) => Shown::Refused(LinkedText::of(&sentence, None, &links)),
+    };
+    html(
+        status,
+        &NoticePage {
+            shell: shell.answering_a_form(),
+            problem,
+            back,
+        },
+    )
 }
 
-/// The notice page for a refusal of the service, with the refusal's status.
+/// The notice page for a refusal of the service, with the refusal's status, in the frame of
+/// `screen`.
 pub async fn refused(
     state: &AppState,
     session: &UiSession,
     error: &ApiError,
+    screen: Screen,
     back: &str,
 ) -> Response {
     if error.status().is_server_error() {
         return error.clone().into_response();
     }
-    notice(state, session, error.status(), Problem::of(error), back).await
+    notice(
+        state,
+        session,
+        error.status(),
+        Problem::of(error),
+        screen,
+        back,
+    )
+    .await
 }

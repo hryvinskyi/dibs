@@ -1,13 +1,14 @@
-//! `POST /ui/items/{id}/takeover`: a person takes over another member's stale claim from the status
-//! page or the board, with the reason the previous holder is told.
+//! `POST /ui/items/{id}/takeover`: a person takes over another member's silent claim from its
+//! inspector, with the reason the previous holder is told. A refusal is shown in the frame of
+//! Claims.
 //!
 //! The browser is one of the person's sessions: the take-over is made from their session labelled
 //! `web` on the host `web`, registered on first use and reused afterwards.
 //!
-//! The form names the page to return to: `status` for the status page, or a path of this service,
-//! such as the board with its filter. Anything else — an address of another site, one a browser
-//! would read as another site's (`//host`, `/\host`), or a value no header can carry — returns
-//! to the board, so the form can never send the person elsewhere.
+//! The form names the page to return to: a path of this service, such as the claim with the list's
+//! filter. No value, or anything else — an address of another site, one a browser would read as
+//! another site's (`//host`, `/\host`), or a value no header can carry — returns to Claims, so
+//! the form can never send the person elsewhere.
 
 use axum::Form;
 use axum::extract::rejection::{FormRejection, PathRejection};
@@ -26,6 +27,7 @@ use crate::http::AppState;
 use crate::ui::notice::{Problem, notice, refused};
 use crate::ui::render::see_other;
 use crate::ui::session::{PageSession, UiSession};
+use crate::ui::shell::Screen;
 use crate::ui::signed_page;
 
 /// The host, label and agent of the browser's session.
@@ -41,17 +43,13 @@ pub struct TakeOverForm {
     back: Option<String>,
 }
 
-/// The page a form that names no page of its own returns to.
-const BOARD: &str = "/ui/board";
+/// The page a form that names no page of this service returns to.
+const CLAIMS: &str = "/ui/claims";
 
-/// The page a take-over form returns to: the status page for `status` or no value, the path the
-/// form names when it is a path of this service, and the board for anything else.
+/// The page a take-over form returns to: the path the form names when it is a path of this
+/// service, and Claims for no value or anything else.
 fn back_to(back: Option<&str>) -> &str {
-    match back {
-        None | Some("status") => "/ui/",
-        Some(path) if is_local_path(path) => path,
-        Some(_) => BOARD,
-    }
+    back.filter(|path| is_local_path(path)).unwrap_or(CLAIMS)
 }
 
 /// Whether a value is a path of this service that a browser cannot read as another site's: it
@@ -80,6 +78,7 @@ pub async fn take_over(
             &session,
             StatusCode::FORBIDDEN,
             Problem::FormExpired,
+            Screen::Claims,
             back,
         )
         .await;
@@ -93,6 +92,7 @@ pub async fn take_over(
             &session,
             StatusCode::UNPROCESSABLE_ENTITY,
             Problem::ReasonMissing,
+            Screen::Claims,
             back,
         )
         .await;
@@ -106,7 +106,7 @@ pub async fn take_over(
     };
     match made {
         Ok(()) => signed_page(&session, see_other(back)),
-        Err(error) => refused(&state, &session, &error, back).await,
+        Err(error) => refused(&state, &session, &error, Screen::Claims, back).await,
     }
 }
 
@@ -147,31 +147,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_form_returns_to_the_status_page_or_the_path_it_names() {
-        assert_eq!(back_to(None), "/ui/");
-        assert_eq!(back_to(Some("status")), "/ui/");
-        assert_eq!(back_to(Some("/ui/board")), "/ui/board");
+    fn a_form_returns_to_the_path_it_names_or_to_claims() {
+        assert_eq!(back_to(None), "/ui/claims");
+        assert_eq!(back_to(Some("/ui/claims/7")), "/ui/claims/7");
         assert_eq!(
-            back_to(Some("/ui/board?area=api%3Abilling&member=bob")),
-            "/ui/board?area=api%3Abilling&member=bob"
+            back_to(Some("/ui/claims/7?filter=silent&who=bob")),
+            "/ui/claims/7?filter=silent&who=bob"
         );
+        assert_eq!(back_to(Some("/ui/")), "/ui/");
     }
 
     #[test]
-    fn an_address_of_another_site_returns_to_the_board() {
+    fn an_address_of_another_site_returns_to_claims() {
         for foreign in [
             "https://example.com/",
-            "//example.com/ui/board",
+            "//example.com/ui/claims",
             "/\\example.com",
             "/\\/example.com",
             "javascript:alert(1)",
-            "ui/board",
-            "board",
+            "ui/claims",
+            "claims",
+            "status",
             "",
-            "/ui/board\r\nSet-Cookie: x=1",
-            "/ui/ board",
+            "/ui/claims\r\nSet-Cookie: x=1",
+            "/ui/ claims",
         ] {
-            assert_eq!(back_to(Some(foreign)), "/ui/board", "{foreign:?}");
+            assert_eq!(back_to(Some(foreign)), "/ui/claims", "{foreign:?}");
         }
     }
 }
