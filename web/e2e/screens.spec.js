@@ -5,7 +5,9 @@
  * none), the page does not scroll sideways, the main landmark and the skip link are there, IBM
  * Plex Sans is loaded, and the page reports no policy violation. At 1100 pixels a selected
  * object's inspector lies over the list and its close link goes back to the list; at 400 pixels
- * the rail's Menu button opens and closes the rail's sections.
+ * the rail's Menu button opens and closes the rail's sections, and wider it is hidden. A list's
+ * field to narrow it holds its whole placeholder, and spans the list on a phone. On a window too
+ * short for the rail, the rail scrolls and its search box keeps its height.
  */
 
 import { expect, test } from './fixtures.js';
@@ -32,6 +34,9 @@ const SCREENS = [
   { name: 'Inbox', address: '/ui/inbox', nav: '/ui/inbox', inspect: (seeded) => `/ui/inbox/${seeded.thread}` },
   { name: 'Search', address: '/ui/search?q=widgets', nav: null, inspect: null },
 ];
+
+/** The screens whose header holds no field to narrow the list with. */
+const WITHOUT_FILTER = new Set(['Now']);
 
 /** @type {readonly ('light' | 'dark')[]} */
 const THEMES = ['light', 'dark'];
@@ -65,6 +70,27 @@ function plexSansLoaded(page) {
     return Array.from(document.fonts).some(
       (face) => face.family.replace(/^["']|["']$/g, '') === 'IBM Plex Sans' && face.status === 'loaded',
     );
+  });
+}
+
+/**
+ * How much wider than the room inside `field` its placeholder is, in pixels: 0 or less when it fits.
+ * @param {import('@playwright/test').Locator} field
+ * @returns {Promise<number>}
+ */
+function placeholderOverflow(field) {
+  return field.evaluate((input) => {
+    if (!(input instanceof HTMLInputElement)) {
+      throw new Error('not an input');
+    }
+    const style = getComputedStyle(input);
+    const context = document.createElement('canvas').getContext('2d');
+    if (context === null) {
+      throw new Error('no canvas to measure with');
+    }
+    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+    const room = input.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    return context.measureText(input.placeholder).width - room;
   });
 }
 
@@ -125,6 +151,17 @@ for (const theme of THEMES) {
             await expect(toggle).toBeHidden();
           }
 
+          const filter = page.locator('.bar-top form[role="search"] input[name="q"]');
+          const narrows = !WITHOUT_FILTER.has(screen.name);
+          await expect(filter).toHaveCount(narrows ? 1 : 0);
+          if (narrows) {
+            expect(await placeholderOverflow(filter)).toBeLessThanOrEqual(0);
+            if (width === PHONE) {
+              const field = await filter.boundingBox();
+              expect(field?.width ?? 0).toBeGreaterThan(PHONE * 0.8);
+            }
+          }
+
           if (width === NARROW_SPLIT && screen.inspect !== null) {
             await page.goto(`${dibs.url}${screen.inspect(seeded)}`);
             expect(await scrollsSideways(page)).toBe(false);
@@ -158,3 +195,18 @@ for (const theme of THEMES) {
     });
   }
 }
+
+test('on a window too short for the rail, the rail scrolls and its search box keeps its height', async ({
+  page,
+  dibs,
+}) => {
+  await seedWidgets(dibs);
+  await page.setViewportSize({ width: 1680, height: 360 });
+  await signIn(page, dibs.url, dibs.adminToken);
+  await page.goto(`${dibs.url}/ui/areas`);
+
+  const rail = page.locator('#rail');
+  expect(await rail.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  const search = await rail.locator('form[data-search]').boundingBox();
+  expect(search?.height).toBe(34);
+});
