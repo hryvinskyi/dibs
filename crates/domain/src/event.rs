@@ -59,6 +59,9 @@ pub enum EventKind {
     ItemReopened(ItemReopened),
     /// An admin ended a claim.
     ForceReleased(ForceReleased),
+    /// The server released a working claim that went the project's `release_after` without a
+    /// sign of its own work; the item is open again.
+    ReleasedStale(ReleasedStale),
     /// A claim gained areas or shared paths through an edit check. Appended only when something
     /// was actually added.
     Reserved(Reserved),
@@ -182,6 +185,7 @@ impl EventKind {
             Self::Completed(_) => "completed",
             Self::ItemReopened(_) => "item_reopened",
             Self::ForceReleased(_) => "force_released",
+            Self::ReleasedStale(_) => "released_stale",
             Self::Reserved(_) => "reserved",
             Self::Granted(_) => "granted",
             Self::GrantRevoked(_) => "grant_revoked",
@@ -259,6 +263,7 @@ impl EventKind {
             Self::Completed(e) => vec![Some(e.member)],
             Self::ItemReopened(e) => vec![Some(e.by)],
             Self::ForceReleased(e) => vec![Some(e.member), e.by],
+            Self::ReleasedStale(e) => vec![Some(e.member)],
             Self::Reserved(e) => vec![Some(e.member)],
             Self::Granted(e) => vec![Some(e.from), Some(e.to)],
             Self::GrantRevoked(e) => vec![Some(e.from), Some(e.to)],
@@ -321,6 +326,7 @@ impl EventKind {
             | Self::Completed(_)
             | Self::ItemReopened(_)
             | Self::ForceReleased(_)
+            | Self::ReleasedStale(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -395,6 +401,7 @@ impl EventKind {
             | Self::Completed(_)
             | Self::ItemReopened(_)
             | Self::ForceReleased(_)
+            | Self::ReleasedStale(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -474,6 +481,7 @@ impl EventKind {
             | Self::Completed(_)
             | Self::ItemReopened(_)
             | Self::ForceReleased(_)
+            | Self::ReleasedStale(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -618,6 +626,18 @@ pub struct ForceReleased {
     pub member: MemberId,
     /// The admin; `None` when the service's operator did it from the server's command line.
     pub by: Option<MemberId>,
+}
+
+/// The server released a working claim whose work stopped showing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReleasedStale {
+    /// The item.
+    pub item: ItemId,
+    /// The member who held it.
+    pub member: MemberId,
+    /// The claim's last sign of its own work, written in RFC 3339.
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_seen: OffsetDateTime,
 }
 
 /// A claim gained areas or shared paths through an edit check.
@@ -1784,6 +1804,35 @@ mod tests {
         let bad = r#"{"kind":"worktree_taken","payload":{"member":1,"host":"laptop",
             "worktree":"../x","holder":"agent","purpose":"p"}}"#;
         assert!(serde_json::from_str::<EventKind>(bad).is_err());
+    }
+
+    #[test]
+    fn a_stale_release_carries_the_item_its_holder_and_when_the_claim_was_last_seen() {
+        let last_seen = OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000);
+        let kind = EventKind::ReleasedStale(ReleasedStale {
+            item: ItemId(4),
+            member: BOB,
+            last_seen,
+        });
+        let value = serde_json::to_value(&kind).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "released_stale",
+                "payload": {"item": 4, "member": 2, "last_seen": "2024-10-04T00:00:00Z"},
+            })
+        );
+        assert_eq!(kind.name(), "released_stale");
+        assert!(parsed_names().iter().any(|name| name == "released_stale"));
+        assert_eq!(kind.members(), BTreeSet::from([BOB]));
+        assert_eq!(
+            (kind.message(), kind.thread(), kind.slot()),
+            (None, None, None)
+        );
+        assert_eq!(kind.private_to(), None, "every reader of the log sees it");
+        assert_eq!(kind.completion(), None, "a release completes nothing");
+        let back: EventKind = serde_json::from_value(value).unwrap();
+        assert_eq!(back, kind);
     }
 
     #[test]

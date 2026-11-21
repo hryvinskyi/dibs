@@ -146,6 +146,7 @@ impl RepoSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectSettings {
     stale_after: Duration,
+    release_after: Duration,
     heartbeat_every: Duration,
     yield_escalates_after: Duration,
     edit_policy: EditPolicy,
@@ -165,6 +166,16 @@ pub enum SettingsError {
     /// `stale_after` is outside 1 hour to 30 days.
     #[error("stale_after is between 1 hour and 30 days")]
     StaleAfterOutOfRange,
+    /// `release_after` is not a duration.
+    #[error("release_after: {0}")]
+    ReleaseAfter(DurationError),
+    /// `release_after` is outside 1 to 90 days.
+    #[error("release_after is between 1 and 90 days")]
+    ReleaseAfterOutOfRange,
+    /// `release_after` is not longer than `stale_after`, so a claim would be released before it
+    /// went stale.
+    #[error("release_after is longer than stale_after")]
+    ReleaseAfterNotPastStale,
     /// `heartbeat_every` is not a duration.
     #[error("heartbeat_every: {0}")]
     HeartbeatEvery(DurationError),
@@ -453,6 +464,8 @@ pub enum CheckoutRefused {
 const DEFAULT_STALE_AFTER: Duration = Duration::hours(24);
 const DEFAULT_HEARTBEAT_EVERY: Duration = Duration::minutes(1);
 const STALE_AFTER_RANGE: (Duration, Duration) = (Duration::hours(1), Duration::days(30));
+const DEFAULT_RELEASE_AFTER: Duration = Duration::days(7);
+const RELEASE_AFTER_RANGE: (Duration, Duration) = (Duration::days(1), Duration::days(90));
 const HEARTBEAT_EVERY_RANGE: (Duration, Duration) = (Duration::minutes(1), Duration::minutes(15));
 const DEFAULT_YIELD_ESCALATES_AFTER: Duration = Duration::minutes(30);
 const YIELD_ESCALATES_AFTER_RANGE: (Duration, Duration) =
@@ -478,7 +491,9 @@ struct RepoInput<'a> {
 impl ProjectSettings {
     /// Validates a settings document.
     ///
-    /// The rules: `stale_after` between 1 hour and 30 days (default 24 hours); `heartbeat_every`
+    /// The rules: `stale_after` between 1 hour and 30 days (default 24 hours); `release_after`
+    /// between 1 and 90 days and longer than `stale_after` (default 7 days, or one day more than
+    /// `stale_after` when that is 7 days or longer); `heartbeat_every`
     /// between 1 and 15 minutes (default 1 minute); `yield_escalates_after` between 5 minutes and
     /// 24 hours (default 30 minutes); `raised_per_hour` between 1 and 1000 (default
     /// 10); either top-level areas and rules or a `repos`
@@ -510,6 +525,16 @@ impl ProjectSettings {
             SettingsError::StaleAfter,
             SettingsError::StaleAfterOutOfRange,
         )?;
+        let release_after = parse_in_range(
+            document.release_after.as_deref(),
+            default_release_after(stale_after),
+            RELEASE_AFTER_RANGE,
+            SettingsError::ReleaseAfter,
+            SettingsError::ReleaseAfterOutOfRange,
+        )?;
+        if release_after <= stale_after {
+            return Err(SettingsError::ReleaseAfterNotPastStale);
+        }
         let heartbeat_every = parse_in_range(
             document.heartbeat_every.as_deref(),
             DEFAULT_HEARTBEAT_EVERY,
@@ -594,6 +619,7 @@ impl ProjectSettings {
             .collect::<Result<BTreeSet<Handle>, _>>()?;
         Ok(Self {
             stale_after,
+            release_after,
             heartbeat_every,
             yield_escalates_after,
             edit_policy: document.edit_policy.unwrap_or_default(),
@@ -614,6 +640,12 @@ impl ProjectSettings {
     /// push of its branch, claiming it again.
     pub fn stale_after(&self) -> Duration {
         self.stale_after
+    }
+
+    /// How long a working claim may go without a sign of its own work before the server releases
+    /// it: always longer than [`ProjectSettings::stale_after`], so a claim is stale first.
+    pub fn release_after(&self) -> Duration {
+        self.release_after
     }
 
     /// How often a session sends a heartbeat.
@@ -688,6 +720,18 @@ impl ProjectSettings {
             .collect();
         kept.slots = SlotCatalog::new(slots);
         kept
+    }
+
+    /// The same settings with every setting that decides how the server ends claims or takes
+    /// areas from them on its own set to its default: what a reader that knows none of them can
+    /// parse, since [`ProjectSettings::to_document`] leaves a setting at its default out. The
+    /// claims' liveness, the areas and every other setting are kept.
+    #[must_use]
+    pub fn without_claim_endings(&self) -> Self {
+        Self {
+            release_after: default_release_after(self.stale_after),
+            ..self.clone()
+        }
     }
 
     /// The repository of this id.
@@ -824,6 +868,8 @@ impl ProjectSettings {
         let area_deps = radar::area_deps_document;
         let mut document = SettingsDocument {
             stale_after: Some(format_duration(self.stale_after)),
+            release_after: (self.release_after != default_release_after(self.stale_after))
+                .then(|| format_duration(self.release_after)),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
             yield_escalates_after: (self.yield_escalates_after != DEFAULT_YIELD_ESCALATES_AFTER)
                 .then(|| format_duration(self.yield_escalates_after)),
@@ -862,6 +908,17 @@ impl ProjectSettings {
             document.area_deps = area_deps(repo);
         }
         document
+    }
+}
+
+/// The release delay a project gets when its settings name none: seven days, or one day past
+/// `stale_after` when that is seven days or longer, so the default is always longer than the
+/// project's `stale_after` and settings that name no `release_after` always parse.
+fn default_release_after(stale_after: Duration) -> Duration {
+    if stale_after >= DEFAULT_RELEASE_AFTER {
+        stale_after + Duration::days(1)
+    } else {
+        DEFAULT_RELEASE_AFTER
     }
 }
 
@@ -1109,6 +1166,115 @@ mod tests {
             let got = ProjectSettings::parse(&document(json), &HotRuleRegistry::standard()).err();
             assert_eq!(&got, expected, "{json}");
         }
+    }
+
+    #[test]
+    fn a_claim_is_released_after_seven_days_unless_it_goes_stale_that_late() {
+        assert_eq!(settings("{}").release_after(), Duration::days(7));
+        assert_eq!(
+            settings(r#"{"stale_after":"6d23h"}"#).release_after(),
+            Duration::days(7)
+        );
+        assert_eq!(
+            settings(r#"{"stale_after":"7d"}"#).release_after(),
+            Duration::days(8)
+        );
+        assert_eq!(
+            settings(r#"{"stale_after":"30d"}"#).release_after(),
+            Duration::days(31),
+            "settings that name no release delay keep parsing whatever their stale delay"
+        );
+        assert_eq!(
+            settings(r#"{"release_after":"3d"}"#).release_after(),
+            Duration::days(3)
+        );
+    }
+
+    #[test]
+    fn a_written_release_delay_is_between_one_and_ninety_days_and_longer_than_the_stale_one() {
+        let cases: &[(&str, Option<SettingsError>)] = &[
+            (r#"{"stale_after":"1h","release_after":"1d"}"#, None),
+            (
+                r#"{"release_after":"1d"}"#,
+                Some(SettingsError::ReleaseAfterNotPastStale),
+            ),
+            (r#"{"release_after":"90d"}"#, None),
+            (
+                r#"{"release_after":"23h59m"}"#,
+                Some(SettingsError::ReleaseAfterOutOfRange),
+            ),
+            (
+                r#"{"release_after":"90d1s"}"#,
+                Some(SettingsError::ReleaseAfterOutOfRange),
+            ),
+            (
+                r#"{"release_after":"a week"}"#,
+                Some(SettingsError::ReleaseAfter(DurationError::Malformed)),
+            ),
+            (r#"{"stale_after":"2d","release_after":"2d1s"}"#, None),
+            (
+                r#"{"stale_after":"2d","release_after":"2d"}"#,
+                Some(SettingsError::ReleaseAfterNotPastStale),
+            ),
+            (
+                r#"{"stale_after":"10d","release_after":"7d"}"#,
+                Some(SettingsError::ReleaseAfterNotPastStale),
+            ),
+        ];
+        for (json, expected) in cases {
+            let got = ProjectSettings::parse(&document(json), &HotRuleRegistry::standard()).err();
+            assert_eq!(&got, expected, "{json}");
+        }
+        assert_eq!(
+            refusal(r#"{"stale_after":"2d","release_after":"1d"}"#).to_string(),
+            "release_after is longer than stale_after"
+        );
+    }
+
+    #[test]
+    fn the_release_delay_is_written_back_only_when_it_is_not_the_default() {
+        for (json, written) in [
+            ("{}", None),
+            (r#"{"stale_after":"10d"}"#, None),
+            (r#"{"release_after":"7d"}"#, None),
+            (r#"{"stale_after":"10d","release_after":"11d"}"#, None),
+            (r#"{"release_after":"3d"}"#, Some("3d")),
+            (
+                r#"{"stale_after":"10d","release_after":"20d"}"#,
+                Some("20d"),
+            ),
+        ] {
+            let parsed = settings(json);
+            let document = parsed.to_document();
+            assert_eq!(document.release_after.as_deref(), written, "{json}");
+            assert_eq!(
+                ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+                parsed,
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_claim_endings_the_release_delay_is_the_default_and_everything_else_stays() {
+        let written = settings(
+            r#"{"stale_after":"2d","release_after":"20d","yield_escalates_after":"1h",
+                "areas":[{"name":"billing","paths":["packages/billing/**"]}]}"#,
+        );
+        let older = written.without_claim_endings();
+        assert_eq!(older.release_after(), Duration::days(7));
+        assert_eq!(older.stale_after(), written.stale_after());
+        let mut expected = written.to_document();
+        expected.release_after = None;
+        assert_eq!(older.to_document(), expected);
+        let late = settings(r#"{"stale_after":"10d","release_after":"30d"}"#);
+        assert_eq!(
+            late.without_claim_endings().release_after(),
+            Duration::days(11),
+            "the default follows the stale delay, so what an older reader gets still parses"
+        );
+        let plain = settings(r#"{"stale_after":"2d"}"#);
+        assert_eq!(plain.without_claim_endings(), plain);
     }
 
     #[test]

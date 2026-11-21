@@ -6,7 +6,8 @@
 //! stop showing it. For the areas feature claims
 //! wait for — an area whose debt claim went stale moves to the claim waiting for it, and a request
 //! to hand one over that nobody answered within the project's `yield_escalates_after` goes to the
-//! project's arbiters.
+//! project's arbiters. For claims — a working claim that went the project's `release_after`
+//! without a sign of its own work is released, its item open again and its holder told.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use crate::stream::StopSignal;
 pub const SWEEP_EVERY: Duration = Duration::from_secs(30);
 
 /// Sweeps every `every` until `stop` is given: the slots first, then the worktree pools, then the
-/// waiting areas. A sweep that fails for one project, or one pool, is logged and the others are
+/// waiting areas, then the claims. A sweep that fails for one project, or one pool, is logged and the others are
 /// applied; a sweep already running when the stop comes is finished first.
 pub async fn run_sweeper(app: Arc<UseCases>, every: Duration, mut stop: StopSignal) {
     tracing::info!(every_s = every.as_secs(), "the sweep is scheduled");
@@ -31,6 +32,7 @@ pub async fn run_sweeper(app: Arc<UseCases>, every: Duration, mut stop: StopSign
         sweep_slots(&app).await;
         sweep_worktrees(&app).await;
         sweep_handovers(&app).await;
+        sweep_claims(&app).await;
     }
 }
 
@@ -99,6 +101,26 @@ async fn sweep_handovers(app: &UseCases) {
         }
         Err(error) => {
             tracing::error!(code = error.code(), error = ?error, "the sweep could not list the projects whose claims wait for areas");
+        }
+    }
+}
+
+async fn sweep_claims(app: &UseCases) {
+    match app.tick_claims.execute().await {
+        Ok(report) => {
+            for (project, error) in &report.failed {
+                tracing::error!(project = %project, code = error.code(), error = ?error, "the claims of a project could not be swept");
+            }
+            if report.released > 0 {
+                tracing::debug!(
+                    projects = report.projects,
+                    released = report.released,
+                    "the claims were swept"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(code = error.code(), error = ?error, "the claim sweep could not list the projects to sweep");
         }
     }
 }

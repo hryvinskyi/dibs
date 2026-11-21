@@ -245,7 +245,10 @@ other.
 A claim stays live while its own work shows: an edit made under it (the server checks it, or the hooks report it with
 the next heartbeat they send in the background), a push of its branch, claiming it again, or a pull request it waits
 for. It goes stale the project's `stale_after` after the last of those; a heartbeat alone keeps no claim alive. Claim
-the item again to keep a claim you have not touched for a while; a claim in review never goes stale.
+the item again to keep a claim you have not touched for a while; a claim in review never goes stale. A working claim
+that goes the project's `release_after` (7 days unless the settings say otherwise) without any of those is released by
+the server: the item is open again, its areas are free, and dibs tells you in that claim's conversation. If the work
+goes on, claim the item again.
 
 ## Taking over
 

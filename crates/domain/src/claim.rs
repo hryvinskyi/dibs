@@ -18,8 +18,10 @@ use crate::settings::ProjectSettings;
 use crate::wide::{WideScope, live_wide_naming};
 
 mod areas;
+mod release;
 
 pub use areas::{AreaOrigin, ClaimAreas, GainedNotHeld};
+pub use release::due_for_release;
 
 /// A member holding a work item. The claim is the member's: `session` and `host` record where it
 /// was taken, and any session of the member acts on it. It stays live while its own work shows (an

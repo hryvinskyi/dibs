@@ -289,6 +289,15 @@ while its own work shows — an edit made under it, whether the server checked i
 heartbeat; a push of its branch (a footprint report that changed what was stored); claiming it again; a pull request it
 waits for — and goes stale `stale_after` after the last of those.
 
+A working claim that goes the project's `release_after` (7 days unless the settings say otherwise) after the last of those
+signs is **released** by the server's sweep, which runs every 30 seconds: the item is `open` again, what the claim held
+or waited for is let go as any ending lets it go (an area another claim waits for moves to it), an event
+`released_stale` is appended, and its holder is told in the claim's conversation, in a `normal` message from dibs:
+"Released: dibs released your claim on work item … because nothing of its work showed for 7d: no edit made under it, no
+push of its branch, no renewal. The item is open again. If the work goes on, claim it again". A claim in review is never
+released this way. The sweep decides on the claims as stored when it takes the project, so a request that showed the
+claim's work first keeps it.
+
 The guard answers most edits from what its machine knows (an area the member is known to hold, from a status or an
 edit check under 30 seconds old) and never asks about a path no area governs, so the hooks record each edit they let
 through that way and the next heartbeat reports it in `edits`: `areas`, at most 200, each `repo:area`, the areas of
@@ -1333,6 +1342,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `released`, `completed` | `item`, `member` |
 | `item_reopened` | `item`, `by` (the member whose claim brought the done item back) |
 | `force_released` | `item`, `member`, `by` (the admin; `null` for the operator) |
+| `released_stale` | `item`, `member`, `last_seen` (RFC 3339: the claim's last sign of its own work; the server's sweep released it after the project's `release_after`) |
 | `reserved` | `item`, `member`, `areas`, `paths` |
 | `granted` | `grant`, `item`, `area`, `from`, `to` |
 | `grant_revoked` | `grant`, `item`, `area`, `from`, `to`, `cause` (`revoked`, `grantor_left`, `grantee_left`) |
@@ -1416,6 +1426,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | Setting | Meaning |
 |---|---|
 | `stale_after` | How long a claim stays live after the last sign of its own work (an edit made under it, a push of its branch, claiming it again): `24h`; 1 hour to 30 days; default 24 hours. |
+| `release_after` | How long a working claim may go without a sign of its own work before the server releases it and its item is open again: `7d`; 1 to 90 days, and longer than `stale_after`; default 7 days, or one day more than `stale_after` when that is 7 days or longer. |
 | `heartbeat_every` | How often a session sends a heartbeat: `1m`; 1 to 15 minutes; default 1 minute. |
 | `yield_escalates_after` | How long a request to hand an area over from debt work to a feature claim waits before it is escalated to the arbiters: `30m`; 5 minutes to 24 hours; default 30 minutes. A top-level setting in either layout. |
 | `edit_policy` | `require-claim` (default): a governed path needs a live claim. `advise`: it does not. |

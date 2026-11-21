@@ -62,6 +62,7 @@ mod slots;
 mod start_thread;
 mod status;
 mod take_over;
+mod tick_claims;
 mod unacked;
 mod upsert_items;
 mod wide_asks;
@@ -143,6 +144,7 @@ pub use slots::{
 pub use start_thread::{Addressees, StartThread, StartThreadInput, StartedThread};
 pub use status::{AreaHold, HeldItem, Status, StatusView, WideAreaStanding, WideClaimStatus};
 pub use take_over::{TakeOver, TakeOverInput, TakenOverClaim};
+pub use tick_claims::{ClaimSweep, TickClaims};
 pub use unacked::{Unacked, UnackedMessage};
 pub use upsert_items::{UpsertItems, UpsertReport};
 pub use wide_asks::Announced;
@@ -311,6 +313,8 @@ pub struct UseCases {
     pub tick_worktrees: TickWorktrees,
     /// See [`TickHandovers`].
     pub tick_handovers: TickHandovers,
+    /// See [`TickClaims`].
+    pub tick_claims: TickClaims,
 }
 
 impl UseCases {
@@ -394,6 +398,7 @@ impl UseCases {
             worktrees: Worktrees::new(deps),
             tick_worktrees: TickWorktrees::new(deps),
             tick_handovers: TickHandovers::new(deps),
+            tick_claims: TickClaims::new(deps),
         }
     }
 }

@@ -521,6 +521,22 @@ waiting areas of a project could not be swept*) and the other projects are swept
 The rule that only a feature claim waits for an area is kept by the service; the database keeps one waiting claim per
 area of a project, but cannot check the kind, which lives in another table than the waits.
 
+## Stale claims released
+
+The same 30-second sweep releases, in every project, each working claim that went the project's `release_after` without
+a sign of its own work (an edit made under it, a push of its branch, claiming it again): its item is open again, an
+area another claim waits for moves to that claim, the log records `released_stale`, and dibs tells the holder in the
+claim's conversation. A claim in review is never released this way. `release_after` is a top-level setting, 1 to 90
+days and longer than the project's `stale_after`; it defaults to 7 days, or to one day more than `stale_after` when that
+is 7 days or longer, so settings written before the setting existed keep parsing. A project with no claim due is read
+and left without a write. A failure to sweep one project, its stored settings not parsing included, is logged (*the
+claims of a project could not be swept*) and the other projects are swept all the same.
+
+Clients older than 0.1.11 cannot read `release_after`, so the server serves them the settings without it (as `GET
+/v1/me` leaves out what an older client cannot parse; see [client versions](#client-versions)): setting it is safe before
+every member has updated. A server rolled back to a build without `release_after` cannot read settings that name it:
+remove the setting from the settings before rolling back.
+
 ## Sessions woken while they wait
 
 A member's session that waits for its person can be woken by a pushed message on a host that can do it, when the

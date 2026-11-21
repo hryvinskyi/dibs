@@ -139,7 +139,8 @@ async fn a_client_older_than_protected_tags_is_served_the_settings_without_them(
 }
 
 #[tokio::test]
-async fn a_client_older_than_branch_patterns_is_served_the_settings_and_slots_without_them() {
+async fn a_client_older_than_branch_patterns_or_the_release_delay_is_served_the_settings_and_slots_without_them()
+ {
     let world = World::new().await;
     let alice = world.project("acme", "alice").await;
     world
@@ -152,7 +153,8 @@ async fn a_client_older_than_branch_patterns_is_served_the_settings_and_slots_wi
                     {"ref": "refs/tags/v*", "pushers": ["alice"]}
                 ],
                 "slots": [{"name": "release:cut", "max_hold": "1h",
-                           "freezes": ["refs/heads/release/*", "refs/heads/main"]}]
+                           "freezes": ["refs/heads/release/*", "refs/heads/main"]}],
+                "release_after": "3d"
             }),
         )
         .await;
@@ -172,37 +174,62 @@ async fn a_client_older_than_branch_patterns_is_served_the_settings_and_slots_wi
             .map(|frozen| frozen.as_str().unwrap().to_owned())
             .collect()
     };
+    let whole_rules = vec!["refs/heads/main", "refs/heads/release/*", "refs/tags/v*"];
     let whole_freezes = ["default:refs/heads/release/*", "default:refs/heads/main"];
-    for (agent, expected_rules, expected_freezes) in [
+    let released = serde_json::Value::from("3d");
+    let absent = serde_json::Value::Null;
+    for (agent, expected_rules, expected_freezes, expected_release) in [
         (
             Some("dibs/0.1.0"),
             vec!["refs/heads/main"],
             vec!["default:refs/heads/main"],
+            &absent,
         ),
         (
             Some("dibs/0.1.1"),
             vec!["refs/heads/main", "refs/tags/v*"],
             vec!["default:refs/heads/main"],
+            &absent,
         ),
         (
             Some("dibs/0.1.2"),
-            vec!["refs/heads/main", "refs/heads/release/*", "refs/tags/v*"],
+            whole_rules.clone(),
             whole_freezes.to_vec(),
+            &absent,
+        ),
+        (
+            Some("dibs/0.1.10"),
+            whole_rules.clone(),
+            whole_freezes.to_vec(),
+            &absent,
+        ),
+        (
+            Some("dibs/0.1.11-rc.1"),
+            whole_rules.clone(),
+            whole_freezes.to_vec(),
+            &released,
+        ),
+        (
+            Some("dibs/0.1.11"),
+            whole_rules.clone(),
+            whole_freezes.to_vec(),
+            &released,
         ),
         (
             Some("curl/8.0"),
-            vec!["refs/heads/main", "refs/heads/release/*", "refs/tags/v*"],
+            whole_rules.clone(),
             whole_freezes.to_vec(),
+            &released,
         ),
-        (
-            None,
-            vec!["refs/heads/main", "refs/heads/release/*", "refs/tags/v*"],
-            whole_freezes.to_vec(),
-        ),
+        (None, whole_rules.clone(), whole_freezes.to_vec(), &released),
     ] {
         let me = as_agent(&world, &alice, "/v1/me", agent).await;
         assert_eq!(me.status, StatusCode::OK, "{agent:?}: {}", me.body);
         assert_eq!(rules(&me), expected_rules, "{agent:?}");
+        assert_eq!(
+            &me.body["settings"]["release_after"], expected_release,
+            "{agent:?}"
+        );
         assert_eq!(
             frozen(&me.body["settings"]["slots"][0]),
             expected_freezes,

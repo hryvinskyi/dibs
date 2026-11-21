@@ -1,12 +1,18 @@
 //! Claiming, taking over, releasing and completing work items, and the status that shows them.
 
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
 use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
 use time::Duration;
+use time::format_description::well_known::Rfc3339;
 
 use dibs_domain::member::Role;
+use dibs_server::stream::Shutdown;
+use dibs_server::sweep::run_sweeper;
 
-use crate::support::{Person, World, assert_error, two_repositories};
+use crate::support::{Person, START, World, assert_error, two_repositories};
 
 /// A project with two repositories, alice (admin) and bob, each with a session.
 struct Team {
@@ -488,4 +494,72 @@ async fn malformed_branches_or_an_unlisted_repository_refuse_the_claim_and_name_
         "no claim was made: {}",
         status.body
     );
+}
+
+#[tokio::test]
+async fn the_sweep_releases_a_claim_unseen_past_the_release_delay_and_the_log_shows_it() {
+    let team = Team::new().await;
+    let item = team
+        .world
+        .item(&team.bob, Some("gh:acme/api#42"), "Billing fix")
+        .await;
+    let claimed = team
+        .claim(&team.bob, team.bob_session, item, json!(["api:billing"]))
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    team.world.fakes.clock.advance(Duration::days(7));
+    let early = team.world.app.tick_claims.execute().await.unwrap();
+    assert_eq!(early.released, 0, "seven days are not more than seven days");
+    team.world.fakes.clock.advance(Duration::minutes(1));
+
+    let shutdown = Shutdown::new();
+    let sweeper = tokio::spawn(run_sweeper(
+        Arc::clone(&team.world.app),
+        StdDuration::from_millis(20),
+        shutdown.signal(),
+    ));
+    let mut released = None;
+    for _ in 0..200 {
+        let events = team.world.get(&team.alice, "/v1/events").await;
+        assert_eq!(events.status, StatusCode::OK, "{}", events.body);
+        released = events.body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "released_stale")
+            .cloned();
+        if released.is_some() {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+    shutdown.stop();
+    tokio::time::timeout(StdDuration::from_secs(5), sweeper)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let released = released.expect("the sweep released the claim");
+    let bob = team.bob.actor.member.get();
+    assert_eq!(
+        released["payload"],
+        json!({"item": item, "member": bob, "last_seen": START.format(&Rfc3339).unwrap()})
+    );
+    assert_eq!(released["members"][bob.to_string()], "bob");
+    let read = team
+        .world
+        .get(&team.bob, &format!("/v1/items/{item}"))
+        .await;
+    assert_eq!(read.body["claim"], Value::Null, "{}", read.body);
+    assert_eq!(read.body["item"]["status"], "open");
+    let taken = team
+        .claim(
+            &team.alice,
+            team.alice_session,
+            item,
+            json!(["api:billing"]),
+        )
+        .await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+    assert_eq!(taken.body["outcome"], "new");
 }

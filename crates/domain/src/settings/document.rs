@@ -19,6 +19,11 @@ pub struct SettingsDocument {
     /// push of its branch, claiming it again (`24h`; 1 hour to 30 days; default 24 hours).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_after: Option<String>,
+    /// How long a working claim may go without a sign of its own work before the server releases
+    /// it and its item is open again (`7d`; 1 to 90 days and longer than `stale_after`; default 7
+    /// days, or one day more than `stale_after` when that is 7 days or longer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_after: Option<String>,
     /// How often a session sends a heartbeat (`1m`; 1 to 15 minutes; default 1 minute).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_every: Option<String>,

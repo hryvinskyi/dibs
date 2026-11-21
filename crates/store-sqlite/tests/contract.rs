@@ -2140,6 +2140,11 @@ mod contract {
                 item: FIRST,
                 member: ALICE,
             }),
+            EventKind::ReleasedStale(dibs_domain::event::ReleasedStale {
+                item: FIRST,
+                member: BOB,
+                last_seen: at(-3) + time::Duration::nanoseconds(123_456_789),
+            }),
         ];
         let mut tx = store.begin().await.unwrap();
         let mut expected = Vec::new();
