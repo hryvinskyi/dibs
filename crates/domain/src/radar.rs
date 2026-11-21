@@ -21,8 +21,8 @@ pub use footprint::{
 };
 pub use names::{BranchName, BranchNameError, CommitSha, CommitShaError};
 pub use overlap::{
-    Merge, MergeMark, Overlap, OverlapChanges, OverlapError, OverlapKey, OverlapKind, RadarScene,
-    reconcile,
+    BASE_MOVED_TOLD_EVERY, Merge, MergeMark, Overlap, OverlapChanges, OverlapError, OverlapKey,
+    OverlapKind, RadarScene, reconcile,
 };
 pub use source::{
     BranchRecording, BranchSource, BranchSourceError, BranchSourceKind, HeldWorktrees,

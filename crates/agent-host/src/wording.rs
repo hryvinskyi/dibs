@@ -843,6 +843,13 @@ fn claim_lines(heading: &str, claims: &[&ClaimLine], text: &mut String) {
         if !claim.prs.is_empty() {
             let _ = write!(text, ", in review on {}", pr_list(&claim.prs));
         }
+        if !claim.base_moved_by.is_empty() {
+            let _ = write!(
+                text,
+                ", the base moved under it: {} (rebase onto the base)",
+                pr_list(&claim.base_moved_by)
+            );
+        }
     }
 }
 
@@ -1220,6 +1227,7 @@ mod tests {
                 .map(|area| QualifiedArea::parse(area).unwrap())
                 .collect(),
             prs: Vec::new(),
+            base_moved_by: Vec::new(),
         }
     }
 
@@ -1585,6 +1593,42 @@ mod tests {
         }
         .text();
         assert!(!quiet.contains("integration silent"), "{quiet}");
+    }
+
+    #[test]
+    fn a_claim_whose_base_moved_says_so_on_its_line_and_one_whose_did_not_says_nothing() {
+        let me = handle("bob");
+        let status = StatusView {
+            live: vec![
+                ClaimLine {
+                    base_moved_by: vec![
+                        PrRef::parse("acme/widgets#7").unwrap(),
+                        PrRef::parse("acme/widgets#9").unwrap(),
+                    ],
+                    ..claim(3, "bob", &["api:billing"])
+                },
+                claim(4, "alice", &[]),
+            ],
+            ..StatusView::default()
+        };
+        let text = Brief {
+            member: &me,
+            policy: EditPolicy::RequireClaim,
+            status: Some(&status),
+            inbox: None,
+            status_age: None,
+            newer: None,
+            now: OffsetDateTime::UNIX_EPOCH,
+        }
+        .text();
+        assert!(
+            text.contains(
+                "- item 3 \"Fix billing\", bob, areas api:billing, the base moved under it: acme/widgets#7 and acme/widgets#9 (rebase onto the base)\n"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("- item 4 \"Fix billing\", alice\n"), "{text}");
+        assert_eq!(text.matches("the base moved under it").count(), 1, "{text}");
     }
 
     #[test]

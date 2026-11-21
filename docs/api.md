@@ -225,8 +225,9 @@ an escalation, and the notice that a member left. dibs writes them itself, in th
 `"dibs"`, `system` is `true` and `label` is `dibs`.
 
 **A claim's conversation.** Everything dibs writes to a claim's holder about that one claim goes into the claim's own
-conversation: done by merge, done in the tracker, set aside in review, back from review, an area handed over to the
-claim, a grant given for it, taken over (told to the previous holder, in the previous claim's conversation) and ended by
+conversation: an overlap the radar found and a base that moved under its branch (see
+[Branches and overlaps](#branches-and-overlaps)), done by merge, done in the tracker, set aside in review, back from
+review, an area handed over to the claim, a grant given for it, taken over (told to the previous holder, in the previous claim's conversation) and ended by
 an admin. dibs starts that conversation at the first such message: `thread.author` is `"dibs"`, it is addressed to the
 holder alone and filed under the claim's item, and its subject is `Your claim on gh:acme/widgets#42 "Refund rounding"`
 (the item's reference, or `#` and its id, and its title). Each message opens with what happened (`Done by merge: pull
@@ -834,11 +835,22 @@ missing or malformed field or more than 3000 paths, `forbidden` for anyone but a
 
 One member's own claims never collide (`same_file`, `contract`).
 
-Each overlap is **announced once**, the first time it is found while every claim it names is live: a conversation
-started by dibs about the first item it names, addressed to the holders of the claims it names (both of them; one for
-`main_moved`), whose one message is `high` for `same_file` and `contract` and `normal` for `main_moved` — every merge
-brings one — and says to rebase onto the base now, and for a contract to read the other change before going on.
-`overlap_found` records each announcement. The same overlap on more paths is not new.
+Each overlap is **announced once**, the first time it is found while every claim it names is live: one message from
+dibs to the holder of each claim it names (both of them; one for `main_moved`), each in that claim's own conversation
+(see *A claim's conversation* under [Records](#records)), so neither holder reads the other's. A message opens with what happened (`Overlap: …`,
+`Base moved: …`) and describes the overlap from its reader's side: their branch, and the other claim with its item,
+title, holder and branch, or the merged pull request; the paths, the first 20 by name and then how many more. It is
+`high` for `same_file` and `contract` and `normal` for `main_moved`, and says to rebase onto the base now, for a
+contract to read the other change before going on, and for `same_file` and `contract` to write to the other holder
+(`dibs send bob`) to settle who changes what, since the holders no longer share a conversation. `overlap_found`
+records each overlap found once, whoever was told. The same overlap on more paths is not new.
+
+A moved base is **told at most once a day** for each claim. A `main_moved` found within 24 hours of the last one told in
+the same claim's conversation is stored, recorded with `overlap_found` and shown, but no message is written: every merge
+into a busy base can bring one, and one word to rebase is enough. A claim whose conversation is new, or was deleted or
+pruned, has been told nothing. A claim's moved bases are part of what it is: `GET /v1/status` lists them among
+`overlaps`, and the session brief and `dibs status` add them to the claim's own line ("the base moved under it:
+acme/widgets#7 (rebase onto the base)").
 
 An overlap **ends** only when what it rests on changes: a footprint it rests on changes so that it no longer holds, a
 claim's branch changes, a merge delivers the branch it rests on, the settings change so that it no longer holds, or a

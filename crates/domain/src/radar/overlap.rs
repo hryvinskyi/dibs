@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::area::QualifiedArea;
 use crate::claim::Claim;
@@ -17,6 +17,12 @@ use crate::radar::{BranchName, Consumer, Footprint, FootprintEntry};
 use crate::repo::RepoId;
 use crate::review::PrRef;
 use crate::settings::ProjectSettings;
+
+/// How long after dibs told a claim's holder that the base moved under the claim's work another
+/// moved base of that claim goes untold. Every merge into a busy base can move it again, and one
+/// word a day to rebase onto the base is enough: a moved base found within this time of the last
+/// one told is stored and shown with the claim, and no message is written about it.
+pub const BASE_MOVED_TOLD_EVERY: Duration = Duration::hours(24);
 
 /// What kind of collision an overlap is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -55,6 +61,27 @@ impl OverlapKind {
         match self {
             Self::SameFile | Self::Contract => Importance::High,
             Self::MainMoved => Importance::Normal,
+        }
+    }
+
+    /// How long after its holder was last told an overlap of the kind about a claim another one of
+    /// the kind found for that claim goes untold: [`BASE_MOVED_TOLD_EVERY`] for a moved base, which
+    /// every merge into a busy base brings; `None` for a collision with another member's work,
+    /// told each time it is found.
+    pub const fn told_at_most_every(self) -> Option<Duration> {
+        match self {
+            Self::SameFile | Self::Contract => None,
+            Self::MainMoved => Some(BASE_MOVED_TOLD_EVERY),
+        }
+    }
+
+    /// Whether an overlap of the kind found at `now` for a claim is told to its holder, when one
+    /// of the kind was last told about that claim at `last_told` (`None` when never). A time
+    /// ahead of `now` counts as within the wait.
+    pub fn is_told(self, last_told: Option<OffsetDateTime>, now: OffsetDateTime) -> bool {
+        match (self.told_at_most_every(), last_told) {
+            (None, _) | (Some(_), None) => true,
+            (Some(every), Some(at)) => now - at >= every,
         }
     }
 

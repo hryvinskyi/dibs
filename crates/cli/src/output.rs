@@ -13,6 +13,7 @@ use dibs_client::api::{
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
 use dibs_domain::radar::OverlapKind;
+use dibs_domain::review::PrRef;
 
 use crate::failure::Failure;
 
@@ -350,6 +351,20 @@ pub fn escalation_line(escalation: &OpenEscalation) -> String {
     )
 }
 
+/// What a claim line adds for the merges that moved the base under the claim's branch: `, the base
+/// moved under it: acme/widgets#7, acme/widgets#9 (rebase onto the base)`, or nothing when no
+/// merge did.
+pub fn base_moved_text(prs: &[PrRef]) -> String {
+    if prs.is_empty() {
+        return String::new();
+    }
+    let names: Vec<String> = prs.iter().map(ToString::to_string).collect();
+    format!(
+        ", the base moved under it: {} (rebase onto the base)",
+        names.join(", ")
+    )
+}
+
 /// One line for an overlap between live claims:
 /// `same file: gh:acme/api#1 (alice) and gh:acme/api#2 (bob) on api:config/app.yaml`, the paths
 /// after the first five counted.
@@ -414,6 +429,19 @@ mod tests {
         let shown = secret_shown(true, "Added bob; hand it over", "dibs_secret");
         assert_eq!(shown.out, "Added bob; hand it over:\ndibs_secret");
         assert_eq!(shown.err, None);
+    }
+
+    #[test]
+    fn a_claim_line_names_every_merge_that_moved_its_base_and_nothing_without_one() {
+        let prs = [
+            PrRef::parse("acme/widgets#7").unwrap(),
+            PrRef::parse("acme/widgets#9").unwrap(),
+        ];
+        assert_eq!(
+            base_moved_text(&prs),
+            ", the base moved under it: acme/widgets#7, acme/widgets#9 (rebase onto the base)"
+        );
+        assert_eq!(base_moved_text(&[]), "");
     }
 
     #[test]

@@ -1,9 +1,9 @@
 //! The overlap radar across the built binaries: alice and bob each work on a branch of their own
 //! checkout, the sync of the session that took each claim tells the server which branch the claim
 //! is on, the integration reads the branches and reports what each changes through the footprint
-//! route, and the one file both branches change is announced once, to both of them, however often
-//! the reports come. A checkout two sessions of one member share records no branch, so a file its
-//! claim's work changes is announced to nobody.
+//! route, and the one file both branches change is announced once to each of them, in their own
+//! claim's conversation, however often the reports come. A checkout two sessions of one member
+//! share records no branch, so a file its claim's work changes is announced to nobody.
 
 use serde_json::{Value, json};
 
@@ -21,16 +21,17 @@ paths = ["packages/search/**"]
 
 const REMOTE: &str = "git@example.com:acme/widgets.git";
 
-const SUBJECT: &str = "Overlap: gh:acme/widgets#1 and gh:acme/widgets#2 change the same files";
-
-/// The subjects of the threads in `inbox` that announce the overlap.
-fn announcements(inbox: &Value) -> usize {
+/// How many messages `inbox` holds in the conversation of the claim on `reference`, where dibs
+/// tells its holder about an overlap.
+fn announcements(inbox: &Value, reference: &str) -> u64 {
+    let subject = format!("Your claim on {reference} \"Work\"");
     inbox["threads"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|thread| thread["thread"]["subject"] == SUBJECT)
-        .count()
+        .filter(|thread| thread["thread"]["subject"] == subject.as_str())
+        .filter_map(|thread| thread["messages"].as_u64())
+        .sum()
 }
 
 #[test]
@@ -114,9 +115,12 @@ fn one_file_two_branches_change_is_told_to_both_holders_once() {
         }
     }
 
-    for (who, checkout) in [(alice, &alices_checkout), (bob, &bobs_checkout)] {
+    for (who, checkout, reference) in [
+        (alice, &alices_checkout, "gh:acme/widgets#1"),
+        (bob, &bobs_checkout, "gh:acme/widgets#2"),
+    ] {
         let (_, inbox) = who.json(checkout, &["inbox"]);
-        assert_eq!(announcements(&inbox), 1, "{inbox}");
+        assert_eq!(announcements(&inbox, reference), 1, "{inbox}");
     }
     let (_, status) = bob.json(&bobs_checkout, &["status"]);
     assert_eq!(status["overlaps"][0]["kind"], "same_file", "{status}");
@@ -192,8 +196,11 @@ fn a_checkout_two_sessions_of_one_member_share_records_no_branch_and_announces_n
         assert_eq!(code, 200, "{answer}");
         assert_eq!(answer["stored"], stored, "{answer}");
     }
-    for (who, checkout) in [(alice, &alices_checkout), (bob, &bobs_checkout)] {
+    for (who, checkout, reference) in [
+        (alice, &alices_checkout, "gh:acme/widgets#1"),
+        (bob, &bobs_checkout, "gh:acme/widgets#2"),
+    ] {
         let (_, inbox) = who.json(checkout, &["inbox"]);
-        assert_eq!(announcements(&inbox), 0, "{inbox}");
+        assert_eq!(announcements(&inbox, reference), 0, "{inbox}");
     }
 }

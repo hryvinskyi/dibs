@@ -1,6 +1,7 @@
 //! The branch overlap radar: an integration reports what each claim's branch changes, the overlaps
 //! between live claims of different members are derived from those reports, and each one found is
-//! announced once, in a message from dibs, to the holders it concerns.
+//! announced once, in a message from dibs to each holder it concerns, in that holder's claim's
+//! conversation.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -12,7 +13,6 @@ use dibs_domain::event::{self, EventKind};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::ItemId;
-use dibs_domain::message::{Author, Recipients};
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::radar::{
     BranchName, Footprint, FootprintBase, FootprintDigest, FootprintOutcome, FootprintReport,
@@ -29,8 +29,9 @@ use crate::dependencies::Dependencies;
 use crate::error::{AppError, Missing};
 use crate::named::{ItemName, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
+use crate::use_cases::claim_notice::{ClaimNotice, claim_link};
 use crate::use_cases::common::existing_item;
-use crate::use_cases::writing::{Posted, SystemPost, titled_body};
+use crate::use_cases::writing::titled_body;
 use crate::work::Work;
 
 mod checkout;
@@ -457,8 +458,9 @@ impl Radar<'_> {
         Ok(())
     }
 
-    /// Writes the message of an overlap found to the holders of the claims it names, and records
-    /// that it was found.
+    /// Tells the holder of each claim the overlap names, in that claim's own conversation, and
+    /// records once that it was found. A moved base found within a day of the last one told about
+    /// the same claim is recorded but not told.
     async fn announce(
         &self,
         work: &mut Work,
@@ -466,35 +468,37 @@ impl Radar<'_> {
         names: &Names,
         overlap: &Overlap,
     ) -> Result<(), AppError> {
+        let repos: BTreeSet<&RepoId> = overlap.paths().iter().map(|path| &path.repo).collect();
         let mut parties = Vec::new();
         for item in overlap.items() {
             let Some(claim) = claims.iter().find(|claim| claim.item == *item) else {
                 continue;
             };
-            let named = ItemName::of(&existing_item(work, *item).await?, self.schemes);
             parties.push(Party {
-                item: named,
-                holder: names.handle(claim.member)?,
+                side: Side {
+                    item: ItemName::of(&existing_item(work, *item).await?, self.schemes),
+                    holder: names.handle(claim.member)?,
+                    branches: repos
+                        .iter()
+                        .filter_map(|repo| claim.branch(repo))
+                        .cloned()
+                        .collect(),
+                },
                 claim,
             });
         }
-        let Some(first) = parties.first() else {
+        if parties.is_empty() {
             return Ok(());
-        };
-        let holders: BTreeSet<_> = parties.iter().map(|party| party.claim.member).collect();
-        let lead = wording(overlap, &parties);
-        SystemPost {
-            ids: Posted::next(self.ids),
-            subject: subject(overlap, &parties),
-            item: Some(first.item.id),
-            on_behalf_of: Author::System,
-            to: Recipients::Members(holders),
-            body: titled_body(&lead, None)?,
-            importance: overlap.kind().importance(),
-            ack_required: false,
         }
-        .send(work, self.now)
-        .await?;
+        for (index, reader) in parties.iter().enumerate() {
+            let others: Vec<&Side> = parties
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, party)| &party.side)
+                .collect();
+            self.tell(work, overlap, reader, &others).await?;
+        }
         work.record(
             self.now,
             EventKind::OverlapFound(event::OverlapFound {
@@ -512,41 +516,89 @@ impl Radar<'_> {
         .await?;
         Ok(())
     }
+
+    /// Writes the overlap to the holder of one claim it names, in that claim's conversation,
+    /// naming the other claims. The claim's link to its conversation is read once: it says both
+    /// where to write and when a moved base was last told there. An overlap of a kind told at
+    /// most so often is not written within that time of the last one told about the claim, and
+    /// when it is written, the time is kept on the conversation.
+    async fn tell(
+        &self,
+        work: &mut Work,
+        overlap: &Overlap,
+        reader: &Party<'_>,
+        others: &[&Side],
+    ) -> Result<(), AppError> {
+        let kind = overlap.kind();
+        let link = claim_link(work, reader.claim).await?;
+        if !kind.is_told(link.and_then(|link| link.base_moved_told_at), self.now) {
+            return Ok(());
+        }
+        let thread = ClaimNotice {
+            claim: reader.claim,
+            item: &reader.side.item,
+            body: titled_body(&wording(overlap, &reader.side, others), None)?,
+            importance: kind.importance(),
+        }
+        .send_linked(work, self.ids, self.now, link)
+        .await?;
+        if kind.told_at_most_every().is_some() {
+            let project = work.project_id();
+            work.set_base_moved_told_at(project, thread, self.now)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
-/// One claim an overlap names, with its item and holder.
+/// One claim an overlap names, with how its message describes it.
 struct Party<'a> {
-    item: ItemName,
-    holder: Handle,
+    side: Side,
     claim: &'a Claim,
 }
 
-impl Party<'_> {
-    /// `work item gh:acme/widgets#42 "Title" (alice, on alice/42-x)`.
-    fn described(&self, repos: &BTreeSet<&RepoId>) -> String {
-        let branches: Vec<String> = repos
-            .iter()
-            .filter_map(|repo| self.claim.branch(repo))
-            .map(ToString::to_string)
-            .collect();
-        let on = if branches.is_empty() {
+/// How a message about an overlap describes one claim it names: its item, its holder, and the
+/// branches its work is on in the repositories of the overlap's paths, as far as they are
+/// recorded.
+struct Side {
+    item: ItemName,
+    holder: Handle,
+    branches: Vec<BranchName>,
+}
+
+impl Side {
+    /// The reader's own branches: `your branch alice/1-x`, or `your branch` when none is recorded.
+    fn yours(&self) -> String {
+        match self.branches.as_slice() {
+            [] => "your branch".to_owned(),
+            [one] => format!("your branch {one}"),
+            many => format!("your branches {}", joined(many)),
+        }
+    }
+
+    /// Another member's claim: `work item gh:acme/widgets#42 "Title" (alice, on alice/42-x)`.
+    fn described(&self) -> String {
+        let on = if self.branches.is_empty() {
             String::new()
         } else {
-            format!(", on {}", branches.join(" and "))
+            format!(", on {}", joined(&self.branches))
         };
         format!(
             "work item {} \"{}\" ({}{on})",
-            reference(&self.item),
+            self.item.label(),
             self.item.title,
             self.holder
         )
     }
 }
 
-fn reference(item: &ItemName) -> String {
-    item.external_ref
-        .as_ref()
-        .map_or_else(|| format!("#{}", item.id), ToString::to_string)
+/// The names joined with `and`.
+fn joined(names: &[impl ToString]) -> String {
+    names
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 /// The overlap's paths for a sentence: the first ones by name, then how many more.
@@ -564,36 +616,40 @@ fn listed(paths: &BTreeSet<RepoPath>) -> String {
     }
 }
 
-fn subject(overlap: &Overlap, parties: &[Party<'_>]) -> String {
-    let refs: Vec<String> = parties.iter().map(|party| reference(&party.item)).collect();
-    let pair = refs.join(" and ");
-    match overlap.kind() {
-        OverlapKind::SameFile => format!("Overlap: {pair} change the same files"),
-        OverlapKind::Contract => format!("Overlap: {pair} meet at a published contract"),
-        OverlapKind::MainMoved => format!(
-            "Base moved: {} changed files of {pair}",
-            overlap.pr().map(ToString::to_string).unwrap_or_default()
-        ),
-    }
-}
-
-fn wording(overlap: &Overlap, parties: &[Party<'_>]) -> String {
-    let repos: BTreeSet<&RepoId> = overlap.paths().iter().map(|path| &path.repo).collect();
-    let who: Vec<String> = parties
-        .iter()
-        .map(|party| party.described(&repos))
-        .collect();
-    let who = who.join(" and ");
+/// What the holder of the claim `reader` is told of the overlap, which names the claims `others`
+/// too: it opens with what happened, says what the overlap is from the reader's side and what to
+/// do. The holders do not share a conversation, so a collision says how to write to the others.
+fn wording(overlap: &Overlap, reader: &Side, others: &[&Side]) -> String {
+    let yours = reader.yours();
+    let theirs = if others.is_empty() {
+        "another claim".to_owned()
+    } else {
+        joined(
+            &others
+                .iter()
+                .map(|side| side.described())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let write = if others.is_empty() {
+        "write to its holder".to_owned()
+    } else {
+        let ways: Vec<String> = others
+            .iter()
+            .map(|side| format!("{} (dibs send {})", side.holder, side.holder))
+            .collect();
+        format!("write to {}", joined(&ways))
+    };
     let paths = listed(overlap.paths());
     match overlap.kind() {
         OverlapKind::SameFile => format!(
-            "The branches of {who} change the same files: {paths}. Rebase onto the base now, and settle here who changes what, so the second merge does not meet a conflict."
+            "Overlap: {yours} and the branch of {theirs} change the same files: {paths}. Rebase onto the base now, and {write} to settle who changes what, so the second merge does not meet a conflict."
         ),
         OverlapKind::Contract => format!(
-            "The branches of {who} meet at a published contract: one changes {paths}, and the other works where that contract is used. Rebase onto the base now, and read the other change before going on, so both sides build on the same contract."
+            "Overlap: {yours} and the branch of {theirs} meet at a published contract: one changes {paths}, and the other works where that contract is used. Rebase onto the base now, and read the other change before going on, so both sides build on the same contract; {write} to agree on it."
         ),
         OverlapKind::MainMoved => format!(
-            "Pull request {} was merged into the base after the branch of {who} took its base, and it changed files that branch changes too: {paths}. Rebase onto the base now.",
+            "Base moved: pull request {} was merged into the base after {yours} took its base, and it changed files that branch changes too: {paths}. Rebase onto the base now.",
             overlap.pr().map(ToString::to_string).unwrap_or_default()
         ),
     }

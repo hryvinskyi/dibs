@@ -45,13 +45,23 @@ impl ClaimNotice<'_> {
         ids: &dyn IdGen,
         now: OffsetDateTime,
     ) -> Result<ThreadId, AppError> {
+        let link = claim_link(work, self.claim).await?;
+        self.send_linked(work, ids, now, link).await
+    }
+
+    /// Sends the message as [`ClaimNotice::send`] does, into the conversation of `link`, which
+    /// [`claim_link`] read for the same claim in the same transaction: a caller that decides from
+    /// the link whether to write at all reads it once.
+    pub(crate) async fn send_linked(
+        self,
+        work: &mut Work,
+        ids: &dyn IdGen,
+        now: OffsetDateTime,
+        link: Option<ClaimThread>,
+    ) -> Result<ThreadId, AppError> {
         let project = work.project_id();
         let instance = self.claim.instance();
-        let linked = match work.claim_thread(project, &instance).await? {
-            Some(link) if work.thread(project, link.thread).await?.is_some() => Some(link.thread),
-            Some(_) | None => None,
-        };
-        if let Some(thread) = linked {
+        if let Some(thread) = link.map(|link| link.thread) {
             SystemReply {
                 thread,
                 message: MessageId(ids.next()),
@@ -88,6 +98,24 @@ impl ClaimNotice<'_> {
         .await?;
         Ok(posted.thread)
     }
+}
+
+/// The claim's link to its conversation, with when a moved base was last told in it, when dibs
+/// started one and it still exists; `None` when dibs never wrote about the claim or the
+/// conversation is gone.
+pub(crate) async fn claim_link(
+    work: &mut Work,
+    claim: &Claim,
+) -> Result<Option<ClaimThread>, AppError> {
+    let project = work.project_id();
+    let Some(link) = work.claim_thread(project, &claim.instance()).await? else {
+        return Ok(None);
+    };
+    Ok(work
+        .thread(project, link.thread)
+        .await?
+        .is_some()
+        .then_some(link))
 }
 
 /// The subject of a claim's conversation: `Your claim on <reference> "<title>"`, cut at a

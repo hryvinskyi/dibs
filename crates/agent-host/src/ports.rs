@@ -85,6 +85,9 @@ pub struct ClaimLine {
     pub areas: Vec<QualifiedArea>,
     /// While it is in review, the pull requests it waits for; empty while it is worked on.
     pub prs: Vec<PrRef>,
+    /// The pull requests whose merges moved the base under its branch since the branch took its
+    /// base, in pull request order; empty while its branch is up to date with what was merged.
+    pub base_moved_by: Vec<PrRef>,
 }
 
 /// An area held by a member's live claim.

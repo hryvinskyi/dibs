@@ -250,12 +250,16 @@ async fn people_lists_a_members_conversation_marked_unread_and_no_notice_from_di
 #[tokio::test]
 async fn the_tabs_count_unread_people_waiting_grants_and_unread_notices() {
     let seeded = Seeded::new().await;
-    assert_eq!(seeded.notices().await.len(), 2, "two overlaps reach alice");
+    assert_eq!(
+        seeded.notices().await.len(),
+        1,
+        "two overlaps reach alice, both in her claim's conversation"
+    );
     let page = seeded.page("/ui/inbox").await;
     for tab in [
         r#"<a href="/ui/inbox" aria-current="true">People<span class="k">2</span></a>"#,
         r#"<a href="/ui/inbox?tab=grants">Grants<span class="k">1</span></a>"#,
-        r#"<a href="/ui/inbox?tab=dibs">From dibs<span class="k">2</span></a>"#,
+        r#"<a href="/ui/inbox?tab=dibs">From dibs<span class="k">1</span></a>"#,
         r#"<a href="/ui/inbox" aria-current="page">Inbox<span class="k k--hot">2</span>"#,
     ] {
         assert!(page.text.contains(tab), "{tab} in {}", page.text);
@@ -366,7 +370,7 @@ async fn from_dibs_folds_the_notices_about_one_claimed_item_into_one_row() {
         "{shown}"
     );
     assert!(
-        shown.contains("<span>2 notices · 2 unread</span>"),
+        shown.contains("<span>1 notice · 1 unread</span>"),
         "{shown}"
     );
     let notices = seeded.notices().await;

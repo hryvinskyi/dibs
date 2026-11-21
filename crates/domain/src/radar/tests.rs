@@ -129,6 +129,31 @@ fn report(item: u64, name: &str, base: &str, paths: &[&str]) -> FootprintReport 
 }
 
 #[test]
+fn a_moved_base_is_told_at_most_once_a_day_and_a_collision_every_time() {
+    let now = at(10_000);
+    let told =
+        |kind: OverlapKind, ago: Option<Duration>| kind.is_told(ago.map(|ago| now - ago), now);
+    let moved = OverlapKind::MainMoved;
+    assert!(told(moved, None), "never told: told now");
+    assert!(!told(moved, Some(Duration::hours(23))), "told 23 hours ago");
+    assert!(told(moved, Some(Duration::hours(25))), "told 25 hours ago");
+    assert!(
+        told(moved, Some(BASE_MOVED_TOLD_EVERY)),
+        "told a whole day ago"
+    );
+    assert!(
+        !told(moved, Some(-Duration::minutes(5))),
+        "a time ahead of the clock is within the day"
+    );
+    assert_eq!(moved.told_at_most_every(), Some(Duration::hours(24)));
+    for collision in [OverlapKind::SameFile, OverlapKind::Contract] {
+        assert_eq!(collision.told_at_most_every(), None);
+        assert!(told(collision, Some(Duration::minutes(1))));
+        assert!(told(collision, None));
+    }
+}
+
+#[test]
 fn a_digest_knows_the_areas_the_unzoned_paths_and_the_contract_paths() {
     let settings = radar_settings();
     let digest = FootprintDigest::of(

@@ -1643,6 +1643,7 @@ fn a_session_starts_with_a_brief_from_a_fresh_cache() {
                     holder: handle("bob"),
                     areas: vec![area("api:billing")],
                     prs: Vec::new(),
+                    base_moved_by: Vec::new(),
                 }],
                 ..StatusView::default()
             },

@@ -754,6 +754,21 @@ pub struct Status {
     pub worktrees: Vec<OwnWorktreePool>,
 }
 
+impl Status {
+    /// The pull requests whose merges moved the base under the branch of the claim on `item`, from
+    /// the overlaps of kind `main_moved` that name it: in pull request order, each once.
+    pub fn moved_bases(&self, item: ItemId) -> Vec<PrRef> {
+        self.overlaps
+            .iter()
+            .filter(|overlap| overlap.kind == OverlapKind::MainMoved)
+            .filter(|overlap| overlap.items.iter().any(|party| party.id == item))
+            .filter_map(|overlap| overlap.pr.clone())
+            .collect::<BTreeSet<PrRef>>()
+            .into_iter()
+            .collect()
+    }
+}
+
 /// An overlap the radar found between live claims, or a base a merge moved under one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlapInfo {

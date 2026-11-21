@@ -1478,8 +1478,10 @@ mod use_cases {
             let (subject, text) = &told[0];
             assert_eq!(
                 subject,
-                "Overlap: gh:acme/widgets#1 and gh:acme/widgets#2 change the same files"
+                &format!("Your claim on gh:acme/widgets#{} \"Contested\"", n + 1),
+                "each holder in their own claim's conversation"
             );
+            assert!(text.starts_with("Overlap: "), "{text}");
             assert!(
                 text.contains("change the same files: default:src/billing/round.rs. "),
                 "{text}"
@@ -1526,9 +1528,10 @@ mod use_cases {
         let told = radar.told(0).await;
         assert_eq!(told.len(), 1, "{told:?}");
         let (subject, text) = &told[0];
-        assert_eq!(
-            subject,
-            "Base moved: acme/widgets#10 changed files of gh:acme/widgets#1"
+        assert_eq!(subject, "Your claim on gh:acme/widgets#1 \"Contested\"");
+        assert!(
+            text.starts_with("Base moved: pull request acme/widgets#10 "),
+            "{text}"
         );
         assert!(
             text.contains("changed files that branch changes too: default:src/billing/round.rs. "),

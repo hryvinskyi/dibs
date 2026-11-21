@@ -1,15 +1,16 @@
 //! The radar over the in-memory store: branches recorded from a member's checkout, footprints an
-//! integration reports, the overlaps they make announced once to both holders, the moved bases a
-//! merge brings, and everything a claim had cleared when it ends.
+//! integration reports, the overlaps they make announced once to each holder in their own claim's
+//! conversation, the moved bases a merge brings, told at most once a day for each claim, and
+//! everything a claim had cleared when it ends.
 
 use std::collections::BTreeSet;
 
 use dibs_domain::event::EventKind;
-use dibs_domain::ids::ItemId;
+use dibs_domain::ids::{ItemId, ThreadId};
 use dibs_domain::message::Importance;
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::radar::{
-    BranchName, BranchSource, CommitSha, FootprintBase, NotStored, OverlapKind,
+    BranchName, BranchSource, CommitSha, FootprintBase, MergeMark, NotStored, OverlapKind,
 };
 use dibs_domain::repo::RepoId;
 use dibs_domain::review::PrRef;
@@ -163,50 +164,54 @@ async fn stored_footprints(env: &Env) -> usize {
     tx.footprints(env.project).await.unwrap().len()
 }
 
-/// The subjects and importance of the threads `who` can read that dibs started.
-async fn told(env: &Env, who: &Person) -> Vec<(String, Importance)> {
-    ListThreads::new(&env.deps)
+/// One message dibs wrote to a holder about an overlap or a moved base.
+#[derive(Debug)]
+struct Told {
+    /// The conversation it is in.
+    thread: ThreadId,
+    /// That conversation's subject.
+    subject: String,
+    /// Its text.
+    text: String,
+    /// How much it asks for attention.
+    importance: Importance,
+}
+
+/// Every message `who` can read that opens with `Overlap:` or `Base moved:`, by conversation and
+/// then oldest first.
+async fn told(env: &Env, who: &Person) -> Vec<Told> {
+    let mut threads: Vec<ThreadId> = ListThreads::new(&env.deps)
         .execute(&who.actor, None)
         .await
         .unwrap()
         .into_iter()
-        .filter(|summary| {
-            summary.thread.record.subject.as_str().contains("Overlap")
-                || summary
-                    .thread
-                    .record
-                    .subject
-                    .as_str()
-                    .starts_with("Base moved")
-        })
-        .map(|summary| {
-            (
-                summary.thread.record.subject.to_string(),
-                summary.importance,
-            )
-        })
-        .collect()
-}
-
-/// The subject and the first message's text of each thread about an overlap that `who` can read.
-async fn told_texts(env: &Env, who: &Person) -> Vec<(String, String)> {
-    let threads = ListThreads::new(&env.deps)
-        .execute(&who.actor, None)
-        .await
-        .unwrap();
-    let mut texts = Vec::new();
-    for summary in threads {
-        let subject = summary.thread.record.subject.to_string();
-        if !(subject.contains("Overlap") || subject.starts_with("Base moved")) {
-            continue;
-        }
+        .map(|summary| summary.thread.record.id)
+        .collect();
+    threads.sort();
+    let mut told = Vec::new();
+    for id in threads {
         let thread = ReadThread::new(&env.deps)
-            .execute(&who.actor, summary.thread.record.id)
+            .execute(&who.actor, id)
             .await
             .unwrap();
-        texts.push((subject, thread.messages[0].record.body.to_string()));
+        for message in thread.messages {
+            let text = message.record.body.to_string();
+            if text.starts_with("Overlap: ") || text.starts_with("Base moved: ") {
+                told.push(Told {
+                    thread: id,
+                    subject: thread.thread.record.subject.to_string(),
+                    text,
+                    importance: message.record.importance,
+                });
+            }
+        }
     }
-    texts
+    told
+}
+
+/// The subject of the conversation of a claim on `reference`, an item the tests made.
+fn claim_subject(reference: &str) -> String {
+    format!("Your claim on {reference} \"Work on {reference}\"")
 }
 
 fn found(kinds: &[EventKind]) -> usize {
@@ -346,12 +351,20 @@ async fn two_members_changing_one_file_are_both_told_once_and_again_only_after_i
     assert_eq!(stored[0].kind(), OverlapKind::SameFile);
     assert_eq!(stored[0].items(), &[alices, bobs].into());
     assert_eq!(stored[0].paths(), &[path("config/app.yaml")].into());
-    let subject = "Overlap: gh:acme/widgets#1 and gh:acme/widgets#2 change the same files";
-    for who in [&env.alice, &env.bob] {
+    for (who, own, other) in [
+        (&env.alice, "gh:acme/widgets#1", "gh:acme/widgets#2"),
+        (&env.bob, "gh:acme/widgets#2", "gh:acme/widgets#1"),
+    ] {
+        let told = told(&env, who).await;
+        assert_eq!(told.len(), 1, "{told:?}");
         assert_eq!(
-            told(&env, who).await,
-            [(subject.to_owned(), Importance::High)]
+            told[0].subject,
+            claim_subject(own),
+            "in their own claim's conversation"
         );
+        assert_eq!(told[0].importance, Importance::High);
+        assert!(told[0].text.contains("change the same files"), "{told:?}");
+        assert!(told[0].text.contains(other), "{told:?}");
     }
 
     report(
@@ -453,11 +466,19 @@ async fn a_contract_change_reaches_the_member_working_in_an_area_that_depends_on
         stored[0].paths(),
         &[path("packages/billing/src/Api/Money.php")].into()
     );
-    let subject = "Overlap: gh:acme/widgets#1 and gh:acme/widgets#2 meet at a published contract";
-    assert_eq!(
-        told(&env, &env.bob).await,
-        [(subject.to_owned(), Importance::High)]
-    );
+    for (who, own) in [
+        (&env.alice, "gh:acme/widgets#1"),
+        (&env.bob, "gh:acme/widgets#2"),
+    ] {
+        let told = told(&env, who).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].subject, claim_subject(own));
+        assert_eq!(told[0].importance, Importance::High);
+        assert!(
+            told[0].text.contains("meet at a published contract"),
+            "{told:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -580,15 +601,18 @@ async fn a_settings_change_that_drops_a_regenerate_rule_finds_and_announces_the_
     assert_eq!(stored[0].items(), &[alices, bobs].into());
     assert_eq!(stored[0].paths(), &[path("composer.lock")].into());
     assert_eq!(found(&env.kinds_after(before).await), 1);
-    let subject = "Overlap: gh:acme/widgets#1 and gh:acme/widgets#2 change the same files";
-    for who in [&env.alice, &env.bob] {
-        let texts = told_texts(&env, who).await;
-        assert_eq!(texts.len(), 1, "{texts:?}");
-        let (told_subject, text) = &texts[0];
-        assert_eq!(told_subject, subject);
+    for (who, own) in [
+        (&env.alice, "gh:acme/widgets#1"),
+        (&env.bob, "gh:acme/widgets#2"),
+    ] {
+        let told = told(&env, who).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].subject, claim_subject(own));
         assert!(
-            text.contains("change the same files: default:composer.lock. "),
-            "{text}"
+            told[0]
+                .text
+                .contains("change the same files: default:composer.lock. "),
+            "{told:?}"
         );
     }
 
@@ -608,7 +632,7 @@ async fn a_settings_change_that_drops_a_regenerate_rule_finds_and_announces_the_
         "and append nothing"
     );
     for who in [&env.alice, &env.bob] {
-        assert_eq!(told_texts(&env, who).await.len(), 1, "told once");
+        assert_eq!(told(&env, who).await.len(), 1, "told once");
     }
 }
 
@@ -720,10 +744,13 @@ async fn a_merge_moves_the_base_under_every_branch_behind_it_its_authors_other_w
     assert_eq!(stored_footprints(&env).await, 2, "and its footprint");
     let base_moved = told(&env, &env.bob).await;
     assert!(
-        base_moved.contains(&(
-            "Base moved: acme/widgets#7 changed files of gh:acme/widgets#2".to_owned(),
-            Importance::Normal
-        )),
+        base_moved
+            .iter()
+            .any(|told| told.subject == claim_subject("gh:acme/widgets#2")
+                && told
+                    .text
+                    .starts_with("Base moved: pull request acme/widgets#7 ")
+                && told.importance == Importance::Normal),
         "{base_moved:?}"
     );
     let events = env.events().await.len();
@@ -1225,7 +1252,7 @@ async fn branches_sharing_only_a_regenerated_file_do_not_overlap_and_a_hand_merg
     );
     assert_eq!(found(&env.kinds_after(before).await), 0);
     for who in [&env.alice, &env.bob] {
-        assert!(told_texts(&env, who).await.is_empty());
+        assert!(told(&env, who).await.is_empty());
     }
 
     let both = ["composer.lock", "src/billing/round.rs"];
@@ -1236,9 +1263,9 @@ async fn branches_sharing_only_a_regenerated_file_do_not_overlap_and_a_hand_merg
     assert_eq!(stored[0].kind(), OverlapKind::SameFile);
     assert_eq!(stored[0].paths(), &[path("src/billing/round.rs")].into());
     for who in [&env.alice, &env.bob] {
-        let texts = told_texts(&env, who).await;
-        assert_eq!(texts.len(), 1, "{texts:?}");
-        let (_, text) = &texts[0];
+        let told = told(&env, who).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        let text = &told[0].text;
         assert!(
             text.contains("change the same files: default:src/billing/round.rs. "),
             "{text}"
@@ -1294,7 +1321,7 @@ async fn a_merge_through_a_regenerated_file_alone_moves_no_base_and_names_only_h
     );
     assert_eq!(found(&env.kinds_after(before).await), 0);
     for who in [&env.alice, &env.bob] {
-        assert!(told_texts(&env, who).await.is_empty());
+        assert!(told(&env, who).await.is_empty());
     }
 
     merged(
@@ -1324,12 +1351,12 @@ async fn a_merge_through_a_regenerated_file_alone_moves_no_base_and_names_only_h
         (&env.alice, "default:src/search/index.rs"),
         (&env.bob, "default:src/billing/round.rs"),
     ] {
-        let texts = told_texts(&env, who).await;
-        assert_eq!(texts.len(), 1, "{texts:?}");
-        let (subject, text) = &texts[0];
+        let told = told(&env, who).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        let text = &told[0].text;
         assert!(
-            subject.starts_with("Base moved: acme/widgets#10"),
-            "{subject}"
+            text.starts_with("Base moved: pull request acme/widgets#10 "),
+            "{text}"
         );
         assert!(
             text.contains(&format!("changed files that branch changes too: {only}. ")),
@@ -1392,4 +1419,266 @@ async fn a_report_left_by_a_session_gone_quiet_stops_blocking_its_checkout_after
         })
         .collect();
     assert_eq!(recorded, ["bob/9-search"]);
+}
+
+#[tokio::test]
+async fn each_holder_is_told_an_overlap_in_their_own_claims_conversation_and_never_in_the_others() {
+    let env = Env::with_settings(SETTINGS).await;
+    let alices = env.item("gh:acme/widgets#1").await;
+    let bobs = env.item("gh:acme/widgets#2").await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    report(
+        &env,
+        footprint(alices, "alice/1-x", "abcd", &["config/app.yaml", "a.rs"]),
+    )
+    .await;
+    let before = env.events().await.len();
+    report(
+        &env,
+        footprint(bobs, "bob/2-y", "abcd", &["config/app.yaml"]),
+    )
+    .await;
+    assert_eq!(
+        found(&env.kinds_after(before).await),
+        1,
+        "the overlap is recorded once"
+    );
+
+    let alice_told = told(&env, &env.alice).await;
+    let bob_told = told(&env, &env.bob).await;
+    assert_eq!(alice_told.len(), 1, "{alice_told:?}");
+    assert_eq!(bob_told.len(), 1, "{bob_told:?}");
+    assert_ne!(
+        alice_told[0].thread, bob_told[0].thread,
+        "each in a conversation of their own"
+    );
+    for (who, mine, theirs) in [
+        (&env.alice, &alice_told[0], &bob_told[0]),
+        (&env.bob, &bob_told[0], &alice_told[0]),
+    ] {
+        let unreadable = ReadThread::new(&env.deps)
+            .execute(&who.actor, theirs.thread)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            unreadable.code(),
+            "not_found",
+            "the other holder's claim conversation is not theirs to read"
+        );
+        assert!(!mine.text.contains("settle here"), "{}", mine.text);
+    }
+    assert!(
+        alice_told[0].text.starts_with(
+            "Overlap: your branch alice/1-x and the branch of work item gh:acme/widgets#2 \"Work on gh:acme/widgets#2\" (bob, on bob/2-y) change the same files: default:config/app.yaml. "
+        ),
+        "{}",
+        alice_told[0].text
+    );
+    assert!(
+        alice_told[0].text.contains("write to bob (dibs send bob)"),
+        "{}",
+        alice_told[0].text
+    );
+    assert!(
+        bob_told[0].text.contains("(alice, on alice/1-x)")
+            && bob_told[0]
+                .text
+                .contains("write to alice (dibs send alice)"),
+        "{}",
+        bob_told[0].text
+    );
+
+    env.advance(time::Duration::minutes(1));
+    merged(
+        &env,
+        merge(&env, "acme/widgets#7", "main", Some(&["a.rs"]), None),
+    )
+    .await;
+    let alice_told = told(&env, &env.alice).await;
+    assert_eq!(alice_told.len(), 2, "{alice_told:?}");
+    assert_eq!(
+        alice_told[1].thread, alice_told[0].thread,
+        "a second overlap of the same claim lands in the same conversation"
+    );
+    assert!(
+        alice_told[1]
+            .text
+            .starts_with("Base moved: pull request acme/widgets#7 "),
+        "{}",
+        alice_told[1].text
+    );
+    assert_eq!(
+        told(&env, &env.bob).await.len(),
+        1,
+        "bob's branch does not change a.rs"
+    );
+}
+
+#[tokio::test]
+async fn a_moved_base_is_told_at_most_once_a_day_per_claim_and_every_one_is_stored() {
+    let env = Env::with_settings(SETTINGS).await;
+    let bobs = env.item("gh:acme/widgets#2").await;
+    claim_on(&env, &env.bob, bobs, "bob/2").await;
+    report(&env, footprint(bobs, "bob/2", "abcd", &["b.rs", "c.rs"])).await;
+    let first_merge = env.now() + time::Duration::minutes(1);
+    env.advance(time::Duration::minutes(1));
+    let before = env.events().await.len();
+    merged(
+        &env,
+        merge(&env, "acme/widgets#7", "main", Some(&["b.rs"]), None),
+    )
+    .await;
+    env.advance(time::Duration::hours(1));
+    merged(
+        &env,
+        merge(&env, "acme/widgets#8", "main", Some(&["c.rs"]), None),
+    )
+    .await;
+    let stored = overlaps(&env).await;
+    assert_eq!(moved_items(&stored), [bobs, bobs], "{stored:?}");
+    assert_eq!(
+        found(&env.kinds_after(before).await),
+        2,
+        "each moved base is recorded"
+    );
+    let bob_told = told(&env, &env.bob).await;
+    assert_eq!(
+        bob_told.len(),
+        1,
+        "the second within the hour is not told: {bob_told:?}"
+    );
+    assert!(
+        bob_told[0]
+            .text
+            .starts_with("Base moved: pull request acme/widgets#7 "),
+        "{bob_told:?}"
+    );
+    let status = Status::new(&env.deps)
+        .execute(&env.bob.actor)
+        .await
+        .unwrap();
+    let shown: Vec<Option<String>> = status
+        .overlaps
+        .iter()
+        .map(|named| named.overlap.pr().map(ToString::to_string))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            Some("acme/widgets#7".to_owned()),
+            Some("acme/widgets#8".to_owned())
+        ],
+        "both are shown with the claim"
+    );
+
+    env.advance(first_merge + time::Duration::hours(25) - env.now());
+    claim(&env, &env.bob, bobs).await;
+    merged(
+        &env,
+        merge(&env, "acme/widgets#9", "main", Some(&["b.rs"]), None),
+    )
+    .await;
+    let bob_told = told(&env, &env.bob).await;
+    assert_eq!(
+        bob_told.len(),
+        2,
+        "a day after the last one told, the next is told: {bob_told:?}"
+    );
+    assert_eq!(bob_told[1].thread, bob_told[0].thread);
+    assert!(
+        bob_told[1]
+            .text
+            .starts_with("Base moved: pull request acme/widgets#9 "),
+        "{bob_told:?}"
+    );
+    assert_eq!(moved_items(&overlaps(&env).await).len(), 3);
+}
+
+/// How the wording tests name a claim: `gh:acme/widgets#<n>` with a title, its holder and branches.
+fn side(n: u64, holder: &str, branches: &[&str]) -> Side {
+    Side {
+        item: ItemName {
+            id: ItemId(n),
+            external_ref: Some(
+                dibs_domain::item::ExternalRef::parse(&format!("gh:acme/widgets#{n}")).unwrap(),
+            ),
+            title: dibs_domain::item::Title::parse("Refund rounding").unwrap(),
+            link: None,
+        },
+        holder: holder.parse().unwrap(),
+        branches: branches
+            .iter()
+            .map(|branch| BranchName::parse(branch).unwrap())
+            .collect(),
+    }
+}
+
+fn collision(kind: OverlapKind) -> Overlap {
+    Overlap::new(
+        kind,
+        [ItemId(1), ItemId(2)].into(),
+        None,
+        [path("config/app.yaml")].into(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_same_file_message_names_the_other_claim_and_how_to_write_to_its_holder() {
+    let text = wording(
+        &collision(OverlapKind::SameFile),
+        &side(1, "alice", &["alice/1-x"]),
+        &[&side(2, "bob", &["bob/2-y"])],
+    );
+    assert_eq!(
+        text,
+        "Overlap: your branch alice/1-x and the branch of work item gh:acme/widgets#2 \"Refund rounding\" (bob, on bob/2-y) change the same files: default:config/app.yaml. Rebase onto the base now, and write to bob (dibs send bob) to settle who changes what, so the second merge does not meet a conflict."
+    );
+    let unrecorded = wording(
+        &collision(OverlapKind::SameFile),
+        &side(2, "bob", &[]),
+        &[&side(1, "alice", &[])],
+    );
+    assert!(
+        unrecorded.starts_with(
+            "Overlap: your branch and the branch of work item gh:acme/widgets#1 \"Refund rounding\" (alice) change"
+        ),
+        "{unrecorded}"
+    );
+}
+
+#[test]
+fn a_contract_message_says_one_side_changes_it_and_the_other_uses_it() {
+    let text = wording(
+        &collision(OverlapKind::Contract),
+        &side(2, "bob", &["bob/2"]),
+        &[&side(1, "alice", &["alice/1"])],
+    );
+    assert!(
+        text.starts_with(
+            "Overlap: your branch bob/2 and the branch of work item gh:acme/widgets#1 \"Refund rounding\" (alice, on alice/1) meet at a published contract: one changes default:config/app.yaml, and the other works where that contract is used. "
+        ),
+        "{text}"
+    );
+    assert!(text.contains("write to alice (dibs send alice)"), "{text}");
+    assert!(!text.contains("settle here"), "{text}");
+}
+
+#[test]
+fn a_moved_base_message_names_the_merged_pull_request_and_the_readers_branch() {
+    let moved = Overlap::new(
+        OverlapKind::MainMoved,
+        [ItemId(2)].into(),
+        Some(MergeMark {
+            pr: PrRef::parse("acme/widgets#7").unwrap(),
+            at: START,
+        }),
+        [path("b.rs")].into(),
+    )
+    .unwrap();
+    assert_eq!(
+        wording(&moved, &side(2, "bob", &["bob/2"]), &[]),
+        "Base moved: pull request acme/widgets#7 was merged into the base after your branch bob/2 took its base, and it changed files that branch changes too: default:b.rs. Rebase onto the base now."
+    );
 }

@@ -211,20 +211,27 @@ against its base. It learns the branch from these, the first one that holds winn
 `dibs_claim` claims as your session, the one your host's hooks report, when your host tells the tool server which
 session it serves; otherwise as the tool server's own session. A claim taken with `dibs claim` on the command line is
 a session of its own too, so in a checkout where your host's session also works, such a claim never gets the
-checkout's branch: name it with `--branch`. When your branch meets another member's, dibs writes to both of you, once:
+checkout's branch: name it with `--branch`. When your branch meets another member's, dibs writes to each of you once, in
+your own claim's conversation; the other holder reads their own message, not yours:
 
-- **The same files** (`high`): both branches change one file. Rebase onto the base now, and settle in that conversation
-  who changes what, so the second merge does not meet a conflict. Files the project regenerates rather than merges by
-  hand (a `regenerate` rule) never count, so branches that share only those do not overlap.
-- **A published contract** (`high`): one branch changes paths the project declares as a contract, and the other works
-  where that contract is used. Rebase onto the base now, and read the other change before going on, so both sides build
-  on the same contract.
-- **The base moved** (`normal`): a merge into the base changed files your branch changes, after your branch left the
-  base — your own earlier pull request of a series included. Rebase onto the base now. Files the project regenerates
-  rather than merges by hand (a `regenerate` rule) never count, so a merge through them alone tells you nothing.
+- **The same files** (`high`, "Overlap: …"): both branches change one file. Rebase onto the base now, and write to the
+  other holder (`dibs_send`, or `dibs send <handle>`; the message names them) to settle who changes what, so the second
+  merge does not meet a conflict. Files the project regenerates rather than merges by hand (a `regenerate` rule) never
+  count, so branches that share only those do not overlap.
+- **A published contract** (`high`, "Overlap: …"): one branch changes paths the project declares as a contract, and the
+  other works where that contract is used. Rebase onto the base now, and read the other change before going on, so both
+  sides build on the same contract; write to the other holder when you need to agree on it.
+- **The base moved** (`normal`, "Base moved: …"): a merge into the base changed files your branch changes, after your
+  branch left the base — your own earlier pull request of a series included. Rebase onto the base now. Files the project
+  regenerates rather than merges by hand (a `regenerate` rule) never count, so a merge through them alone tells you
+  nothing. dibs writes this at most once a day for a claim; every later merge that moves the base is still shown with
+  the claim.
 
-Tell your person what the message says before you rebase in the middle of their work. `dibs status` lists the overlaps
-that still stand. Your own claims never overlap each other.
+A moved base stays with the claim until your branch catches up: the brief and `dibs status` add "the base moved under
+it: acme/widgets#7 (rebase onto the base)" to the claim's line. When you see it, rebase onto the base when you next work
+on that claim, before you edit; do not stop other work for it. Tell your person what the message says before you rebase
+in the middle of their work. `dibs status` lists the overlaps that still stand. Your own claims never overlap each
+other.
 
 ## Release and done
 

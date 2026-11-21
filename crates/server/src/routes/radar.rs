@@ -59,9 +59,10 @@ struct FootprintAnswer {
 /// (RFC 3339) that commit's committer time. `truncated` (default `false`) says the forge gave
 /// fewer paths than the branch changes.
 /// It replaces the claim's footprint of that repository, and the overlaps it makes with other
-/// members' live claims are announced once to both holders. A report for an item no live claim
-/// holds, or for another branch than the one the claim records there, answers `stored: false`; one
-/// that repeats the stored footprint answers `changed: false`. Neither changes anything.
+/// members' live claims are announced once to each holder, in their claim's conversation. A report
+/// for an item no live claim holds, or for another branch than the one the claim records there,
+/// answers `stored: false`; one that repeats the stored footprint answers `changed: false`. Neither
+/// changes anything.
 ///
 /// # Errors
 /// `forbidden` for anyone but an integration or an admin; `not_found` for a repository the project

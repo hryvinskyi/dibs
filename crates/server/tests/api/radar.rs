@@ -1,7 +1,8 @@
 //! The radar through the router: a member's checkout says which branch their claim works on when
 //! nothing else works there, an integration lists the branches and reports what each changes, the
-//! overlap that makes is told to both holders and shown in the status, a merge moves the base
-//! under the other branch, and every refusal.
+//! overlap that makes is told to each holder in their own claim's conversation and shown in the
+//! status, a merge moves the base under the other branch, told at most once a day, and every
+//! refusal.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -84,14 +85,32 @@ impl Team {
     }
 
     /// The subjects of the threads `who` reads.
-    async fn subjects(&self, who: &Person) -> Vec<String> {
+    /// Every message `who` can read that opens with `Overlap:` or `Base moved:`, with the subject
+    /// of its conversation, by conversation and then oldest first.
+    async fn told(&self, who: &Person) -> Vec<(String, String)> {
         let threads = self.world.get(who, "/v1/threads").await;
-        threads.body["threads"]
+        let mut ids: Vec<u64> = threads.body["threads"]
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|thread| thread["thread"]["subject"].as_str().map(str::to_owned))
-            .collect()
+            .filter_map(|thread| thread["thread"]["id"].as_u64())
+            .collect();
+        ids.sort_unstable();
+        let mut told = Vec::new();
+        for id in ids {
+            let thread = self.world.get(who, &format!("/v1/threads/{id}")).await;
+            let subject = thread.body["thread"]["subject"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            for message in thread.body["messages"].as_array().unwrap() {
+                let body = message["body"].as_str().unwrap();
+                if body.starts_with("Overlap: ") || body.starts_with("Base moved: ") {
+                    told.push((subject.clone(), body.to_owned()));
+                }
+            }
+        }
+        told
     }
 }
 
@@ -293,13 +312,28 @@ async fn one_shared_file_reported_through_the_footprint_route_tells_both_holders
     );
     let again = team.footprint(team.bobs, body).await;
     assert_eq!(again.body, json!({"stored": true, "changed": false}));
-    let subject = "Overlap: gh:acme/api#1 and gh:acme/api#2 change the same files";
-    for who in [&team.alice, &team.bob] {
-        let subjects = team.subjects(who).await;
+    for (who, subject, other) in [
+        (
+            &team.alice,
+            "Your claim on gh:acme/api#1 \"Rates\"",
+            "work item gh:acme/api#2 \"Refunds\" (bob, on bob/2-refunds)",
+        ),
+        (
+            &team.bob,
+            "Your claim on gh:acme/api#2 \"Refunds\"",
+            "work item gh:acme/api#1 \"Rates\" (alice, on alice/1-rates)",
+        ),
+    ] {
+        let told = team.told(who).await;
         assert_eq!(
-            subjects.iter().filter(|s| *s == subject).count(),
+            told.len(),
             1,
-            "{subjects:?}"
+            "told once, in their own claim's conversation: {told:?}"
+        );
+        assert_eq!(told[0].0, subject);
+        assert!(
+            told[0].1.contains(other) && told[0].1.contains("change the same files"),
+            "{told:?}"
         );
     }
     let status = team.world.get(&team.bob, "/v1/status").await;
@@ -448,12 +482,12 @@ async fn a_contract_changed_in_one_repository_meets_its_consumer_in_the_other() 
         status.body["overlaps"][0]["paths"],
         json!(["api:schema/invoice.json"])
     );
-    let subjects = team.subjects(&team.bob).await;
+    let told = team.told(&team.bob).await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0].0, "Your claim on gh:acme/api#2 \"Refunds\"");
     assert!(
-        subjects.contains(
-            &"Overlap: gh:acme/api#1 and gh:acme/api#2 meet at a published contract".to_owned()
-        ),
-        "{subjects:?}"
+        told[0].1.starts_with("Overlap: ") && told[0].1.contains("meet at a published contract"),
+        "{told:?}"
     );
 }
 
@@ -693,4 +727,74 @@ async fn a_heartbeat_and_an_edit_that_name_no_checkout_record_no_branch() {
     for claim in listed.body["claims"].as_array().unwrap() {
         assert_eq!(claim["branches"], json!({}), "{}", listed.body);
     }
+}
+
+#[tokio::test]
+async fn two_merges_an_hour_apart_that_move_a_claims_base_are_told_once_and_both_shown() {
+    let team = Team::new().await;
+    team.world
+        .post(
+            &team.bob,
+            "/v1/heartbeat",
+            json!({"session_id": team.bob_session, "checkout": checkout_of(team.bob_session),
+                   "repo": "api", "branch": "bob/2-refunds"}),
+        )
+        .await;
+    let stored = team
+        .footprint(
+            team.bobs,
+            json!({"repo": "api", "branch": "bob/2-refunds", "base": "main",
+                   "base_at": "2026-03-01T00:00:00Z", "base_sha": "abcd1234",
+                   "paths": ["config/app.yaml", "src/billing/rates.rs"]}),
+        )
+        .await;
+    assert_eq!(stored.body["changed"], true, "{}", stored.body);
+    for (pr, merged_at, file) in [
+        ("acme/api#40", "2099-01-01T00:00:00Z", "config/app.yaml"),
+        (
+            "acme/api#41",
+            "2099-01-01T01:00:00Z",
+            "src/billing/rates.rs",
+        ),
+    ] {
+        let merged = team
+            .world
+            .post(
+                &team.worker,
+                "/v1/prs/merged",
+                json!({"pr": pr, "base": "main", "merged_at": merged_at, "files": [file]}),
+            )
+            .await;
+        assert_eq!(merged.status, StatusCode::OK, "{}", merged.body);
+        team.world.fakes.clock.advance(time::Duration::hours(1));
+    }
+
+    let told = team.told(&team.bob).await;
+    assert_eq!(told.len(), 1, "one message within the day: {told:?}");
+    assert_eq!(told[0].0, "Your claim on gh:acme/api#2 \"Refunds\"");
+    assert!(
+        told[0].1.starts_with(
+            "Base moved: pull request acme/api#40 was merged into the base after your branch bob/2-refunds took its base"
+        ),
+        "{told:?}"
+    );
+    let status = team.world.get(&team.bob, "/v1/status").await;
+    let moved: Vec<(&str, &str)> = status.body["overlaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|overlap| overlap["kind"] == "main_moved")
+        .filter_map(|overlap| {
+            Some((
+                overlap["pr"].as_str()?,
+                overlap["items"][0]["holder"].as_str()?,
+            ))
+        })
+        .collect();
+    assert_eq!(
+        moved,
+        [("acme/api#40", "bob"), ("acme/api#41", "bob")],
+        "{}",
+        status.body
+    );
 }

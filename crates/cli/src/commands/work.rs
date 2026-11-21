@@ -21,7 +21,9 @@ use crate::cli::{
 };
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
-use crate::output::{claim_text, escalation_line, item_label, item_line, overlap_line};
+use crate::output::{
+    base_moved_text, claim_text, escalation_line, item_label, item_line, overlap_line,
+};
 
 /// Shows the live and stale claims and the areas they hold.
 ///
@@ -50,9 +52,10 @@ pub async fn status(ctx: &Context) -> Result<(), Failure> {
             for entry in held {
                 let _ = writeln!(
                     text,
-                    "  {} — {}",
+                    "  {} — {}{}",
                     item_line(&entry.item),
-                    claim_text(&entry.claim)
+                    claim_text(&entry.claim),
+                    base_moved_text(&status.moved_bases(entry.item.id))
                 );
             }
         };

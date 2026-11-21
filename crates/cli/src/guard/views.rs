@@ -30,6 +30,7 @@ pub fn status(status: &Status) -> StatusView {
             .as_ref()
             .map(|review| review.prs.iter().cloned().collect())
             .unwrap_or_default(),
+        base_moved_by: status.moved_bases(held.item.id),
     };
     StatusView {
         live: status.live.iter().map(line).collect(),
@@ -411,6 +412,55 @@ mod tests {
     use dibs_client::ErrorDetails;
 
     use super::*;
+
+    /// A live claim on item `id`, held by `holder`, as the status answer lists it.
+    fn held(id: u64, holder: &str) -> serde_json::Value {
+        serde_json::json!({
+            "item": {"id": id, "ref": format!("gh:acme/widgets#{id}"), "title": "Work",
+                     "status": "claimed", "created_by": holder,
+                     "created_at": "2026-03-01T00:00:00Z"},
+            "claim": {"item": id, "holder": holder, "session_id": 1, "host": "laptop",
+                      "areas": [], "claimed_at": "2026-03-01T00:00:00Z",
+                      "renewed_at": "2026-03-01T00:00:00Z",
+                      "last_seen": "2026-03-01T00:00:00Z"}
+        })
+    }
+
+    #[test]
+    fn a_claims_line_names_the_merges_that_moved_its_base_and_no_other_overlap() {
+        let party = |id: u64, holder: &str| {
+            serde_json::json!({"id": id, "ref": format!("gh:acme/widgets#{id}"),
+                               "title": "Work", "holder": holder})
+        };
+        let answer: Status = serde_json::from_value(serde_json::json!({
+            "live": [held(1, "alice"), held(2, "bob")],
+            "stale": [],
+            "holds": [],
+            "overlaps": [
+                {"kind": "same_file", "items": [party(1, "alice"), party(2, "bob")],
+                 "pr": null, "paths": ["default:a.rs"]},
+                {"kind": "main_moved", "items": [party(2, "bob")],
+                 "pr": "acme/widgets#9", "paths": ["default:b.rs"]},
+                {"kind": "main_moved", "items": [party(2, "bob")],
+                 "pr": "acme/widgets#7", "paths": ["default:c.rs"]}
+            ]
+        }))
+        .unwrap();
+        let view = status(&answer);
+        let moved: Vec<Vec<String>> = view
+            .live
+            .iter()
+            .map(|line| line.base_moved_by.iter().map(ToString::to_string).collect())
+            .collect();
+        assert_eq!(
+            moved,
+            [
+                Vec::<String>::new(),
+                vec!["acme/widgets#7".to_owned(), "acme/widgets#9".to_owned()]
+            ],
+            "alice's claim has only a collision; bob's base moved twice, named in order"
+        );
+    }
 
     #[test]
     fn a_debt_holders_verdict_carries_the_way_to_the_handover() {
