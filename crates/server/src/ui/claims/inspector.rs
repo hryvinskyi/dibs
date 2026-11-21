@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use dibs_app::named::{AuthorName, NamedSummary};
+use dibs_app::named::NamedSummary;
 use dibs_app::records::ItemRecord;
 use dibs_app::use_cases::HeldItem;
 use dibs_domain::forge::Revision;
@@ -45,7 +45,7 @@ pub struct InspectorView {
     pub collisions: Vec<Collision>,
     /// The merges that moved the base under its branches.
     pub moved: Vec<Moved>,
-    /// The conversations members started about its item.
+    /// The conversations about its item that hold a message a member wrote.
     pub talk: Vec<Talk>,
     /// dibs's notices about its item, when there are any.
     pub notices: Option<Notices>,
@@ -88,10 +88,11 @@ pub struct Moved {
     pub more: usize,
 }
 
-/// A conversation a member started about the item.
+/// A conversation about the item that holds a message a member wrote.
 #[derive(Debug, Clone)]
 pub struct Talk {
-    /// Who started it.
+    /// The member who started it, or, in one dibs started, the member who wrote its newest
+    /// message from people.
     pub person: PersonView,
     /// The conversation.
     pub conversation: ConversationView,
@@ -99,14 +100,14 @@ pub struct Talk {
     pub last: Moment,
 }
 
-/// dibs's notices about the item, as one line.
+/// dibs's notices about the item, as one line: the messages dibs wrote in its conversations.
 #[derive(Debug, Clone)]
 pub struct Notices {
     /// How many there are.
-    pub count: usize,
-    /// How many have messages the viewer has not read.
-    pub unread: usize,
-    /// The address of the newest.
+    pub count: u64,
+    /// How many of them the viewer has not read.
+    pub unread: u64,
+    /// The address of the newest conversation that holds one.
     pub newest: String,
 }
 
@@ -244,31 +245,37 @@ fn files<'a>(
     (shown, paths.len().saturating_sub(limit))
 }
 
-/// The conversations members started about the item, and dibs's notices about it as one line.
+/// The conversations about the item that hold a message a member wrote, whoever started them, and
+/// the messages dibs wrote in its conversations as one line; `threads` come newest activity first.
 fn conversations(threads: &[NamedSummary], scene: &Scene<'_>) -> (Vec<Talk>, Option<Notices>) {
     let mut talk = Vec::new();
     let mut notices: Option<Notices> = None;
     for summary in threads {
         let record = &summary.thread.record;
-        let href = format!("/ui/inbox/{}", record.id);
-        match &summary.thread.author {
-            AuthorName::Member(handle) => talk.push(Talk {
-                person: PersonView::of(handle),
+        let person = summary
+            .thread
+            .author
+            .handle()
+            .or(summary.last_from.as_ref())
+            .filter(|_| summary.from_people > 0);
+        if let Some(person) = person {
+            talk.push(Talk {
+                person: PersonView::of(person),
                 conversation: ConversationView::of(record.id, record.subject.as_str(), scene.links),
                 last: moment(
                     summary.last_message_at.unwrap_or(record.created_at),
                     scene.now,
                 ),
-            }),
-            AuthorName::Dibs => {
-                let line = notices.get_or_insert(Notices {
-                    count: 0,
-                    unread: 0,
-                    newest: href,
-                });
-                line.count += 1;
-                line.unread += usize::from(summary.unread > 0);
-            }
+            });
+        }
+        if summary.from_dibs > 0 {
+            let line = notices.get_or_insert_with(|| Notices {
+                count: 0,
+                unread: 0,
+                newest: format!("/ui/inbox/{}", record.id),
+            });
+            line.count += summary.from_dibs;
+            line.unread += summary.unread_from_dibs;
         }
     }
     (talk, notices)

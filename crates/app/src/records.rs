@@ -326,8 +326,23 @@ pub struct ThreadSummary {
     pub thread: ThreadRecord,
     /// How many messages it has.
     pub messages: u64,
-    /// How many of them the reader has not read and did not write.
+    /// How many of them the reader has not read and did not write: always `unread_from_people`
+    /// and `unread_from_dibs` together.
     pub unread: u64,
+    /// How many of the unread ones a member wrote.
+    pub unread_from_people: u64,
+    /// How many of the unread ones dibs wrote. What dibs wrote in a thread started in the
+    /// reader's name is the reader's own, and so never unread.
+    pub unread_from_dibs: u64,
+    /// How many of its messages members wrote, read or not, the reader's own included.
+    pub from_people: u64,
+    /// How many of its messages dibs wrote, read or not, in whoever's name.
+    pub from_dibs: u64,
+    /// The member who wrote its newest message from people, the reader included, when a member
+    /// wrote one.
+    pub last_from: Option<MemberId>,
+    /// The member who wrote its newest unread message from people, when there is one.
+    pub last_unread_from: Option<MemberId>,
     /// When its newest message was written.
     pub last_message_at: Option<OffsetDateTime>,
     /// The highest importance among its messages.

@@ -108,10 +108,20 @@ fn ack(row: &SqliteRow) -> StoreResult<Ack> {
 
 fn summary(row: &SqliteRow) -> StoreResult<ThreadSummary> {
     let f = Fields::of(row, "threads");
+    let messages: u64 = f.number("messages")?;
+    let from_people: u64 = f.number("from_people")?;
+    let unread_from_people: u64 = f.number("unread_from_people")?;
+    let unread_from_dibs: u64 = f.number("unread_from_dibs")?;
     Ok(ThreadSummary {
         thread: thread(row)?,
-        messages: f.number("messages")?,
-        unread: f.number("unread")?,
+        messages,
+        unread: unread_from_people.saturating_add(unread_from_dibs),
+        unread_from_people,
+        unread_from_dibs,
+        from_people,
+        from_dibs: messages.saturating_sub(from_people),
+        last_from: f.opt_number("last_from")?.map(MemberId),
+        last_unread_from: f.opt_number("last_unread_from")?.map(MemberId),
         last_message_at: f.opt_time("last_message_at")?,
         importance: f
             .json::<Vec<Importance>>("importances")?
@@ -245,9 +255,27 @@ impl ThreadRows for SqliteTx {
               WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS messages, \
              (SELECT COUNT(*) FROM messages m \
               WHERE m.project_id = t.project_id AND m.thread_id = t.id \
-              AND COALESCE(m.author_id, t.author_id) IS NOT ?2 \
+              AND m.author_id IS NOT NULL AND m.author_id IS NOT ?2 \
               AND NOT EXISTS (SELECT 1 FROM reads d WHERE d.project_id = m.project_id \
-                  AND d.member_id = ?2 AND d.message_id = m.id)) AS unread, \
+                  AND d.member_id = ?2 AND d.message_id = m.id)) AS unread_from_people, \
+             (SELECT COUNT(*) FROM messages m \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id \
+              AND m.author_id IS NULL AND t.author_id IS NOT ?2 \
+              AND NOT EXISTS (SELECT 1 FROM reads d WHERE d.project_id = m.project_id \
+                  AND d.member_id = ?2 AND d.message_id = m.id)) AS unread_from_dibs, \
+             (SELECT COUNT(*) FROM messages m \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id \
+              AND m.author_id IS NOT NULL) AS from_people, \
+             (SELECT m.author_id FROM messages m \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id \
+              AND m.author_id IS NOT NULL \
+              ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS last_from, \
+             (SELECT m.author_id FROM messages m \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id \
+              AND m.author_id IS NOT NULL AND m.author_id IS NOT ?2 \
+              AND NOT EXISTS (SELECT 1 FROM reads d WHERE d.project_id = m.project_id \
+                  AND d.member_id = ?2 AND d.message_id = m.id) \
+              ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS last_unread_from, \
              (SELECT MAX(m.created_at) FROM messages m \
               WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS last_message_at, \
              (SELECT json_group_array(DISTINCT m.importance) FROM messages m \

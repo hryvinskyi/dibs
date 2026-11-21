@@ -12,7 +12,7 @@ use dibs_domain::message::Body;
 use crate::cli::{AckArgs, EscalateArgs, InboxArgs, SendArgs, ThreadArgs};
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
-use crate::output::{asking_text, author_text, thread_line, unacked_line};
+use crate::output::{asking_text, author_text, thread_line, unacked_line, unread_line};
 
 /// Starts a conversation with members or the project; the body `-` is read from standard input.
 ///
@@ -133,16 +133,13 @@ pub async fn inbox(args: InboxArgs, ctx: &Context) -> Result<(), Failure> {
         .await
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&inbox, || {
-        let mut text = if inbox.threads.is_empty() {
-            "No conversations are waiting for you.".to_owned()
-        } else {
-            inbox
-                .threads
-                .iter()
-                .map(thread_line)
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        let mut text = unread_line(inbox.unread());
+        if inbox.threads.is_empty() {
+            text.push_str("\nNo conversations are waiting for you.");
+        }
+        for summary in &inbox.threads {
+            let _ = write!(text, "\n{}", thread_line(summary));
+        }
         if args.unacked {
             if inbox.unacked.is_empty() {
                 text.push_str("\nNo message waits for your acknowledgement.");

@@ -95,7 +95,7 @@ pub use handover::{
 pub use heartbeat::{Heartbeat, HeartbeatOutcome};
 pub use inbox::{
     DELIVERABLE_FOR, DeliverableMessage, Inbox, InboxQuery, InboxView, MAX_DELIVERABLE,
-    MAX_GRANT_ASKS, PendingGrantAsk, PendingOffer,
+    MAX_GRANT_ASKS, PendingGrantAsk, PendingOffer, UnreadConversations,
 };
 pub use init_project::{InitProject, InitProjectInput, InitializedProject};
 pub use list_claims::ListClaims;

@@ -23,8 +23,8 @@ use crate::event::AgentKey;
 use crate::neutral::Neutral;
 use crate::ports::{
     Afterwards, CoordinationGateway, GrantAskLine, HeldWay, HoldLine, InboxView, LocalCache,
-    Removal, Retaken, StatusView, TouchedBy, UnackedLine, Upkeep, WorktreeHolder, WorktreePool,
-    WorktreeRecord, WorktreeTake,
+    Removal, Retaken, StatusView, TouchedBy, UnackedLine, UnreadLine, Upkeep, WorktreeHolder,
+    WorktreePool, WorktreeRecord, WorktreeTake,
 };
 use dibs_domain::worktree::WorktreeName;
 
@@ -1666,8 +1666,12 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
         state.now = at(120);
         state.heartbeats.insert("s-1".to_owned(), at(120));
         state.server_inbox = Ok(InboxView {
-            unread: 1,
-            subjects: vec!["Rates".parse().unwrap()],
+            unread_from_people: 1,
+            people: vec![UnreadLine {
+                thread: ThreadId(30),
+                from: Some(handle("carol")),
+                subject: "Rates".parse().unwrap(),
+            }],
             unacked: vec![UnackedLine {
                 message: MessageId(9),
                 sender: handle("alice"),
@@ -1693,7 +1697,10 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
         .as_str()
         .unwrap()
         .to_owned();
-    assert!(context.contains("Unread conversations: 1"), "{context}");
+    assert!(
+        context.contains("Unread from people: 1.\n- carol: \"Rates\" (dibs_thread 30)"),
+        "{context}"
+    );
     assert!(
         context.contains("Grant requests waiting for your decision (1):\n- alice asks for api:billing for 4 \"Refunds\""),
         "{context}"

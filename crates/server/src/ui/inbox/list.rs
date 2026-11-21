@@ -1,6 +1,7 @@
-//! Inbox's tabs and their rows: the messages from people; the grant requests waiting for the
-//! viewer's decision; and dibs's notices, one row per item they are about, then the notices about no
-//! item. Each tab counts what waits on it, and knows which conversations are its own.
+//! Inbox's tabs and their rows: the conversations from people; the grant requests waiting for the
+//! viewer's decision; and dibs's notices, the conversations that hold only what dibs wrote, one row
+//! per item they are about, then the notices about no item. Each tab counts what waits on it, and
+//! knows which conversations are its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,7 +12,7 @@ use dibs_app::use_cases::PendingGrantAsk;
 use dibs_domain::ids::{ItemId, ThreadId};
 
 use crate::ui::inbox::query::ListQuery;
-use crate::ui::inbox::summary::{ConversationSummary, from_people, unread_from_people};
+use crate::ui::inbox::summary::{ConversationSummary, from_people, notice, unread_from_people};
 use crate::ui::links::{AreaView, LinkContext, PersonView, TicketView};
 use crate::ui::matching::matches;
 use crate::ui::moments::{Moment, moment};
@@ -51,10 +52,10 @@ pub(crate) static TABS: [Tab; 3] = [
         count: |mail| {
             mail.threads
                 .iter()
-                .filter(|summary| summary.thread.author.is_dibs() && summary.unread > 0)
+                .filter(|summary| summary.unread_from_dibs > 0 && notice(summary, mail.waiting))
                 .count()
         },
-        owns: |_, summary| summary.thread.author.is_dibs(),
+        owns: |mail, summary| notice(summary, mail.waiting),
         rows: notices,
     },
 ];
@@ -66,7 +67,7 @@ impl Tab {
     }
 
     /// The tab a conversation belongs to: grant requests waiting for the viewer's decision to
-    /// Grants, what dibs started to From dibs, every other one to People.
+    /// Grants, the conversations from people to People, every other one to From dibs.
     pub(crate) fn of(mail: &Mailbox<'_>, summary: &NamedSummary) -> &'static Self {
         TABS.iter()
             .find(|tab| (tab.owns)(mail, summary))
@@ -164,10 +165,10 @@ pub(crate) struct GrantRow {
 pub(crate) struct FoldRow {
     /// The item.
     pub(crate) item: ItemFacts,
-    /// How many notices there are.
-    pub(crate) count: usize,
-    /// How many of them have messages the viewer has not read.
-    pub(crate) unread: usize,
+    /// How many messages dibs wrote in its notices.
+    pub(crate) count: u64,
+    /// How many of those the viewer has not read.
+    pub(crate) unread: u64,
     /// How many of their messages wait for the viewer's acknowledgement.
     pub(crate) awaiting_ack: u64,
     /// The newest notice.
@@ -237,7 +238,7 @@ impl Mailbox<'_> {
     }
 }
 
-/// The messages from people, read or not, that match the text.
+/// The conversations from people, read or not, that match the text.
 fn people(mail: &Mailbox<'_>, query: &ListQuery, selected: Option<ThreadId>) -> Body {
     Body::People(
         mail.each()
@@ -300,23 +301,22 @@ fn grants(mail: &Mailbox<'_>, query: &ListQuery, selected: Option<ThreadId>) -> 
 }
 
 /// dibs's notices that match the text: those about an item folded into one row per item, newest
-/// first, then those about no item.
+/// first, counting the messages dibs wrote in them, then those about no item.
 fn notices(mail: &Mailbox<'_>, query: &ListQuery, selected: Option<ThreadId>) -> Body {
     let mut folded: Vec<(ItemId, FoldRow)> = Vec::new();
     let mut loose = Vec::new();
     for (named, summary) in mail.each() {
-        if !named.thread.author.is_dibs() || !matches(&query.q, &summary.text()) {
+        if !notice(named, mail.waiting) || !matches(&query.q, &summary.text()) {
             continue;
         }
         let current = selected == Some(summary.id);
-        let unread = usize::from(summary.unread > 0);
         let Some(item) = named.thread.record.item else {
             loose.push(mail.talk(summary, query, selected));
             continue;
         };
         if let Some((_, row)) = folded.iter_mut().find(|(id, _)| *id == item) {
-            row.count += 1;
-            row.unread += unread;
+            row.count += named.from_dibs;
+            row.unread += named.unread_from_dibs;
             row.awaiting_ack += summary.awaiting_ack;
             row.current |= current;
             continue;
@@ -330,8 +330,8 @@ fn notices(mail: &Mailbox<'_>, query: &ListQuery, selected: Option<ThreadId>) ->
             item,
             FoldRow {
                 item: facts,
-                count: 1,
-                unread,
+                count: named.from_dibs,
+                unread: named.unread_from_dibs,
                 awaiting_ack: summary.awaiting_ack,
                 newest: summary.clone(),
                 href: query.address(Some(summary.id)),
@@ -375,7 +375,8 @@ mod tests {
         )
     }
 
-    /// Conversation `id` about `item`, started by bob, or by dibs when `by_dibs`.
+    /// Conversation `id` about `item`, started by bob, or by dibs when `by_dibs`, holding one
+    /// message by whoever started it.
     fn thread(id: u64, by_dibs: bool, item: Option<u64>, unread: u64) -> NamedSummary {
         let (author, named) = if by_dibs {
             (Author::System, AuthorName::Dibs)
@@ -400,10 +401,25 @@ mod tests {
             },
             messages: 1,
             unread,
+            unread_from_people: if by_dibs { 0 } else { unread },
+            unread_from_dibs: if by_dibs { unread } else { 0 },
+            from_people: u64::from(!by_dibs),
+            from_dibs: u64::from(by_dibs),
+            last_from: (!by_dibs).then(|| Handle::parse("bob").unwrap()),
+            last_unread_from: (!by_dibs && unread > 0).then(|| Handle::parse("bob").unwrap()),
             last_message_at: None,
             importance: Importance::Normal,
             awaiting_ack: 0,
         }
+    }
+
+    /// `summary` with `more` messages dibs wrote, `unread` of them unread.
+    fn more_notices(mut summary: NamedSummary, more: u64, unread: u64) -> NamedSummary {
+        summary.messages += more;
+        summary.from_dibs += more;
+        summary.unread += unread;
+        summary.unread_from_dibs += unread;
+        summary
     }
 
     fn with<T>(
@@ -431,12 +447,24 @@ mod tests {
     }
 
     #[test]
-    fn a_conversation_belongs_to_grants_while_it_waits_to_from_dibs_when_dibs_started_it_else_to_people()
+    fn a_conversation_belongs_to_grants_while_it_waits_to_people_when_a_member_wrote_in_it_else_to_from_dibs()
      {
+        let mut reply = thread(4, true, None, 1);
+        reply.from_people = 1;
+        reply.unread_from_people = 1;
+        reply.unread_from_dibs = 0;
+        let mut in_bobs_name = thread(5, false, None, 0);
+        in_bobs_name.from_people = 0;
+        in_bobs_name.from_dibs = 1;
+        let mut waiting_ack = thread(6, true, None, 0);
+        waiting_ack.awaiting_ack = 1;
         let threads = [
             thread(1, false, None, 1),
             thread(2, false, None, 1),
             thread(3, true, None, 1),
+            reply,
+            in_bobs_name,
+            waiting_ack,
         ];
         let tabs: Vec<&str> = with(&threads, &[2], |mail| {
             threads
@@ -444,7 +472,11 @@ mod tests {
                 .map(|summary| Tab::of(mail, summary).code)
                 .collect()
         });
-        assert_eq!(tabs, ["people", "grants", "dibs"]);
+        assert_eq!(
+            tabs,
+            ["people", "grants", "dibs", "people", "dibs", "people"],
+            "a member's reply makes dibs's conversation people's; what dibs wrote in a member's name does not; a message waiting for an acknowledgement does"
+        );
     }
 
     #[test]
@@ -463,7 +495,7 @@ mod tests {
         let Body::Notices(folded, loose) = body else {
             panic!("{body:?}");
         };
-        let rows: Vec<(String, usize, usize, bool)> = folded
+        let rows: Vec<(String, u64, u64, bool)> = folded
             .iter()
             .map(|row| {
                 (
@@ -488,15 +520,11 @@ mod tests {
     }
 
     #[test]
-    fn a_folded_row_counts_every_acknowledgement_its_notices_wait_for_read_or_not() {
-        let awaiting = |mut summary: NamedSummary, count: u64| {
-            summary.awaiting_ack = count;
-            summary
-        };
+    fn a_folded_row_counts_the_messages_dibs_wrote_and_how_many_are_unread() {
         let threads = [
-            awaiting(thread(5, true, Some(7), 0), 1),
+            more_notices(thread(5, true, Some(7), 0), 3, 2),
             thread(4, true, Some(8), 1),
-            awaiting(thread(3, true, Some(7), 0), 2),
+            more_notices(thread(3, true, Some(7), 1), 1, 0),
         ];
         let body = with(&threads, &[], |mail| {
             let shown = ListQuery::default().showing(&TABS[2]);
@@ -505,20 +533,19 @@ mod tests {
         let Body::Notices(folded, _) = body else {
             panic!("{body:?}");
         };
-        let counts: Vec<(usize, u64)> = folded
-            .iter()
-            .map(|row| (row.unread, row.awaiting_ack))
-            .collect();
-        assert_eq!(counts, [(0, 3), (1, 0)]);
+        let counts: Vec<(u64, u64)> = folded.iter().map(|row| (row.count, row.unread)).collect();
+        assert_eq!(counts, [(6, 3), (1, 1)]);
     }
 
     #[test]
     fn the_tabs_count_unread_people_waiting_grants_and_unread_notices() {
+        let read_reply = more_notices(thread(5, false, None, 0), 1, 1);
         let threads = [
             thread(1, false, None, 1),
             thread(2, false, None, 1),
             thread(3, true, None, 1),
             thread(4, true, None, 0),
+            read_reply,
         ];
         let counts: Vec<usize> = with(&threads, &[2], |mail| {
             mail.tabs(&ListQuery::default(), &TABS[0])

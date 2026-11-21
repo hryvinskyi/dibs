@@ -222,10 +222,13 @@ pub struct UnackedLine {
 /// The conversations waiting for the member.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InboxView {
-    /// How many conversations have messages the member has not read.
-    pub unread: u64,
-    /// The subjects of those conversations, newest activity first.
-    pub subjects: Vec<Subject>,
+    /// How many conversations have messages from people the member has not read: messages a
+    /// member wrote, whoever started the conversation.
+    pub unread_from_people: u64,
+    /// Those conversations, newest activity first.
+    pub people: Vec<UnreadLine>,
+    /// How many conversations have messages dibs wrote that the member has not read.
+    pub unread_from_dibs: u64,
     /// The messages that ask the member for an acknowledgement they have not given, newest first.
     pub unacked: Vec<UnackedLine>,
     /// The slots on offer to the member.
@@ -237,6 +240,17 @@ pub struct InboxView {
     pub claims: Vec<ClaimedDelivery>,
     /// The grants asked of the member that wait for their decision, newest first.
     pub grant_asks: Vec<GrantAskLine>,
+}
+
+/// A conversation with unread messages from people, as the brief names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadLine {
+    /// The conversation.
+    pub thread: ThreadId,
+    /// The member who wrote its newest unread message, when the server names them.
+    pub from: Option<Handle>,
+    /// Its subject.
+    pub subject: Subject,
 }
 
 /// A grant asked of the member that waits for their decision, as the brief shows it.

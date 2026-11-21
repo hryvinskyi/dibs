@@ -31,7 +31,15 @@ fn a_message_is_sent_found_in_the_inbox_read_and_marked() {
     assert_eq!(status(&inbox), 0);
     let listed = text(&inbox.stdout);
     assert!(
-        listed.contains(&format!("#{thread} Billing rates (from alice, 1 unread)")),
+        listed.starts_with(
+            "Unread from people: 1 conversation. Unread from dibs: 0 conversations (dibs read --dibs marks them read).\n"
+        ),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!(
+            "#{thread} Billing rates (from alice, 1 unread from people)"
+        )),
         "{listed}"
     );
 
@@ -55,7 +63,13 @@ fn a_message_is_sent_found_in_the_inbox_read_and_marked() {
         .args(["inbox", "--unread"])
         .output()
         .unwrap();
-    assert!(text(&empty.stdout).contains("No conversations are waiting for you."));
+    assert!(
+        text(&empty.stdout).contains(
+            "Unread from people: 0 conversations. Unread from dibs: 0 conversations (dibs read --dibs marks them read).\nNo conversations are waiting for you."
+        ),
+        "{}",
+        text(&empty.stdout)
+    );
 
     let everyone = setup
         .dibs(&setup.bob, &dir)
@@ -114,7 +128,7 @@ fn an_urgent_message_that_asks_is_acked_once_from_the_command_line() {
         .unwrap();
     let listed = text(&listed.stdout);
     assert!(
-        listed.contains("(from alice, urgent, 1 unread, 1 to ack)"),
+        listed.contains("(from alice, urgent, 1 unread from people, 1 to ack)"),
         "{listed}"
     );
     assert!(

@@ -260,7 +260,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "List the conversations waiting for you, newest activity first; with unread, only those with messages you have not read; with unacked, also the messages that ask you for an acknowledgement (read each, then dibs_ack it; a wide claim's announcement only as dibs_ack says). Check it when you start and whenever you are told a message arrived.",
+        description = "List the conversations waiting for you, newest activity first; with unread, only those with messages you have not read. Each splits its unread messages into unread_from_people (a member wrote them; answer what asks for an answer) and unread_from_dibs (dibs's notices), and unread_conversations counts the conversations with each. With unacked, also the messages that ask you for an acknowledgement (read each, then dibs_ack it; a wide claim's announcement only as dibs_ack says). Check it when you start and whenever you are told a message arrived.",
         annotations(read_only_hint = true)
     )]
     async fn dibs_inbox(&self, Parameters(input): Parameters<InboxInput>) -> CallToolResult {

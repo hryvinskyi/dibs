@@ -200,8 +200,21 @@ pub struct NamedSummary {
     pub thread: NamedThread,
     /// How many messages it has.
     pub messages: u64,
-    /// How many of them the reader has not read and did not write.
+    /// How many of them the reader has not read and did not write: always `unread_from_people`
+    /// and `unread_from_dibs` together.
     pub unread: u64,
+    /// How many of the unread ones a member wrote.
+    pub unread_from_people: u64,
+    /// How many of the unread ones dibs wrote.
+    pub unread_from_dibs: u64,
+    /// How many of its messages members wrote, read or not, the reader's own included.
+    pub from_people: u64,
+    /// How many of its messages dibs wrote, read or not.
+    pub from_dibs: u64,
+    /// The member who wrote its newest message from people, the reader included.
+    pub last_from: Option<Handle>,
+    /// The member who wrote its newest unread message from people.
+    pub last_unread_from: Option<Handle>,
     /// When its newest message was written.
     pub last_message_at: Option<OffsetDateTime>,
     /// The highest importance among its messages.
@@ -497,6 +510,18 @@ impl Names {
             thread: self.thread(summary.thread)?,
             messages: summary.messages,
             unread: summary.unread,
+            unread_from_people: summary.unread_from_people,
+            unread_from_dibs: summary.unread_from_dibs,
+            from_people: summary.from_people,
+            from_dibs: summary.from_dibs,
+            last_from: summary
+                .last_from
+                .map(|member| self.handle(member))
+                .transpose()?,
+            last_unread_from: summary
+                .last_unread_from
+                .map(|member| self.handle(member))
+                .transpose()?,
             last_message_at: summary.last_message_at,
             importance: summary.importance,
             awaiting_ack,

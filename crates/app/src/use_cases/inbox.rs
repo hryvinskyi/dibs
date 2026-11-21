@@ -63,6 +63,31 @@ pub struct InboxView {
     /// The threads the caller may read with messages awaiting their acknowledgement, newest
     /// activity first, read or not: `unread_only` never leaves one out.
     pub awaiting_ack: Vec<NamedSummary>,
+    /// How many of the threads the caller may read have unread messages from people and from
+    /// dibs, whatever `unread_only` leaves out of `threads`.
+    pub unread_conversations: UnreadConversations,
+}
+
+/// How many conversations have messages the reader has not read, by who wrote them: a member, or
+/// dibs. A conversation with unread messages of both is counted in both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnreadConversations {
+    /// The conversations with unread messages a member wrote.
+    pub from_people: u64,
+    /// The conversations with unread messages dibs wrote.
+    pub from_dibs: u64,
+}
+
+impl UnreadConversations {
+    /// The counts over `summaries`.
+    pub fn of<'a>(summaries: impl IntoIterator<Item = &'a ThreadSummary>) -> Self {
+        summaries
+            .into_iter()
+            .fold(Self::default(), |counted, summary| Self {
+                from_people: counted.from_people + u64::from(summary.unread_from_people > 0),
+                from_dibs: counted.from_dibs + u64::from(summary.unread_from_dibs > 0),
+            })
+    }
 }
 
 /// A grant asked of the caller that waits for their decision: asked in a conversation they have not
@@ -173,6 +198,7 @@ impl Inbox {
         let waiting = awaiting_per_thread(&awaiting(&mut work, actor).await?);
         let names = Names::load(&mut work).await?;
         let readable = readable_summaries(actor, summaries);
+        let unread_conversations = UnreadConversations::of(&readable);
         let awaiting_count =
             |summary: &ThreadSummary| waiting.get(&summary.thread.id).copied().unwrap_or(0);
         let threads = readable
@@ -211,6 +237,7 @@ impl Inbox {
                 .collect(),
             every_grant_ask,
             awaiting_ack,
+            unread_conversations,
         })
     }
 
@@ -454,6 +481,94 @@ mod tests {
                 .unwrap_err()
                 .code(),
             "forbidden"
+        );
+    }
+
+    /// Stores a conversation dibs started for alice about nothing, with one message of its own.
+    async fn notice_to_alice(env: &Env, id: u64) {
+        let thread = ThreadRecord {
+            id: ThreadId(id),
+            subject: Subject::parse(&format!("Notice {id}")).unwrap(),
+            item: None,
+            author: dibs_domain::message::Author::System,
+            recipients: dibs_domain::message::Recipients::Members(
+                [env.alice.actor.member].into_iter().collect(),
+            ),
+            created_at: env.now(),
+        };
+        let message = MessageRecord {
+            id: MessageId(id),
+            thread: thread.id,
+            author: dibs_domain::message::Author::System,
+            label: SessionLabel::parse("dibs").unwrap(),
+            body: Body::parse("Something happened to your claim.").unwrap(),
+            importance: Importance::Normal,
+            ack_required: false,
+            created_at: env.now(),
+        };
+        let mut tx = env.deps.store.begin().await.unwrap();
+        tx.insert_thread(env.project, &thread).await.unwrap();
+        tx.insert_message(env.project, &message).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_inbox_counts_the_conversations_unread_from_people_apart_from_those_from_dibs() {
+        let env = Env::new().await;
+        let start = StartThread::new(&env.deps);
+        let to_alice = || Addressees::Members(vec![Handle::parse("alice").unwrap()]);
+        for subject in ["Rates", "Staging"] {
+            start
+                .execute(&env.bob.actor, input(to_alice(), subject))
+                .await
+                .unwrap();
+            env.advance(time::Duration::minutes(1));
+        }
+        for id in [9001, 9002, 9003] {
+            notice_to_alice(&env, id).await;
+            env.advance(time::Duration::minutes(1));
+        }
+        let inbox = Inbox::new(&env.deps);
+        let asked = InboxQuery {
+            unread_only: true,
+            unacked: false,
+            deliverable: false,
+        };
+        let alices = inbox.execute(&env.alice.actor, asked).await.unwrap();
+        assert_eq!(
+            alices.unread_conversations,
+            UnreadConversations {
+                from_people: 2,
+                from_dibs: 3,
+            }
+        );
+        let split: Vec<(&str, u64, u64, Option<&str>)> = alices
+            .threads
+            .iter()
+            .map(|summary| {
+                (
+                    summary.thread.record.subject.as_str(),
+                    summary.unread_from_people,
+                    summary.unread_from_dibs,
+                    summary.last_unread_from.as_ref().map(Handle::as_str),
+                )
+            })
+            .collect();
+        assert_eq!(
+            split,
+            [
+                ("Notice 9003", 0, 1, None),
+                ("Notice 9002", 0, 1, None),
+                ("Notice 9001", 0, 1, None),
+                ("Staging", 1, 0, Some("bob")),
+                ("Rates", 1, 0, Some("bob")),
+            ]
+        );
+        let bobs = inbox.execute(&env.bob.actor, asked).await.unwrap();
+        assert_eq!(
+            bobs.unread_conversations,
+            UnreadConversations::default(),
+            "bob may read none of dibs's notices to alice, and wrote the rest"
         );
     }
 

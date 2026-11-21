@@ -27,8 +27,8 @@ use crate::ports::{
 };
 use crate::text::Text;
 
-/// How many unread subjects the brief names.
-const BRIEF_SUBJECTS: usize = 3;
+/// How many conversations with unread messages from people the brief names.
+const BRIEF_PEOPLE: usize = 5;
 
 /// How many items of the ready list the brief names.
 const BRIEF_READY: usize = 5;
@@ -962,22 +962,53 @@ fn grant_ask_lines(asks: &[GrantAskLine], text: &mut String) {
     let _ = write!(text, "\n{GRANT_RULE}");
 }
 
+/// The unread conversations: those with messages a member wrote one line each, the newest first
+/// and at most [`BRIEF_PEOPLE`]; those with messages dibs wrote only counted, with the way to mark
+/// them read.
 fn inbox_lines(inbox: &InboxView, text: &mut String) {
-    if inbox.unread == 0 {
+    if inbox.unread_from_people == 0 && inbox.unread_from_dibs == 0 {
         text.push_str("\nNo unread conversations.");
         return;
     }
-    let _ = write!(text, "\nUnread conversations: {}", inbox.unread);
-    let subjects: Vec<String> = inbox
-        .subjects
-        .iter()
-        .take(BRIEF_SUBJECTS)
-        .map(|subject| format!("\"{}\"", quoted(subject.as_str())))
-        .collect();
-    if !subjects.is_empty() {
-        let _ = write!(text, ", newest {}", subjects.join(", "));
+    if inbox.unread_from_people > 0 {
+        let _ = write!(text, "\nUnread from people: {}.", inbox.unread_from_people);
+        for line in inbox.people.iter().take(BRIEF_PEOPLE) {
+            text.push_str("\n- ");
+            if let Some(from) = &line.from {
+                let _ = write!(text, "{from}: ");
+            }
+            let _ = write!(
+                text,
+                "\"{}\" (dibs_thread {})",
+                quoted(line.subject.as_str()),
+                line.thread
+            );
+        }
+        let shown = u64::try_from(inbox.people.len().min(BRIEF_PEOPLE)).unwrap_or(u64::MAX);
+        let more = inbox.unread_from_people.saturating_sub(shown);
+        if more > 0 {
+            let _ = write!(
+                text,
+                "\n- and {more} more; dibs_inbox or dibs inbox lists them."
+            );
+        }
     }
-    text.push_str(". Read them with dibs_inbox or dibs inbox.");
+    if inbox.unread_from_dibs > 0 {
+        let _ = write!(
+            text,
+            "\nUnread from dibs: {}; mark them read with dibs read --dibs (MCP: dibs_read with dibs: true).",
+            conversations(inbox.unread_from_dibs)
+        );
+    }
+}
+
+/// `n` conversations, in words: `1 conversation`, `3 conversations`.
+fn conversations(n: u64) -> String {
+    if n == 1 {
+        "1 conversation".to_owned()
+    } else {
+        format!("{n} conversations")
+    }
 }
 
 fn unacked_lines(unacked: &[UnackedLine], text: &mut String) {
@@ -1211,6 +1242,7 @@ mod tests {
     use dibs_domain::message::Importance;
 
     use super::*;
+    use crate::ports::UnreadLine;
 
     fn handle(text: &str) -> Handle {
         Handle::parse(text).unwrap()
@@ -1671,11 +1703,9 @@ mod tests {
             ..StatusView::default()
         };
         let inbox = InboxView {
-            unread: 4,
-            subjects: ["One", "Two", "Three", "Four"]
-                .iter()
-                .map(|subject| subject.parse().unwrap())
-                .collect(),
+            unread_from_people: 1,
+            people: vec![unread_line(41, Some("alice"), "One")],
+            unread_from_dibs: 3,
             unacked: Vec::new(),
             offers: Vec::new(),
             ..InboxView::default()
@@ -1701,11 +1731,91 @@ mod tests {
         assert!(text.contains(HELD_AREAS), "{text}");
         assert!(text.contains("Stale claims"), "{text}");
         assert!(
-            text.contains("Unread conversations: 4, newest \"One\", \"Two\", \"Three\"."),
+            text.contains(
+                "Unread from people: 1.\n- alice: \"One\" (dibs_thread 41)\nUnread from dibs: 3 conversations;"
+            ),
             "{text}"
         );
-        assert!(!text.contains("Four"), "{text}");
         assert!(!text.contains("acknowledgement"), "{text}");
+    }
+
+    fn unread_line(thread: u64, from: Option<&str>, subject: &str) -> UnreadLine {
+        UnreadLine {
+            thread: ThreadId(thread),
+            from: from.map(handle),
+            subject: subject.parse().unwrap(),
+        }
+    }
+
+    fn inbox_text(inbox: &InboxView) -> String {
+        let mut text = String::new();
+        inbox_lines(inbox, &mut text);
+        text
+    }
+
+    #[test]
+    fn unread_from_people_is_named_one_line_each_and_from_dibs_only_counted() {
+        let people = InboxView {
+            unread_from_people: 2,
+            people: vec![
+                unread_line(41, Some("bob"), "Rates \"table\""),
+                unread_line(40, None, "Staging"),
+            ],
+            ..InboxView::default()
+        };
+        assert_eq!(
+            inbox_text(&people),
+            "\nUnread from people: 2.\n\
+             - bob: \"Rates 'table'\" (dibs_thread 41)\n\
+             - \"Staging\" (dibs_thread 40)",
+            "the subject is quoted; a line names its writer when the server does"
+        );
+        let dibs = InboxView {
+            unread_from_dibs: 1,
+            ..InboxView::default()
+        };
+        assert_eq!(
+            inbox_text(&dibs),
+            "\nUnread from dibs: 1 conversation; mark them read with dibs read --dibs (MCP: dibs_read with dibs: true)."
+        );
+        let both = InboxView {
+            unread_from_dibs: 5,
+            ..people
+        };
+        assert_eq!(
+            inbox_text(&both),
+            "\nUnread from people: 2.\n\
+             - bob: \"Rates 'table'\" (dibs_thread 41)\n\
+             - \"Staging\" (dibs_thread 40)\n\
+             Unread from dibs: 5 conversations; mark them read with dibs read --dibs (MCP: dibs_read with dibs: true)."
+        );
+        assert_eq!(
+            inbox_text(&InboxView::default()),
+            "\nNo unread conversations."
+        );
+    }
+
+    #[test]
+    fn the_brief_names_the_five_newest_conversations_from_people_and_says_how_many_more() {
+        let inbox = InboxView {
+            unread_from_people: 7,
+            people: (0..7)
+                .map(|n| unread_line(50 - n, Some("bob"), &format!("Subject {n}")))
+                .collect(),
+            ..InboxView::default()
+        };
+        let text = inbox_text(&inbox);
+        assert!(text.starts_with("\nUnread from people: 7.\n"), "{text}");
+        assert_eq!(text.matches("(dibs_thread").count(), 5, "{text}");
+        assert!(
+            text.contains("- bob: \"Subject 4\" (dibs_thread 46)"),
+            "{text}"
+        );
+        assert!(!text.contains("Subject 5"), "{text}");
+        assert!(
+            text.ends_with("\n- and 2 more; dibs_inbox or dibs inbox lists them."),
+            "{text}"
+        );
     }
 
     fn unacked(message: u64, sender: &str, subject: &str, importance: Importance) -> UnackedLine {
@@ -1721,8 +1831,8 @@ mod tests {
     fn the_brief_names_what_awaits_my_ack_urgent_first_with_sender_and_subject() {
         let me = handle("bob");
         let inbox = InboxView {
-            unread: 1,
-            subjects: vec!["Staging".parse().unwrap()],
+            unread_from_people: 1,
+            people: vec![unread_line(40, Some("alice"), "Staging")],
             unacked: vec![
                 unacked(21, "carol", "Lunch order", Importance::Normal),
                 unacked(20, "alice", "Staging is down", Importance::Urgent),
@@ -1771,12 +1881,12 @@ mod tests {
     fn the_brief_lists_each_grant_request_with_its_command_and_how_the_agent_decides_them() {
         let me = handle("alice");
         let inbox = InboxView {
-            unread: 1,
-            subjects: vec![
-                "A grant on api:billing for gh:acme/widgets#2"
-                    .parse()
-                    .unwrap(),
-            ],
+            unread_from_people: 1,
+            people: vec![unread_line(
+                31,
+                Some("bob"),
+                "A grant on api:billing for gh:acme/widgets#2",
+            )],
             grant_asks: vec![
                 GrantAskLine {
                     thread: ThreadId(31),
@@ -1817,7 +1927,7 @@ mod tests {
                  - bob asks for api:billing for gh:acme/widgets#2 \"Refund 'rounding'\", which your claim on gh:acme/widgets#1 holds: dibs grant gh:acme/widgets#2 --area api:billing --to bob (MCP: dibs_grant); to refuse or ask, answer in conversation 31 (dibs_thread 31).\n\
                  - carol asks for api:search for 7 \"Search\", which your claim on 3 holds: dibs grant 7 --area api:search --to carol (MCP: dibs_grant); to refuse or ask, answer in conversation 32 (dibs_thread 32).\n\
                  {GRANT_RULE}\n\
-                 Unread conversations: 1"
+                 Unread from people: 1."
             )),
             "{text}"
         );

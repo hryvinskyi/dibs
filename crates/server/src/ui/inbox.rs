@@ -37,7 +37,7 @@ use crate::ui::claims::view::{ClaimView, Scene};
 use crate::ui::conversation::{Conversation, Draft, ReplyProblem, item_of};
 use crate::ui::inbox::list::{Body, ItemFacts, Mailbox, TABS, Tab, TabEntry};
 use crate::ui::inbox::query::{ListQuery, RawQuery};
-use crate::ui::inbox::summary::{ConversationSummary, waiting_grants};
+use crate::ui::inbox::summary::{ConversationSummary, notice, waiting_grants};
 use crate::ui::links::{LinkContext, TicketView};
 use crate::ui::live::latest_event;
 use crate::ui::moments::{Moment, moment};
@@ -296,9 +296,10 @@ async fn notice_items(
     loaded: &Loaded,
     links: &LinkContext,
 ) -> Result<BTreeMap<ItemId, ItemFacts>, ApiError> {
+    let waiting = waiting_grants(&loaded.unread);
     let wanted: Vec<ItemId> = threads
         .iter()
-        .filter(|summary| summary.thread.author.is_dibs())
+        .filter(|summary| notice(summary, &waiting))
         .filter_map(|summary| summary.thread.record.item)
         .collect();
     let mut items = BTreeMap::new();

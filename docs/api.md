@@ -202,7 +202,8 @@ grant    { id, item, area, from, to, created_at }
 thread   { id, subject, item | null, author, system, to_project, to: [handle, …], created_at }
 message  { id, thread, author, system, label, body, importance: "normal" | "high" | "urgent", ack_required,
            created_at, acks?: [{ member, acked_at | null }, …] }
-summary  { thread, messages, unread, last_message_at | null, importance, awaiting_ack }
+summary  { thread, messages, unread, unread_from_people, unread_from_dibs, last_unread_from | null, last_message_at | null,
+           importance, awaiting_ack }
 ```
 
 `repo` of an item is the project's repository that its reference names, when the project lists it; `unlisted_remote` is
@@ -1008,8 +1009,15 @@ but the caller, `not_found` for an unknown item or a conversation the caller may
 `unknown_slot` (`404`), `invalid_request` for no subject, more than one, or no reason.
 
 `GET /v1/threads?item=12` answers `{ "threads": [summary, …] }`, the conversations the caller may read, newest activity
-first. `GET /v1/inbox` answers the same shape for the conversations waiting for the caller; with `unread=true` (or `1`)
-only those with messages they have not read. With `unacked=1` (or `true`) the answer also carries
+first. A summary's `unread` counts the messages the caller has not read and did not write; what dibs wrote in a
+conversation started in the caller's name is the caller's own. A message is *from people* when a member wrote it and
+*from dibs* when dibs wrote it (its author is `dibs`), whoever started the conversation and in whose name, so `unread`
+is always `unread_from_people` and `unread_from_dibs` together; `last_unread_from` is the member who wrote the newest
+unread message from people, or `null`. `GET /v1/inbox` answers the same shape for the conversations waiting for the
+caller; with `unread=true` (or `1`) only those with messages they have not read. Every inbox answer carries
+`"unread_conversations": { "from_people": 2, "from_dibs": 3 }`: how many conversations the caller may read have unread
+messages from people and from dibs, whatever `unread` leaves out of `threads`; a conversation with both is counted in
+both. A client reading a server that leaves out these fields counts every unread message as from people. With `unacked=1` (or `true`) the answer also carries
 `"unacked": [{ "thread": thread, "message": message }, …]`, newest first: every message that asks the caller for an
 acknowledgement they have not given. A conversation the caller may not read is reported as missing, the same as one that
 does not exist. Every inbox answer carries `"offers": [{ "slot": "deploy:prod", "until": "…" }, …]`: the slots offered
@@ -1666,12 +1674,12 @@ holding the screen's list and, on four screens, an inspector for the object the 
 | `GET /ui` | `308` to `/ui/`. |
 | `GET /ui/` | Now: what waits for a person's look, every claim by how long it has been held, and what happened today. |
 | `GET /ui/claims` | Claims: the live and silent claims by holder. |
-| `GET /ui/claims/{item}` | Claims, with the claim on that work item in the inspector. |
+| `GET /ui/claims/{item}` | Claims, with the claim on that work item in the inspector: among what it shows, the conversations about the item that hold a member's message, and how many messages dibs wrote about it and how many of those are unread. |
 | `GET /ui/queue` | Queue: the tickets that wait to be claimed. |
 | `GET /ui/queue/{item}` | Queue, with that ticket in the inspector. |
 | `GET /ui/areas` | Areas: the project's areas by repository. |
 | `GET /ui/areas/{repo}:{area}` | Areas, with that area, written as dibs writes it (`api:billing`), in the inspector. |
-| `GET /ui/inbox` | Inbox: the conversations. |
+| `GET /ui/inbox` | Inbox: the conversations. People lists those from people: holding a message a member wrote, or one waiting for your acknowledgement; Grants, the grant requests waiting for your decision; From dibs, every other one, one row per item with how many messages dibs wrote and how many are unread. People's count and the rail's are the conversations with unread messages from people. |
 | `GET /ui/inbox/{thread}` | Inbox, with that conversation and its reply form in the inspector; reading it marks it read. |
 | `GET /ui/search` | Search: claims, pull requests, tickets in the queue, branches, areas, people, conversations and slots. |
 | `POST /ui/login` | Opens a session for a pasted token and answers `303` to `/ui/`; a refused token shows the form again. |

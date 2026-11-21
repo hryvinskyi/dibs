@@ -3,9 +3,11 @@
 //! acknowledgement, how pressing it is and when its last message was written — and which
 //! conversations are messages from people.
 //!
-//! A message from people is a conversation a member started, the viewer included, unless it is a
-//! grant request still waiting for the viewer's decision: the viewer's agent decides that one, so it
-//! never raises the count of what a person has to read. What dibs started is a notice.
+//! A conversation is from people when it holds a message a member wrote, the viewer included, or a
+//! message waiting for the viewer's acknowledgement, unless it is a grant request still waiting for
+//! the viewer's decision: the viewer's agent decides that one, so it never raises the count of what
+//! a person has to read. Who started the conversation, and in whose name, does not matter: what
+//! dibs wrote in a member's name is a notice all the same.
 
 use std::collections::BTreeSet;
 
@@ -102,21 +104,35 @@ pub(crate) fn waiting_grants(inbox: &InboxView) -> BTreeSet<ThreadId> {
     inbox.every_grant_ask.iter().map(|ask| ask.thread).collect()
 }
 
-/// Whether the conversation is a message from people: a member started it, the viewer included,
-/// and it is not one of `waiting_grants`.
+/// Whether the conversation is from people: it holds a message a member wrote, the viewer
+/// included, or one waiting for the viewer's acknowledgement, and it is not one of
+/// `waiting_grants`.
 pub(crate) fn from_people(summary: &NamedSummary, waiting_grants: &BTreeSet<ThreadId>) -> bool {
-    matches!(summary.thread.author, AuthorName::Member(_))
+    (summary.from_people > 0 || summary.awaiting_ack > 0)
         && !waiting_grants.contains(&summary.thread.record.id)
 }
 
-/// How many of the conversations are messages from people with messages the viewer has not read.
+/// Whether the conversation is one of dibs's notices: neither from people nor one of
+/// `waiting_grants`.
+pub(crate) fn notice(summary: &NamedSummary, waiting_grants: &BTreeSet<ThreadId>) -> bool {
+    !from_people(summary, waiting_grants) && !waiting_grants.contains(&summary.thread.record.id)
+}
+
+/// Whether the conversation has messages a member wrote that the viewer has not read, and is not
+/// one of `waiting_grants`.
+pub(crate) fn unread_people(summary: &NamedSummary, waiting_grants: &BTreeSet<ThreadId>) -> bool {
+    summary.unread_from_people > 0 && from_people(summary, waiting_grants)
+}
+
+/// How many of the conversations have messages a member wrote that the viewer has not read,
+/// leaving out `waiting_grants`.
 pub(crate) fn unread_from_people<'a>(
     summaries: impl IntoIterator<Item = &'a NamedSummary>,
     waiting_grants: &BTreeSet<ThreadId>,
 ) -> usize {
     summaries
         .into_iter()
-        .filter(|summary| summary.unread > 0 && from_people(summary, waiting_grants))
+        .filter(|summary| unread_people(summary, waiting_grants))
         .count()
 }
 
@@ -136,7 +152,9 @@ mod tests {
         Handle::parse(text).unwrap()
     }
 
-    /// Conversation `id`, started by `author` (`None`: dibs), with `unread` messages unread.
+    /// Conversation `id`, started by `author` (`None`: dibs), with `unread` messages unread, each
+    /// written by its author: a member's conversation holds a member's messages, dibs's only
+    /// dibs's.
     fn summary(id: u64, author: Option<(u64, &str)>, unread: u64) -> NamedSummary {
         let (record_author, named_author) = match author {
             Some((member, name)) => (
@@ -145,6 +163,8 @@ mod tests {
             ),
             None => (Author::System, AuthorName::Dibs),
         };
+        let by_member = author.is_some();
+        let (people, dibs) = if by_member { (2, 0) } else { (0, 2) };
         NamedSummary {
             thread: NamedThread {
                 record: ThreadRecord {
@@ -160,14 +180,32 @@ mod tests {
             },
             messages: 2,
             unread,
+            unread_from_people: if by_member { unread } else { 0 },
+            unread_from_dibs: if by_member { 0 } else { unread },
+            from_people: people,
+            from_dibs: dibs,
+            last_from: author.map(|(_, name)| handle(name)),
+            last_unread_from: author.filter(|_| unread > 0).map(|(_, name)| handle(name)),
             last_message_at: None,
             importance: Importance::Normal,
             awaiting_ack: 0,
         }
     }
 
+    /// `summary` with `members` of its messages written by bob, the rest by dibs.
+    fn written(mut summary: NamedSummary, members: u64, unread_from_people: u64) -> NamedSummary {
+        summary.from_people = members;
+        summary.from_dibs = summary.messages - members;
+        summary.unread_from_people = unread_from_people;
+        summary.unread_from_dibs = summary.unread - unread_from_people;
+        if unread_from_people == 0 {
+            summary.last_unread_from = None;
+        }
+        summary
+    }
+
     #[test]
-    fn a_member_started_conversation_is_from_people_and_dibss_is_not() {
+    fn a_conversation_holding_a_members_message_is_from_people_and_one_of_dibss_only_is_not() {
         let none = BTreeSet::new();
         assert!(from_people(&summary(1, Some((2, "bob")), 1), &none));
         assert!(
@@ -175,6 +213,26 @@ mod tests {
             "the viewer's own conversation counts once someone answers it"
         );
         assert!(!from_people(&summary(3, None, 1), &none));
+        assert!(
+            !from_people(&written(summary(4, Some((1, "alice")), 2), 0, 0), &none),
+            "dibs writing in the viewer's name makes no message from people"
+        );
+        assert!(
+            from_people(&written(summary(5, None, 2), 1, 1), &none),
+            "a member's reply in a conversation dibs started"
+        );
+    }
+
+    #[test]
+    fn a_message_waiting_for_the_viewers_acknowledgement_keeps_a_conversation_among_peoples() {
+        let mut notice = summary(6, None, 0);
+        notice.awaiting_ack = 1;
+        assert!(from_people(&notice, &BTreeSet::new()));
+        assert_eq!(
+            unread_from_people([&notice], &BTreeSet::new()),
+            0,
+            "nothing from people is unread in it"
+        );
     }
 
     #[test]
@@ -186,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn the_unread_count_counts_only_unread_conversations_from_people() {
+    fn the_unread_count_counts_only_conversations_with_unread_messages_from_people() {
         let waiting = BTreeSet::from([ThreadId(4)]);
         let all = [
             summary(1, Some((2, "bob")), 1),
@@ -194,8 +252,14 @@ mod tests {
             summary(3, None, 2),
             summary(4, Some((2, "bob")), 1),
             summary(5, Some((2, "bob")), 0),
+            written(summary(6, None, 2), 1, 0),
+            written(summary(7, Some((2, "bob")), 2), 1, 0),
         ];
-        assert_eq!(unread_from_people(&all, &waiting), 2);
+        assert_eq!(
+            unread_from_people(&all, &waiting),
+            2,
+            "a member's message read and dibs's unread is nothing from people to read"
+        );
         assert_eq!(unread_from_people(&all, &BTreeSet::new()), 3);
     }
 }

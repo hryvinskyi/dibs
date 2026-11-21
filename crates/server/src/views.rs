@@ -17,7 +17,7 @@ use dibs_app::records::{MemberRecord, SessionRecord};
 use dibs_app::use_cases::{
     Acknowledged, DeliverableMessage, ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady,
     NamedOverlap, PendingGrantAsk, ReadyEntry, ReadyView as ReadyList, RecipientAck,
-    RecipientStatus, UnackedMessage,
+    RecipientStatus, UnackedMessage, UnreadConversations,
 };
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::delivery::Delivery;
@@ -973,8 +973,15 @@ pub struct ThreadSummaryView {
     pub thread: ThreadView,
     /// How many messages it has.
     pub messages: u64,
-    /// How many of them the caller has not read and did not write.
+    /// How many of them the caller has not read and did not write: `unread_from_people` and
+    /// `unread_from_dibs` together.
     pub unread: u64,
+    /// How many of the unread ones a member wrote.
+    pub unread_from_people: u64,
+    /// How many of the unread ones dibs wrote, in whoever's name the conversation was started.
+    pub unread_from_dibs: u64,
+    /// The member who wrote the newest unread message from people, when there is one.
+    pub last_unread_from: Option<Handle>,
     /// When its newest message was written.
     #[serde(serialize_with = "time::serde::rfc3339::option::serialize")]
     pub last_message_at: Option<OffsetDateTime>,
@@ -991,9 +998,32 @@ impl ThreadSummaryView {
             thread: ThreadView::of(named.thread),
             messages: named.messages,
             unread: named.unread,
+            unread_from_people: named.unread_from_people,
+            unread_from_dibs: named.unread_from_dibs,
+            last_unread_from: named.last_unread_from,
             last_message_at: named.last_message_at,
             importance: named.importance,
             awaiting_ack: named.awaiting_ack,
+        }
+    }
+}
+
+/// How many conversations have messages the caller has not read, by who wrote them; a
+/// conversation with unread messages of both is counted in both.
+#[derive(Debug, Serialize)]
+pub struct UnreadConversationsView {
+    /// The conversations with unread messages a member wrote.
+    pub from_people: u64,
+    /// The conversations with unread messages dibs wrote.
+    pub from_dibs: u64,
+}
+
+impl UnreadConversationsView {
+    /// The view of the counts.
+    pub fn of(counts: UnreadConversations) -> Self {
+        Self {
+            from_people: counts.from_people,
+            from_dibs: counts.from_dibs,
         }
     }
 }

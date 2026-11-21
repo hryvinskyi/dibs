@@ -693,6 +693,34 @@ async fn the_conversations_about_a_claim_list_what_members_wrote_and_fold_dibss_
         shown.contains(">1 notice from dibs, 1 unread</a>"),
         "{shown}"
     );
+    let marker = r#"<span class="tag">dibs</span><a class="t lnk" href="/ui/inbox/"#;
+    let notice: u64 = shown[shown.find(marker).unwrap() + marker.len()..]
+        .split('"')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let answered = seeded
+        .world
+        .post(
+            &seeded.alice,
+            &format!("/v1/threads/{notice}/messages"),
+            json!({"label": "web", "body": "Looking at it."}),
+        )
+        .await;
+    assert_eq!(answered.status, StatusCode::CREATED, "{}", answered.body);
+    let page = seeded.page(&format!("/ui/claims/{}", seeded.working)).await;
+    let shown = inspector(&page);
+    assert!(
+        shown.contains(&format!(
+            r#"<b>alice</b></a><span class="t"><a class="lnk" href="/ui/inbox/{notice}">"#
+        )),
+        "a member's answer lists dibs's conversation among what members wrote: {shown}"
+    );
+    assert!(
+        shown.contains(">1 notice from dibs, "),
+        "the notices still count only what dibs wrote: {shown}"
+    );
     let quiet = seeded.page(&format!("/ui/claims/{}", seeded.branch)).await;
     assert!(
         inspector(&quiet).contains(r#"<li class="faint">Nothing was written about it.</li>"#),

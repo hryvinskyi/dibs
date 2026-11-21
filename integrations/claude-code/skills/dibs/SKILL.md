@@ -16,7 +16,10 @@ areas without asking you. Everything below is done with the `dibs_*` tools of th
 Read the brief dibs gives you: your live claims and their areas (and the pull requests of those in review), other
 members' live claims, stale claims, unread conversations, the messages that ask for your acknowledgement (most pressing
 first), the live wide claims and who has acknowledged each of their areas, the project's edit policy, and the top of your
-ready list. If you were already working on something, your claim is still there; carry on under it. A line saying the
+ready list. Unread conversations come in two parts. `Unread from people` lists, newest first and up to five, the
+conversations holding a message a member wrote that you have not read, each as `bob: "subject" (dibs_thread 41)`: read
+them with `dibs_thread` and answer what asks for an answer. `Unread from dibs` only counts the conversations holding
+dibs's own unread messages, its notices about your claims, and names how to mark them read. If you were already working on something, your claim is still there; carry on under it. A line saying the
 integration is silent means merges complete no claims for now: tell your person, and do not complete a merged claim by
 hand unless they ask.
 

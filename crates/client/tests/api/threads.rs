@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 
-use dibs_client::api::{InboxRequest, PostMessage, Recipients, StartThread};
+use dibs_client::api::{InboxRequest, PostMessage, Recipients, StartThread, UnreadConversations};
 use dibs_domain::event::EventKind;
 use dibs_domain::message::Importance;
 
@@ -46,6 +46,19 @@ fn a_thread_is_started_answered_read_and_marked() {
         let inbox = bob.inbox(UNREAD).await.unwrap();
         assert_eq!(inbox.threads.len(), 1);
         assert_eq!(inbox.threads[0].unread, 1);
+        assert_eq!(inbox.threads[0].unread_from_people, Some(1));
+        assert_eq!(inbox.threads[0].unread_from_dibs, Some(0));
+        assert_eq!(
+            inbox.threads[0].last_unread_from,
+            Some("alice".parse().unwrap())
+        );
+        assert_eq!(
+            inbox.unread_conversations,
+            Some(UnreadConversations {
+                from_people: 1,
+                from_dibs: 0,
+            })
+        );
         let posted = bob
             .post_message(
                 started.thread.id,

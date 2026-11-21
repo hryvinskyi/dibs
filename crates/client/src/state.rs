@@ -1251,6 +1251,7 @@ mod tests {
             offers: Vec::new(),
             deliverable: Vec::new(),
             grant_asks: Vec::new(),
+            unread_conversations: None,
         };
         state.remember_inbox(&inbox, at).unwrap();
         assert_eq!(state.inbox().unwrap().fetched_at, at);
@@ -1552,6 +1553,7 @@ mod tests {
             offers: Vec::new(),
             deliverable: Vec::new(),
             grant_asks: Vec::new(),
+            unread_conversations: None,
         };
         let claim = ClaimedDelivery {
             subject: "42".to_owned(),

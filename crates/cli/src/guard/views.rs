@@ -5,7 +5,7 @@ use dibs_agent_host::ports::{
     ClaimLine, ClaimedDelivery as GuardClaim, GrantAskLine, HeldWay, HoldLine, InboxView,
     OfferLine, PathAnswer, Pending, PendingMessage, PortError, ReadyLine, SlotHoldLine,
     SlotHoldState, SlotLine, SlotOfferState, SlotState, SlotWaiterState, StatusView, TouchedBy,
-    UnackedLine, WideAreaLine, WideLine,
+    UnackedLine, UnreadLine, WideAreaLine, WideLine,
 };
 use dibs_client::ClientError;
 use dibs_client::api::{
@@ -138,21 +138,27 @@ pub const GUARD_INBOX: InboxRequest = InboxRequest {
     deliverable: true,
 };
 
-/// The conversations with unread messages, the messages awaiting an acknowledgement or still to be
-/// delivered, the grants asked of the member that wait for their decision, and the deliveries this
-/// machine claimed, as the guard reads them. A claim this dibs cannot read back is left out.
+/// The conversations with unread messages from people and how many have unread messages from
+/// dibs, the messages awaiting an acknowledgement or still to be delivered, the grants asked of the
+/// member that wait for their decision, and the deliveries this machine claimed, as the guard reads
+/// them. A claim this dibs cannot read back is left out. From a server that does not tell people's
+/// unread messages from dibs's, every unread message counts as from people, so that nothing unread
+/// is hidden.
 pub fn inbox(inbox: &Inbox, claims: &[ClaimedDelivery]) -> InboxView {
-    let unread: Vec<_> = inbox
-        .threads
-        .iter()
-        .filter(|summary| summary.unread > 0)
-        .collect();
+    let unread = inbox.unread();
     InboxView {
-        unread: u64::try_from(unread.len()).unwrap_or(u64::MAX),
-        subjects: unread
+        unread_from_people: unread.from_people,
+        people: inbox
+            .threads
             .iter()
-            .map(|summary| summary.thread.subject.clone())
+            .filter(|summary| summary.unread_people() > 0)
+            .map(|summary| UnreadLine {
+                thread: summary.thread.id,
+                from: summary.last_unread_from.clone(),
+                subject: summary.thread.subject.clone(),
+            })
             .collect(),
+        unread_from_dibs: unread.from_dibs,
         unacked: inbox
             .unacked
             .iter()
@@ -410,6 +416,7 @@ pub fn port_error(error: &ClientError) -> PortError {
 #[cfg(test)]
 mod tests {
     use dibs_client::ErrorDetails;
+    use dibs_domain::ids::ThreadId;
 
     use super::*;
 
@@ -563,5 +570,86 @@ mod tests {
         let older: Inbox =
             serde_json::from_value(serde_json::json!({"threads": [], "offers": []})).unwrap();
         assert!(inbox(&older, &[]).grant_asks.is_empty());
+    }
+
+    /// A thread of an inbox answer, with `split` merged into it.
+    fn thread(id: u64, subject: &str, unread: u64, split: serde_json::Value) -> serde_json::Value {
+        let mut summary = serde_json::json!({
+            "thread": {
+                "id": id, "subject": subject, "item": null, "author": "alice",
+                "to_project": false, "to": [], "created_at": "2026-03-02T09:00:00Z"
+            },
+            "messages": 9,
+            "unread": unread,
+            "last_message_at": "2026-03-02T10:00:00Z",
+        });
+        if let (Some(summary), Some(split)) = (summary.as_object_mut(), split.as_object()) {
+            summary.extend(split.clone());
+        }
+        summary
+    }
+
+    #[test]
+    fn the_brief_names_conversations_with_unread_from_people_and_counts_those_from_dibs() {
+        let answer: Inbox = serde_json::from_value(serde_json::json!({
+            "threads": [
+                thread(41, "Rates", 3, serde_json::json!({
+                    "unread_from_people": 1, "unread_from_dibs": 2, "last_unread_from": "bob"
+                })),
+                thread(40, "Your claim on gh:acme/widgets#2", 4, serde_json::json!({
+                    "unread_from_people": 0, "unread_from_dibs": 4, "last_unread_from": null
+                })),
+                thread(39, "Staging", 1, serde_json::json!({
+                    "unread_from_people": 1, "unread_from_dibs": 0, "last_unread_from": "carol"
+                })),
+            ],
+            "offers": [],
+            "unread_conversations": {"from_people": 2, "from_dibs": 3}
+        }))
+        .unwrap();
+        let view = inbox(&answer, &[]);
+        assert_eq!(view.unread_from_people, 2);
+        assert_eq!(
+            view.unread_from_dibs, 3,
+            "the server's count, not the threads'"
+        );
+        assert_eq!(
+            view.people,
+            [
+                UnreadLine {
+                    thread: ThreadId(41),
+                    from: Some("bob".parse().unwrap()),
+                    subject: "Rates".parse().unwrap(),
+                },
+                UnreadLine {
+                    thread: ThreadId(39),
+                    from: Some("carol".parse().unwrap()),
+                    subject: "Staging".parse().unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn from_a_server_that_does_not_split_unread_every_unread_conversation_is_from_people() {
+        let answer: Inbox = serde_json::from_value(serde_json::json!({
+            "threads": [
+                thread(41, "Rates", 3, serde_json::json!({})),
+                thread(40, "Read already", 0, serde_json::json!({})),
+            ],
+            "offers": []
+        }))
+        .unwrap();
+        let view = inbox(&answer, &[]);
+        assert_eq!(view.unread_from_people, 1, "never zero while one is unread");
+        assert_eq!(view.unread_from_dibs, 0);
+        assert_eq!(
+            view.people,
+            [UnreadLine {
+                thread: ThreadId(41),
+                from: None,
+                subject: "Rates".parse().unwrap(),
+            }]
+        );
     }
 }

@@ -1419,6 +1419,16 @@ pub struct ThreadSummary {
     pub messages: u64,
     /// How many the caller has not read and did not write.
     pub unread: u64,
+    /// How many of the unread ones a member wrote; `None` from a server that does not split them.
+    #[serde(default)]
+    pub unread_from_people: Option<u64>,
+    /// How many of the unread ones dibs wrote; `None` from a server that does not split them.
+    #[serde(default)]
+    pub unread_from_dibs: Option<u64>,
+    /// The member who wrote the newest unread message from people, when there is one and the
+    /// server names them.
+    #[serde(default)]
+    pub last_unread_from: Option<Handle>,
     /// When its newest message was written.
     #[serde(with = "time::serde::rfc3339::option")]
     pub last_message_at: Option<OffsetDateTime>,
@@ -1511,6 +1521,55 @@ pub struct Inbox {
     /// server that does not list them.
     #[serde(default)]
     pub grant_asks: Vec<GrantAsk>,
+    /// How many conversations the caller may read have unread messages from people and from
+    /// dibs; `None` from a server that does not count them.
+    #[serde(default)]
+    pub unread_conversations: Option<UnreadConversations>,
+}
+
+/// How many conversations have messages the caller has not read, by who wrote them; a
+/// conversation with unread messages of both is counted in both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnreadConversations {
+    /// The conversations with unread messages a member wrote.
+    pub from_people: u64,
+    /// The conversations with unread messages dibs wrote.
+    pub from_dibs: u64,
+}
+
+impl ThreadSummary {
+    /// How many of its unread messages a member wrote. A server that does not split them counts
+    /// every unread message here, so that nothing unread is hidden.
+    pub fn unread_people(&self) -> u64 {
+        self.unread_from_people.unwrap_or(self.unread)
+    }
+
+    /// How many of its unread messages dibs wrote; none from a server that does not split them.
+    pub fn unread_dibs(&self) -> u64 {
+        self.unread_from_dibs.unwrap_or(0)
+    }
+}
+
+impl Inbox {
+    /// How many conversations have unread messages from people and from dibs: the server's
+    /// counts, or, from a server that does not count them, the threads of the answer counted by
+    /// [`ThreadSummary::unread_people`] and [`ThreadSummary::unread_dibs`].
+    pub fn unread(&self) -> UnreadConversations {
+        self.unread_conversations.unwrap_or_else(|| {
+            let count = |of: fn(&ThreadSummary) -> u64| {
+                let counted = self
+                    .threads
+                    .iter()
+                    .filter(|summary| of(summary) > 0)
+                    .count();
+                u64::try_from(counted).unwrap_or(u64::MAX)
+            };
+            UnreadConversations {
+                from_people: count(ThreadSummary::unread_people),
+                from_dibs: count(ThreadSummary::unread_dibs),
+            }
+        })
+    }
 }
 
 /// A grant asked of the caller that waits for their decision.

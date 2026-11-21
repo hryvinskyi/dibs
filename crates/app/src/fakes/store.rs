@@ -1099,24 +1099,38 @@ impl ThreadRows for MemoryTx {
             .iter()
             .filter(|((p, _), t)| *p == project && item.is_none_or(|item| t.item == Some(item)))
             .map(|(_, thread)| {
-                let messages: Vec<&MessageRecord> = self
+                let mut messages: Vec<&MessageRecord> = self
                     .work
                     .messages
                     .iter()
                     .filter(|((p, _), m)| *p == project && m.thread == thread.id)
                     .map(|(_, m)| m)
                     .collect();
-                let unread = messages
+                messages.sort_by_key(|m| (m.created_at, m.id));
+                let unread: Vec<&MessageRecord> = messages
                     .iter()
+                    .copied()
                     .filter(|m| {
                         speaks_for(thread.author, m.author) != Some(reader)
                             && !self.work.reads.contains_key(&(project, reader, m.id))
                     })
-                    .count();
+                    .collect();
+                let count = |of: &[&MessageRecord], dibs: bool| {
+                    let counted = of.iter().filter(|m| m.author.is_system() == dibs).count();
+                    u64::try_from(counted).unwrap_or(u64::MAX)
+                };
+                let newest_person =
+                    |of: &[&MessageRecord]| of.iter().rev().find_map(|m| m.author.member());
                 ThreadSummary {
                     thread: thread.clone(),
                     messages: u64::try_from(messages.len()).unwrap_or(u64::MAX),
-                    unread: u64::try_from(unread).unwrap_or(u64::MAX),
+                    unread: u64::try_from(unread.len()).unwrap_or(u64::MAX),
+                    unread_from_people: count(&unread, false),
+                    unread_from_dibs: count(&unread, true),
+                    from_people: count(&messages, false),
+                    from_dibs: count(&messages, true),
+                    last_from: newest_person(&messages),
+                    last_unread_from: newest_person(&unread),
                     last_message_at: messages.iter().map(|m| m.created_at).max(),
                     importance: messages
                         .iter()

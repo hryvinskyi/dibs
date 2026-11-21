@@ -18,7 +18,7 @@ use dibs_domain::radar::OverlapKind;
 
 use crate::ui::claims::classify::{finished, held_over_a_week, other_ticket, silent};
 use crate::ui::claims::view::{ClaimView, OtherTicket, Scene};
-use crate::ui::inbox::summary::{ConversationSummary, from_people, waiting_grants};
+use crate::ui::inbox::summary::{ConversationSummary, unread_people, waiting_grants};
 use crate::ui::links::{
     AreaView, BranchView, ConversationView, LinkContext, PersonView, TicketView,
 };
@@ -362,8 +362,8 @@ fn disputed(facts: &Facts<'_>) -> BTreeSet<ThreadId> {
         .collect()
 }
 
-/// The unread conversations from people that no other card shows: an open escalation's
-/// conversation is the Arbitrate card's.
+/// The conversations with unread messages from people that no other card shows: an open
+/// escalation's conversation is the Arbitrate card's.
 fn answers<'a>(facts: &Facts<'a>) -> Vec<&'a NamedSummary> {
     let waiting = waiting_grants(facts.inbox);
     let disputed = disputed(facts);
@@ -372,9 +372,7 @@ fn answers<'a>(facts: &Facts<'a>) -> Vec<&'a NamedSummary> {
         .threads
         .iter()
         .filter(|summary| {
-            summary.unread > 0
-                && from_people(summary, &waiting)
-                && !disputed.contains(&summary.thread.record.id)
+            unread_people(summary, &waiting) && !disputed.contains(&summary.thread.record.id)
         })
         .collect()
 }
@@ -622,7 +620,7 @@ mod tests {
 
     use dibs_app::named::{AuthorName, ItemName, NamedClaim, NamedItem, NamedThread};
     use dibs_app::records::{ItemRecord, ThreadRecord};
-    use dibs_app::use_cases::ReadyView;
+    use dibs_app::use_cases::{ReadyView, UnreadConversations};
     use dibs_domain::claim::Claim;
     use dibs_domain::escalation::EscalationSubject;
     use dibs_domain::forge::ForgeRegistry;
@@ -695,6 +693,7 @@ mod tests {
             grant_asks: Vec::new(),
             every_grant_ask: Vec::new(),
             awaiting_ack: Vec::new(),
+            unread_conversations: UnreadConversations::default(),
         }
     }
 
@@ -810,8 +809,8 @@ mod tests {
             .collect()
     }
 
-    /// A conversation `id` started by `author` (`None`: dibs) with `unread` unread messages, its
-    /// last message `ago` before now.
+    /// A conversation `id` started by `author` (`None`: dibs) with `unread` unread messages, every
+    /// message written by whoever started it, its last message `ago` before now.
     fn talk(id: u64, author: Option<&str>, unread: u64, ago: Duration) -> NamedSummary {
         let (record_author, named) = match author {
             Some(name) => (
@@ -835,6 +834,12 @@ mod tests {
             },
             messages: 2,
             unread,
+            unread_from_people: if author.is_some() { unread } else { 0 },
+            unread_from_dibs: if author.is_some() { 0 } else { unread },
+            from_people: if author.is_some() { 2 } else { 0 },
+            from_dibs: if author.is_some() { 0 } else { 2 },
+            last_from: author.map(handle),
+            last_unread_from: author.filter(|_| unread > 0).map(handle),
             last_message_at: Some(NOW - ago),
             importance: Importance::Normal,
             awaiting_ack: 0,

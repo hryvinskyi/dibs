@@ -267,6 +267,75 @@ async fn the_tabs_count_unread_people_waiting_grants_and_unread_notices() {
 }
 
 #[tokio::test]
+async fn what_dibs_writes_in_a_members_name_is_from_dibs_until_a_member_answers_it() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    world.member(&alice, "carol", Role::Member).await;
+    world.settings(&alice, settings()).await;
+    let removed = world.delete(&alice, "/v1/admin/members/carol").await;
+    assert_eq!(removed.status, StatusCode::OK, "{}", removed.body);
+    let listed = world.get(&bob, "/v1/threads").await;
+    let left = &listed.body["threads"][0];
+    assert_eq!(
+        left["thread"]["subject"], "carol left the project",
+        "{}",
+        listed.body
+    );
+    assert_eq!(left["thread"]["author"], "alice", "started in alice's name");
+    let left = left["thread"]["id"].as_u64().unwrap();
+    let browser = sign_in(&world, &bob).await;
+    let tabs = |people: u64, dibs: u64, rail: &str| {
+        [
+            format!(
+                r#"<a href="/ui/inbox" aria-current="true">People<span class="k">{people}</span></a>"#
+            ),
+            format!(r#"<a href="/ui/inbox?tab=dibs">From dibs<span class="k">{dibs}</span></a>"#),
+            format!(r#"<a href="/ui/inbox" aria-current="page">Inbox{rail}"#),
+        ]
+    };
+    let before = browser.get(&world, "/ui/inbox").await;
+    for tab in tabs(0, 1, r#"<span class="k">0</span>"#) {
+        assert!(before.text.contains(&tab), "{tab} in {}", before.text);
+    }
+    assert!(
+        !lists(&before, &format!("/ui/inbox/{left}")),
+        "{}",
+        before.text
+    );
+    let inbox = world.get(&bob, "/v1/inbox?unread=true").await;
+    assert_eq!(
+        inbox.body["unread_conversations"],
+        json!({"from_people": 0, "from_dibs": 1})
+    );
+
+    let answered = world
+        .post(
+            &alice,
+            &format!("/v1/threads/{left}/messages"),
+            json!({"label": "web", "body": "Her items are back in the queue."}),
+        )
+        .await;
+    assert_eq!(answered.status, StatusCode::CREATED, "{}", answered.body);
+    let after = browser.get(&world, "/ui/inbox").await;
+    for tab in tabs(1, 0, r#"<span class="k k--hot">1</span>"#) {
+        assert!(after.text.contains(&tab), "{tab} in {}", after.text);
+    }
+    assert!(
+        lists(&after, &format!("/ui/inbox/{left}")),
+        "{}",
+        after.text
+    );
+    let inbox = world.get(&bob, "/v1/inbox?unread=true").await;
+    assert_eq!(
+        inbox.body["unread_conversations"],
+        json!({"from_people": 1, "from_dibs": 1}),
+        "dibs's message in it is still unread"
+    );
+    assert_eq!(inbox.body["threads"][0]["last_unread_from"], "alice");
+}
+
+#[tokio::test]
 async fn opening_a_conversation_takes_it_off_the_rails_count_on_that_very_answer() {
     let seeded = Seeded::new().await;
     let page = seeded.page(&format!("/ui/inbox/{}", seeded.from_bob)).await;
@@ -370,8 +439,8 @@ async fn from_dibs_folds_the_notices_about_one_claimed_item_into_one_row() {
         "{shown}"
     );
     assert!(
-        shown.contains("<span>1 notice · 1 unread</span>"),
-        "{shown}"
+        shown.contains("<span>2 notices · 2 unread</span>"),
+        "the row counts the messages dibs wrote, both overlaps in one conversation: {shown}"
     );
     let notices = seeded.notices().await;
     assert_eq!(

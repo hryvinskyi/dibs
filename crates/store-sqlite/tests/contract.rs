@@ -131,6 +131,7 @@ mod contract {
         grants_are_listed_by_id,
         threads_keep_their_recipients_and_messages_their_order,
         summaries_count_what_the_reader_has_not_read,
+        summaries_split_unread_into_what_members_and_dibs_wrote,
         summaries_put_the_newest_activity_first_and_filter_by_item,
         messages_keep_their_importance_and_summaries_the_highest,
         acks_are_one_per_member_and_message_and_scoped,
@@ -1779,6 +1780,105 @@ mod contract {
         );
         assert_eq!(tx.mark_read(A, BOB, t, at(69)).await.unwrap(), 0);
         assert_eq!(tx.mark_read(A, ALICE, t, at(69)).await.unwrap(), 2);
+    }
+
+    async fn summaries_split_unread_into_what_members_and_dibs_wrote(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let of_dibs = ThreadRecord {
+            author: Author::System,
+            ..thread(ThreadId(81), ALICE, None, 60)
+        };
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &of_dibs).await.unwrap();
+        tx.insert_message(A, &system_message(91, ThreadId(81), 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(92, ThreadId(81), 62))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(82), ALICE, None, 60))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(93, ThreadId(82), 63))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(94, ThreadId(82), BOB, 64))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(83), BOB, None, 60))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(95, ThreadId(83), BOB, 65))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(96, ThreadId(83), 66))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(97, ThreadId(83), BOB, 67))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(98, ThreadId(83), ALICE, 68))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        /// Per thread: unread from people and from dibs, every message from people and from dibs,
+        /// the newest writer from people and the newest unread one.
+        type Split = (u64, u64, u64, u64, Option<MemberId>, Option<MemberId>);
+        let split = |summaries: Vec<dibs_app::records::ThreadSummary>| {
+            summaries
+                .iter()
+                .map(|s| {
+                    assert_eq!(
+                        s.unread,
+                        s.unread_from_people + s.unread_from_dibs,
+                        "thread {}",
+                        s.thread.id
+                    );
+                    assert_eq!(s.messages, s.from_people + s.from_dibs);
+                    let counts: Split = (
+                        s.unread_from_people,
+                        s.unread_from_dibs,
+                        s.from_people,
+                        s.from_dibs,
+                        s.last_from,
+                        s.last_unread_from,
+                    );
+                    (s.thread.id.get(), counts)
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            split(tx.thread_summaries(A, ALICE, None).await.unwrap()),
+            [
+                (83, (2, 1, 3, 1, Some(ALICE), Some(BOB))),
+                (82, (1, 0, 1, 1, Some(BOB), Some(BOB))),
+                (81, (0, 2, 0, 2, None, None)),
+            ],
+            "what dibs wrote in a thread started in alice's name is her own, unread in neither"
+        );
+        assert_eq!(
+            split(tx.thread_summaries(A, BOB, None).await.unwrap()),
+            [
+                (83, (1, 0, 3, 1, Some(ALICE), Some(ALICE))),
+                (82, (0, 1, 1, 1, Some(BOB), None)),
+                (81, (0, 2, 0, 2, None, None)),
+            ],
+            "in bob's thread what dibs wrote is his own; in alice's it is dibs's"
+        );
+        assert_eq!(
+            tx.mark_read(A, ALICE, ThreadId(83), at(70)).await.unwrap(),
+            3
+        );
+        tx.insert_message(A, &system_message(99, ThreadId(83), 71))
+            .await
+            .unwrap();
+        assert_eq!(
+            split(tx.thread_summaries(A, ALICE, None).await.unwrap())[0],
+            (83, (0, 1, 3, 2, Some(ALICE), None)),
+            "once read, no member is the newest unread writer"
+        );
     }
 
     async fn summaries_put_the_newest_activity_first_and_filter_by_item(store: Arc<dyn Store>) {

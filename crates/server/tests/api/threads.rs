@@ -121,12 +121,27 @@ async fn a_thread_starts_and_its_people_read_and_answer() {
     let waiting = world.get(&team.bob, "/v1/inbox?unread=1").await;
     assert_eq!(
         waiting.body,
-        json!({"threads": [], "offers": [], "grant_asks": []})
+        json!({
+            "threads": [], "offers": [], "grant_asks": [],
+            "unread_conversations": {"from_people": 0, "from_dibs": 0}
+        })
     );
     let everything = world.get(&team.bob, "/v1/inbox").await;
     assert_eq!(everything.body["threads"][0]["unread"], 0);
+    assert_eq!(
+        everything.body["threads"][0]["last_unread_from"],
+        json!(null)
+    );
     let alices = world.get(&team.alice, "/v1/inbox?unread=true").await;
-    assert_eq!(alices.body["threads"][0]["unread"], 1);
+    let summary = &alices.body["threads"][0];
+    assert_eq!(summary["unread"], 1);
+    assert_eq!(summary["unread_from_people"], 1);
+    assert_eq!(summary["unread_from_dibs"], 0);
+    assert_eq!(summary["last_unread_from"], "bob");
+    assert_eq!(
+        alices.body["unread_conversations"],
+        json!({"from_people": 1, "from_dibs": 0})
+    );
 
     let about = world
         .get(&team.alice, &format!("/v1/threads?item={item}"))
@@ -199,7 +214,10 @@ async fn a_thread_the_caller_may_not_read_is_missing() {
     );
     assert_eq!(
         world.get(&team.carol, "/v1/inbox").await.body,
-        json!({"threads": [], "offers": [], "grant_asks": []})
+        json!({
+            "threads": [], "offers": [], "grant_asks": [],
+            "unread_conversations": {"from_people": 0, "from_dibs": 0}
+        })
     );
 }
 

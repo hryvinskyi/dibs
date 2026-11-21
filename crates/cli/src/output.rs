@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use dibs_client::api::{
     Claim, ClaimKind, HeldReason, Item, ItemName, Message, OpenEscalation, OverlapInfo,
-    PathVerdict, ThreadSummary, Unacked, Verdict,
+    PathVerdict, ThreadSummary, Unacked, UnreadConversations, Verdict,
 };
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
@@ -296,21 +296,51 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
     format!("{}: {what}", verdict.path)
 }
 
-/// One line for a conversation: `#4 Billing rates (from alice, urgent, 2 unread, 1 to ack)`.
+/// One line for a conversation:
+/// `#4 Billing rates (from alice, urgent, 2 unread from people, 5 from dibs, 1 to ack)`. A server
+/// that does not tell people's unread messages from dibs's gives only `2 unread`.
 pub fn thread_line(summary: &ThreadSummary) -> String {
     let thread = &summary.thread;
     let mut line = format!("#{} {} (from {}", thread.id, thread.subject, thread.author);
     if summary.importance.is_raised() {
         let _ = write!(line, ", {}", summary.importance);
     }
-    if summary.unread > 0 {
-        let _ = write!(line, ", {} unread", summary.unread);
+    let unread = match (summary.unread_from_people, summary.unread_from_dibs) {
+        (Some(people), Some(dibs)) => match (people, dibs) {
+            (0, 0) => None,
+            (people, 0) => Some(format!("{people} unread from people")),
+            (0, dibs) => Some(format!("{dibs} unread from dibs")),
+            (people, dibs) => Some(format!("{people} unread from people, {dibs} from dibs")),
+        },
+        _ => (summary.unread > 0).then(|| format!("{} unread", summary.unread)),
+    };
+    if let Some(unread) = unread {
+        let _ = write!(line, ", {unread}");
     }
     if summary.awaiting_ack > 0 {
         let _ = write!(line, ", {} to ack", summary.awaiting_ack);
     }
     line.push(')');
     line
+}
+
+/// The first line of the inbox: how many conversations have unread messages from people and how
+/// many from dibs, with the way to mark dibs's read.
+pub fn unread_line(unread: UnreadConversations) -> String {
+    format!(
+        "Unread from people: {}. Unread from dibs: {} (dibs read --dibs marks them read).",
+        conversations(unread.from_people),
+        conversations(unread.from_dibs)
+    )
+}
+
+/// `n` conversations, in words: `1 conversation`, `3 conversations`.
+fn conversations(n: u64) -> String {
+    if n == 1 {
+        "1 conversation".to_owned()
+    } else {
+        format!("{n} conversations")
+    }
 }
 
 /// One line for a message awaiting the caller's acknowledgement:
@@ -442,6 +472,62 @@ mod tests {
             ", the base moved under it: acme/widgets#7, acme/widgets#9 (rebase onto the base)"
         );
         assert_eq!(base_moved_text(&[]), "");
+    }
+
+    /// A conversation alice started, with `unread` unread messages and `split` merged in.
+    fn summary(unread: u64, split: serde_json::Value) -> ThreadSummary {
+        let mut summary = serde_json::json!({
+            "thread": {
+                "id": 4, "subject": "Billing rates", "item": null, "author": "alice",
+                "to_project": false, "to": ["bob"], "created_at": "2026-03-02T09:00:00Z"
+            },
+            "messages": 9,
+            "unread": unread,
+            "last_message_at": "2026-03-02T10:00:00Z",
+            "importance": "urgent",
+            "awaiting_ack": 1,
+        });
+        if let (Some(summary), Some(split)) = (summary.as_object_mut(), split.as_object()) {
+            summary.extend(split.clone());
+        }
+        serde_json::from_value(summary).unwrap()
+    }
+
+    #[test]
+    fn a_conversation_line_splits_its_unread_messages_into_peoples_and_dibss() {
+        let split = |people: u64, dibs: u64| serde_json::json!({"unread_from_people": people, "unread_from_dibs": dibs});
+        assert_eq!(
+            thread_line(&summary(7, split(2, 5))),
+            "#4 Billing rates (from alice, urgent, 2 unread from people, 5 from dibs, 1 to ack)"
+        );
+        assert_eq!(
+            thread_line(&summary(2, split(2, 0))),
+            "#4 Billing rates (from alice, urgent, 2 unread from people, 1 to ack)"
+        );
+        assert_eq!(
+            thread_line(&summary(5, split(0, 5))),
+            "#4 Billing rates (from alice, urgent, 5 unread from dibs, 1 to ack)"
+        );
+        assert_eq!(
+            thread_line(&summary(0, split(0, 0))),
+            "#4 Billing rates (from alice, urgent, 1 to ack)"
+        );
+        assert_eq!(
+            thread_line(&summary(3, serde_json::json!({}))),
+            "#4 Billing rates (from alice, urgent, 3 unread, 1 to ack)",
+            "a server that does not split them gives the total"
+        );
+    }
+
+    #[test]
+    fn the_inbox_opens_with_the_conversations_unread_from_people_and_from_dibs() {
+        assert_eq!(
+            unread_line(UnreadConversations {
+                from_people: 1,
+                from_dibs: 3,
+            }),
+            "Unread from people: 1 conversation. Unread from dibs: 3 conversations (dibs read --dibs marks them read)."
+        );
     }
 
     #[test]
