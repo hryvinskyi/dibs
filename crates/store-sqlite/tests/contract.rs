@@ -134,6 +134,7 @@ mod contract {
         summaries_split_unread_into_what_members_and_dibs_wrote,
         summaries_put_the_newest_activity_first_and_filter_by_item,
         messages_keep_their_importance_and_summaries_the_highest,
+        summaries_keep_the_highest_importance_of_what_the_reader_has_not_read,
         acks_are_one_per_member_and_message_and_scoped,
         ack_requests_leave_out_my_own_and_the_acknowledged,
         wide_claims_keep_their_scope_and_reason,
@@ -160,6 +161,7 @@ mod contract {
         what_dibs_writes_has_no_member_author_and_speaks_for_the_threads_starter,
         many_threads_are_marked_read_at_once_and_dibss_messages_alone_when_asked,
         members_are_seen_by_their_sessions_from_a_time,
+        an_ended_session_is_not_seen_until_it_is_opened_again,
         a_removed_member_is_kept_with_the_first_time_they_were_removed,
         a_deleted_thread_takes_everything_that_refers_to_its_messages,
         a_claims_conversation_keeps_its_claim_and_when_a_moved_base_was_last_told,
@@ -234,6 +236,7 @@ mod contract {
             agent: AgentLabel::parse("agent").unwrap(),
             push: false,
             last_seen: at(2),
+            ended_at: None,
         }
     }
 
@@ -565,6 +568,7 @@ mod contract {
             agent: AgentLabel::parse("other-agent").unwrap(),
             push: true,
             last_seen: at(30),
+            ended_at: Some(at(31)),
             ..session(ALICE_LAPTOP, ALICE, "ignored")
         };
         tx.save_session(A, &moved).await.unwrap();
@@ -2359,6 +2363,70 @@ mod contract {
         );
     }
 
+    async fn summaries_keep_the_highest_importance_of_what_the_reader_has_not_read(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let high = |id: u64, thread: u64, author: MemberId, created: i64| MessageRecord {
+            importance: Importance::High,
+            ..message(id, ThreadId(thread), author, created)
+        };
+        let mut tx = store.begin().await.unwrap();
+        for thread_id in [81, 82, 83] {
+            tx.insert_thread(A, &thread(ThreadId(thread_id), ALICE, None, 60))
+                .await
+                .unwrap();
+        }
+        tx.insert_message(A, &high(91, 81, ALICE, 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &high(92, 82, ALICE, 62))
+            .await
+            .unwrap();
+        tx.insert_message(A, &high(93, 83, BOB, 63)).await.unwrap();
+        tx.insert_message(A, &message(94, ThreadId(83), ALICE, 64))
+            .await
+            .unwrap();
+        assert_eq!(tx.mark_read(A, BOB, ThreadId(81), at(65)).await.unwrap(), 1);
+        tx.insert_message(A, &message(95, ThreadId(81), ALICE, 66))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(96, ThreadId(81), ALICE, 67))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let importances: Vec<(u64, u64, Importance, Importance)> = tx
+            .thread_summaries(A, BOB, None)
+            .await
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s.thread.id.get(),
+                    s.unread,
+                    s.importance,
+                    s.unread_importance,
+                )
+            })
+            .collect();
+        assert_eq!(
+            importances,
+            [
+                (81, 2, Importance::High, Importance::Normal),
+                (83, 1, Importance::High, Importance::Normal),
+                (82, 1, Importance::High, Importance::High),
+            ],
+            "a raised message read, or written by the reader, is not a raised unread one"
+        );
+        assert_eq!(
+            tx.thread_summaries(A, ALICE, None).await.unwrap()[0].unread_importance,
+            Importance::Normal,
+            "nothing is unread for alice in 81: an empty unread set is normal"
+        );
+    }
+
     async fn acks_are_one_per_member_and_message_and_scoped(store: Arc<dyn Store>) {
         seed(&store).await;
         let mut tx = store.begin().await.unwrap();
@@ -3570,6 +3638,47 @@ mod contract {
         assert_eq!(
             tx.members_seen_since(B, at(0)).await.unwrap(),
             BTreeSet::from([DAVE])
+        );
+    }
+
+    async fn an_ended_session_is_not_seen_until_it_is_opened_again(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let mut desktop = SessionRecord {
+            last_seen: at(40),
+            ..session(SessionId(33), ALICE, "desktop/mcp")
+        };
+        desktop.end(at(41));
+        tx.save_session(A, &desktop).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.session(A, SessionId(33)).await.unwrap(),
+            Some(desktop.clone()),
+            "the session stays, marked ended"
+        );
+        assert_eq!(
+            tx.members_seen_since(A, at(3)).await.unwrap(),
+            BTreeSet::new(),
+            "alice's only recent session ended"
+        );
+        assert_eq!(
+            tx.members_seen_since(A, at(2)).await.unwrap(),
+            BTreeSet::from([ALICE, BOB]),
+            "her open session of before still counts"
+        );
+        desktop.seen(at(50));
+        tx.save_session(A, &desktop).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.session(A, SessionId(33)).await.unwrap(),
+            Some(desktop),
+            "opened again"
+        );
+        assert_eq!(
+            tx.members_seen_since(A, at(3)).await.unwrap(),
+            BTreeSet::from([ALICE])
         );
     }
 

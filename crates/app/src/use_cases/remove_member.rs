@@ -44,15 +44,16 @@ pub struct RemovedMember {
 }
 
 /// Removes a member from a project, for an admin of it — never the admin themself — or for the
-/// operator of the service, in one transaction: every token of theirs is revoked and every browser
-/// session ended; each of their claims is released, its item open again (`force_released`); their
-/// holds on slots end and their places in queues and the offers to them go, the freed slots
-/// offered on (`slot_force_released`); every hold of their worktree pools ends
-/// (`worktree_released`); they are marked removed (`member_removed`); and dibs tells
-/// the project, in one message, what was released. The areas other claims waited for their claims
-/// to hand over move to those claims, and their own claims' waits end with them. Their messages,
-/// and every record that names them, stay. A removed member is no recipient, takes nothing and
-/// signs in nowhere.
+/// operator of the service, in one transaction: they are marked removed first, so whatever the
+/// rest of the removal tells other members already treats them as gone; every token of theirs is
+/// revoked and every browser session ended; each of their claims is released, its item open again
+/// (`force_released`); their holds on slots end and their places in queues and the offers to them
+/// go, the freed slots offered on (`slot_force_released`); every hold of their worktree pools ends
+/// (`worktree_released`); the removal is recorded (`member_removed`); and dibs tells the project,
+/// in one message, what was released. The areas other claims waited for their claims to hand over
+/// move to those claims, and their own claims' waits end with them. Their messages, and every
+/// record that names them, stay. A removed member is no recipient, takes nothing and signs in
+/// nowhere.
 pub struct RemoveMember {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -94,6 +95,7 @@ impl RemoveMember {
         if admin == Some(member.id) {
             return Err(AppError::SelfRemoval);
         }
+        work.remove_member(project, member.id, now).await?;
         let mut tokens_revoked = 0;
         for token in work.tokens_of(project, member.id).await? {
             if token.is_active() {
@@ -138,7 +140,6 @@ impl RemoveMember {
                 .len();
             pool.save(&mut work, now).await?;
         }
-        work.remove_member(project, member.id, now).await?;
         work.record(
             now,
             EventKind::MemberRemoved(MemberRemoved {

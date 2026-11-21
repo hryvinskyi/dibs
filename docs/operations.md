@@ -420,11 +420,13 @@ describe_holder = false
   pre-push hook alike. A machine that upgrades fetches the settings again rather than judging from what its older
   release remembered. Once 0.1.2 has been out long enough, raise `DIBS_MIN_CLIENT` to it.
 - **A claim lives through review.** A member records their pull request on their claim (`dibs claim review <item> --pr
-  <owner>/<repo>#<number>`); the claim keeps its areas and never goes stale while in review. Its review ends when the
-  integration reports the merge or the close of a pull request it recorded, or when its holder removes one recorded by
-  mistake (`--drop-pr`); and the claim itself still ends as any claim does — its holder releases or completes it, an
-  admin forces its release, or the member is removed. Only a merge into a protected branch (any branch, in a repository
-  that protects none) completes it.
+  <owner>/<repo>#<number>`); the claim never goes stale and is never released while in review, and it keeps its areas
+  unless its item's tracker moves into a state the project lists in `free_areas_at` (it then gives up every area) or
+  the sweep gives back an area that saw no edit of its work for `idle_area_after`; declaring the area again takes it
+  back while it is free. Its review ends when the integration reports the merge or the close of a pull request it
+  recorded, or when its holder removes one recorded by mistake (`--drop-pr`); and the claim itself still ends as any
+  claim does — its holder releases or completes it, an admin forces its release, or the member is removed. Only a
+  merge into a protected branch (any branch, in a repository that protects none) completes it.
 - **An integration closes the loop.** dibs speaks no forge API. A worker holding an `importer` token
   (`dibs admin member add worker --name "Integration" --role importer`) watches the forge and calls
   `GET /v1/review-claims`, `POST /v1/prs/merged`, `POST /v1/prs/closed` and `GET /v1/pr-status` (and reports a pull
@@ -536,12 +538,15 @@ claims of a project could not be swept*) and the other projects are swept all th
 
 The same sweep gives back, from each live claim (worked on and seen within `stale_after`, or in review), every area it
 held for the project's `idle_area_after` with no sign of the claim's work in it: the area's clock (when the claim
-declared or gained it, moved by every later declaration of it and every edit of the claim in it) is older than that,
+declared or gained it, moved by every later declaration of it, every edit of the claim in it and every sweep that
+finds the claim's footprint keeping it) is older than that,
 no path of the claim's stored footprints falls in it, and the footprint of its repository, when there is one, is not
 truncated. The claim holds the area no more, the grants given in it end, an area another claim waits for moves to that
 claim, the log records `areas_returned`, and dibs tells the holder in the claim's conversation. When the claim was last
 seen stays as it was, so a claim whose areas went back still reaches the release rule. Only a claim with an area whose
-clock is past the delay has its footprints read, and a project with nothing to give back is left without a write.
+clock is past the delay has its footprints read. An area kept that way has its clock restarted, which is written, so
+its footprints are not read again until the delay has passed once more; a project with no area past the delay is left
+without a write.
 `idle_area_after` is a top-level setting, 1 to 90 days, 7 days by default. The upgrade that brings area clocks starts
 the clock of every area held then at the time the migration runs, so nothing is given back for the time before it.
 
@@ -779,10 +784,11 @@ checkout token are ignored, so its claims record no branch and see no overlap un
 server, then publish the 0.1.11 client binaries and set `DIBS_LATEST_CLIENT` to 0.1.11 straight away, so the radar comes
 back as members update.
 
-**0.1.11, one conversation per claim, and the server ends what is over.** Two migrations: 15 adds a table that links
-each claim to its conversation (it goes with its conversation, and conversations that exist stay as they are), and 16
-adds a clock to each area a claim holds, started at the upgrade for every area held then, so the first areas can go
-back 7 days after the upgrade at the earliest. Three things change with the release:
+**0.1.11, one conversation per claim, and the server ends what is over.** Three migrations: 15 adds a table that
+links each claim to its conversation (it goes with its conversation, and conversations that exist stay as they are),
+16 adds a clock to each area a claim holds, started at the upgrade for every area held then, so the first areas can go
+back 7 days after the upgrade at the earliest, and 17 marks when a session was ended, so an ended session no longer
+counts as at work (every session that exists stays open). Three things change with the release:
 
 - **A heartbeat no longer keeps a claim alive.** A claim lives by its own work: it goes stale `stale_after` after its
   last edit made under it, push of its branch or renewal, or while its pull requests wait, and the server's sweep
@@ -810,14 +816,13 @@ What the client version changes, so set `DIBS_LATEST_CLIENT` to 0.1.11 at the up
   without `release_after`, `idle_area_after` and `free_areas_at`.
 
 `release_after` defaults to 7 days, or to one day more than `stale_after` when that is 7 days or longer, so no stored
-settings stop parsing at the upgrade. The settings document refuses fields it does not know: once a project's settings
-name `release_after`, `idle_area_after` or `free_areas_at`, rolling the server back to an earlier release makes those
-settings unreadable, so remove the fields before a rollback.
+settings stop parsing at the upgrade.
 
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
-Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the
-snapshot taken before the upgrade onto the older release. `dibs-server migrate` migrates a database file without
-serving, offline.
+Migrations only go forward: a server refuses a database that a newer release has migrated, and this release migrates
+the schema (migrations 15, 16 and 17). Going back from it therefore means restoring the snapshot taken before the upgrade
+onto the older release; the settings changed after the upgrade are not in that snapshot.
+`dibs-server migrate` migrates a database file without serving, offline.
 
 ### Two spellings of one ticket
 

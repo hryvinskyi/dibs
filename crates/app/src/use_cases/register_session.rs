@@ -28,7 +28,7 @@ pub struct RegisterSessionInput {
 }
 
 /// Registers a session of the caller, or updates the one of the same label: a session that
-/// registers again keeps its id.
+/// registers again keeps its id, and is open again if it was ended.
 pub struct RegisterSession {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -71,6 +71,7 @@ impl RegisterSession {
             agent: input.agent,
             push: input.push,
             last_seen: now,
+            ended_at: None,
         };
         work.save_session(actor.project, &session).await?;
         work.commit_quietly().await?;
@@ -124,5 +125,29 @@ mod tests {
                 .iter()
                 .all(|e| !matches!(e.kind, dibs_domain::event::EventKind::Claimed(_)))
         );
+    }
+
+    #[tokio::test]
+    async fn registering_an_ended_session_again_opens_it() {
+        let env = Env::new().await;
+        let register = RegisterSession::new(&env.deps);
+        let first = register
+            .execute(&env.bob.actor, input("desktop", "desktop/mcp", false))
+            .await
+            .unwrap();
+        crate::use_cases::EndSession::new(&env.deps)
+            .execute(&env.bob.actor, first.id)
+            .await
+            .unwrap();
+        env.advance(time::Duration::minutes(3));
+        let again = register
+            .execute(&env.bob.actor, input("desktop", "desktop/mcp", false))
+            .await
+            .unwrap();
+        assert_eq!(again.id, first.id, "the label keeps its id");
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let stored = tx.session(env.project, first.id).await.unwrap().unwrap();
+        assert!(stored.is_open());
+        assert_eq!(stored.last_seen, env.now());
     }
 }

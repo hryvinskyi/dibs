@@ -649,6 +649,38 @@ async fn a_session_that_ends_ends_only_its_own_holds_and_its_agents() {
 }
 
 #[tokio::test]
+async fn an_ended_session_stays_registered_as_ended_until_a_heartbeat_opens_it() {
+    let env = Env::new().await;
+    let stored = || async {
+        let mut tx = env.deps.store.begin().await.unwrap();
+        tx.session(env.project, env.alice.session)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    let before = stored().await;
+    env.advance(Duration::minutes(5));
+    EndSession::new(&env.deps)
+        .execute(&env.alice.actor, env.alice.session)
+        .await
+        .unwrap();
+    let ended = stored().await;
+    assert_eq!(ended.ended_at, Some(env.now()));
+    assert_eq!(
+        ended.last_seen, before.last_seen,
+        "ending is no sign of life"
+    );
+    env.advance(Duration::minutes(5));
+    Heartbeat::new(&env.deps)
+        .execute(&env.alice.actor, env.alice.session, None)
+        .await
+        .unwrap();
+    let opened = stored().await;
+    assert!(opened.is_open());
+    assert_eq!(opened.last_seen, env.now());
+}
+
+#[tokio::test]
 async fn an_admin_ends_a_members_hold_and_tells_them_why() {
     let env = Env::new().await;
     Ask::of(&env.bob).agent("agent-1").took(&env).await;

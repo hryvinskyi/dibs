@@ -209,7 +209,13 @@ fn a_stale_claim_is_taken_over_with_a_reason_and_a_grant_lets_another_edit() {
         &["takeover", "gh:acme/api#1", "--reason", "alice is away"],
     );
     assert_eq!(status(&taken), 0);
-    assert!(text(&taken.stdout).contains("from alice"));
+    let said = text(&taken.stdout);
+    assert!(said.contains("from alice"), "{said}");
+    assert!(
+        said.contains("they were told why in their claim's conversation")
+            && !said.contains("conversation #"),
+        "the answer names no conversation the taker cannot read: {said}"
+    );
 
     run(&setup.alice, &["new", "gh:acme/api#2", "--title", "Search"]);
     assert_eq!(

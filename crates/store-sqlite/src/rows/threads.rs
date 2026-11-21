@@ -125,12 +125,17 @@ fn summary(row: &SqliteRow) -> StoreResult<ThreadSummary> {
         last_from: f.opt_number("last_from")?.map(MemberId),
         last_unread_from: f.opt_number("last_unread_from")?.map(MemberId),
         last_message_at: f.opt_time("last_message_at")?,
-        importance: f
-            .json::<Vec<Importance>>("importances")?
-            .into_iter()
-            .max()
-            .unwrap_or_default(),
+        importance: highest(&f, "importances")?,
+        unread_importance: highest(&f, "unread_importances")?,
     })
+}
+
+/// The highest of the importances in the JSON array of this column: normal when it is empty.
+fn highest(f: &Fields<'_>, column: &str) -> StoreResult<Importance> {
+    Ok(f.json::<Vec<Importance>>(column)?
+        .into_iter()
+        .max()
+        .unwrap_or_default())
 }
 
 #[async_trait]
@@ -281,7 +286,13 @@ impl ThreadRows for SqliteTx {
              (SELECT MAX(m.created_at) FROM messages m \
               WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS last_message_at, \
              (SELECT json_group_array(DISTINCT m.importance) FROM messages m \
-              WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS importances \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id) AS importances, \
+             (SELECT json_group_array(DISTINCT m.importance) FROM messages m \
+              WHERE m.project_id = t.project_id AND m.thread_id = t.id \
+              AND ((m.author_id IS NOT NULL AND m.author_id IS NOT ?2) \
+                  OR (m.author_id IS NULL AND t.author_id IS NOT ?2)) \
+              AND NOT EXISTS (SELECT 1 FROM reads d WHERE d.project_id = m.project_id \
+                  AND d.member_id = ?2 AND d.message_id = m.id)) AS unread_importances \
              FROM threads t WHERE t.project_id = ?1 AND (?3 IS NULL OR t.item_id = ?3) \
              ORDER BY COALESCE(last_message_at, t.created_at) DESC, t.id DESC",
         )

@@ -129,6 +129,43 @@ fn a_kind_has_a_stable_name_and_a_new_claim_is_a_feature_unless_it_says_debt() {
 }
 
 #[test]
+fn a_withdrawal_reason_has_a_stable_name_and_says_who_ended_the_wait() {
+    let all = [
+        WithdrawReason::Stale,
+        WithdrawReason::Narrowed,
+        WithdrawReason::HandedOn,
+        WithdrawReason::Returned,
+        WithdrawReason::HolderChanged,
+        WithdrawReason::Ended,
+    ];
+    for reason in all {
+        assert_eq!(
+            serde_json::to_value(reason).unwrap(),
+            serde_json::json!(reason.code())
+        );
+    }
+    assert_eq!(
+        WithdrawReason::Narrowed.why("bob", "gh:acme/widgets#42"),
+        "bob gave it up on their claim on gh:acme/widgets#42"
+    );
+    for by_the_server in [WithdrawReason::HandedOn, WithdrawReason::Returned] {
+        let why = by_the_server.why("bob", "gh:acme/widgets#42");
+        assert!(
+            why.contains("bob's claim")
+                && why.contains("gh:acme/widgets#42")
+                && why.contains("dibs"),
+            "{why}"
+        );
+        assert!(!why.contains("gave it up"), "bob did nothing: {why}");
+    }
+    assert!(
+        WithdrawReason::HandedOn
+            .why("bob", "gh:acme/widgets#42")
+            .starts_with("the tracker moved gh:acme/widgets#42")
+    );
+}
+
+#[test]
 fn only_a_feature_waits_and_only_for_debt_work() {
     assert!(ClaimKind::Feature.takes_from(ClaimKind::Debt));
     assert!(!ClaimKind::Feature.takes_from(ClaimKind::Feature));
@@ -544,6 +581,11 @@ fn narrowing_gives_up_what_the_claim_holds_or_waits_for_and_nothing_else() {
     assert!(narrowed.claim.pending.is_empty());
     assert_eq!(narrowed.claim.areas, areas(&["web:checkout"]));
     assert_eq!(narrowed.claim.last_seen, at(9));
+    assert_eq!(
+        narrowed.reason,
+        WithdrawReason::Narrowed,
+        "its holder gave it up"
+    );
     assert!(decide_narrow(Some(&bob), ALICE, &areas(&["web:checkout"]), at(9)).is_err());
     assert!(decide_narrow(None, BOB, &areas(&["web:checkout"]), at(9)).is_err());
 }
@@ -558,6 +600,11 @@ fn areas_given_back_without_the_holder_go_as_a_narrowing_and_leave_when_the_clai
     assert_eq!(returned.areas, areas(&["api:billing", "web:checkout"]));
     assert!(returned.claim.pending.is_empty());
     assert_eq!(returned.withdrawn.len(), 1, "the wait for api:billing ends");
+    assert_eq!(
+        returned.reason,
+        WithdrawReason::Returned,
+        "the server gave it back, not its holder"
+    );
     assert!(returned.claim.areas.is_empty());
     assert!(returned.claim.areas.clocks().is_empty());
     assert_eq!(
@@ -581,6 +628,11 @@ fn work_handed_on_gives_up_every_area_held_or_waited_for_and_leaves_when_the_cla
         handed.withdrawn.keys().cloned().collect::<BTreeSet<_>>(),
         areas(&["api:billing"]),
         "the wait ends"
+    );
+    assert_eq!(
+        handed.reason,
+        WithdrawReason::HandedOn,
+        "the tracker handed it on, not its holder"
     );
     assert_eq!(handed.claim.item, bob.item, "the claim keeps its item");
     assert_eq!(handed.claim.last_seen, bob.last_seen, "no sign of its work");

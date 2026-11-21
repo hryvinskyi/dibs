@@ -40,25 +40,60 @@ impl Claim {
     }
 }
 
-/// The areas of the claim that lie idle at `now`, given every stored footprint of it: each of its
-/// [`Claim::idle_candidates`] that no path of those footprints falls in, unless the footprint of
-/// the area's repository is truncated, since a path the forge left out may fall in it. A path
-/// falls in the first area of its repository, in declaration order, that contains it, as an edit
-/// of it would; a path of a repository the settings no longer list falls in none. An area of a
-/// repository with no footprint is idle on its clock alone.
+/// What the idle rule finds among a claim's [`Claim::idle_candidates`], given every stored
+/// footprint of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdleAreas {
+    /// The candidates that lie idle: to give back.
+    pub idle: BTreeSet<QualifiedArea>,
+    /// The candidates the claim's footprints keep: a path of them falls in the area, or the
+    /// footprint of the area's repository is truncated. Their clocks start again at the sweep
+    /// ([`IdleAreas::restart_kept`]), so that they are not candidates again until the idle delay
+    /// has passed once more.
+    pub kept: BTreeSet<QualifiedArea>,
+}
+
+impl IdleAreas {
+    /// Whether the rule found no candidate at all.
+    pub fn is_empty(&self) -> bool {
+        self.idle.is_empty() && self.kept.is_empty()
+    }
+
+    /// Starts the clock of every kept area of `claim` again at `now`. It moves nothing else: when
+    /// the claim was last seen stays as it was, since a footprint read at a sweep is no sign of the
+    /// claim's work.
+    pub fn restart_kept(&self, claim: &mut Claim, now: OffsetDateTime) {
+        for area in &self.kept {
+            claim.areas.restart_clock(area, now);
+        }
+    }
+}
+
+/// The candidates of the claim at `now` ([`Claim::idle_candidates`]), sorted by every stored
+/// footprint of it: a candidate that a path of those footprints falls in is kept, and so is every
+/// candidate of a repository whose footprint is truncated, since a path the forge left out may fall
+/// in it; the other candidates lie idle. A path falls in the first area of its repository, in
+/// declaration order, that contains it, as an edit of it would; a path of a repository the settings
+/// no longer list falls in none. An area of a repository with no footprint is idle on its clock
+/// alone.
 pub fn idle_areas(
     claim: &Claim,
     footprints: &[FootprintPaths<'_>],
     settings: &ProjectSettings,
     now: OffsetDateTime,
-) -> BTreeSet<QualifiedArea> {
+) -> IdleAreas {
     let mut idle = claim.idle_candidates(now, settings);
+    let mut kept = BTreeSet::new();
     if idle.is_empty() {
-        return idle;
+        return IdleAreas { idle, kept };
     }
     for footprint in footprints {
         if footprint.truncated {
-            idle.retain(|area| area.repo != *footprint.repo);
+            let (covered, rest): (BTreeSet<_>, BTreeSet<_>) = idle
+                .into_iter()
+                .partition(|area| area.repo == *footprint.repo);
+            kept.extend(covered);
+            idle = rest;
             continue;
         }
         let Some(spec) = settings.repo(footprint.repo) else {
@@ -66,11 +101,14 @@ pub fn idle_areas(
         };
         for path in footprint.paths {
             if let Some(area) = spec.area_for(path) {
-                idle.remove(&spec.qualify(&area.name));
+                let area = spec.qualify(&area.name);
+                if idle.remove(&area) {
+                    kept.insert(area);
+                }
             }
         }
     }
-    idle
+    IdleAreas { idle, kept }
 }
 
 #[cfg(test)]
@@ -111,9 +149,14 @@ mod tests {
             truncated: false,
         }];
         assert_eq!(
-            idle_areas(&claim, &footprints, &settings, now),
+            idle_areas(&claim, &footprints, &settings, now).idle,
             areas(&["api:billing"]),
             "a path of the branch in search keeps it"
+        );
+        assert_eq!(
+            idle_areas(&claim, &footprints, &settings, now).kept,
+            areas(&["api:search"]),
+            "kept by the footprint"
         );
     }
 
@@ -123,12 +166,12 @@ mod tests {
         let mut claim = held_since_then(&["api:billing", "api:search"], WEEK);
         claim.areas.note_edit(&area("api:search"), at(60));
         assert_eq!(
-            idle_areas(&claim, &[], &settings, at(WEEK)),
+            idle_areas(&claim, &[], &settings, at(WEEK)).idle,
             areas(&[]),
             "seven days are not more than seven days"
         );
         assert_eq!(
-            idle_areas(&claim, &[], &settings, at(WEEK + 1)),
+            idle_areas(&claim, &[], &settings, at(WEEK + 1)).idle,
             areas(&["api:billing"])
         );
     }
@@ -145,9 +188,13 @@ mod tests {
             truncated: true,
         }];
         assert_eq!(
-            idle_areas(&claim, &footprints, &settings, at(WEEK + 1)),
+            idle_areas(&claim, &footprints, &settings, at(WEEK + 1)).idle,
             areas(&["web:checkout"]),
             "an area of another repository with no footprint there goes on its clock alone"
+        );
+        assert_eq!(
+            idle_areas(&claim, &footprints, &settings, at(WEEK + 1)).kept,
+            areas(&["api:billing"])
         );
     }
 
@@ -157,9 +204,39 @@ mod tests {
         let mut claim = held_since_then(&[], WEEK);
         claim.areas.gain(area("web:billing"), at(0));
         assert_eq!(
-            idle_areas(&claim, &[], &settings, at(WEEK + 1)),
+            idle_areas(&claim, &[], &settings, at(WEEK + 1)).idle,
             areas(&["web:billing"])
         );
+    }
+
+    #[test]
+    fn restarting_the_kept_areas_moves_their_clocks_alone() {
+        let settings = two_repo_settings();
+        let now = at(WEEK + 1);
+        let mut claim = held_since_then(&["api:billing", "api:search"], WEEK);
+        let api = RepoId::parse("api").unwrap();
+        let changed = paths(&["packages/search/index.rs"]);
+        let footprints = [FootprintPaths {
+            repo: &api,
+            paths: &changed,
+            truncated: false,
+        }];
+        let found = idle_areas(&claim, &footprints, &settings, now);
+        assert!(!found.is_empty());
+        let seen = claim.last_seen;
+        found.restart_kept(&mut claim, now);
+        assert_eq!(claim.areas.clock(&area("api:search")), Some(now));
+        assert_eq!(claim.areas.clock(&area("api:billing")), Some(at(0)));
+        assert_eq!(claim.last_seen, seen, "no sign of the claim's work");
+        assert_eq!(
+            idle_areas(&claim, &footprints, &settings, now),
+            IdleAreas {
+                idle: areas(&["api:billing"]),
+                kept: areas(&[]),
+            },
+            "a kept area is no candidate until the delay passes again"
+        );
+        assert!(idle_areas(&claim, &[], &settings, at(0)).is_empty());
     }
 
     #[test]
@@ -174,7 +251,7 @@ mod tests {
             truncated: false,
         }];
         assert_eq!(
-            idle_areas(&claim, &footprints, &settings, at(WEEK + 1)),
+            idle_areas(&claim, &footprints, &settings, at(WEEK + 1)).idle,
             areas(&["api:billing-docs"])
         );
     }
@@ -185,12 +262,12 @@ mod tests {
         let stale = held_since_then(&["api:billing"], 0);
         let now = at(WEEK + 1);
         assert!(stale.idle_candidates(now, &settings).is_empty());
-        assert!(idle_areas(&stale, &[], &settings, now).is_empty());
+        assert!(idle_areas(&stale, &[], &settings, now).idle.is_empty());
         let mut reviewing = stale.clone();
         let pr = PrRef::parse("acme/api#9").unwrap();
         reviewing.state = ClaimState::InReview(Review::new([pr].into(), at(0), false).unwrap());
         assert_eq!(
-            idle_areas(&reviewing, &[], &settings, now),
+            idle_areas(&reviewing, &[], &settings, now).idle,
             areas(&["api:billing"])
         );
         assert_eq!(

@@ -251,7 +251,8 @@ pub trait SessionRows: Send {
         member: MemberId,
         since: OffsetDateTime,
     ) -> StoreResult<Vec<SessionCheckout>>;
-    /// The members of the project with a session registered or seen at `since` or later.
+    /// The members of the project with an open session registered or seen at `since` or later; a
+    /// session ended since is left out.
     async fn members_seen_since(
         &mut self,
         project: ProjectId,

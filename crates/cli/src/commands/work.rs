@@ -380,7 +380,7 @@ async fn start_review(args: ReviewArgs, ctx: &Context) -> Result<(), Failure> {
             "the merge of its last pull request completes it"
         };
         format!(
-            "Your claim on {} is in review on {}: it keeps its areas and never goes stale while the pull request is open, and {ends}.",
+            "Your claim on {} is in review on {}: it never goes stale while the pull request is open, and {ends}. It keeps its areas, except that its tracker moving the item into a state the project hands work on at gives them all up, and an area your work has not touched for the project's idle period is given back; declaring an area again takes it back while it is free.",
             item_label(Some(&reviewed.item), item),
             prs.join(", ")
         )
@@ -450,10 +450,9 @@ pub async fn take_over(args: TakeoverArgs, ctx: &Context) -> Result<(), Failure>
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&taken, || {
         format!(
-            "Took over {} from {}; they were told why in conversation #{}.",
+            "Took over {} from {}; they were told why in their claim's conversation.",
             item_label(taken.item.as_ref(), item),
             taken.previous_holder,
-            taken.thread_id
         )
     });
     Ok(())

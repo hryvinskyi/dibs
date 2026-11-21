@@ -4,12 +4,16 @@
 //! made in a path no area governs. A hook makes the file it needs without a lock and without
 //! syncing it to the disk, and leaves it alone when it is already there, so recording the same area
 //! again costs one failed create and the spool never holds more files than the project has areas,
-//! and one.
+//! and one, besides those in flight.
 //!
-//! The sync reads the spool under the project's sync lock, sends what it read with the heartbeat
-//! (at most [`ReportedEdits::MAX_AREAS`] areas, the others staying for the next one) and, once the
-//! server accepted that heartbeat, deletes the files it read; a heartbeat that failed leaves them
-//! for the next. Nothing here holds a path or a work item.
+//! The sync reads the spool under the project's sync lock. Each file it reads is first moved into
+//! `edits.spool/sending/`, so an edit recorded while the heartbeat is in flight makes a fresh file
+//! in the spool instead of finding the one about to be deleted. It sends what it read with the
+//! heartbeat (at most [`ReportedEdits::MAX_AREAS`] areas, the others staying in `sending/` for the
+//! next one) and, once the server accepted that heartbeat, deletes the files it sent from
+//! `sending/`. A heartbeat that failed leaves them there, and the next read moves the fresh ones
+//! over them, so an area recorded in both is one file and counts once. Hooks never touch
+//! `sending/`. Nothing here holds a path or a work item.
 
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
@@ -30,6 +34,9 @@ const OUTSIDE: &str = "outside";
 /// What stands between the repository and the area in a file's name, as `:` cannot be in a file
 /// name everywhere.
 const SEPARATOR: char = '+';
+
+/// The directory of the spool that holds what a heartbeat in flight carries.
+const SENDING: &str = "sending";
 
 /// The spool directory of the project.
 fn spool_dir(state: &StateDir) -> PathBuf {
@@ -93,13 +100,10 @@ pub struct Recorded {
     files: Vec<PathBuf>,
 }
 
-/// What the spool holds, for the next heartbeat: the first [`ReportedEdits::MAX_AREAS`] areas by
-/// name, and whether an edit was made outside every area. A file whose name records nothing this
-/// dibs reads is taken with them, so it is removed and never sent.
-pub fn recorded(state: &StateDir) -> Recorded {
-    let dir = spool_dir(state);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Recorded::default();
+/// The names of the files in `dir`, sorted; none when it cannot be read.
+fn file_names(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
     let mut names: Vec<String> = entries
         .filter_map(Result::ok)
@@ -107,10 +111,32 @@ pub fn recorded(state: &StateDir) -> Recorded {
         .filter_map(|entry| entry.file_name().into_string().ok())
         .collect();
     names.sort_unstable();
+    names
+}
+
+/// What the spool holds, for the next heartbeat: the first [`ReportedEdits::MAX_AREAS`] areas by
+/// name, and whether an edit was made outside every area, from what a heartbeat that failed left
+/// in flight and what was recorded since, each moved in flight as it is read. A file whose name
+/// records nothing this dibs reads is taken with them, so it is removed and never sent; a file that
+/// cannot be moved stays in the spool for a later read.
+pub fn recorded(state: &StateDir) -> Recorded {
+    let dir = spool_dir(state);
+    let fresh = file_names(&dir);
+    let sending = dir.join(SENDING);
+    if !fresh.is_empty()
+        && let Err(error) = std::fs::create_dir_all(&sending)
+    {
+        tracing::debug!(error = %error, "the edits could not be read");
+    }
+    for name in fresh {
+        if let Err(error) = std::fs::rename(dir.join(&name), sending.join(&name)) {
+            tracing::debug!(error = %error, "a recorded edit could not be read");
+        }
+    }
     let mut areas = BTreeSet::new();
     let mut outside = false;
     let mut files = Vec::new();
-    for name in names {
+    for name in file_names(&sending) {
         if name == OUTSIDE {
             outside = true;
         } else if let Some(area) = area_of(&name) {
@@ -119,13 +145,14 @@ pub fn recorded(state: &StateDir) -> Recorded {
             }
             areas.insert(area);
         }
-        files.push(dir.join(name));
+        files.push(sending.join(name));
     }
     let edits = ReportedEdits::new(areas, outside).unwrap_or_default();
     Recorded { edits, files }
 }
 
-/// Removes what `recorded` was read from, as a heartbeat the server accepted carried it.
+/// Removes what `recorded` was read from, as a heartbeat the server accepted carried it. An edit
+/// recorded since it was read is in a file of its own, which stays for the next heartbeat.
 pub fn sent(recorded: &Recorded) {
     for file in &recorded.files {
         if let Err(error) = std::fs::remove_file(file)
@@ -133,6 +160,15 @@ pub fn sent(recorded: &Recorded) {
         {
             tracing::debug!(error = %error, "a sent edit could not be removed");
         }
+    }
+    if let Some(sending) = recorded.files.first().and_then(|file| file.parent())
+        && let Err(error) = std::fs::remove_dir(sending)
+        && !matches!(
+            error.kind(),
+            ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+        )
+    {
+        tracing::debug!(error = %error, "the edits in flight could not be tidied away");
     }
 }
 
@@ -181,6 +217,37 @@ mod tests {
         let next = recorded(&state(&dir));
         assert_eq!(named(&next.edits), ["api:search"]);
         assert!(!next.edits.outside());
+        sent(&next);
+        assert!(recorded(&state(&dir)).edits.is_empty());
+    }
+
+    #[test]
+    fn an_area_recorded_again_while_its_heartbeat_is_in_flight_stays_for_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let edits = StateEdits::new(state(&dir));
+        edits.record(&[area("api:billing")], true);
+        let first = recorded(&state(&dir));
+        assert_eq!(named(&first.edits), ["api:billing"]);
+        edits.record(&[area("api:billing")], true);
+        sent(&first);
+        let next = recorded(&state(&dir));
+        assert_eq!(named(&next.edits), ["api:billing"]);
+        assert!(next.edits.outside());
+        sent(&next);
+        assert!(recorded(&state(&dir)).edits.is_empty());
+    }
+
+    #[test]
+    fn a_heartbeat_that_failed_leaves_its_edits_for_the_next_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let edits = StateEdits::new(state(&dir));
+        edits.record(&[area("api:billing")], false);
+        let failed = recorded(&state(&dir));
+        edits.record(&[area("api:billing"), area("api:search")], true);
+        let next = recorded(&state(&dir));
+        assert_eq!(named(&failed.edits), ["api:billing"]);
+        assert_eq!(named(&next.edits), ["api:billing", "api:search"]);
+        assert!(next.edits.outside());
         sent(&next);
         assert!(recorded(&state(&dir)).edits.is_empty());
     }

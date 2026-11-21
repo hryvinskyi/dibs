@@ -7,7 +7,7 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::{Narrowed, decide_narrow};
 use dibs_domain::event::{ClaimNarrowed, EventKind};
 use dibs_domain::handle::Handle;
-use dibs_domain::handover::{AreaMove, WithdrawReason, Withdrawal};
+use dibs_domain::handover::{AreaMove, Withdrawal};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::ItemId;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
@@ -155,8 +155,8 @@ impl NarrowClaim {
 }
 
 /// Carries out a decision that a claim gives areas up, whoever made it: stores the claim as the
-/// decision left it, ends each wait it gave up (`wait_withdrawn`, the debt holder asked told that
-/// the request no longer stands), records `event` and ends the grants its holder gave in areas it
+/// decision left it, ends each wait it gave up (`wait_withdrawn` with the decision's reason, the
+/// debt holder asked told that the request no longer stands and why), records `event` and ends the grants its holder gave in areas it
 /// no longer holds, when it gave any area up, and settles every pending area of the project, so an
 /// area another claim waited for moves to that claim. Answers what settling did.
 pub(crate) async fn give_areas_up(
@@ -178,7 +178,7 @@ pub(crate) async fn give_areas_up(
                     from: pending.from,
                     to: narrowed.claim.item,
                 },
-                reason: WithdrawReason::Narrowed,
+                reason: narrowed.reason,
                 request: pending.request,
             };
             handovers

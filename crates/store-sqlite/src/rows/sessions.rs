@@ -13,7 +13,7 @@ use dibs_domain::message::SessionLabel;
 use dibs_domain::session::{AgentLabel, CheckoutToken, HostName, SessionCheckout};
 
 use crate::SqliteTx;
-use crate::codec::{Fields, int, nanos};
+use crate::codec::{Fields, int, nanos, opt_nanos};
 
 fn session(row: &SqliteRow) -> StoreResult<SessionRecord> {
     let f = Fields::of(row, "sessions");
@@ -25,6 +25,7 @@ fn session(row: &SqliteRow) -> StoreResult<SessionRecord> {
         agent: f.parse("agent", AgentLabel::parse)?,
         push: f.flag("push")?,
         last_seen: f.time("last_seen")?,
+        ended_at: f.opt_time("ended_at")?,
     })
 }
 
@@ -46,7 +47,7 @@ impl SessionRows for SqliteTx {
         id: SessionId,
     ) -> StoreResult<Option<SessionRecord>> {
         let statement = sqlx::query(
-            "SELECT id, member_id, host, label, agent, push, last_seen FROM sessions \
+            "SELECT id, member_id, host, label, agent, push, last_seen, ended_at FROM sessions \
              WHERE project_id = ?1 AND id = ?2",
         )
         .bind(int(project.get())?)
@@ -65,7 +66,7 @@ impl SessionRows for SqliteTx {
         label: &SessionLabel,
     ) -> StoreResult<Option<SessionRecord>> {
         let statement = sqlx::query(
-            "SELECT id, member_id, host, label, agent, push, last_seen FROM sessions \
+            "SELECT id, member_id, host, label, agent, push, last_seen, ended_at FROM sessions \
              WHERE project_id = ?1 AND member_id = ?2 AND label = ?3",
         )
         .bind(int(project.get())?)
@@ -84,11 +85,11 @@ impl SessionRows for SqliteTx {
         record: &SessionRecord,
     ) -> StoreResult<()> {
         let statement = sqlx::query(
-            "INSERT INTO sessions (project_id, id, member_id, host, label, agent, push, last_seen) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+            "INSERT INTO sessions (project_id, id, member_id, host, label, agent, push, last_seen, \
+             ended_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT (project_id, id) DO UPDATE SET member_id = excluded.member_id, \
              host = excluded.host, label = excluded.label, agent = excluded.agent, \
-             push = excluded.push, last_seen = excluded.last_seen",
+             push = excluded.push, last_seen = excluded.last_seen, ended_at = excluded.ended_at",
         )
         .bind(int(project.get())?)
         .bind(int(record.id.get())?)
@@ -97,7 +98,8 @@ impl SessionRows for SqliteTx {
         .bind(record.label.as_str().to_owned())
         .bind(record.agent.as_str().to_owned())
         .bind(record.push)
-        .bind(nanos(record.last_seen)?);
+        .bind(nanos(record.last_seen)?)
+        .bind(opt_nanos(record.ended_at)?);
         self.run(statement).await?;
         Ok(())
     }
@@ -149,7 +151,8 @@ impl SessionRows for SqliteTx {
         since: OffsetDateTime,
     ) -> StoreResult<BTreeSet<MemberId>> {
         let statement = sqlx::query(
-            "SELECT DISTINCT member_id FROM sessions WHERE project_id = ?1 AND last_seen >= ?2",
+            "SELECT DISTINCT member_id FROM sessions \
+             WHERE project_id = ?1 AND last_seen >= ?2 AND ended_at IS NULL",
         )
         .bind(int(project.get())?)
         .bind(nanos(since)?);

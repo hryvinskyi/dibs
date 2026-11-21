@@ -307,9 +307,11 @@ pub struct ClaimArgs {
 /// What `dibs claim` does with a claim the member holds.
 #[derive(Debug, Subcommand)]
 pub enum ClaimAction {
-    /// Record a pull request of your claim: the claim waits in review, keeps its areas so nobody
-    /// edits the files under review, and never goes stale while the pull request is open. Its
-    /// merge completes the claim, unless `--more` says more pull requests of the item follow.
+    /// Record a pull request of your claim: the claim waits in review and never goes stale while
+    /// the pull request is open. It keeps its areas, so nobody edits the files under review, unless
+    /// its tracker moves the item into a state the project hands work on at, or an area your work
+    /// has not touched for the project's idle period is given back. Its merge completes the claim,
+    /// unless `--more` says more pull requests of the item follow.
     Review(ReviewArgs),
     /// Give areas of your claim up. An area another member's feature claim waits for moves to it
     /// at once: commit and push what you have there first, and list the files you hand over in

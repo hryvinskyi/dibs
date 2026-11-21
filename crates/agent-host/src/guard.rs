@@ -378,7 +378,9 @@ impl Run<'_> {
         }
         let judged = match call {
             ToolCall::Edit { paths } if self.capabilities.deny_edit => self.edits(cwd, paths),
-            ToolCall::Shell { command } if self.capabilities.deny_shell => self.shell(cwd, command),
+            ToolCall::Shell { command } if self.capabilities.deny_shell => {
+                self.shell(cwd, command).map_err(Undecided::from)
+            }
             ToolCall::Edit { .. } | ToolCall::Shell { .. } | ToolCall::Other => {
                 Ok(Judged::plain(GuardOutcome::silent()))
             }
@@ -391,7 +393,7 @@ impl Run<'_> {
             })
         );
         if denied {
-            return judged;
+            return judged.map_err(|undecided| undecided.problem);
         }
         if let worktrees::Holding::Free(name) = &holding
             && let Some(refusal) = self.retake(name, agent)
@@ -401,14 +403,14 @@ impl Run<'_> {
             }));
         }
         self.leave_beats(cwd, call, agent);
-        if let Ok(Judged {
-            unchecked: Some(unchecked),
-            ..
-        }) = &judged
-        {
+        let unchecked = match &judged {
+            Ok(judged) => judged.unchecked.as_ref(),
+            Err(undecided) => undecided.unchecked.as_ref(),
+        };
+        if let Some(unchecked) = unchecked {
             unchecked.record(self.workspace);
         }
-        judged
+        judged.map_err(|undecided| undecided.problem)
     }
 
     /// The outcome of a judgement, a refusal counted on this machine and ending with the id it is
@@ -439,7 +441,10 @@ impl Run<'_> {
         }
     }
 
-    fn edits(&self, cwd: &Path, paths: &[PathBuf]) -> Result<Judged, Problem> {
+    /// The edit check. The paths answered from what this machine knows, and those no area
+    /// governs, are let through without the server; the others are asked about. When the server
+    /// gives no decision on them, they are let through as well, and recorded with the rest.
+    fn edits(&self, cwd: &Path, paths: &[PathBuf]) -> Result<Judged, Undecided> {
         let mut inside: Vec<RelPath> = Vec::new();
         for path in paths {
             if let Some(relative) = self.workspace.relative(cwd, path)
@@ -479,14 +484,28 @@ impl Run<'_> {
             return Ok(Judged::plain(GuardOutcome::silent()).letting(unchecked));
         }
         let branch = self.workspace.branch();
-        let answers =
-            self.call(|gateway| gateway.edit_check(&self.session, &repo, branch.as_ref(), &ask))?;
-        if answers.len() != ask.len() {
-            return Err(Problem::Unreachable(
-                "the server answered for a different number of files than it was asked about."
-                    .to_owned(),
-            ));
-        }
+        let checked = self
+            .call(|gateway| gateway.edit_check(&self.session, &repo, branch.as_ref(), &ask))
+            .and_then(|answers| {
+                if answers.len() == ask.len() {
+                    Ok(answers)
+                } else {
+                    Err(Problem::Unreachable(
+                        "the server answered for a different number of files than it was asked \
+                         about."
+                            .to_owned(),
+                    ))
+                }
+            });
+        let answers = match checked {
+            Ok(answers) => answers,
+            Err(problem) => {
+                return Err(Undecided {
+                    problem,
+                    unchecked: Some(unchecked.and_unanswered(settings, &repo, &ask)),
+                });
+            }
+        };
         let wide = self.wide_named_by_me(&known.value);
         Ok(self
             .verdicts(settings, &repo, &ask, &answers, &wide)
@@ -770,13 +789,23 @@ impl Run<'_> {
         &self,
         call: impl FnOnce(&dyn CoordinationGateway) -> Result<T, PortError>,
     ) -> Result<T, Problem> {
-        let cache = self.workspace.cache();
-        let since = cache.unreachable_since();
-        if circuit_open(since, self.now) {
+        if circuit_open(self.workspace.cache().unreachable_since(), self.now) {
             return Err(Problem::Unreachable(
                 "the server could not be reached a moment ago.".to_owned(),
             ));
         }
+        self.call_through(call)
+    }
+
+    /// A call to the server even when it failed within the last minute, for an act that happens
+    /// once and is lost unless it reaches the server. A failure opens the circuit; a success
+    /// closes it.
+    fn call_through<T>(
+        &self,
+        call: impl FnOnce(&dyn CoordinationGateway) -> Result<T, PortError>,
+    ) -> Result<T, Problem> {
+        let cache = self.workspace.cache();
+        let since = cache.unreachable_since();
         match call(self.workspace.gateway()) {
             Ok(value) => {
                 if since.is_some() {
@@ -873,6 +902,23 @@ fn shown<'a>(hold: &'a SlotHold, known: &'a KnownBoard) -> wording::HoldShown<'a
         holder: known.handle(hold.member),
         purpose: &hold.purpose,
         until: hold.expires_at,
+    }
+}
+
+/// Why the guard could not decide on a tool call, and the edits it lets through all the same,
+/// recorded once the tool call is let through.
+struct Undecided {
+    problem: Problem,
+    unchecked: Option<Unchecked>,
+}
+
+impl From<Problem> for Undecided {
+    /// A problem met before any edit was known to be let through.
+    fn from(problem: Problem) -> Self {
+        Self {
+            problem,
+            unchecked: None,
+        }
     }
 }
 
@@ -1005,15 +1051,34 @@ fn with_notice(outcome: GuardOutcome, notice: String) -> GuardOutcome {
     }
 }
 
-/// The edits of one tool call the guard let through without asking the server: the areas of
-/// paths answered from what this machine knew the member holds, and whether a path no area
-/// governs was among them.
+/// The edits of one tool call the guard let through without a decision of the server: the areas
+/// of paths answered from what this machine knew the member holds or that the server gave no
+/// decision on, and whether a path no area contains was among them.
 struct Unchecked {
     areas: BTreeSet<QualifiedArea>,
     outside: bool,
 }
 
 impl Unchecked {
+    /// The same, with `paths` the server gave no decision on: the area of each, or outside every
+    /// area for one no area contains.
+    fn and_unanswered(
+        mut self,
+        settings: &ProjectSettings,
+        repo: &RepoId,
+        paths: &[RelPath],
+    ) -> Self {
+        for path in paths {
+            match area_of(settings, repo, path) {
+                Some(area) => {
+                    self.areas.insert(area);
+                }
+                None => self.outside = true,
+            }
+        }
+        self
+    }
+
     /// Records them for the next heartbeat, when there is anything to record.
     fn record(&self, workspace: &dyn Workspace) {
         if self.areas.is_empty() && !self.outside {

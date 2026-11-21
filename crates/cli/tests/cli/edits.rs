@@ -62,6 +62,44 @@ fn edit(setup: &Setup, cwd: &Path, path: &str) {
 }
 
 #[test]
+fn an_edit_let_through_while_the_server_is_down_reaches_the_next_heartbeat() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    for args in [
+        vec!["new", "gh:acme/api#1", "--title", "Billing work"],
+        vec!["claim", "gh:acme/api#1"],
+    ] {
+        let out = setup.dibs_as("bob", &api).args(&args).output().unwrap();
+        assert_eq!(status(&out), 0, "{args:?}: {}", text(&out.stderr));
+    }
+    let (code, _) = sync(&setup, &api);
+    assert_eq!(code, 0);
+
+    setup.server.stop();
+    edit(&setup, &api, "src/billing/invoice.rs");
+    let before = setup.server.requests();
+    setup.server.start_again().unwrap();
+    let out = setup
+        .dibs_as("bob", &api)
+        .args(["status"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&out), 0, "{}", text(&out.stderr));
+    let (code, _) = sync(&setup, &api);
+    assert_eq!(code, 0);
+    let (code, _) = sync(&setup, &api);
+    assert_eq!(code, 0);
+
+    let sent = heartbeats_since(&setup, before);
+    let carrying: Vec<&String> = sent
+        .iter()
+        .filter(|body| body.contains(r#""edits":{"areas":["api:billing"],"outside":false}"#))
+        .collect();
+    assert_eq!(carrying.len(), 1, "carried once: {sent:?}");
+    assert!(!carrying[0].contains("invoice"), "never the path: {sent:?}");
+}
+
+#[test]
 fn the_next_heartbeat_carries_an_unchecked_edit_once_and_a_failed_sync_keeps_it() {
     let setup = Setup::new();
     let api = setup.checkout("api", Some("api"), API_REMOTE);

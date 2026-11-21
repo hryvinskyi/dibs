@@ -114,10 +114,14 @@ struct HeartbeatAnswer {
 /// Records a session's sign of life and answers the claims the edits it reports refreshed. A
 /// heartbeat keeps the session seen and no claim by itself. `edits` reports what the session's
 /// machine let through without asking since the last heartbeat that reported it: `areas`, at most
-/// 200, each `repo:area`, the areas of edits made where the member was known to hold the area, and
-/// `outside`, whether an edit was made in a path no area governs. Every live claim of the caller
-/// that holds a reported area is seen now, and an edit outside every area makes the caller's target
-/// claim (the live claim most recently claimed or renewed) seen now; `refreshed` names those claims.
+/// 200, each `repo:area`, the areas of edits made where the member was known to hold the area or let
+/// through while the server gave no decision, and `outside`, whether such an edit was made in a path
+/// no area governs. A reported area one of the caller's live claims answers for makes the one claim
+/// an edit check would give the edit to seen now (declared, else wide, else gained, the most
+/// recently claimed or renewed) and moves that area's clock; an area another member's live claim
+/// holds refreshes nothing; an area no live claim holds, like an edit outside every area, makes the
+/// caller's target claim seen now (for an area, among the claims that do not wait for it), with no
+/// clock moved and no area given. `refreshed` names those claims.
 /// A heartbeat without `edits` comes from a client that does not report its edits: it refreshes no
 /// claim, and `refreshed` is empty. `checkout` names the
 /// checkout the session works in, by the 32 lowercase hexadecimal characters its client makes of

@@ -154,8 +154,9 @@ revokes their tokens and releases everything they held at once. With the Claude 
   Two features keep the plain refusal, and an area waits for one claim at a time. The Claims screen marks debt work
   and what each claim waits for.
 - **Review.** Work reaches a protected branch through pull requests. A member records the pull request of their claim
-  (`dibs claim review`); the claim is then *in review*: it keeps its areas, so nobody edits the files under review, and
-  never goes stale while it waits. The merge of its last recorded pull request completes it, reported by an integration
+  (`dibs claim review`); the claim is then *in review*: it never goes stale or gets released while it waits, and
+  it keeps its areas, so nobody edits the files under review, unless its tracker moves the item into a state the
+  project hands work on at, or an area its work has not touched for the project's idle period is given back. The merge of its last recorded pull request completes it, reported by an integration
   that watches the forge; with `--more`, the merge returns it to work for the next pull request of the item. A pull
   request closed without a merge, or merged into a branch that is not protected, delivers nothing and returns the claim
   to its holder. A ticket its tracker closes completes its claim at the next import of that tracker that lists it

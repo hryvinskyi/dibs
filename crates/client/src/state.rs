@@ -1621,7 +1621,7 @@ mod tests {
         assert_eq!(
             state.heartbeat_at("neutral", "s-2"),
             None,
-            "a moment as old as the project lets a claim live without a heartbeat is forgotten"
+            "a moment as old as the time it is kept for is forgotten"
         );
         assert_eq!(state.heartbeat_at("neutral", "s-3"), Some(newer));
         assert_eq!(state.heartbeat_at("neutral", "s-4"), Some(later + keep));

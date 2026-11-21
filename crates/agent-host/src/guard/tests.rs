@@ -116,6 +116,8 @@ struct State {
     retaken: Result<Retaken, PortError>,
     released: Result<(), PortError>,
     ended: Result<(), PortError>,
+    /// The sessions whose holds this machine forgot, by key.
+    forgotten: Vec<String>,
     rescued: Option<String>,
     touched: Vec<String>,
     /// The holder each sign of life was left for: the session's key and the agent.
@@ -207,6 +209,7 @@ impl State {
             retaken: Ok(Retaken::Took),
             released: Ok(()),
             ended: Ok(()),
+            forgotten: Vec::new(),
             rescued: None,
             touched: Vec::new(),
             beaten_by: Vec::new(),
@@ -333,9 +336,8 @@ impl WorktreePool for World {
         self.0.borrow().released.clone()
     }
 
-    fn end_session(&self, session: &SessionRef) -> Result<(), PortError> {
-        self.call(&format!("end {}", session.key));
-        self.0.borrow().ended.clone()
+    fn forget_session(&self, session: &SessionRef) {
+        self.0.borrow_mut().forgotten.push(session.key.to_string());
     }
 
     fn records(&self, session: &SessionRef) -> Vec<WorktreeRecord> {
@@ -669,6 +671,11 @@ impl CoordinationGateway for World {
             asked.join(",")
         ));
         self.0.borrow().answers.clone()
+    }
+
+    fn end_session(&self, session: &SessionRef) -> Result<(), PortError> {
+        self.call(&format!("end {}", session.key));
+        self.0.borrow().ended.clone()
     }
 }
 
@@ -1296,6 +1303,67 @@ fn an_edit_the_server_checked_records_nothing_of_itself() {
         [(Vec::new(), true)],
         "only what the server was not asked about"
     );
+}
+
+#[test]
+fn an_edit_let_through_while_the_server_cannot_be_reached_is_recorded() {
+    let world = World::new().with(|state| {
+        state.answers = Err(PortError::Unavailable(
+            "the dibs server could not be reached.".to_owned(),
+        ));
+    });
+    for seconds in [0, 10] {
+        world.set(|state| state.now = at(seconds));
+        let answer = run(
+            &world,
+            "neutral",
+            "before-tool",
+            &edit(&["README.md", "src/billing/a.rs"]),
+        );
+        assert_eq!(reply(&answer)["decision"], "no_objection");
+    }
+    assert_eq!(
+        world.calls().len(),
+        1,
+        "the second answered from the open circuit, without a call"
+    );
+    assert_eq!(
+        unchecked(&world),
+        [
+            (vec!["api:billing".to_owned()], true),
+            (vec!["api:billing".to_owned()], true)
+        ]
+    );
+}
+
+#[test]
+fn an_edit_let_through_when_the_server_gave_no_decision_is_recorded() {
+    let world = World::new().with(|state| {
+        state.answers = Err(PortError::Refused(
+            "the server could not check these files.".to_owned(),
+        ));
+    });
+    let answer = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    assert_eq!(reply(&answer)["decision"], "no_objection");
+    assert_eq!(unchecked(&world), [(vec!["api:billing".to_owned()], false)]);
+}
+
+#[test]
+fn an_edit_the_server_answered_wrongly_for_is_recorded() {
+    let world = World::new().with(|state| state.answers = Ok(Vec::new()));
+    let answer = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    assert_eq!(reply(&answer)["decision"], "no_objection");
+    assert_eq!(unchecked(&world), [(vec!["api:billing".to_owned()], false)]);
 }
 
 #[test]
@@ -3677,7 +3745,7 @@ fn an_agents_end_releases_its_holds_and_costs_nothing_when_it_held_none() {
 }
 
 #[test]
-fn a_sessions_end_ends_it_on_the_server_only_when_it_held_a_worktree() {
+fn a_sessions_end_ends_it_on_the_server_whatever_it_held() {
     let world =
         World::new().with(|state| state.records = vec![record("s-1", "worktree2", Some("a1b2"))]);
     run(
@@ -3687,6 +3755,11 @@ fn a_sessions_end_ends_it_on_the_server_only_when_it_held_a_worktree() {
         &worktree_input(json!({})),
     );
     assert_eq!(world.calls(), ["end s-1"]);
+    assert_eq!(
+        world.0.borrow().forgotten,
+        ["s-1"],
+        "the server freed its holds, so this machine's records of them go"
+    );
     let none = World::new().with(|state| state.records = vec![record("s-2", "worktree2", None)]);
     run(
         &none,
@@ -3694,7 +3767,24 @@ fn a_sessions_end_ends_it_on_the_server_only_when_it_held_a_worktree() {
         "session-ended",
         &worktree_input(json!({})),
     );
-    assert!(none.calls().is_empty());
+    assert_eq!(
+        none.calls(),
+        ["end s-1"],
+        "a session that held no worktree is ended too"
+    );
+    let no_pool = World::new().with(|state| state.pool = false);
+    run(
+        &no_pool,
+        "neutral",
+        "session-ended",
+        &worktree_input(json!({})),
+    );
+    assert_eq!(
+        no_pool.calls(),
+        ["end s-1"],
+        "and so is one in a checkout that lends no pool"
+    );
+    assert!(no_pool.0.borrow().forgotten.is_empty());
     let away = World::new().with(|state| {
         state.records = vec![record("s-1", "worktree2", None)];
         state.ended = Err(PortError::Unavailable("the server is away.".to_owned()));
@@ -3712,6 +3802,27 @@ fn a_sessions_end_ends_it_on_the_server_only_when_it_held_a_worktree() {
             .contains("the server is away"),
         "a failure is a notice, never a verdict"
     );
+    assert!(
+        away.0.borrow().forgotten.is_empty(),
+        "holds the server did not free are still recorded"
+    );
+    away.0.borrow_mut().ended = Ok(());
+    let again = run(
+        &away,
+        "neutral",
+        "session-ended",
+        &worktree_input(json!({})),
+    );
+    assert_eq!(
+        away.calls(),
+        ["end s-1", "end s-1"],
+        "a session's end is tried even a moment after the server was unreachable"
+    );
+    assert!(
+        !away.0.borrow().forgotten.is_empty(),
+        "the end that reached the server lets this machine forget the holds"
+    );
+    no_objection(&again);
 }
 
 #[test]
@@ -3809,7 +3920,11 @@ fn a_sessions_end_frees_the_worktrees_its_ended_agents_left_even_with_no_hold() 
         &worktree_input(json!({})),
     );
     assert_eq!(world.0.borrow().freed_left, ["s-1"]);
-    assert!(world.calls().is_empty(), "no hold, no call");
+    assert_eq!(
+        world.calls(),
+        ["end s-1"],
+        "and the session is ended all the same"
+    );
 }
 
 #[test]

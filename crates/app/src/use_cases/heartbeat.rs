@@ -31,15 +31,22 @@ pub struct HeartbeatOutcome {
     pub accepted: Vec<ReportDay>,
 }
 
-/// Keeps the session seen, and refreshes only the caller's claims the edits it reports show work
-/// under: a heartbeat itself keeps no claim alive. Its machine's hooks let edits through without
-/// asking the server when the member is known to hold the edit's area, or when no area governs the
-/// path, and the heartbeat reports them: every live claim of the caller that holds a reported area
-/// is seen now, and the clock of each reported area it holds moves to now, as an edit check moves
-/// it ([`Claim::saw_work`](dibs_domain::claim::Claim::saw_work)); an edit outside every area makes
-/// the caller's target claim (the live claim most recently claimed or renewed) seen now
-/// ([`claims_shown_by`]) and moves no clock, wherever those claims were taken. A report of no edit refreshes no claim, and so does a heartbeat that carries no report
-/// at all, as a client that does not report its edits sends: its member's claims stay live by the
+/// Keeps the session seen, and open again if it was ended, and refreshes only the caller's claims
+/// the edits it reports show work under: a heartbeat itself keeps no claim alive. Its machine's
+/// hooks let edits through without asking the server when the member is known to hold the edit's
+/// area, when no area governs the path, or when the server gave no decision, and the heartbeat
+/// reports them. Each reported area one of the caller's live claims answers for goes to the one
+/// claim an edit check would give an edit in it to — the most recently claimed or renewed of those
+/// that declared it, else of their wide claims that name it, else of those that only gained it —
+/// and that claim is seen now and the area's clock on it moves to now, as an edit check moves it
+/// ([`Claim::saw_work`](dibs_domain::claim::Claim::saw_work)); the caller's other claims that hold
+/// the area are left alone. An area another member's live claim holds refreshes nothing. An area
+/// no live claim holds makes the caller's target claim among those that do not wait for it seen
+/// now and moves no clock: the heartbeat gives no claim an area, which only an edit check does. An
+/// edit outside every area makes the caller's target claim (the live claim most recently claimed
+/// or renewed) seen now and moves no clock ([`claims_shown_by`]), wherever those claims were
+/// taken. A report of no edit refreshes no claim, and so does a heartbeat that carries no report at
+/// all, as a client that does not report its edits sends: its member's claims stay live by the
 /// edit checks that reach the server, the pushes of their branches and their renewals. A claim
 /// that already went stale is renewed only by claiming it again. The caller's places in slot
 /// queues, and the slot holds their heartbeats keep, are seen now too, from any machine.
@@ -117,7 +124,7 @@ impl Heartbeat {
         let mut session = own_session(&mut work, actor, session).await?;
         let settings = work.project_settings(&self.hot_rules).await?;
         let stale_after = settings.stale_after();
-        session.last_seen = now;
+        session.seen(now);
         work.save_session(actor.project, &session).await?;
         let claims = work.claims(actor.project).await?;
         let shown = edits
@@ -126,8 +133,8 @@ impl Heartbeat {
         let mut refreshed = Vec::new();
         let mut kept = Vec::new();
         for mut claim in claims {
-            if shown.contains(&claim.item) {
-                claim.saw_work(edits.into_iter().flat_map(ReportedEdits::areas), now);
+            if let Some(areas) = shown.get(&claim.item) {
+                claim.saw_work(areas, now);
                 work.save_claim(actor.project, &claim).await?;
                 refreshed.push(claim.item);
             }
@@ -304,7 +311,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reported_edit_in_an_area_refreshes_every_live_claim_of_the_caller_holding_it() {
+    async fn a_reported_edit_in_an_area_refreshes_the_one_claim_an_edit_check_would_take() {
         let env = Env::new().await;
         let here = env.item("gh:acme/widgets#1").await;
         let elsewhere = env.item("gh:acme/widgets#2").await;
@@ -314,6 +321,7 @@ mod tests {
         claim_with(&env, gone_stale, env.bob.session, &["billing"]).await;
         env.advance(Duration::hours(25));
         claim_with(&env, here, env.bob.session, &["billing"]).await;
+        env.advance(Duration::minutes(1));
         claim_with(&env, elsewhere, other_machine, &["billing"]).await;
         claim_with(&env, other, env.bob.session, &["search"]).await;
         let events = env.events().await.len();
@@ -326,11 +334,14 @@ mod tests {
         .await;
         assert_eq!(
             outcome.refreshed,
-            [here, elsewhere],
-            "wherever the claim was taken"
+            [elsewhere],
+            "the most recently claimed of the claims that declared it, wherever it was taken"
         );
-        assert_eq!(last_seen(&env, here).await, env.now());
         assert_eq!(last_seen(&env, elsewhere).await, env.now());
+        assert!(
+            last_seen(&env, here).await < env.now(),
+            "another claim of the caller sharing the area is not kept alive by it"
+        );
         assert!(last_seen(&env, other).await < env.now());
         assert!(
             stale(&env).await.contains(&gone_stale),
@@ -352,6 +363,62 @@ mod tests {
         assert_eq!(outcome.refreshed, [newer]);
         assert_eq!(last_seen(&env, newer).await, env.now());
         assert!(last_seen(&env, older).await < env.now());
+    }
+
+    #[tokio::test]
+    async fn a_reported_edit_in_an_area_nobody_holds_refreshes_the_target_claim_without_the_area() {
+        let env = Env::new().await;
+        let billing = env.item("gh:acme/widgets#1").await;
+        claim_with(&env, billing, env.bob.session, &["billing"]).await;
+        let events = env.events().await.len();
+        env.advance(Duration::minutes(10));
+        let outcome = beat_reporting(
+            &env,
+            env.bob.session,
+            Some(&edits(&["default:search"], false)),
+        )
+        .await;
+        assert_eq!(outcome.refreshed, [billing]);
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let stored = tx.claim(env.project, billing).await.unwrap().unwrap();
+        assert_eq!(stored.last_seen, env.now());
+        assert!(
+            !stored.holds(&dibs_domain::area::QualifiedArea::parse("default:search").unwrap()),
+            "the heartbeat gives the claim no area"
+        );
+        drop(tx);
+        assert_eq!(env.events().await.len(), events);
+
+        let env = Env::new().await;
+        let billing = env.item("gh:acme/widgets#1").await;
+        let search = env.item("gh:acme/widgets#2").await;
+        claim_with(&env, billing, env.bob.session, &["billing"]).await;
+        ClaimItem::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                ClaimItemInput {
+                    branches: Default::default(),
+                    wide: None,
+                    item: search,
+                    session: env.alice.session,
+                    areas: vec!["search".to_owned()],
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        env.advance(Duration::minutes(10));
+        let outcome = beat_reporting(
+            &env,
+            env.bob.session,
+            Some(&edits(&["default:search"], false)),
+        )
+        .await;
+        assert!(
+            outcome.refreshed.is_empty(),
+            "an area another member's live claim holds shows nothing"
+        );
+        assert!(last_seen(&env, billing).await < env.now());
     }
 
     #[tokio::test]
@@ -394,15 +461,19 @@ mod tests {
             Some(&edits(&["default:billing"], false)),
         )
         .await;
-        assert_eq!(outcome.refreshed, [item, other]);
-        for item in [item, other] {
-            let claim = stored(item).await;
-            assert_eq!(
-                clock(&claim, "default:billing"),
-                Some(env.now()),
-                "on every live claim of the member holding it"
-            );
-        }
+        assert_eq!(outcome.refreshed, [other]);
+        assert_eq!(
+            clock(&stored(other).await, "default:billing"),
+            Some(env.now()),
+            "on the claim the edit went to"
+        );
+        let shared = stored(item).await;
+        assert_eq!(
+            clock(&shared, "default:billing"),
+            Some(START),
+            "not on another claim of the member sharing the area"
+        );
+        assert!(shared.last_seen < env.now());
         assert_eq!(
             clock(&stored(item).await, "default:search"),
             Some(START),

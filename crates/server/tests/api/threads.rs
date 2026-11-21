@@ -576,3 +576,55 @@ async fn the_send_answer_names_whom_no_session_will_show_it_soon() {
         .await;
     assert_eq!(everyone.body["no_session_at_work"], json!([]));
 }
+
+#[tokio::test]
+async fn an_ended_session_is_not_at_work_until_it_registers_again() {
+    let team = Team::new().await;
+    let world = &team.world;
+    let desktop = world.session(&team.bob, "desktop").await;
+    let ended = world
+        .post(&team.bob, &format!("/v1/sessions/{desktop}/end"), json!({}))
+        .await;
+    assert_eq!(ended.status, StatusCode::OK, "{}", ended.body);
+    let started = world
+        .post(
+            &team.alice,
+            "/v1/threads",
+            start(json!(["bob"]), "Still there?"),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::CREATED, "{}", started.body);
+    assert_eq!(
+        started.body["no_session_at_work"],
+        json!([{"member": "bob", "holds_live_claim": false}]),
+        "bob's only session ended a moment ago"
+    );
+
+    assert_eq!(world.session(&team.bob, "desktop").await, desktop);
+    let again = world
+        .post(&team.alice, "/v1/threads", start(json!(["bob"]), "Back?"))
+        .await;
+    assert_eq!(again.status, StatusCode::CREATED, "{}", again.body);
+    assert_eq!(
+        again.body["no_session_at_work"],
+        json!([]),
+        "registering the label again opens the session"
+    );
+
+    let ended = world
+        .post(&team.bob, &format!("/v1/sessions/{desktop}/end"), json!({}))
+        .await;
+    assert_eq!(ended.status, StatusCode::OK, "{}", ended.body);
+    let beat = world
+        .post(&team.bob, "/v1/heartbeat", json!({"session_id": desktop}))
+        .await;
+    assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);
+    let after_beat = world
+        .post(&team.alice, "/v1/threads", start(json!(["bob"]), "Ping."))
+        .await;
+    assert_eq!(
+        after_beat.body["no_session_at_work"],
+        json!([]),
+        "a heartbeat from it opens it too"
+    );
+}

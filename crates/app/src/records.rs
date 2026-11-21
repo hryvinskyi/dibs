@@ -115,6 +115,28 @@ pub struct SessionRecord {
     pub push: bool,
     /// When it last registered or sent a heartbeat.
     pub last_seen: OffsetDateTime,
+    /// When it was ended; `None` while it is open. An ended session stays registered, so that its
+    /// label keeps its id, and does not count as at work.
+    pub ended_at: Option<OffsetDateTime>,
+}
+
+impl SessionRecord {
+    /// Whether the session is open: never ended, or registered or seen since it last was.
+    pub fn is_open(&self) -> bool {
+        self.ended_at.is_none()
+    }
+
+    /// The session registered again or sent a heartbeat at `at`: it is seen then, and open again
+    /// if it was ended.
+    pub fn seen(&mut self, at: OffsetDateTime) {
+        self.last_seen = at;
+        self.ended_at = None;
+    }
+
+    /// The session ended at `at`.
+    pub fn end(&mut self, at: OffsetDateTime) {
+        self.ended_at = Some(at);
+    }
 }
 
 /// A work item.
@@ -345,8 +367,10 @@ pub struct ThreadSummary {
     pub last_unread_from: Option<MemberId>,
     /// When its newest message was written.
     pub last_message_at: Option<OffsetDateTime>,
-    /// The highest importance among its messages.
+    /// The highest importance among its messages, read or not.
     pub importance: Importance,
+    /// The highest importance among the unread ones: normal when none is unread.
+    pub unread_importance: Importance,
 }
 
 /// Whose messages a mark of reading covers.
@@ -424,4 +448,38 @@ pub struct PrunedEvents {
     pub count: u64,
     /// The newest id among them, if any went.
     pub through: Option<EventId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use time::Duration;
+
+    use super::*;
+
+    fn session() -> SessionRecord {
+        SessionRecord {
+            id: SessionId(31),
+            member: MemberId(11),
+            host: HostName::parse("laptop").unwrap(),
+            label: SessionLabel::parse("laptop/mcp").unwrap(),
+            agent: AgentLabel::parse("agent").unwrap(),
+            push: false,
+            last_seen: OffsetDateTime::UNIX_EPOCH,
+            ended_at: None,
+        }
+    }
+
+    #[test]
+    fn a_session_ends_and_is_opened_again_by_being_seen() {
+        let start = OffsetDateTime::UNIX_EPOCH;
+        let mut session = session();
+        assert!(session.is_open(), "a registered session starts open");
+        session.end(start + Duration::minutes(5));
+        assert!(!session.is_open());
+        assert_eq!(session.ended_at, Some(start + Duration::minutes(5)));
+        assert_eq!(session.last_seen, start, "ending is no sign of life");
+        session.seen(start + Duration::minutes(9));
+        assert!(session.is_open());
+        assert_eq!(session.last_seen, start + Duration::minutes(9));
+    }
 }

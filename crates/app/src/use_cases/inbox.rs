@@ -305,9 +305,11 @@ impl Inbox {
 /// unread and handed to sessions by what it is ([`handed_to_sessions`]: a member's message in a
 /// thread addressed to members at any importance, any other only when raised) — leaving out every
 /// announcement of a wide claim that has ended and every message already delivered to one of their
-/// sessions. Only the threads that may hold such a message are opened: one with unread messages
-/// whose highest importance is raised, or one addressed to members with unread messages a member
-/// wrote, so the notices dibs wrote at normal importance cost nothing however many are unread.
+/// sessions. Only the threads that may hold such a message are opened: one with a raised message
+/// the actor has not read, or one addressed to members with unread messages a member wrote, so the
+/// notices dibs wrote at normal importance cost nothing however many are unread, even in a thread
+/// whose raised messages were all read. A message awaiting the actor's acknowledgement is found
+/// through what awaits it, read or not, and needs no thread opened.
 async fn deliverable(
     work: &mut Work,
     actor: &Actor,
@@ -389,11 +391,11 @@ async fn deliverable(
     Ok(answered)
 }
 
-/// Whether a thread may hold an unread message [`handed_to_sessions`] hands over: unread messages
-/// with a raised one among its messages, or, in a thread addressed to members, unread messages a
-/// member wrote.
+/// Whether a thread may hold an unread message [`handed_to_sessions`] hands over: a raised one among
+/// its unread messages, or, in a thread addressed to members, unread messages a member wrote. A
+/// raised message already read does not count, however many normal ones followed it.
 fn may_hand_over(summary: &ThreadSummary) -> bool {
-    let raised = summary.unread > 0 && summary.importance.is_raised();
+    let raised = summary.unread_importance.is_raised();
     let from_people_to_members = summary.unread_from_people > 0
         && matches!(summary.thread.recipients, Recipients::Members(_));
     raised || from_people_to_members
@@ -811,6 +813,70 @@ mod tests {
             deliverable_ids(&env, &env.alice.actor).await,
             [raised_to_everyone],
             "older than a day, it is left to the brief"
+        );
+    }
+
+    /// Writes a message of dibs to bob in the conversation `thread`, starting it when it is new.
+    async fn notice_to_bob(env: &Env, thread: ThreadId, id: u64, importance: Importance) {
+        let mut tx = env.deps.store.begin().await.unwrap();
+        if tx.thread(env.project, thread).await.unwrap().is_none() {
+            let record = ThreadRecord {
+                id: thread,
+                subject: Subject::parse("Your claim on billing").unwrap(),
+                item: None,
+                author: dibs_domain::message::Author::System,
+                recipients: dibs_domain::message::Recipients::Members(
+                    [env.bob.actor.member].into_iter().collect(),
+                ),
+                created_at: env.now(),
+            };
+            tx.insert_thread(env.project, &record).await.unwrap();
+        }
+        let message = MessageRecord {
+            id: MessageId(id),
+            thread,
+            author: dibs_domain::message::Author::System,
+            label: SessionLabel::parse("dibs").unwrap(),
+            body: Body::parse("Something happened to your claim.").unwrap(),
+            importance,
+            ack_required: false,
+            created_at: env.now(),
+        };
+        tx.insert_message(env.project, &message).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_conversation_is_opened_for_delivery_only_by_an_unread_raised_message() {
+        let env = Env::new().await;
+        let read_high = ThreadId(9001);
+        let unread_high = ThreadId(9002);
+        notice_to_bob(&env, read_high, 9101, Importance::High).await;
+        MarkRead::new(&env.deps)
+            .execute(&env.bob.actor, read_high)
+            .await
+            .unwrap();
+        env.advance(time::Duration::minutes(1));
+        for id in [9102, 9103] {
+            notice_to_bob(&env, read_high, id, Importance::Normal).await;
+        }
+        notice_to_bob(&env, unread_high, 9104, Importance::High).await;
+        let listed = |thread| env.fakes.store.listings_of(env.project, thread);
+        let before = (listed(read_high).await, listed(unread_high).await);
+
+        assert_eq!(
+            deliverable_ids(&env, &env.bob.actor).await,
+            [MessageId(9104)]
+        );
+        assert_eq!(
+            listed(read_high).await,
+            before.0,
+            "a raised message bob has read and normal notices after it hold nothing to hand over"
+        );
+        assert_eq!(
+            listed(unread_high).await,
+            before.1 + 1,
+            "an unread raised message is looked for in its conversation"
         );
     }
 

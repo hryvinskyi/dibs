@@ -418,6 +418,68 @@ fn a_session_that_ends_leaves_no_start_behind_to_hold_its_key_back() {
     );
 }
 
+#[test]
+fn a_session_that_held_no_worktree_is_ended_on_the_server_when_it_ends() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    claim(&setup, "bob", &api, "gh:acme/api#7", &[]);
+    let hook = |event: &str| {
+        let out = setup.hook("bob", &api, event, &input_of(&api, "sess-7777-aaaa"));
+        assert_eq!(status(&out), 0, "{event}: {}", text(&out.stderr));
+        out
+    };
+    hook("after-tool");
+    assert!(
+        eventually(StdDuration::from_secs(5), || !heartbeat_sessions(&setup)
+            .is_empty()),
+        "{:?}",
+        setup.server.request_paths()
+    );
+    let session = heartbeat_sessions(&setup)[0];
+    let ended = hook("session-ended");
+    assert_eq!(
+        reply(&ended)["notice"],
+        Value::Null,
+        "the end is silent: {}",
+        text(&ended.stdout)
+    );
+    let path = format!("/v1/sessions/{session}/end");
+    assert!(
+        setup.server.request_paths().contains(&path),
+        "a checkout that lends no pool ends its session too: {:?}",
+        setup.server.request_paths()
+    );
+}
+
+#[test]
+fn a_session_that_ends_while_the_server_is_away_is_answered_at_once() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    claim(&setup, "bob", &api, "gh:acme/api#7", &[]);
+    let out = setup.hook("bob", &api, "after-tool", &input_of(&api, "sess-8888-bbbb"));
+    assert_eq!(status(&out), 0, "{}", text(&out.stderr));
+    assert!(
+        eventually(StdDuration::from_secs(5), || !heartbeat_sessions(&setup)
+            .is_empty()),
+        "{:?}",
+        setup.server.request_paths()
+    );
+    setup.server.stop();
+    let started = Instant::now();
+    let ended = setup.hook(
+        "bob",
+        &api,
+        "session-ended",
+        &input_of(&api, "sess-8888-bbbb"),
+    );
+    assert_eq!(decision(&ended), "no_objection", "{}", text(&ended.stdout));
+    assert!(
+        started.elapsed() < StdDuration::from_secs(5),
+        "an unreachable server keeps the hook quick: {:?}",
+        started.elapsed()
+    );
+}
+
 /// The `[worktrees]` table of a pool of one worktree, added from the checkout's `main`, whose reset
 /// does nothing.
 const ONE_WORKTREE: &str = r#"[worktrees]

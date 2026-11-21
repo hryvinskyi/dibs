@@ -330,21 +330,11 @@ impl<'a> EditWorld<'a> {
                 EditPolicy::Advise => Verdict::Allowed,
             };
         }
-        let declared = self.holding(area, AreaOrigin::Declared);
-        let wide = target_claim(
-            self.mine
-                .iter()
-                .copied()
-                .filter(|claim| claim.names_wide(area)),
-        );
         let waited_for_elsewhere = input
             .claims
             .iter()
             .any(|claim| claim.member != input.me && claim.waits_for(area));
-        let taker = declared
-            .or(wide)
-            .or_else(|| self.holding(area, AreaOrigin::Gained));
-        if let Some(claim) = taker {
+        if let Some(claim) = taker_of(&self.mine, area) {
             check.touch.insert(claim.item);
             check.edited_in(claim.item, area);
             if claim.areas.origin(area) != Some(AreaOrigin::Gained) {
@@ -361,18 +351,6 @@ impl<'a> EditWorld<'a> {
             check.edited_in(target.item, area);
         }
         Verdict::Allowed
-    }
-
-    /// The target among my claims that hold the area with that origin. An edit goes to the one that
-    /// declared the area, else to my live wide claim that names it, else to the one that only
-    /// gained it.
-    fn holding(&self, area: &QualifiedArea, origin: AreaOrigin) -> Option<&'a Claim> {
-        target_claim(
-            self.mine
-                .iter()
-                .copied()
-                .filter(|claim| claim.areas.origin(area) == Some(origin)),
-        )
     }
 
     /// The way on from an area another member's claim holds: its pull requests' merge when that
@@ -448,16 +426,9 @@ impl<'a> EditWorld<'a> {
         work_target(&self.mine)
     }
 
-    /// The claim an area an edit meets goes to: [`EditWorld::target`] among my claims that do not
-    /// wait for it.
+    /// The claim an area an edit meets goes to ([`target_for`]).
     fn target_for(&self, area: &QualifiedArea) -> Option<&'a Claim> {
-        let free = || {
-            self.mine
-                .iter()
-                .copied()
-                .filter(|claim| !claim.waits_for(area))
-        };
-        target_claim(free().filter(|claim| claim.is_working())).or_else(|| target_claim(free()))
+        target_for(&self.mine, area)
     }
 
     /// Other members' live claims that recorded this path as shared, each once, ordered.
@@ -487,6 +458,32 @@ fn live_claims_of(
         .iter()
         .filter(|claim| claim.member == me && claim.is_live(now, stale_after))
         .collect()
+}
+
+/// The one claim among `mine`, the member's live claims, that an edit in `area` nobody else holds
+/// goes to: the target among those that declared the area, else among their wide claims that name
+/// it, else among those that only gained it. `None` when none of them answers for the area. A
+/// member's own claims may share an area, so this picks one of them rather than every holder.
+fn taker_of<'a>(mine: &[&'a Claim], area: &QualifiedArea) -> Option<&'a Claim> {
+    let holding = |origin: AreaOrigin| {
+        target_claim(
+            mine.iter()
+                .copied()
+                .filter(move |claim| claim.areas.origin(area) == Some(origin)),
+        )
+    };
+    let wide = || target_claim(mine.iter().copied().filter(|claim| claim.names_wide(area)));
+    holding(AreaOrigin::Declared)
+        .or_else(wide)
+        .or_else(|| holding(AreaOrigin::Gained))
+}
+
+/// The claim among `mine`, the member's live claims, that an edit in `area` goes to when nobody
+/// holds the area and none of them answers for it: their target claim ([`work_target`]) among
+/// those that do not wait for the area.
+fn target_for<'a>(mine: &[&'a Claim], area: &QualifiedArea) -> Option<&'a Claim> {
+    let free = || mine.iter().copied().filter(|claim| !claim.waits_for(area));
+    target_claim(free().filter(|claim| claim.is_working())).or_else(|| target_claim(free()))
 }
 
 /// The member's target claim among `mine`, their live claims: of those they work on, the one most

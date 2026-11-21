@@ -230,9 +230,10 @@ What the guard does:
   other take for an agent's silence after its last sign of life (20 minutes): a host may continue an agent after it
   ended, in the same worktree, and finds it as it left it. Neither the agent's end nor `dibs worktree upkeep` writes
   that worktree free while its last sign of life is younger than that. **A session ended** ends the session on the
-  server, which frees its holds and its agents', and the worktrees are free at once, those its ended agents left
-  included: the agent's end records, beside the worktree's beat, which session left it. Each calls the server only when
-  a local record names that agent or session, so a subagent that held nothing costs no call.
+  server whatever it held, so it no longer counts as at work, and that frees its holds and its agents'; the worktrees
+  are free at once, those its ended agents left included: the agent's end records, beside the worktree's beat, which
+  session left it. An agent's end calls the server only when a local record names that agent, so a subagent that held
+  nothing costs no call.
 - **Signs of life** need no network: an `AfterTool` whose directory lies in a pool worktree the session or agent may
   work in (its holder's, or the session's own agent's), an edit of a file in one and a shell command that `cd`s into one
   or runs `git -C` on one touch that worktree's beat file; the detached sync and `dibs worktree upkeep` send them. Only

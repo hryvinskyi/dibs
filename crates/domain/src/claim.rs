@@ -7,7 +7,7 @@ use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 
 use crate::area::QualifiedArea;
-use crate::handover::{ClaimKind, PendingArea, pending_elsewhere};
+use crate::handover::{ClaimKind, PendingArea, WithdrawReason, pending_elsewhere};
 use crate::ids::{ItemId, MemberId, SessionId, ThreadId};
 use crate::member::Role;
 use crate::radar::{BranchName, BranchSource, RecordedBranch};
@@ -22,7 +22,7 @@ mod idle;
 mod release;
 
 pub use areas::{AreaOrigin, ClaimAreas, ClaimAreasError};
-pub use idle::{FootprintPaths, idle_areas};
+pub use idle::{FootprintPaths, IdleAreas, idle_areas};
 pub use release::due_for_release;
 
 /// A member holding a work item. The claim is the member's: `session` and `host` record where it
@@ -658,6 +658,9 @@ pub struct Narrowed {
     pub areas: BTreeSet<QualifiedArea>,
     /// The waits it gave up, by area, as they stood.
     pub withdrawn: BTreeMap<QualifiedArea, PendingArea>,
+    /// Why those waits ended, as the debt holders they asked are told: the holder gave the areas
+    /// up, or the server did on its own and says why.
+    pub reason: WithdrawReason,
 }
 
 /// Decides a narrowing: the holder gives areas of their claim up, live or stale, and stops waiting
@@ -672,29 +675,35 @@ pub fn decide_narrow(
     areas: &BTreeSet<QualifiedArea>,
     now: OffsetDateTime,
 ) -> Result<Narrowed, HolderOnly> {
-    let mut narrowed = give_up(holder_only(current, by)?, areas);
+    let mut narrowed = give_up(holder_only(current, by)?, areas, WithdrawReason::Narrowed);
     narrowed.claim.last_seen = now;
     Ok(narrowed)
 }
 
-/// Decides giving areas of a claim back without its holder, as the server does on its own: the
-/// claim neither holds nor waits for those of `areas` it held or waited for, and nothing else
-/// changes. It is no sign of the claim's work, so when the claim was last seen stays as it was.
+/// Decides giving areas of a claim back without its holder, as the server does on its own when
+/// nothing of the claim's work showed in them: the claim neither holds nor waits for those of
+/// `areas` it held or waited for, and nothing else changes. It is no sign of the claim's work, so
+/// when the claim was last seen stays as it was. A wait it ends is withdrawn as `returned`.
 pub fn decide_return(claim: &Claim, areas: &BTreeSet<QualifiedArea>) -> Narrowed {
-    give_up(claim, areas)
+    give_up(claim, areas, WithdrawReason::Returned)
 }
 
 /// Decides handing a claim's work on without its holder, as the server does when the item's
 /// tracker moves it into a state at which areas are freed: the claim gives up every area it holds
 /// and every area it waits for, and keeps its item. As with [`decide_return`], nothing else
 /// changes and when the claim was last seen stays as it was. A claim that neither holds nor waits
-/// for an area gives nothing up.
+/// for an area gives nothing up. A wait it ends is withdrawn as `handed_on`.
 pub fn decide_hand_on(claim: &Claim) -> Narrowed {
-    decide_return(claim, &held_or_waited(&claim.areas, &claim.pending))
+    give_up(
+        claim,
+        &held_or_waited(&claim.areas, &claim.pending),
+        WithdrawReason::HandedOn,
+    )
 }
 
-/// The claim without those of `areas` it holds or waits for, and what it gave up.
-fn give_up(claim: &Claim, areas: &BTreeSet<QualifiedArea>) -> Narrowed {
+/// The claim without those of `areas` it holds or waits for, what it gave up, and `reason` as why
+/// the waits it gave up ended.
+fn give_up(claim: &Claim, areas: &BTreeSet<QualifiedArea>, reason: WithdrawReason) -> Narrowed {
     let mut claim = claim.clone();
     let given: BTreeSet<QualifiedArea> = areas
         .iter()
@@ -712,6 +721,7 @@ fn give_up(claim: &Claim, areas: &BTreeSet<QualifiedArea>) -> Narrowed {
         claim,
         areas: given,
         withdrawn,
+        reason,
     }
 }
 

@@ -458,23 +458,23 @@ impl Run<'_> {
     }
 
     /// Lets go of the worktrees the session's ended agents left in use on this machine, and ends
-    /// the session on the server, which frees its holds and its agents', when this machine records
-    /// one of them: a session that held nothing costs no call.
+    /// the session on the server whatever it held, so it no longer counts as at work and its holds
+    /// and its agents' are freed; this machine then forgets its records of those holds. A session
+    /// ends once, so the end is tried even when the server could not be reached a moment ago; a
+    /// server that cannot be reached is a notice, and the records stay.
     pub(super) fn session_ended(&self) -> GuardOutcome {
-        let Some(pool) = self.workspace.worktree_pool() else {
-            return GuardOutcome::silent();
-        };
-        pool.free_left(&self.session);
-        let held = pool
-            .records(&self.session)
-            .iter()
-            .any(|record| record.this_session);
-        if !held {
-            return GuardOutcome::silent();
+        let pool = self.workspace.worktree_pool();
+        if let Some(pool) = pool {
+            pool.free_left(&self.session);
         }
-        match pool.end_session(&self.session) {
-            Ok(()) => GuardOutcome::silent(),
-            Err(error) => self.no_decision(Problem::from(error)),
+        match self.call_through(|gateway| gateway.end_session(&self.session)) {
+            Ok(()) => {
+                if let Some(pool) = pool {
+                    pool.forget_session(&self.session);
+                }
+                GuardOutcome::silent()
+            }
+            Err(problem) => self.no_decision(problem),
         }
     }
 }

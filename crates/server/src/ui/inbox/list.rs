@@ -1,7 +1,9 @@
 //! Inbox's tabs and their rows: the conversations from people; the grant requests waiting for the
 //! viewer's decision; and dibs's notices, the conversations that hold only what dibs wrote, one row
 //! per item they are about, then the notices about no item. Each tab counts what waits on it, and
-//! knows which conversations are its own.
+//! knows which conversations are its own: People the conversations from people holding a message
+//! the viewer has not read, whoever wrote it; Grants the requests waiting for the viewer's
+//! decision; From dibs the notices holding a message the viewer has not read.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,7 +14,9 @@ use dibs_app::use_cases::PendingGrantAsk;
 use dibs_domain::ids::{ItemId, ThreadId};
 
 use crate::ui::inbox::query::ListQuery;
-use crate::ui::inbox::summary::{ConversationSummary, from_people, notice, unread_from_people};
+use crate::ui::inbox::summary::{
+    ConversationSummary, count_unread_among_people, from_people, notice,
+};
 use crate::ui::links::{AreaView, LinkContext, PersonView, TicketView};
 use crate::ui::matching::matches;
 use crate::ui::moments::{Moment, moment};
@@ -35,7 +39,7 @@ pub(crate) static TABS: [Tab; 3] = [
     Tab {
         code: "people",
         names_items: false,
-        count: |mail| unread_from_people(mail.threads, mail.waiting),
+        count: |mail| count_unread_among_people(mail.threads, mail.waiting),
         owns: |mail, summary| from_people(summary, mail.waiting),
         rows: people,
     },
@@ -169,8 +173,6 @@ pub(crate) struct FoldRow {
     pub(crate) count: u64,
     /// How many of those the viewer has not read.
     pub(crate) unread: u64,
-    /// How many of their messages wait for the viewer's acknowledgement.
-    pub(crate) awaiting_ack: u64,
     /// The newest notice.
     pub(crate) newest: ConversationSummary,
     /// The address of the newest notice in the inspector, with the list's state.
@@ -317,7 +319,6 @@ fn notices(mail: &Mailbox<'_>, query: &ListQuery, selected: Option<ThreadId>) ->
         if let Some((_, row)) = folded.iter_mut().find(|(id, _)| *id == item) {
             row.count += named.from_dibs;
             row.unread += named.unread_from_dibs;
-            row.awaiting_ack += summary.awaiting_ack;
             row.current |= current;
             continue;
         }
@@ -332,7 +333,6 @@ fn notices(mail: &Mailbox<'_>, query: &ListQuery, selected: Option<ThreadId>) ->
                 item: facts,
                 count: named.from_dibs,
                 unread: named.unread_from_dibs,
-                awaiting_ack: summary.awaiting_ack,
                 newest: summary.clone(),
                 href: query.address(Some(summary.id)),
                 current,
@@ -555,8 +555,8 @@ mod tests {
         });
         assert_eq!(
             counts,
-            [1, 0, 1],
-            "no grant request is listed, only marked as waiting"
+            [2, 0, 1],
+            "dibs's unread message beside a member's read one waits on People, not on From dibs; no grant request is listed, only marked as waiting"
         );
     }
 }

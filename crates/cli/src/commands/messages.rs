@@ -91,7 +91,7 @@ fn no_session_text(away: &NoSessionAtWork) -> String {
     if away.holds_live_claim {
         let _ = write!(
             text,
-            " To get an area {member} holds, ask for a grant: dibs ask-grant <your item> --area <area> (MCP: dibs_ask_grant), which {member}'s agents or the server decide."
+            " To get an area {member} holds, ask for a grant: dibs ask-grant <your item> --area <area> (MCP: dibs_ask_grant), which {member} or their agents decide; it waits until they do."
         );
     }
     text

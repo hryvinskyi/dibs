@@ -54,8 +54,9 @@ pub struct ReviewedClaim {
     pub item: ItemName,
 }
 
-/// Records a pull request on the caller's claim: the claim is in review and keeps its areas, and it
-/// no longer goes stale while the pull request is open. A request to hand one of its areas over
+/// Records a pull request on the caller's claim: the claim is in review and no longer goes stale
+/// while the pull request is open. It keeps its areas unless the item's tracker moves it into a
+/// state that hands its work on, or the sweep gives back an area its work left idle. A request to hand one of its areas over
 /// asked before is no longer counted, in the same transaction, so that it is asked again once the
 /// claim is worked on again.
 ///

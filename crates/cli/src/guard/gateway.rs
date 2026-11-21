@@ -11,12 +11,12 @@ use dibs_agent_host::ports::{
     CoordinationGateway, InboxView, KnownSettings, PathAnswer, PortError, SessionRef, SlotState,
     StatusView,
 };
-use dibs_client::Client;
 use dibs_client::api::{EditCheckRequest, InWorktree};
 use dibs_client::checkout::Checkout;
 use dibs_client::checkout_token::CheckoutKey;
 use dibs_client::git_dirs::GitDirs;
 use dibs_client::worktree_pool::{pool_id, read_marker, read_settings};
+use dibs_client::{Client, ClientError};
 use dibs_domain::paths::RelPath;
 use dibs_domain::radar::BranchName;
 use dibs_domain::repo::RepoId;
@@ -27,7 +27,7 @@ use dibs_domain::slot::SlotName;
 use crate::failure::sentence;
 use crate::guard::checkout_key::checkout_key;
 use crate::guard::machine::machine_id;
-use crate::guard::remote::{Remote, RemoteError};
+use crate::guard::remote::{Remote, RemoteError, session_label};
 use crate::guard::views;
 
 /// The server of one checkout's project. Nothing is read or built until the first call.
@@ -125,6 +125,12 @@ impl HookGateway {
     }
 }
 
+/// Whether a failed end leaves nothing to end: the server does not know the session, or is older
+/// than the call.
+fn nothing_to_end(error: &ClientError) -> bool {
+    matches!(error, ClientError::ServerTooOld { .. }) || error.code() == "not_found"
+}
+
 fn port_error(error: &RemoteError) -> PortError {
     match error {
         RemoteError::Client(error) => views::port_error(error),
@@ -133,6 +139,21 @@ fn port_error(error: &RemoteError) -> PortError {
 }
 
 impl CoordinationGateway for HookGateway {
+    fn end_session(&self, session: &SessionRef) -> Result<(), PortError> {
+        let Some(id) = session_label(session)
+            .ok()
+            .and_then(|label| self.remote.state.session(&label))
+        else {
+            return Ok(());
+        };
+        let client = self.client()?;
+        match self.runtime()?.block_on(client.end_session(id)) {
+            Ok(_) => Ok(()),
+            Err(error) if nothing_to_end(&error) => Ok(()),
+            Err(error) => Err(views::port_error(&error)),
+        }
+    }
+
     fn settings(&self) -> Result<KnownSettings, PortError> {
         let client = self.client()?;
         let me = self

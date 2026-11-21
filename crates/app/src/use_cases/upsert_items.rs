@@ -1326,7 +1326,7 @@ mod tests {
                     area: billing.clone(),
                     from: debt,
                     to: feature,
-                    reason: dibs_domain::handover::WithdrawReason::Narrowed,
+                    reason: dibs_domain::handover::WithdrawReason::HandedOn,
                 }
             )),
             "{kinds:?}"
@@ -1354,6 +1354,15 @@ mod tests {
                 .as_str()
                 .starts_with("The request for default:billing no longer stands")),
             "the debt holder's request is withdrawn: {new:?}"
+        );
+        let withdrawn = new
+            .iter()
+            .map(|(_, message)| message.body.as_str())
+            .find(|body| body.starts_with("The request for default:billing"))
+            .unwrap_or_default();
+        assert!(
+            withdrawn.contains("tracker") && !withdrawn.contains("gave it up"),
+            "the tracker moved the item, bob did not give the area up: {withdrawn}"
         );
         assert!(
             stored_claim(&env, debt).await.unwrap().holds(&billing),

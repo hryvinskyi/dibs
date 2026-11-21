@@ -950,3 +950,84 @@ async fn a_message_waiting_for_the_viewers_acknowledgement_keeps_its_mark_once_r
         list(&written)
     );
 }
+
+#[tokio::test]
+async fn an_unread_message_from_dibs_in_a_conversation_among_people_counts_on_people_and_the_rail()
+{
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    world.settings(&alice, settings()).await;
+    let bob_desk = world.session(&bob, "bob-desk").await;
+    let alice_laptop = world.session(&alice, "alice-laptop").await;
+    let debt = world
+        .item(&bob, Some("gh:acme/widgets#7"), "Tidy the invoice module")
+        .await;
+    let held = world
+        .post(
+            &bob,
+            &format!("/v1/items/{debt}/claim"),
+            json!({"session_id": bob_desk, "areas": ["api:billing"], "kind": "debt"}),
+        )
+        .await;
+    assert_eq!(held.status, StatusCode::OK, "{}", held.body);
+    let feature = world
+        .item(&alice, Some("gh:acme/widgets#42"), "Currency on invoices")
+        .await;
+    claim(
+        &world,
+        &alice,
+        alice_laptop,
+        feature,
+        json!(["api:billing"]),
+    )
+    .await;
+
+    let asked = world.get(&bob, "/v1/inbox?unacked=1").await;
+    let request = &asked.body["unacked"][0];
+    assert_eq!(request["thread"]["author"], "alice", "{}", asked.body);
+    let thread = request["thread"]["id"].as_u64().unwrap();
+    let message = request["message"]["id"].as_u64().unwrap();
+    let acked = world
+        .post(&bob, &format!("/v1/messages/{message}/ack"), json!({}))
+        .await;
+    assert_eq!(acked.status, StatusCode::CREATED, "{}", acked.body);
+    let nudged = world
+        .post(
+            &alice,
+            &format!("/v1/threads/{thread}/messages"),
+            json!({"label": "web", "body": "any news?"}),
+        )
+        .await;
+    assert_eq!(nudged.status, StatusCode::CREATED, "{}", nudged.body);
+    let browser = sign_in(&world, &bob).await;
+    let href = format!("/ui/inbox/{thread}");
+    let opened = browser.get(&world, &href).await;
+    assert_eq!(opened.status, StatusCode::OK, "{}", opened.text);
+
+    let released = world
+        .post(&alice, &format!("/v1/items/{feature}/release"), json!({}))
+        .await;
+    assert_eq!(released.status, StatusCode::OK, "{}", released.body);
+    let inbox = world.get(&bob, "/v1/inbox?unread=true").await;
+    assert_eq!(
+        inbox.body["unread_conversations"],
+        json!({"from_people": 0, "from_dibs": 1}),
+        "only dibs's word that the request no longer stands is unread: {}",
+        inbox.body
+    );
+
+    let page = browser.get(&world, "/ui/inbox").await;
+    for count in [
+        r#"<a href="/ui/inbox" aria-current="true">People<span class="k">1</span></a>"#,
+        r#"<a href="/ui/inbox?tab=dibs">From dibs<span class="k">0</span></a>"#,
+        r#"<a href="/ui/inbox" aria-current="page">Inbox<span class="k k--hot">1</span>"#,
+    ] {
+        assert!(page.text.contains(count), "{count} in {}", page.text);
+    }
+    assert!(
+        row(&page, &href).starts_with(r#"><span class="s s--review" aria-hidden="true"></span>"#),
+        "{}",
+        row(&page, &href)
+    );
+}

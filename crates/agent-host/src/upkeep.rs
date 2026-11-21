@@ -25,8 +25,8 @@ pub const DEFAULT_HEARTBEAT: Duration = Duration::minutes(1);
 /// How often, at most, the server is asked which client it recommends, and a newer one installed.
 pub const UPDATE_EVERY: Duration = Duration::days(1);
 
-/// How long a session's last heartbeat is remembered while the project's settings are not known:
-/// the shortest time a project may let a claim live without a heartbeat.
+/// How long a session's last heartbeat is remembered while the project's settings are not known.
+/// Once they are known the project's `stale_after` is used instead.
 pub const HEARTBEAT_KEPT: Duration = Duration::hours(1);
 
 /// How often, at most, the signs of life left in pool worktrees are sent. It does not follow the

@@ -49,7 +49,8 @@ struct ReviewAnswer {
 }
 
 /// Records the pull request `pr` (`<owner>/<name>#<number>`) on the caller's claim of the item: the
-/// claim is in review, keeps its areas and does not go stale while the pull request is open. With
+/// claim is in review and does not go stale while the pull request is open; it keeps its areas
+/// unless a tracker state that hands work on or the idle sweep gives them up. With
 /// `more: true`, merging it returns the claim to work rather than completing it, for the next pull
 /// request of the item. Recording one the claim has changes at most `more`. `head`, the pull
 /// request's head branch (`bob/42-refunds` or `refs/heads/bob/42-refunds`), is recorded as the

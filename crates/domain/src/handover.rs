@@ -138,7 +138,7 @@ impl YieldPair {
 }
 
 /// Why a claim stopped waiting for an area it was not handed. Serialised as `stale`, `narrowed`,
-/// `holder_changed` or `ended`.
+/// `handed_on`, `returned`, `holder_changed` or `ended`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WithdrawReason {
@@ -146,6 +146,12 @@ pub enum WithdrawReason {
     Stale,
     /// Its holder gave the area up.
     Narrowed,
+    /// The server gave the area up without the holder, since the tracker moved the waiting
+    /// claim's item into a state at which its areas are freed.
+    HandedOn,
+    /// The server gave the area up without the holder, since nothing of the waiting claim's work
+    /// showed in it for the project's idle delay.
+    Returned,
     /// The area is held now by a claim that a feature does not take from.
     HolderChanged,
     /// The waiting claim ended: released, completed, ended by an admin or with its member's
@@ -159,8 +165,30 @@ impl WithdrawReason {
         match self {
             Self::Stale => "stale",
             Self::Narrowed => "narrowed",
+            Self::HandedOn => "handed_on",
+            Self::Returned => "returned",
             Self::HolderChanged => "holder_changed",
             Self::Ended => "ended",
+        }
+    }
+
+    /// Why the wait ended, as the debt holder who was asked reads it: `waiter` names the holder of
+    /// the claim that waited, `item` that claim's item. A wait the server ended on its own says what
+    /// the server did, and never that the waiting member gave the area up.
+    pub fn why(self, waiter: &str, item: &str) -> String {
+        match self {
+            Self::Stale => format!("{waiter}'s claim on {item} went stale"),
+            Self::Narrowed => format!("{waiter} gave it up on their claim on {item}"),
+            Self::HandedOn => format!(
+                "the tracker moved {item} to a state at which its areas are freed, so dibs ended the wait of {waiter}'s claim on it"
+            ),
+            Self::Returned => format!(
+                "nothing of the work of {waiter}'s claim on {item} showed in it for the project's idle delay, so dibs gave it back"
+            ),
+            Self::HolderChanged => {
+                "another member's claim that a feature does not take from holds it now".to_owned()
+            }
+            Self::Ended => format!("{waiter}'s claim on {item} ended"),
         }
     }
 }

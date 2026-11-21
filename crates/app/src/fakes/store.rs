@@ -91,7 +91,12 @@ struct State {
 pub struct MemoryStore {
     state: Arc<Mutex<State>>,
     fail_next_commit: Arc<AtomicBool>,
+    listings: Listings,
 }
+
+/// How many times each thread's messages were listed, kept apart from the state so that a listing
+/// counts whether its transaction commits or not.
+type Listings = Arc<Mutex<BTreeMap<(ProjectId, ThreadId), u64>>>;
 
 impl MemoryStore {
     /// Makes the next commit fail as a store outage would, keeping nothing of that transaction.
@@ -102,6 +107,16 @@ impl MemoryStore {
     /// Every event of every project, in log order.
     pub async fn all_events(&self) -> Vec<Event> {
         self.state.lock().await.events.clone()
+    }
+
+    /// How many times a transaction listed the messages of this thread, committed or not.
+    pub async fn listings_of(&self, project: ProjectId, thread: ThreadId) -> u64 {
+        self.listings
+            .lock()
+            .await
+            .get(&(project, thread))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -114,6 +129,7 @@ impl Store for MemoryStore {
             guard: Some(guard),
             work,
             fail_commit: self.fail_next_commit.clone(),
+            listings: self.listings.clone(),
         }))
     }
 
@@ -123,6 +139,7 @@ impl Store for MemoryStore {
             guard: None,
             work,
             fail_commit: self.fail_next_commit.clone(),
+            listings: self.listings.clone(),
         }))
     }
 }
@@ -133,6 +150,7 @@ struct MemoryTx {
     guard: Option<MutexGuardArc<State>>,
     work: State,
     fail_commit: Arc<AtomicBool>,
+    listings: Listings,
 }
 
 fn outage() -> StoreError {
@@ -650,7 +668,7 @@ impl SessionRows for MemoryTx {
             .work
             .sessions
             .iter()
-            .filter(|((p, _), s)| *p == project && s.last_seen >= since)
+            .filter(|((p, _), s)| *p == project && s.is_open() && s.last_seen >= since)
             .map(|(_, s)| s.member)
             .collect())
     }
@@ -1090,6 +1108,12 @@ impl ThreadRows for MemoryTx {
         project: ProjectId,
         thread: ThreadId,
     ) -> StoreResult<Vec<MessageRecord>> {
+        *self
+            .listings
+            .lock()
+            .await
+            .entry((project, thread))
+            .or_default() += 1;
         let mut messages: Vec<MessageRecord> = self
             .work
             .messages
@@ -1135,6 +1159,9 @@ impl ThreadRows for MemoryTx {
                 };
                 let newest_person =
                     |of: &[&MessageRecord]| of.iter().rev().find_map(|m| m.author.member());
+                let highest = |of: &[&MessageRecord]| {
+                    of.iter().map(|m| m.importance).max().unwrap_or_default()
+                };
                 ThreadSummary {
                     thread: thread.clone(),
                     messages: u64::try_from(messages.len()).unwrap_or(u64::MAX),
@@ -1146,11 +1173,8 @@ impl ThreadRows for MemoryTx {
                     last_from: newest_person(&messages),
                     last_unread_from: newest_person(&unread),
                     last_message_at: messages.iter().map(|m| m.created_at).max(),
-                    importance: messages
-                        .iter()
-                        .map(|m| m.importance)
-                        .max()
-                        .unwrap_or_default(),
+                    importance: highest(&messages),
+                    unread_importance: highest(&unread),
                 }
             })
             .collect();

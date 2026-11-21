@@ -23,9 +23,10 @@ pub enum AreaOrigin {
 
 /// The areas a claim holds. Read it as the set of those areas; it also knows which of them the
 /// claim only gained, which is always a subset of them, and keeps a clock for each: when the claim
-/// declared or gained the area, moved by every later declaration of it and by every edit of the
-/// claim's work in it. An area named again is declared, whatever it was before. No area is held
-/// without a clock, and giving an area up forgets its clock.
+/// declared or gained the area, moved by every later declaration of it, by every edit of the
+/// claim's work in it, and by a sweep of idle areas that finds a stored footprint of the claim
+/// keeping it. An area named again is declared, whatever it was before. No area is held without a
+/// clock, and giving an area up forgets its clock.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClaimAreas {
     held: BTreeSet<QualifiedArea>,
@@ -124,6 +125,19 @@ impl ClaimAreas {
         }
     }
 
+    /// Starts the area's clock again at `at`, keeping its origin, as when a sweep finds the claim's
+    /// footprint keeping it; whether the claim holds it. An area the claim does not hold is left
+    /// alone.
+    pub fn restart_clock(&mut self, area: &QualifiedArea, at: OffsetDateTime) -> bool {
+        match self.clocks.get_mut(area) {
+            Some(clock) => {
+                *clock = at;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Starts every area's clock again at `at`, each keeping its origin.
     pub fn restart_clocks(&mut self, at: OffsetDateTime) {
         for clock in self.clocks.values_mut() {
@@ -167,8 +181,8 @@ impl ClaimAreas {
         &self.gained
     }
 
-    /// The area's clock: when the claim last declared or gained it, or an edit of its work was
-    /// made in it; `None` when the claim does not hold it.
+    /// The area's clock: when the claim last declared or gained it, an edit of its work was made
+    /// in it, or a sweep found its footprint keeping it; `None` when the claim does not hold it.
     pub fn clock(&self, area: &QualifiedArea) -> Option<OffsetDateTime> {
         self.clocks.get(area).copied()
     }
@@ -301,6 +315,18 @@ mod tests {
         assert_eq!(held.clock(&area("api:billing")), Some(at(100)));
         assert_eq!(held.clock(&area("api:search")), Some(at(100)));
         assert_eq!(held.gained(), &areas(&["api:search"]));
+    }
+
+    #[test]
+    fn restarting_one_clock_moves_that_area_alone_and_keeps_its_origin() {
+        let mut held = declared(&["api:billing"], 0);
+        held.gain(area("api:search"), at(5));
+        assert!(held.restart_clock(&area("api:search"), at(100)));
+        assert!(!held.restart_clock(&area("web:checkout"), at(100)));
+        assert_eq!(held.clock(&area("api:search")), Some(at(100)));
+        assert_eq!(held.clock(&area("api:billing")), Some(at(0)));
+        assert_eq!(held.origin(&area("api:search")), Some(AreaOrigin::Gained));
+        assert_eq!(held.clock(&area("web:checkout")), None, "not held");
     }
 
     #[test]

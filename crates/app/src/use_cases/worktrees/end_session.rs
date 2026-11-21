@@ -17,7 +17,8 @@ use crate::work::Work;
 
 /// A session of the caller ended: every hold it, or one of its agents, has in any of the caller's
 /// pools ends with it, and the checkouts it reported working in are forgotten, so it no longer
-/// counts as sharing one with another session. The session itself stays registered.
+/// counts as sharing one with another session. The session itself stays registered, marked ended
+/// now, so it no longer counts as at work until it registers again or sends a heartbeat.
 pub struct EndSession {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -48,7 +49,10 @@ impl EndSession {
         actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin_for(&*self.store, actor).await?;
-        let session = own_session(&mut work, actor, session).await?.id;
+        let mut record = own_session(&mut work, actor, session).await?;
+        record.end(now);
+        work.save_session(actor.project, &record).await?;
+        let session = record.id;
         let mut ended = Vec::new();
         for mut scene in PoolScene::load_all(&mut work, Some(actor.member), now).await? {
             ended.extend(scene.apply(decide_session_ended(&scene.pool, session)));

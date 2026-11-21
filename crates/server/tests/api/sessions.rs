@@ -235,6 +235,47 @@ async fn a_claim_whose_edits_heartbeats_report_stays_out_of_the_stale_list() {
 }
 
 #[tokio::test]
+async fn a_reported_area_two_claims_share_refreshes_only_the_claim_an_edit_check_would_take() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    world.settings(&alice, two_repositories()).await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    let session = world.session(&bob, "laptop").await;
+    let left = world.item(&bob, None, "Fix the invoice total").await;
+    let worked = world.item(&bob, None, "Round the invoice taxes").await;
+    for item in [left, worked] {
+        let claimed = world
+            .post(
+                &bob,
+                &format!("/v1/items/{item}/claim"),
+                json!({"session_id": session, "areas": ["api:billing"]}),
+            )
+            .await;
+        assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+        world.fakes.clock.advance(Duration::minutes(10));
+    }
+    let beat = world
+        .post(
+            &bob,
+            "/v1/heartbeat",
+            json!({"session_id": session, "edits": {"areas": ["api:billing"]}}),
+        )
+        .await;
+    assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);
+    assert_eq!(beat.body["refreshed"], json!([worked]));
+    let (world, bob) = (&world, &bob);
+    let last_seen = |item: u64| async move {
+        world.get(bob, &format!("/v1/items/{item}")).await.body["claim"]["last_seen"].clone()
+    };
+    assert_eq!(last_seen(worked).await, "2026-03-02T09:20:00Z");
+    assert_eq!(
+        last_seen(left).await,
+        "2026-03-02T09:00:00Z",
+        "the claim taken first, whose work stopped, is not kept alive by the other's edits"
+    );
+}
+
+#[tokio::test]
 async fn reported_edits_name_at_most_two_hundred_areas_each_qualified() {
     let world = World::new().await;
     let alice = world.project("acme", "alice").await;

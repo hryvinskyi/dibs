@@ -15,12 +15,14 @@ use crate::records::{MessageRecord, ThreadRecord};
 use crate::use_cases::acks::{people, reached};
 use crate::work::Work;
 
-/// How recently one of a member's sessions must have been seen for the member to have a session
-/// at work. A session is seen when it registers or sends a heartbeat, and heartbeats come from the
-/// syncs its host's hooks start, so a session left open and idle counts as unseen after this long.
+/// How recently one of a member's open sessions must have been seen for the member to have a
+/// session at work. A session is seen when it registers or sends a heartbeat, and heartbeats come
+/// from the syncs its host's hooks start, so a session left open and idle counts as unseen after
+/// this long. A session that was ended is not at work however recently it was seen, until it
+/// registers again or sends a heartbeat.
 pub const AT_WORK_WITHIN: Duration = Duration::hours(1);
 
-/// A recipient none of whose sessions was seen within [`AT_WORK_WITHIN`]: what they were sent
+/// A recipient none of whose open sessions was seen within [`AT_WORK_WITHIN`]: what they were sent
 /// waits for their next session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoSessionAtWork {
@@ -32,7 +34,7 @@ pub struct NoSessionAtWork {
 }
 
 /// The members `message` of `thread` reaches as one it names or as the thread's author, none of
-/// whose sessions was seen within [`AT_WORK_WITHIN`] of `now`, ordered by handle. A thread
+/// whose open sessions was seen within [`AT_WORK_WITHIN`] of `now`, ordered by handle. A thread
 /// addressed to the whole project names nobody, so its messages list nobody.
 pub(crate) async fn no_session_at_work(
     work: &mut Work,

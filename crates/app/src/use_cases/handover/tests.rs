@@ -272,6 +272,15 @@ async fn narrowing_hands_the_area_over_in_the_same_transaction_and_tells_the_fea
         messages[0].body.as_str()
     );
     assert_eq!(messages[0].importance, Importance::High);
+    let told = messages[0].body.as_str();
+    assert!(
+        told.contains("from alice's debt claim on gh:acme/widgets#7"),
+        "the member who let it go is named: {told}"
+    );
+    assert!(
+        told.contains("files handed over. To write to alice: dibs send alice."),
+        "and how to write to them: {told}"
+    );
     let again = env.events().await.len();
     let repeated = narrow(&env, &env.alice, debt, &["billing"]).await;
     assert!(repeated.areas.is_empty() && repeated.handed_over.is_empty());
@@ -285,6 +294,7 @@ async fn completing_or_releasing_the_debt_claim_hands_its_waited_for_areas_over(
     claim(&env, &env.bob, feature, &["billing", "search"], None)
         .await
         .unwrap();
+    let before = env.events().await.len();
     Complete::new(&env.deps)
         .execute(&env.alice.actor, debt)
         .await
@@ -293,6 +303,23 @@ async fn completing_or_releasing_the_debt_claim_hands_its_waited_for_areas_over(
     assert_eq!(
         bobs.areas,
         BTreeSet::from([area("default:billing"), area("default:search")])
+    );
+    let threads = threads_after(&env, before).await;
+    let told: Vec<&str> = threads
+        .iter()
+        .filter(|(thread, _)| {
+            thread.recipients == Recipients::Members([env.bob.actor.member].into())
+        })
+        .flat_map(|(_, messages)| messages.iter().map(|message| message.body.as_str()))
+        .filter(|body| body.contains("is yours now"))
+        .collect();
+    assert_eq!(told.len(), 2, "{told:?}");
+    assert!(
+        told.iter().all(
+            |body| body.contains("from alice's debt claim on gh:acme/widgets#7")
+                && body.contains("files handed over. To write to alice: dibs send alice.")
+        ),
+        "a debt claim that ended still names its holder and how to write to them: {told:?}"
     );
 
     let env = Env::with_settings(SETTINGS).await;
@@ -827,6 +854,47 @@ async fn an_admins_force_release_or_the_removal_of_the_debt_holder_hands_over() 
             .await
             .unwrap()
             .holds(&area("default:billing"))
+    );
+}
+
+#[tokio::test]
+async fn an_area_handed_over_from_a_removed_member_names_them_without_a_way_to_write_to_them() {
+    let env = Env::with_settings(SETTINGS).await;
+    let (_debt, feature) = alice_holds_debt(&env).await;
+    claim(&env, &env.bob, feature, &["billing"], None)
+        .await
+        .unwrap();
+    let before = env.events().await.len();
+    crate::use_cases::RemoveMember::new(&env.deps)
+        .execute(
+            &crate::authority::Operator::of(env.project),
+            &dibs_domain::handle::Handle::parse("alice").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        stored(&env, feature)
+            .await
+            .unwrap()
+            .holds(&area("default:billing"))
+    );
+    let told: Vec<String> = threads_after(&env, before)
+        .await
+        .into_iter()
+        .filter(|(thread, _)| {
+            thread.recipients == Recipients::Members([env.bob.actor.member].into())
+        })
+        .flat_map(|(_, messages)| messages.into_iter().map(|message| message.body.to_string()))
+        .filter(|body| body.contains("is yours now"))
+        .collect();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].contains("from alice's debt claim on gh:acme/widgets#7"),
+        "the member whose claim held it is still named: {told:?}"
+    );
+    assert!(
+        !told[0].contains("dibs send"),
+        "a removed member receives no message, so none is offered: {told:?}"
     );
 }
 

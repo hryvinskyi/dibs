@@ -2174,4 +2174,125 @@ mod use_cases {
             "the notice to carol was never bob's to read, and his reading is his own"
         );
     }
+
+    #[tokio::test]
+    async fn an_idle_area_the_footprint_keeps_restarts_its_clock_on_the_file_and_is_not_read_again()
+    {
+        use dibs_app::ports::Clock;
+        use dibs_app::use_cases::{FootprintInput, FootprintRecorded, FromCheckout, OnBranch};
+        use dibs_domain::area::QualifiedArea;
+        use dibs_domain::paths::RelPath;
+        use dibs_domain::radar::{BranchName, CommitSha, FootprintBase};
+        use dibs_domain::repo::RepoId;
+
+        let world = World::new().await;
+        let app = &world.app;
+        let alice = project(app, "widgets", "alice").await;
+        let document: SettingsDocument = serde_json::from_str(
+            r#"{"stale_after": "10d", "release_after": "30d",
+                "areas": [{"name": "billing", "paths": ["src/billing/**"]},
+                          {"name": "search", "paths": ["src/search/**"]}]}"#,
+        )
+        .unwrap();
+        app.apply_settings.execute(&alice, document).await.unwrap();
+        let importer = app
+            .create_member
+            .execute(
+                &alice,
+                CreateMemberInput {
+                    member: member("worker"),
+                    role: Role::Importer,
+                },
+            )
+            .await
+            .unwrap();
+        let bot = app
+            .authenticate
+            .execute(importer.token.expose())
+            .await
+            .unwrap();
+        let session = register(app, &alice, 1).await;
+        let item = create_item(app, &alice, 1).await;
+        app.claim_item
+            .execute(
+                &alice,
+                ClaimItemInput {
+                    branches: Default::default(),
+                    item,
+                    session,
+                    areas: vec!["billing".to_owned(), "search".to_owned()],
+                    wide: None,
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        let branch = BranchName::parse("work-1").unwrap();
+        let from = FromCheckout {
+            token: checkout('a'),
+            branch: Some(OnBranch {
+                repo: RepoId::implicit(),
+                branch: branch.clone(),
+            }),
+        };
+        app.heartbeat
+            .execute(&alice, session, Some(&from))
+            .await
+            .unwrap();
+        let recorded = app
+            .record_footprint
+            .execute(
+                &bot,
+                FootprintInput {
+                    item,
+                    repo: "default".to_owned(),
+                    branch,
+                    base: FootprintBase {
+                        branch: BranchName::parse("main").unwrap(),
+                        sha: CommitSha::parse("abcd").unwrap(),
+                        at: OffsetDateTime::UNIX_EPOCH,
+                    },
+                    paths: [RelPath::parse("src/billing/rates.rs").unwrap()].into(),
+                    truncated: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded, FootprintRecorded::Stored { changed: true });
+        let stored = || async {
+            let mut tx = world.store.begin().await.unwrap();
+            tx.claim(alice.project, item).await.unwrap().unwrap()
+        };
+        let before = stored().await;
+        world
+            .fakes
+            .clock
+            .advance(Duration::days(7) + Duration::minutes(1));
+        let now = world.fakes.clock.now();
+
+        let swept = app.tick_claims.execute().await.unwrap();
+
+        assert_eq!((swept.released, swept.returned), (0, 1), "search went back");
+        let billing = QualifiedArea::parse("default:billing").unwrap();
+        let kept = stored().await;
+        assert_eq!(
+            kept.areas,
+            std::collections::BTreeSet::from([billing.clone()])
+        );
+        assert_eq!(
+            kept.areas.clock(&billing),
+            Some(now),
+            "the footprint keeps billing, and its clock starts again at the sweep"
+        );
+        assert_eq!(
+            kept.last_seen, before.last_seen,
+            "no sign of the claim's work"
+        );
+
+        world.fakes.clock.advance(Duration::seconds(30));
+        let events = world.event_names(alice.project).await.len();
+        assert_eq!(app.tick_claims.execute().await.unwrap().returned, 0);
+        assert_eq!(stored().await, kept, "no candidate left to read or write");
+        assert_eq!(world.event_names(alice.project).await.len(), events);
+    }
 }

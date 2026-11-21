@@ -150,6 +150,7 @@ impl ClaimDelivery {
         let holder = work
             .session(actor.project, claim.session)
             .await?
+            .filter(|session| session.is_open())
             .map(|session| ClaimSession {
                 session: session.id,
                 push: session.push,
@@ -172,8 +173,9 @@ mod tests {
     use super::*;
     use crate::use_cases::testing::{Env, session};
     use crate::use_cases::{
-        Addressees, ClaimItem, ClaimItemInput, HoldMode, RegisterSession, RegisterSessionInput,
-        ReleaseSlot, ReleaseSlotInput, StartThread, StartThreadInput, TakeSlot, TakeSlotInput,
+        Addressees, ClaimItem, ClaimItemInput, EndSession, HoldMode, RegisterSession,
+        RegisterSessionInput, ReleaseSlot, ReleaseSlotInput, StartThread, StartThreadInput,
+        TakeSlot, TakeSlotInput,
     };
 
     /// Registers a session of bob's that can be woken while idle, or not.
@@ -457,6 +459,29 @@ mod tests {
                 .session,
             neighbour,
             "once the minute is over, the first session to claim it delivers it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_message_about_an_item_is_not_kept_for_a_session_that_ended() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#42").await;
+        let working = bobs(&env, "laptop/mcp-1", true).await;
+        let neighbour = bobs(&env, "laptop/mcp-2", true).await;
+        bob_claims(&env, item, working).await;
+        EndSession::new(&env.deps)
+            .execute(&env.bob.actor, working)
+            .await
+            .unwrap();
+        let message = about(&env, Some(item)).await;
+        env.advance(Duration::seconds(10));
+        let delivered = ClaimDelivery::new(&env.deps)
+            .execute(&env.bob.actor, neighbour, DeliveryAsk::Message(message))
+            .await
+            .unwrap();
+        assert_eq!(
+            delivered.session, neighbour,
+            "the claim's session ended, so no session of bob's waits for the message"
         );
     }
 

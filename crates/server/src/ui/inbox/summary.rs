@@ -8,6 +8,10 @@
 //! the viewer's decision: the viewer's agent decides that one, so it never raises the count of what
 //! a person has to read. Who started the conversation, and in whose name, does not matter: what
 //! dibs wrote in a member's name is a notice all the same.
+//!
+//! A conversation from people waits on the viewer while it holds any message they have not read,
+//! whoever wrote it: what dibs adds to it is read there, among people's, as no notice list shows
+//! it.
 
 use std::collections::BTreeSet;
 
@@ -124,15 +128,24 @@ pub(crate) fn unread_people(summary: &NamedSummary, waiting_grants: &BTreeSet<Th
     summary.unread_from_people > 0 && from_people(summary, waiting_grants)
 }
 
-/// How many of the conversations have messages a member wrote that the viewer has not read,
-/// leaving out `waiting_grants`.
-pub(crate) fn unread_from_people<'a>(
+/// Whether the conversation is from people and holds a message the viewer has not read, a
+/// member's or dibs's.
+pub(crate) fn unread_among_people(
+    summary: &NamedSummary,
+    waiting_grants: &BTreeSet<ThreadId>,
+) -> bool {
+    summary.unread > 0 && from_people(summary, waiting_grants)
+}
+
+/// How many of the conversations from people hold a message the viewer has not read, a member's
+/// or dibs's, leaving out `waiting_grants`.
+pub(crate) fn count_unread_among_people<'a>(
     summaries: impl IntoIterator<Item = &'a NamedSummary>,
     waiting_grants: &BTreeSet<ThreadId>,
 ) -> usize {
     summaries
         .into_iter()
-        .filter(|summary| unread_people(summary, waiting_grants))
+        .filter(|summary| unread_among_people(summary, waiting_grants))
         .count()
 }
 
@@ -229,9 +242,9 @@ mod tests {
         notice.awaiting_ack = 1;
         assert!(from_people(&notice, &BTreeSet::new()));
         assert_eq!(
-            unread_from_people([&notice], &BTreeSet::new()),
+            count_unread_among_people([&notice], &BTreeSet::new()),
             0,
-            "nothing from people is unread in it"
+            "nothing in it is unread"
         );
     }
 
@@ -244,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn the_unread_count_counts_only_conversations_with_unread_messages_from_people() {
+    fn the_unread_count_counts_the_conversations_from_people_holding_any_unread_message() {
         let waiting = BTreeSet::from([ThreadId(4)]);
         let all = [
             summary(1, Some((2, "bob")), 1),
@@ -256,10 +269,26 @@ mod tests {
             written(summary(7, Some((2, "bob")), 2), 1, 0),
         ];
         assert_eq!(
-            unread_from_people(&all, &waiting),
-            2,
-            "a member's message read and dibs's unread is nothing from people to read"
+            count_unread_among_people(&all, &waiting),
+            4,
+            "a member's message read and dibs's unread still waits among people's"
         );
-        assert_eq!(unread_from_people(&all, &BTreeSet::new()), 3);
+        assert_eq!(count_unread_among_people(&all, &BTreeSet::new()), 5);
+    }
+
+    #[test]
+    fn dibss_unread_message_beside_a_read_members_message_is_unread_among_people_but_not_from_them()
+    {
+        let none = BTreeSet::new();
+        let read_reply = written(summary(8, None, 1), 1, 0);
+        assert!(unread_among_people(&read_reply, &none));
+        assert!(!unread_people(&read_reply, &none));
+        let read = written(summary(9, Some((2, "bob")), 0), 2, 0);
+        assert!(!unread_among_people(&read, &none));
+        let notice = summary(10, None, 1);
+        assert!(
+            !unread_among_people(&notice, &none),
+            "a notice is not among people's"
+        );
     }
 }

@@ -12,7 +12,8 @@
 //! client's ordinary limits, as it may wait for a worktree to be freed and reset; every other call
 //! is bounded like a hook's. What this machine records of the pool's holds is read without the
 //! server, so asking whether a session holds anything costs nothing. A server older than the
-//! worktree routes has nothing to release or end: what this machine recorded is forgotten.
+//! worktree routes has nothing to release: what this machine recorded is forgotten. Ending a
+//! session is the gateway's call; the pool then forgets this machine's records of its holds.
 
 use std::cell::{OnceCell, RefCell};
 use std::io;
@@ -229,7 +230,7 @@ fn remote_error(error: &RemoteError) -> PortError {
     }
 }
 
-/// Whether a failed release or end leaves nothing for the server to let go of: the hold was gone
+/// Whether a failed release leaves nothing for the server to let go of: the hold was gone
 /// already, or the server keeps no worktree holds at all.
 fn nothing_to_let_go(error: &ClientError) -> bool {
     matches!(error, ClientError::ServerTooOld { .. }) || error.code() == "worktree_not_held"
@@ -320,22 +321,15 @@ impl WorktreePool for ClientWorktreePool {
         Ok(())
     }
 
-    fn end_session(&self, session: &SessionRef) -> Result<(), PortError> {
+    fn forget_session(&self, session: &SessionRef) {
         let Some(id) = self.known_session(session) else {
-            return Ok(());
+            return;
         };
-        let client = self.client()?;
-        match self.runtime()?.block_on(client.end_session(id)) {
-            Ok(_) => {}
-            Err(error) if nothing_to_let_go(&error) => {}
-            Err(error) => return Err(views::port_error(&error)),
-        }
         for (name, record) in self.pool.files().holds() {
             if record.session_id == id {
                 self.forget(&name, id, Afterwards::Free);
             }
         }
-        Ok(())
     }
 
     fn records(&self, session: &SessionRef) -> Vec<WorktreeRecord> {

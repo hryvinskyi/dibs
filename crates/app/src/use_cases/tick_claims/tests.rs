@@ -580,6 +580,101 @@ async fn a_debt_claims_idle_area_moves_to_the_feature_claim_waiting_for_it() {
     );
 }
 
+/// Bob's work on `item` on the branch `bob/42-x`, recorded from his checkout, and the footprint of
+/// that branch an integration reports, with `paths` as the paths it changes.
+async fn footprint_of(env: &Env, item: ItemId, paths: &[&str]) {
+    use crate::use_cases::testing::in_checkout;
+    use crate::use_cases::{FootprintInput, FootprintRecorded, Heartbeat, RecordFootprint};
+    use dibs_domain::paths::RelPath;
+    use dibs_domain::radar::{BranchName, CommitSha, FootprintBase};
+
+    Heartbeat::new(&env.deps)
+        .execute(
+            &env.bob.actor,
+            env.bob.session,
+            Some(&in_checkout('a', Some("bob/42-x"))),
+        )
+        .await
+        .unwrap();
+    let recorded = RecordFootprint::new(&env.deps)
+        .execute(
+            &env.importer,
+            FootprintInput {
+                item,
+                repo: "default".to_owned(),
+                branch: BranchName::parse("bob/42-x").unwrap(),
+                base: FootprintBase {
+                    branch: BranchName::parse("main").unwrap(),
+                    sha: CommitSha::parse("abcd").unwrap(),
+                    at: START,
+                },
+                paths: paths
+                    .iter()
+                    .map(|text| RelPath::parse(text).unwrap())
+                    .collect(),
+                truncated: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(recorded, FootprintRecorded::Stored { changed: true });
+}
+
+#[tokio::test]
+async fn an_idle_area_a_path_of_the_footprint_is_in_is_kept_and_its_clock_starts_again() {
+    let env = Env::new().await;
+    let item = env.item("gh:acme/widgets#42").await;
+    claim(&env, &env.bob, item, &["billing", "search"], None).await;
+    footprint_of(&env, item, &["packages/billing/rates.rs"]).await;
+    live_for(&env, 7, &[&env.bob]).await;
+    env.advance(Duration::minutes(1));
+    let before = stored(&env, item).await.unwrap();
+
+    let swept = sweep(&env).await;
+
+    assert_eq!(swept.returned, 1, "search went back");
+    let kept = stored(&env, item).await.unwrap();
+    assert_eq!(held(&kept), ["default:billing"]);
+    assert_eq!(
+        kept.areas.clock(&area("default:billing")),
+        Some(env.now()),
+        "the footprint keeps billing, so its clock starts again at the sweep"
+    );
+    assert_eq!(
+        kept.last_seen, before.last_seen,
+        "a footprint found at the sweep is no sign of the claim's work"
+    );
+
+    env.advance(Duration::seconds(30));
+    let quiet = env.events().await.len();
+    assert_eq!(sweep(&env).await.returned, 0);
+    assert_eq!(
+        stored(&env, item).await.unwrap(),
+        kept,
+        "no area is a candidate any more, so the next sweep leaves the claim as it is"
+    );
+    assert_eq!(env.events().await.len(), quiet);
+}
+
+#[tokio::test]
+async fn a_sweep_that_only_finds_areas_the_footprint_keeps_still_restarts_their_clocks() {
+    let env = Env::new().await;
+    let item = env.item("gh:acme/widgets#42").await;
+    claim(&env, &env.bob, item, &["billing"], None).await;
+    footprint_of(&env, item, &["packages/billing/rates.rs"]).await;
+    live_for(&env, 7, &[&env.bob]).await;
+    env.advance(Duration::minutes(1));
+    let quiet = env.events().await.len();
+
+    let swept = sweep(&env).await;
+
+    assert_eq!((swept.released, swept.returned), (0, 0));
+    let kept = stored(&env, item).await.unwrap();
+    assert_eq!(held(&kept), ["default:billing"]);
+    assert_eq!(kept.areas.clock(&area("default:billing")), Some(env.now()));
+    assert_eq!(env.events().await.len(), quiet, "nothing to record");
+}
+
 #[tokio::test]
 async fn a_stale_claim_keeps_its_areas_for_the_release_rule() {
     let env = Env::with_settings(

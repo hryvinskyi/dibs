@@ -728,12 +728,10 @@ pub trait WorktreePool {
     /// [`PortError`] when the server gave no decision.
     fn release(&self, name: &WorktreeName, afterwards: Afterwards) -> Result<(), PortError>;
 
-    /// Ends `session` on the server, which frees every hold of it and of its agents, and forgets
-    /// this machine's records of them.
-    ///
-    /// # Errors
-    /// [`PortError`] when the server gave no decision.
-    fn end_session(&self, session: &SessionRef) -> Result<(), PortError>;
+    /// Forgets this machine's records of the holds of `session` and of its agents, once the server
+    /// ended the session and so freed them ([`CoordinationGateway::end_session`]). Read and
+    /// written on this machine alone; what cannot be written is lost.
+    fn forget_session(&self, session: &SessionRef);
 
     /// Every hold of the pool this machine keeps a record of, each saying whether `session` or one
     /// of its agents holds it. Read from this machine alone.
@@ -836,11 +834,14 @@ pub trait Tallies {
     fn switched_off(&self, day: ReportDay, session: &SessionRef);
 }
 
-/// The edits this machine's hooks let through without asking the server, kept until a heartbeat
-/// the server accepted carries them, so the claims they were made under stay live: the areas of
-/// edits answered from what this machine knew the member holds, and whether an edit was made in a
-/// path no area governs. Nothing else of an edit is kept. Recording waits for no lock, and a record
-/// that cannot be written is skipped, which is not the caller's concern.
+/// The edits this machine's hooks let through without a decision of the server, kept until a
+/// heartbeat the server accepted carries them, so the claims they were made under stay live: the
+/// areas of edits answered from what this machine knew the member holds or let through when the
+/// server gave no decision on them — an area no claim holds as well as one the member holds — and
+/// whether an edit was made in a path no area contains. Which claim each of them keeps live is the
+/// server's to decide. Nothing else of an edit is kept.
+/// Recording waits for no lock, and a record that cannot be written is skipped, which is not the
+/// caller's concern.
 pub trait UncheckedEdits {
     /// Records edits let through in `areas`, and an edit outside every area when `outside`.
     fn record(&self, areas: &[QualifiedArea], outside: bool);
@@ -952,6 +953,14 @@ pub trait CoordinationGateway {
         branch: Option<&BranchName>,
         paths: &[RelPath],
     ) -> Result<Vec<PathAnswer>, PortError>;
+
+    /// Ends `session` on the server: it no longer counts as at work, and every worktree hold of it
+    /// and of its agents is freed. A session this machine never registered, one the server does
+    /// not know, and a server older than the call have nothing to end, which is no failure.
+    ///
+    /// # Errors
+    /// [`PortError`] when the server gave no decision.
+    fn end_session(&self, session: &SessionRef) -> Result<(), PortError>;
 }
 
 /// What each session of this machine was shown. Reading and writing one session's ledger happens

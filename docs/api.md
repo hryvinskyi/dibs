@@ -301,14 +301,17 @@ claim's work first keeps it.
 
 Each area a claim holds keeps a clock: when the claim declared it (taking or renewing the claim with it named, or having
 it handed over) or gained it by an edit, moved by every later declaration of it and by every edit attributed to the
-claim in it, whether the server checked the edit or a heartbeat reported it. A renewal that names an area restarts its
+claim in it, whether the server checked the edit or a heartbeat reported it, and restarted by a sweep that finds the
+claim's footprint keeping it (below). A renewal that names an area restarts its
 clock; one that names none keeps the clocks the claim had. A take-over is a new claim, so every area it keeps from the
 previous one starts its clock at the take-over. Areas held when the server was upgraded to keep clocks start theirs at
 the upgrade. The same sweep **gives back** an area of a live claim (worked on and seen within `stale_after`, or in
 review) whose clock is older than the project's `idle_area_after` (7 days unless the settings say otherwise) and that no
 path of the claim's stored footprints falls in (a path falls in the first area of its repository, in declaration
 order, that contains it); an area of a repository whose footprint is `truncated` stays, since a path the forge left out
-may fall in it. The claim holds the area no more, the grants its holder gave in it end, an area another claim waits for
+may fall in it. Such an area kept by the footprint has its clock restarted by the sweep, without the claim counting as
+seen, so the footprint is not read for it again before `idle_area_after` has passed once more. An area given back: the
+claim holds the area no more, the grants its holder gave in it end, an area another claim waits for
 moves to that claim, an event `areas_returned` is appended, and its holder is told in the claim's conversation, in a
 `normal` message from dibs: "Areas given back: dibs gave back api:billing of your claim on work item … : no path of its
 branch is in them and nothing was edited there under the claim for 7d. To take them back while they are free, declare
@@ -318,11 +321,16 @@ yet, edit in it or name it when claiming again.
 
 The guard answers most edits from what its machine knows (an area the member is known to hold, from a status or an
 edit check under 30 seconds old) and never asks about a path no area governs, so the hooks record each edit they let
-through that way and the next heartbeat reports it in `edits`: `areas`, at most 200, each `repo:area`, the areas of
-edits answered from that knowledge since the last heartbeat that carried them, and `outside`, whether an edit was made
-in a path no area governs. Edits are attributed as an edit check attributes them: every live claim of the caller that
-holds a reported area, declared or gained, is seen now, wherever it was taken, and an edit outside every area makes the
-caller's target claim — of the live claims they work on, the one most recently claimed or renewed, else of those in
+through that way, and each edit they let through when the server gave no decision on it (unreachable, or no answer), and
+the next heartbeat reports it in `edits`: `areas`, at most 200, each `repo:area`, the areas of those edits since the
+last heartbeat that carried them, and `outside`, whether such an edit was made in a path no area governs. Edits are
+attributed as an edit check attributes them, each area to one claim: of the caller's live claims, wherever they were
+taken, the one most recently claimed or renewed among those that declared the area, else among their wide claims that
+name it, else among those that only gained it, is seen now, and that area's clock moves; the caller's other claims
+holding the area are not. An area another member's live claim holds refreshes nothing. An area no live claim holds makes
+the caller's target claim, among those that do not wait for it, seen now; no clock moves and no area is given, since
+only an edit check gives a claim an area. An edit outside every area makes
+the caller's target claim — of the live claims they work on, the one most recently claimed or renewed, else of those in
 review — seen now. A report of no edit refreshes no claim, and a heartbeat without `edits`, as a client released before
 this field sends, keeps its session seen and refreshes no claim either: its member's claims stay live only by the edit
 checks that reach the server, pushes and renewals until they update their client. More than 200 areas, or one that is
@@ -394,7 +402,8 @@ machine's id is shown to nobody: not on the log, not in the figures.
 `POST /v1/sessions/{id}/end` takes no body: the caller's session `id` ended, and every worktree hold it, or one of its
 agents, has in any of the caller's pools ends with it (`worktree_released`, cause `session_ended`). The checkouts it
 reported are forgotten, so it no longer keeps another session of the member in the same checkout from recording its
-branch. The session stays registered. Answers `{ "released": [own hold, …] }` (see [Worktrees](#worktrees)), ordered
+branch. The session stays registered, marked ended: it no longer counts as at work for `no_session_at_work`, nor holds
+a message about its claim for itself, until its label is registered again or it sends a heartbeat. Answers `{ "released": [own hold, …] }` (see [Worktrees](#worktrees)), ordered
 by pool and worktree, empty when it held nothing, so it may be sent again. `not_found` for a session that is not the caller's.
 
 ### Items
@@ -596,7 +605,9 @@ claim the wait was on lets go and another debt claim still holds the area, the w
 afresh. A wait also ends without a handover, appending `wait_withdrawn` with its `reason`, and the debt holder asked is
 told in the request's conversation, in a `normal` message, that "The request for default:billing no longer stands":
 `stale` (the waiting claim went stale), `narrowed` (its holder gave the area up), `ended` (the waiting claim ended, or a
-takeover made it debt work) or `holder_changed` (a claim a feature does not take from holds the area now).
+takeover made it debt work), `holder_changed` (a claim a feature does not take from holds the area now), `handed_on`
+(the waiting claim's item moved into a tracker state the project lists in `free_areas_at`, so dibs gave its areas up)
+or `returned` (dibs gave the waiting claim's idle areas back).
 
 A request that waited the project's `yield_escalates_after` (30 minutes unless the settings say otherwise) without the
 area being handed over is escalated by the sweep, once per pair of claims, to the project's arbiters and the debt
@@ -655,7 +666,8 @@ named), `invalid_request` for a missing or invalid `wide.reason` or a missing `w
 optional: without it the new claim keeps the previous claim's kind), takes over another member's
 stale claim and tells them the reason in the previous claim's conversation: a `high` message from dibs, asking for no
 acknowledgement, that names the new holder, how to write to them (`dibs send <handle>`), and quotes the reason;
-`thread_id` is that conversation. Answers
+`thread_id` is the previous holder's claim conversation, addressed to them alone: only they can read it, and the new
+holder is not told to look there (the field stays for older clients). Answers
 `{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31, "item": item ref, "announced": [] }`. Refusals: `not_stale` (the claim is
 live), `own_claim`, `nothing_to_take`, `area_held`, `wide_overlap`.
 
@@ -715,9 +727,13 @@ integration watching the forge calls the `import` routes.
 request on the caller's live
 claim of the item. A pull request is written `<owner>/<name>#<number>` and compared in one form (lowercased, no leading
 zeros); in a project that lists repositories it must belong to one of them, matched by the path of its `remote`. The
-claim is **in review**: it keeps its areas, so nobody else edits the files under review (their edits answer `held_by`
-with `reason: "in_review"` and the pull requests); it never goes stale while it is in review, so it needs no sign of
-work and cannot be taken over; and its holder may go on editing its branch for review comments. A claim may record several
+claim is **in review**: it never goes stale while it is in review and is never released while its pull request is open,
+so it needs no sign of work and cannot be taken over; and its holder may go on editing its branch for review comments. It
+keeps its areas, so nobody else edits the files under review (their edits answer `held_by` with `reason: "in_review"`
+and the pull requests), unless one of two rules gives them up: its item's tracker moving into a state the project lists
+in `free_areas_at` (the claim gives up every area and keeps the item), or the sweep giving back an area no path of the
+claim's stored footprints falls in and that saw no edit of the claim's work for `idle_area_after`. Declaring the area
+again takes it back while it is free. A claim may record several
 pull requests — an API change and its client in two repositories, or a series — and `more: true` says more pull
 requests of the item follow the ones recorded: the latest request decides it. Recording one the claim has changes at most
 `more`. `head` (optional; `bob/42-refunds` or `refs/heads/bob/42-refunds`) is the pull request's head branch: it is
@@ -1042,7 +1058,8 @@ naming both, or neither, is `invalid_request`. `item` (optional) is the work ite
 label it is signed with. `importance` is `normal` (the default), `high` or `urgent`; `ack_required` (default `false`)
 asks each recipient to acknowledge the message. Answers `201 { "thread": thread, "message": message,
 "no_session_at_work": [{ "member": "alice", "holds_live_claim": true }, …] }`: `no_session_at_work` lists, ordered by
-handle, the members `to` names none of whose sessions was registered or sent a heartbeat within the last hour, each with
+handle, the members `to` names none of whose open sessions was registered or sent a heartbeat within the last hour (an
+ended session does not count), each with
 whether they hold a live claim; it is empty for a conversation addressed to the whole project. Heartbeats come from the
 syncs a host's hooks start, so a session left open and idle counts as unseen after an hour: the message is sent all the
 same and waits for their next session. A client reading a server that leaves the field out lists nobody. Refusals:
@@ -1404,7 +1421,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `yield_requested` | `area`, `from` (the debt claim's item), `to` (the item of the feature claim that waits for it) |
 | `area_handed_over` | `area`, `from` (the debt claim's item), `to` (the item of the feature claim that holds it now) |
 | `claim_narrowed` | `item`, `member`, `areas` (what the claim no longer holds or waits for) |
-| `wait_withdrawn` | `area`, `from` (the debt claim's item), `to` (the waiting claim's item), `reason` (`stale`, `narrowed`, `ended`, `holder_changed`) |
+| `wait_withdrawn` | `area`, `from` (the debt claim's item), `to` (the waiting claim's item), `reason` (`stale`, `narrowed`, `ended`, `holder_changed`, `handed_on`, `returned`) |
 | `yield_unescalated` | `area`, `from`, `to`, `reason` (`no_arbiters`) |
 | `hook_reported` | `member`, `host`, `day`, `counts`, `durations` (the day's report as its machine sent it) |
 | `feedback_given` | `member`, `about` (`{"kind": "false_refusal", "refusal", "tally"}` or `{"kind": "conflict", "repo", "area"}`), `reason` |

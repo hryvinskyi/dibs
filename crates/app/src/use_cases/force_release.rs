@@ -102,15 +102,19 @@ impl ForceRelease {
 }
 
 /// What the holder of a claim an admin ended is told: who ended it — the admin by handle, or the
-/// server's operator when no admin is named — that the item is open again, and that they claim it
-/// again if they still work on it.
+/// server's operator when no admin is named — that the item is open again, that they claim it
+/// again if they still work on it, and, when an admin ended it, how to write to that admin, since a
+/// reply in the claim's conversation reaches nobody but its holder.
 fn force_released(by: Option<&Handle>, item: &ItemName) -> String {
     let who = by.map_or_else(
         || "the operator of this server".to_owned(),
         |admin| format!("{admin}, an admin,"),
     );
+    let write = by.map_or_else(String::new, |admin| {
+        format!(" To write to {admin}: dibs send {admin}.")
+    });
     format!(
-        "Released: {who} ended your claim on work item {label} \"{title}\". The item is open again and its areas are free. If you still work on it, claim it again (dibs claim {key}).",
+        "Released: {who} ended your claim on work item {label} \"{title}\". The item is open again and its areas are free. If you still work on it, claim it again (dibs claim {key}).{write}",
         label = item.label(),
         title = item.title,
         key = item.key(),
@@ -215,7 +219,7 @@ mod tests {
         let alice = Handle::parse("alice").unwrap();
         assert_eq!(
             force_released(Some(&alice), &named(Some("gh:acme/widgets#42"))),
-            "Released: alice, an admin, ended your claim on work item gh:acme/widgets#42 \"Refund rounding\". The item is open again and its areas are free. If you still work on it, claim it again (dibs claim gh:acme/widgets#42)."
+            "Released: alice, an admin, ended your claim on work item gh:acme/widgets#42 \"Refund rounding\". The item is open again and its areas are free. If you still work on it, claim it again (dibs claim gh:acme/widgets#42). To write to alice: dibs send alice."
         );
         let by_operator = force_released(None, &named(None));
         assert!(
@@ -225,5 +229,9 @@ mod tests {
             "{by_operator}"
         );
         assert!(by_operator.ends_with("(dibs claim 7)."), "{by_operator}");
+        assert!(
+            !by_operator.contains("dibs send"),
+            "the operator is no member to write to: {by_operator}"
+        );
     }
 }

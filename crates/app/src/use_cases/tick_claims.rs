@@ -10,7 +10,9 @@ use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
 
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::claim::{Claim, FootprintPaths, decide_return, due_for_release, idle_areas};
+use dibs_domain::claim::{
+    Claim, FootprintPaths, IdleAreas, decide_return, due_for_release, idle_areas,
+};
 use dibs_domain::event::{AreasReturned, EventKind, ReleasedStale};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, ProjectId};
@@ -56,12 +58,16 @@ pub struct ClaimSweep {
 /// the grants its holder gave in them end, an area another claim waited for moves to that claim,
 /// and its holder is told in the claim's conversation. Giving areas back is no sign of the claim's
 /// work, so when the claim was last seen stays as it was. Only a claim with an area whose clock is
-/// past the delay has its footprints read.
+/// past the delay has its footprints read. An area past the delay that its footprints keep — a
+/// path of them in it, or its repository's footprint truncated — has its clock started again at
+/// the sweep, in the same transaction, so that it is not read again before the delay has passed
+/// once more; that too leaves when the claim was last seen as it was.
 ///
 /// Each project is swept in a transaction of its own, and the claims are read inside it, so a
 /// request that showed a claim's work before the sweep took the project keeps that claim and its
-/// areas. A project with no claim due and no area idle is left without a write. The service runs
-/// it on a schedule; it acts for nobody.
+/// areas. A project with no claim due and no area idle is left without a write; an idle area a
+/// footprint keeps has its clock restarted, which is written. The service runs it on a schedule;
+/// it acts for nobody.
 pub struct TickClaims {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -212,18 +218,22 @@ impl TickClaims {
         for item in candidates {
             // Releasing a claim or giving areas back may hand areas to another, so each is read
             // again before it is decided.
-            let Some(claim) = work.claim(project, item).await? else {
+            let Some(mut claim) = work.claim(project, item).await? else {
                 continue;
             };
             let repos = footprints
                 .iter()
                 .filter(|footprint| footprint.item == item)
                 .map(|footprint| &footprint.repo);
-            let idle = idle_of(work, &claim, repos, settings, now).await?;
-            if idle.is_empty() {
+            let found = idle_of(work, &claim, repos, settings, now).await?;
+            found.restart_kept(&mut claim, now);
+            if found.idle.is_empty() {
+                if !found.kept.is_empty() {
+                    work.save_claim(project, &claim).await?;
+                }
                 continue;
             }
-            let narrowed = decide_return(&claim, &idle);
+            let narrowed = decide_return(&claim, &found.idle);
             let event = EventKind::AreasReturned(AreasReturned {
                 item,
                 member: claim.member,
@@ -253,17 +263,17 @@ struct Swept {
     returned: usize,
 }
 
-/// The claim's idle areas at `now`: none without a candidate, else decided on its stored
-/// footprints, those of `repos`, read with their paths only then.
+/// What the idle rule finds in the claim at `now`: nothing without a candidate, else decided on
+/// its stored footprints, those of `repos`, read with their paths only then.
 async fn idle_of(
     work: &mut Work,
     claim: &Claim,
     repos: impl Iterator<Item = &RepoId>,
     settings: &ProjectSettings,
     now: OffsetDateTime,
-) -> Result<BTreeSet<QualifiedArea>, AppError> {
+) -> Result<IdleAreas, AppError> {
     if claim.idle_candidates(now, settings).is_empty() {
-        return Ok(BTreeSet::new());
+        return Ok(IdleAreas::default());
     }
     let project = work.project_id();
     let mut stored = Vec::new();

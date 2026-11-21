@@ -20,7 +20,7 @@ use dibs_domain::worktree::HolderKind;
 use crate::error::ApiError;
 use crate::http::AppState;
 use crate::ui::assets::BUNDLE_HASH;
-use crate::ui::inbox::summary::{unread_from_people, waiting_grants};
+use crate::ui::inbox::summary::{count_unread_among_people, waiting_grants};
 use crate::ui::links::{LinkContext, LinkedText, PersonView, TicketView, places};
 use crate::ui::live::latest_event;
 use crate::ui::moments::{Ago, Moment, Span, moment, span};
@@ -388,11 +388,13 @@ pub async fn load(
 }
 
 impl RailView {
-    /// The rail of `screen`, with the slot `slot` open.
+    /// The rail of `screen`, with the slot `slot` open. Inbox counts what its People tab counts:
+    /// the conversations from people holding a message the viewer has not read, whoever wrote it.
     fn of(loaded: &Loaded, links: &LinkContext, screen: Screen, slot: Option<&str>) -> Self {
         let status = &loaded.status;
         let held_areas: BTreeSet<_> = status.holds.iter().map(|hold| &hold.area).collect();
-        let unread = unread_from_people(&loaded.unread.threads, &waiting_grants(&loaded.unread));
+        let unread =
+            count_unread_among_people(&loaded.unread.threads, &waiting_grants(&loaded.unread));
         let entry = |shown: Screen, count: Option<NavCount>| NavEntry {
             screen: shown,
             current: shown == screen,

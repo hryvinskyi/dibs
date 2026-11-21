@@ -24,9 +24,7 @@ use dibs_domain::escalation::{EscalationReason, EscalationSubject, Parties};
 use dibs_domain::event::{
     AreaPassing, EventKind, UnescalatedReason, WaitWithdrawn, YieldUnescalated,
 };
-use dibs_domain::handover::{
-    AreaMove, WithdrawReason, Withdrawal, YieldPair, escalations_due, settle_pending,
-};
+use dibs_domain::handover::{AreaMove, Withdrawal, YieldPair, escalations_due, settle_pending};
 use dibs_domain::ids::{ItemId, MemberId, MessageId, ThreadId};
 use dibs_domain::message::{Author, Importance, Recipients};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
@@ -118,7 +116,7 @@ impl Handovers<'_> {
         for handed in &settlement.handed_over {
             work.record(self.now, EventKind::AreaHandedOver(passing(handed)))
                 .await?;
-            self.tell_handed_over(work, handed).await?;
+            self.tell_handed_over(work, &names, &claims, handed).await?;
         }
         if !settlement.handed_over.is_empty() {
             end_orphaned_grants(work, self.now).await?;
@@ -337,16 +335,7 @@ impl Handovers<'_> {
             Some(member) => names.handle(member)?.to_string(),
             None => "its holder".to_owned(),
         };
-        let why = match withdrawal.reason {
-            WithdrawReason::Stale => format!("{waiter}'s claim on {} went stale", to.label()),
-            WithdrawReason::Narrowed => {
-                format!("{waiter} gave it up on their claim on {}", to.label())
-            }
-            WithdrawReason::HolderChanged => {
-                "another member's claim that a feature does not take from holds it now".to_owned()
-            }
-            WithdrawReason::Ended => format!("{waiter}'s claim on {} ended", to.label()),
-        };
+        let why = withdrawal.reason.why(&waiter, &to.label());
         let lead = format!(
             "The request for {area} no longer stands: {why}. Nothing more is asked of you for it.",
             area = moved.area,
@@ -363,8 +352,17 @@ impl Handovers<'_> {
     }
 
     /// Tells the holder of the claim an area was handed over to, in that claim's conversation, that
-    /// it is theirs now.
-    async fn tell_handed_over(&self, work: &mut Work, handed: &AreaMove) -> Result<(), AppError> {
+    /// it is theirs now, naming the member whose debt claim held it and, while that member is still
+    /// in the project, how to write to them, since a reply in the claim's conversation reaches
+    /// nobody but its holder; a removed member receives no message, so none is offered. `claims`
+    /// are the claims as they stood before the settlement.
+    async fn tell_handed_over(
+        &self,
+        work: &mut Work,
+        names: &Names,
+        claims: &[Claim],
+        handed: &AreaMove,
+    ) -> Result<(), AppError> {
         let project = work.project_id();
         let Some(receiving) = work.claim(project, handed.to).await? else {
             return Ok(());
@@ -372,8 +370,23 @@ impl Handovers<'_> {
         let to = self.name(work, handed.to).await?;
         let from = self.name(work, handed.from).await?;
         let area = &handed.area;
+        let holder = match former_holder(work, claims, handed, receiving.member).await? {
+            Some(member) => Some((names.handle(member)?, is_present(work, member).await?)),
+            None => None,
+        };
+        let (whose, write) = holder.map_or_else(
+            || ("the".to_owned(), String::new()),
+            |(holder, present)| {
+                let write = if present {
+                    format!(" To write to {holder}: dibs send {holder}.")
+                } else {
+                    String::new()
+                };
+                (format!("{holder}'s"), write)
+            },
+        );
         let lead = format!(
-            "{area} is yours now: no other member's claim holds it any more, so it moved from the debt claim on {from_label} to your claim on work item {to_label} \"{title}\". Rebase onto the base before you edit there, and read the conversation that asked for it for the files handed over.",
+            "{area} is yours now: no other member's claim holds it any more, so it moved from {whose} debt claim on {from_label} to your claim on work item {to_label} \"{title}\". Rebase onto the base before you edit there, and read the conversation that asked for it for the files handed over.{write}",
             from_label = from.label(),
             to_label = to.label(),
             title = to.title,
@@ -470,6 +483,47 @@ pub(crate) async fn save_taken_over(work: &mut Work, claim: &Claim) -> Result<()
         },
         other => Ok(other?),
     }
+}
+
+/// The member whose debt claim held the area handed over, other than `receiver`: the holder of the
+/// claim on its item when it is still among `claims`, else the member the request for it was
+/// addressed to, when that conversation still exists — so that a debt claim that ended is named
+/// too. `None` when neither tells.
+async fn former_holder(
+    work: &mut Work,
+    claims: &[Claim],
+    handed: &AreaMove,
+    receiver: MemberId,
+) -> Result<Option<MemberId>, AppError> {
+    if let Some(member) = member_of(claims, handed.from).filter(|member| *member != receiver) {
+        return Ok(Some(member));
+    }
+    let request = claims
+        .iter()
+        .find(|claim| claim.item == handed.to)
+        .and_then(|claim| claim.pending.get(&handed.area))
+        .and_then(|pending| pending.request);
+    let Some(thread) = request else {
+        return Ok(None);
+    };
+    let project = work.project_id();
+    Ok(work
+        .thread(project, thread)
+        .await?
+        .and_then(|thread| match thread.recipients {
+            Recipients::Members(members) => members.into_iter().find(|member| *member != receiver),
+            Recipients::Project => None,
+        }))
+}
+
+/// Whether `member` is still in the project, as their record says: a removed member receives no
+/// message.
+async fn is_present(work: &mut Work, member: MemberId) -> Result<bool, AppError> {
+    let project = work.project_id();
+    Ok(work
+        .member(project, member)
+        .await?
+        .is_some_and(|record| record.is_present()))
 }
 
 /// The member of the claim on `item`, when there is one.

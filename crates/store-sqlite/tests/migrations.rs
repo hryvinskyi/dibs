@@ -1653,4 +1653,65 @@ mod migrations {
             );
         }
     }
+
+    #[tokio::test]
+    async fn every_session_of_before_is_open_and_an_ending_is_kept() {
+        use dibs_domain::ids::SessionId;
+        use time::OffsetDateTime;
+
+        let (_dir, path) = database_at(16, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let project = ProjectId(1);
+        let mut tx = store.begin().await.unwrap();
+        let mut laptop = tx.session(project, SessionId(31)).await.unwrap().unwrap();
+        let desktop = tx.session(project, SessionId(32)).await.unwrap().unwrap();
+        assert!(
+            laptop.is_open() && desktop.is_open(),
+            "{laptop:?} {desktop:?}"
+        );
+        assert_eq!(laptop.label.as_str(), "laptop/mcp", "the row is kept");
+        assert_eq!(
+            laptop.last_seen,
+            OffsetDateTime::UNIX_EPOCH + time::Duration::nanoseconds(5)
+        );
+        assert_eq!(
+            tx.members_seen_since(project, OffsetDateTime::UNIX_EPOCH)
+                .await
+                .unwrap(),
+            [MemberId(11), MemberId(12)].into(),
+            "both open sessions count as seen"
+        );
+        laptop.end(OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(9));
+        tx.save_session(project, &laptop).await.unwrap();
+        tx.commit().await.unwrap();
+        drop(store);
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.session(project, SessionId(31)).await.unwrap(),
+            Some(laptop),
+            "read back from the file"
+        );
+        assert_eq!(
+            tx.members_seen_since(project, OffsetDateTime::UNIX_EPOCH)
+                .await
+                .unwrap(),
+            [MemberId(12)].into()
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("UPDATE sessions SET ended_at = 'soon' WHERE id = 31")
+                .execute(&pool)
+                .await
+                .is_err(),
+            "the column keeps to times"
+        );
+    }
 }
