@@ -1,6 +1,6 @@
 //! Conversations through the command line.
 
-use crate::support::{Setup, json, status, text};
+use crate::support::{API_REMOTE, Setup, json, status, text};
 
 #[test]
 fn a_message_is_sent_found_in_the_inbox_read_and_marked() {
@@ -225,4 +225,58 @@ fn an_urgent_message_that_asks_is_acked_once_from_the_command_line() {
         .output()
         .unwrap();
     assert_eq!(status(&unknown), 2);
+}
+
+#[test]
+fn a_send_says_who_has_no_session_at_work_and_messages_are_marked_read_together() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    assert_eq!(
+        status(&run(
+            &setup.alice,
+            &["new", "gh:acme/api#1", "--title", "Billing"]
+        )),
+        0
+    );
+    let sent = run(
+        &setup.alice,
+        &[
+            "send",
+            "--to",
+            "bob",
+            "--item",
+            "gh:acme/api#1",
+            "--subject",
+            "Billing rates",
+            "Can you look?",
+        ],
+    );
+    assert_eq!(status(&sent), 0, "{}", text(&sent.stderr));
+    assert!(
+        text(&sent.stdout)
+            .contains("\nbob has no session at work now; it waits for their next session."),
+        "{}",
+        text(&sent.stdout)
+    );
+    assert!(
+        !text(&sent.stdout).contains("ask-grant"),
+        "bob holds no claim: {}",
+        text(&sent.stdout)
+    );
+    run(
+        &setup.alice,
+        &["send", "--to", "bob", "--subject", "Lunch", "Noon?"],
+    );
+
+    let from_dibs = run(&setup.bob, &["read", "--dibs"]);
+    assert_eq!(status(&from_dibs), 0, "{}", text(&from_dibs.stderr));
+    assert_eq!(text(&from_dibs.stdout), "Marked 0 messages read.\n");
+    let by_item = run(&setup.bob, &["read", "--item", "gh:acme/api#1"]);
+    assert_eq!(status(&by_item), 0, "{}", text(&by_item.stderr));
+    assert_eq!(text(&by_item.stdout), "Marked 1 messages read.\n");
+    let inbox = run(&setup.bob, &["inbox", "--unread", "--json"]);
+    assert_eq!(json(&inbox)["threads"].as_array().unwrap().len(), 1);
+    let both = run(&setup.bob, &["read", "--dibs", "--item", "gh:acme/api#1"]);
+    assert_eq!(status(&both), 2, "{}", text(&both.stderr));
 }

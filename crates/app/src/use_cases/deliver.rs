@@ -1,4 +1,4 @@
-//! Claiming the delivery of a pressing message or a slot offer to the caller's agent: the first of
+//! Claiming the delivery of a message or a slot offer to the caller's agent: the first of
 //! the caller's sessions to claim a subject delivers it, and every later claim is refused, so a
 //! member hears of it once however many sessions they run.
 

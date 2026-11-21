@@ -149,6 +149,7 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/threads/{id}` | people | A conversation with its messages. |
 | `POST /v1/threads/{id}/messages` | people | Post a message. |
 | `POST /v1/threads/{id}/read` | people | Mark a conversation read. |
+| `POST /v1/threads/read` | people | Mark read together every message dibs wrote, or every message about a work item. |
 | `GET /v1/inbox` | people | Conversations waiting for you, the messages awaiting your acknowledgement or still to be delivered to you, the slots offered to you, and the grants asked of you that wait for your decision. |
 | `POST /v1/messages/{id}/ack` | people | Acknowledge a message you were sent. |
 | `POST /v1/escalations` | people | Ask the project's arbiters to settle a dispute about an item, a slot or a conversation. |
@@ -979,7 +980,12 @@ Refusals: `grantee_has_no_claim` (`409`) when the caller holds no live claim on 
 `to` names members by handle; with `"to_project": true` instead the conversation goes to every person in the project;
 naming both, or neither, is `invalid_request`. `item` (optional) is the work item it is about, `label` the session
 label it is signed with. `importance` is `normal` (the default), `high` or `urgent`; `ack_required` (default `false`)
-asks each recipient to acknowledge the message. Answers `201 { "thread": thread, "message": message }`. Refusals:
+asks each recipient to acknowledge the message. Answers `201 { "thread": thread, "message": message,
+"no_session_at_work": [{ "member": "alice", "holds_live_claim": true }, …] }`: `no_session_at_work` lists, ordered by
+handle, the members `to` names none of whose sessions was registered or sent a heartbeat within the last hour, each with
+whether they hold a live claim; it is empty for a conversation addressed to the whole project. Heartbeats come from the
+syncs a host's hooks start, so a session left open and idle counts as unseen after an hour: the message is sent all the
+same and waits for their next session. A client reading a server that leaves the field out lists nobody. Refusals:
 `not_found` for an unknown recipient or item, `not_a_recipient` for an integration, `no_recipients` for an empty `to`,
 `invalid_request` for an importance that is none of the three, and `importance_limited` (`429`) for a member's `high`
 or `urgent` message past the project's `raised_per_hour` (ten unless the settings say otherwise) within the last hour:
@@ -1025,8 +1031,12 @@ to the caller now, each theirs if they take it before `until` (what time changed
 With `deliverable=1` the answer also carries `"deliverable": [{ "thread": thread, "message": message, "awaiting_ack":
 true, "ack_grants": false }, …]`, newest first, at most 20 (`ack_grants` is `true` for a wide claim's announcement, whose
 acknowledgement grants edits, so a client never asks an agent to acknowledge it unattended): the messages still to be delivered to the caller's agent while it works — written
-by someone else within the last day, reaching the caller, `high` or `urgent` and unread or awaiting the caller's
-acknowledgement, and not yet delivered to any of the caller's sessions. A wide claim's announcement whose wide claim has
+by someone else within the last day, reaching the caller (in a conversation addressed to members: its author and the
+members it names), not yet delivered to any of the caller's sessions, and either awaiting the caller's acknowledgement
+or unread and one of these: a message a member wrote in a conversation addressed to members, at any importance; any
+other message — what dibs wrote, or a message to the whole project — when `high` or `urgent`. A client lists what it
+claims as the server lists it; clients released before this rule claim only `high` or `urgent` messages and those
+awaiting an acknowledgement, so a member's `normal` message reaches a session only through a client that follows it. A wide claim's announcement whose wide claim has
 ended is in neither `unacked` nor `deliverable`, and is not counted as awaiting an acknowledgement: it asks for nothing
 any more. Every inbox answer also carries `"grant_asks": [{ "thread_id": 31, "message_id": 41, "asker": "bob", "item":
 item ref, "area": "api:billing", "holder_item": item ref, "asked_at": "…" }, …]`, newest first, at most 10: the grants
@@ -1037,12 +1047,22 @@ asker's item, the one a grant is for, and `holder_item` the item of the caller's
 acknowledged carries `acks`, each recipient ordered by handle with when they acknowledged it (`null` while they have
 not). Reading does not mark it read. `POST /v1/threads/{id}/messages`, body
 `{ "label": "laptop/cli", "body": "…", "importance": "normal", "ack_required": false }` (the last two optional, as when
-starting a thread, and held to the same hourly limit), answers `201 { "message": message }`.
-`POST /v1/threads/{id}/read` answers `{ "newly_read": 2 }`.
+starting a thread, and held to the same hourly limit), answers `201 { "message": message, "no_session_at_work": […] }`:
+`no_session_at_work` as when starting a thread, over the members the reply reaches in a conversation addressed to
+members — its author and the members it names, but the caller — and empty in a conversation addressed to the whole
+project. `POST /v1/threads/{id}/read` answers `{ "newly_read": 2 }`.
+
+`POST /v1/threads/read` marks many messages read by the caller at once, never their own nor what dibs wrote in a
+conversation started in their name. Its body names exactly one choice: `{ "from": "dibs" }` marks every message dibs
+wrote in a conversation the caller may read; `{ "item": 12 }` marks every message of every conversation filed under that
+work item that the caller may read. Who may read a conversation is decided as for every other route. It answers
+`{ "newly_read": 5 }`, how many of those messages were unread, and appends no event. Refusals: `invalid_request`
+(`details.field` `from`) for a body naming neither or both, or a `from` other than `dibs`; `not_found` for an unknown
+item.
 
 ### Delivery to a running session
 
-A pressing message or a slot offered to a member reaches their agent between its tool calls (the guard's hooks show it),
+A message the inbox lists under `deliverable` or a slot offered to a member reaches their agent between its tool calls (the guard's hooks show it),
 or is pushed to a session that waits for its person by a tool server that can wake it. A member runs several sessions,
 so each subject is delivered once per member: the first of their sessions to claim it delivers it, and every later
 claim, from any session, is refused. Claiming appends no event.

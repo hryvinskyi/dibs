@@ -10,7 +10,7 @@ use dibs_domain::delivery::DeliverySubject;
 use dibs_domain::grant::AskedGrant;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
-use dibs_domain::message::speaks_for;
+use dibs_domain::message::{Recipients, handed_to_sessions, speaks_for};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::settings::ProjectSettings;
 use dibs_domain::wide::ask_stands;
@@ -301,9 +301,13 @@ impl Inbox {
 }
 
 /// The messages still to be delivered to the actor's agent, newest first: written by someone else
-/// within [`DELIVERABLE_FOR`], reaching the actor, and pressing — raised and unread, or awaiting
-/// their acknowledgement — leaving out every announcement of a wide claim that has ended and every
-/// message already delivered to one of their sessions.
+/// within [`DELIVERABLE_FOR`], reaching the actor, and either awaiting their acknowledgement or
+/// unread and handed to sessions by what it is ([`handed_to_sessions`]: a member's message in a
+/// thread addressed to members at any importance, any other only when raised) — leaving out every
+/// announcement of a wide claim that has ended and every message already delivered to one of their
+/// sessions. Only the threads that may hold such a message are opened: one with unread messages
+/// whose highest importance is raised, or one addressed to members with unread messages a member
+/// wrote, so the notices dibs wrote at normal importance cost nothing however many are unread.
 async fn deliverable(
     work: &mut Work,
     actor: &Actor,
@@ -321,17 +325,18 @@ async fn deliverable(
     }
     let people = people(work).await?;
     let mut claims = None;
-    for summary in readable
-        .iter()
-        .filter(|summary| summary.unread > 0 && summary.importance.is_raised())
-    {
+    for summary in readable.iter().filter(|summary| may_hand_over(summary)) {
         for message in work.messages(project, summary.thread.id).await? {
-            let pressing = message.importance.is_raised()
-                && speaks_for(summary.thread.author, message.author) != Some(actor.member)
+            let handed = handed_to_sessions(
+                &summary.thread.recipients,
+                message.author,
+                message.importance,
+            ) && speaks_for(summary.thread.author, message.author)
+                != Some(actor.member)
                 && recent(&message)
                 && !found.contains_key(&message.id)
                 && reached(&summary.thread, &message, &people).contains(&actor.member);
-            if !pressing {
+            if !handed {
                 continue;
             }
             let read = work
@@ -382,6 +387,16 @@ async fn deliverable(
         });
     }
     Ok(answered)
+}
+
+/// Whether a thread may hold an unread message [`handed_to_sessions`] hands over: unread messages
+/// with a raised one among its messages, or, in a thread addressed to members, unread messages a
+/// member wrote.
+fn may_hand_over(summary: &ThreadSummary) -> bool {
+    let raised = summary.unread > 0 && summary.importance.is_raised();
+    let from_people_to_members = summary.unread_from_people > 0
+        && matches!(summary.thread.recipients, Recipients::Members(_));
+    raised || from_people_to_members
 }
 
 #[cfg(test)]
@@ -665,7 +680,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn what_presses_and_was_not_delivered_is_offered_for_delivery_newest_first() {
+    async fn what_reaches_a_session_and_was_not_delivered_is_offered_for_delivery_newest_first() {
         let env = Env::new().await;
         let to_bob = || Addressees::Members(vec![Handle::parse("bob").unwrap()]);
         let (_, urgent) = send(
@@ -678,7 +693,7 @@ mod tests {
         )
         .await;
         env.advance(time::Duration::minutes(1));
-        send(&env, &env.alice.actor, input(to_bob(), "Lunch")).await;
+        let (_, lunch) = send(&env, &env.alice.actor, input(to_bob(), "Lunch")).await;
         env.advance(time::Duration::minutes(1));
         let (asking_thread, asking) = send(
             &env,
@@ -700,8 +715,8 @@ mod tests {
         .await;
         assert_eq!(
             deliverable_ids(&env, &env.bob.actor).await,
-            [asking, urgent],
-            "an ordinary message asking nothing, and my own, are never delivered"
+            [asking, lunch, urgent],
+            "my own message is never delivered"
         );
         let plain = Inbox::new(&env.deps)
             .execute(&env.bob.actor, InboxQuery::default())
@@ -714,7 +729,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             deliverable_ids(&env, &env.bob.actor).await,
-            [asking, urgent],
+            [asking, lunch, urgent],
             "a message that awaits my acknowledgement presses until I give it"
         );
         crate::use_cases::ClaimDelivery::new(&env.deps)
@@ -727,13 +742,75 @@ mod tests {
             .unwrap();
         assert_eq!(
             deliverable_ids(&env, &env.bob.actor).await,
-            [asking],
+            [asking, lunch],
             "delivered to one of my sessions"
         );
         env.advance(DELIVERABLE_FOR);
         assert!(
             deliverable_ids(&env, &env.bob.actor).await.is_empty(),
             "a day later it is left to the brief"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persons_message_to_named_members_is_delivered_whatever_its_importance() {
+        let env = Env::new().await;
+        let to = |handle: &str| Addressees::Members(vec![Handle::parse(handle).unwrap()]);
+        let (_, to_alice) = send(&env, &env.bob.actor, input(to("alice"), "Rates")).await;
+        env.advance(time::Duration::minutes(1));
+        let (alices_thread, _) = send(&env, &env.alice.actor, input(to("bob"), "Search")).await;
+        let reply = crate::use_cases::PostMessage::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                crate::use_cases::PostMessageInput {
+                    thread: alices_thread,
+                    label: SessionLabel::parse("web").unwrap(),
+                    body: Body::parse("On it.").unwrap(),
+                    importance: Importance::Normal,
+                    ack_required: false,
+                },
+            )
+            .await
+            .unwrap()
+            .message
+            .record
+            .id;
+        env.advance(time::Duration::minutes(1));
+        send(&env, &env.bob.actor, input(Addressees::Project, "Deploy")).await;
+        let (_, raised_to_everyone) = send(
+            &env,
+            &env.bob.actor,
+            StartThreadInput {
+                importance: Importance::High,
+                ..input(Addressees::Project, "Freeze")
+            },
+        )
+        .await;
+        notice_to_alice(&env, 9001).await;
+        assert_eq!(
+            deliverable_ids(&env, &env.alice.actor).await,
+            [raised_to_everyone, reply, to_alice],
+            "a normal message to the whole project and dibs's normal notice wait for the brief; \
+             a reply in a conversation she started reaches her as its author"
+        );
+        crate::use_cases::ClaimDelivery::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                env.alice.session,
+                crate::use_cases::DeliveryAsk::Message(to_alice),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            deliverable_ids(&env, &env.alice.actor).await,
+            [raised_to_everyone, reply],
+            "handed to one of her sessions once"
+        );
+        env.advance(DELIVERABLE_FOR - time::Duration::minutes(1));
+        assert_eq!(
+            deliverable_ids(&env, &env.alice.actor).await,
+            [raised_to_everyone],
+            "older than a day, it is left to the brief"
         );
     }
 

@@ -9,8 +9,8 @@ use dibs_client::Client;
 use dibs_client::api::{
     Acked, ClaimRequest, Claimed, CreatedItem, DropPrRequest, EditCheck, Ended, GrantAsked,
     Granted, Inbox, InboxRequest, Items, MarkedRead, NarrowRequest, Narrowed, PostMessage, Posted,
-    ReadyList, ReviewRequest, Reviewed, StartThread, Started, Status, TakeOverRequest, TakenOver,
-    ThreadDetail,
+    ReadTogether, ReadyList, ReviewRequest, Reviewed, StartThread, Started, Status,
+    TakeOverRequest, TakenOver, ThreadDetail,
 };
 use dibs_client::api::{
     Escalated, EscalationRequest, FeedbackGiven, HoldMode, ReleaseSlotRequest, SlotAnswer,
@@ -37,9 +37,9 @@ use crate::failure::Failure;
 use crate::guard::SystemClock;
 use crate::mcp::inputs::{
     AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget,
-    FeedbackInput, GrantInput, InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, Releasing,
-    ReviewInput, SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput, ThreadInput,
-    WorktreeReleaseInput, WorktreeTakeInput,
+    FeedbackInput, GrantInput, InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, ReadInput,
+    Reading, Releasing, ReviewInput, SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput,
+    ThreadInput, WorktreeReleaseInput, WorktreeTakeInput,
 };
 
 /// The kind of agent the sessions of a tool server that pushes nothing report.
@@ -449,13 +449,21 @@ impl Link {
         self.call(self.connection.client.thread(thread)).await
     }
 
-    /// Marks a conversation read.
+    /// Marks a conversation read, or together every message dibs wrote or every message about a
+    /// work item.
     ///
     /// # Errors
     /// A [`Failure`] for an invalid input, or of the call.
-    pub async fn mark_read(&self, input: ThreadInput) -> Result<MarkedRead, Failure> {
-        let thread = input.id()?;
-        self.call(self.connection.client.mark_read(thread)).await
+    pub async fn mark_read(&self, input: ReadInput) -> Result<MarkedRead, Failure> {
+        let together = match input.reading()? {
+            Reading::Thread(thread) => {
+                return self.call(self.connection.client.mark_read(thread)).await;
+            }
+            Reading::FromDibs => ReadTogether::FromDibs,
+            Reading::Item(key) => ReadTogether::Item(self.resolve(&key).await?),
+        };
+        self.call(self.connection.client.mark_read_together(together))
+            .await
     }
 
     /// Takes a slot, renews the caller's hold, or queues them; with a wait, asks again every 10

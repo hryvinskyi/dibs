@@ -33,9 +33,10 @@ use crate::api::{
     DropPrRequest, EditCheck, EditCheckRequest, Ended, Enrolled, Event, EventPage, GrantAskRequest,
     GrantAsked, GrantRequest, Granted, Heartbeat, Inbox, InboxRequest, Item, ItemDetail,
     ItemFilter, Items, MarkedRead, Me, Member, MessageStatus, NarrowRequest, Narrowed, NewItem,
-    NewMember, OnBranch, PostMessage, Posted, ReadyList, RegisterSession, ReviewRequest, Reviewed,
-    Revoked, Session, SettingsApplied, StartThread, StartThreadBody, Started, Status,
-    TakeOverRequest, TakenOver, ThreadDetail, Threads, TokenRevoked, Versions,
+    NewMember, OnBranch, PostMessage, Posted, ReadTogether, ReadTogetherBody, ReadyList,
+    RegisterSession, ReviewRequest, Reviewed, Revoked, Session, SettingsApplied, StartThread,
+    StartThreadBody, Started, Status, TakeOverRequest, TakenOver, ThreadDetail, Threads,
+    TokenRevoked, Versions,
 };
 use crate::api::{
     BeatWorktreesRequest, ForceReleaseWorktreeRequest, ReleaseWorktreeRequest, SessionEnded,
@@ -665,6 +666,19 @@ impl Client {
         self.send(
             self.request(Method::POST, &format!("/v1/threads/{thread}/read"))
                 .json(&Empty {}),
+        )
+        .await
+    }
+
+    /// `POST /v1/threads/read`: marks read together every message dibs wrote, or every message
+    /// about a work item, that the caller may read.
+    ///
+    /// # Errors
+    /// [`ClientError`].
+    pub async fn mark_read_together(&self, which: ReadTogether) -> Result<MarkedRead, ClientError> {
+        self.send(
+            self.request(Method::POST, "/v1/threads/read")
+                .json(&ReadTogetherBody::of(which)),
         )
         .await
     }

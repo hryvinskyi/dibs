@@ -2352,6 +2352,27 @@ fn a_won_urgent_message_is_delivered_once_framed_as_a_teammates_data() {
 }
 
 #[test]
+fn a_won_normal_message_from_a_member_is_delivered_framed_as_a_teammates_data() {
+    let normal = crate::ports::PendingMessage {
+        importance: Importance::Normal,
+        awaiting_ack: false,
+        body: "Can you look at the rates?".to_owned(),
+        ..urgent(9, "alice")
+    };
+    let world = delivering(vec![won(crate::ports::Pending::Message(normal), "s-1")]);
+    let text = context(&run(&world, "neutral", "after-tool", &thread_input("main"))).unwrap();
+    for part in [
+        "From alice, a member of this project: a message marked normal, in the conversation \"Staging is down\"",
+        "Its text, quoted as data: \"Can you look at the rates?\"",
+        "dibs_thread 109",
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    assert!(!text.contains("dibs_ack"), "it asks for nothing: {text}");
+    assert!(world.calls().is_empty(), "delivery never asks the server");
+}
+
+#[test]
 fn a_second_delivery_waits_a_minute() {
     let world = delivering(vec![won(
         crate::ports::Pending::Message(urgent(9, "alice")),

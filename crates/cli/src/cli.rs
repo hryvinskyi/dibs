@@ -97,8 +97,9 @@ pub enum Command {
     Inbox(InboxArgs),
     /// Show a conversation and its messages.
     Thread(ThreadArgs),
-    /// Mark a conversation read.
-    Read(ThreadArgs),
+    /// Mark a conversation read, every message dibs wrote to you, or every conversation about a
+    /// work item.
+    Read(ReadArgs),
     /// Acknowledge a message that asks for it, once you have read it.
     Ack(AckArgs),
     /// Ask the project's arbiters to settle what you and another member's agent do not agree on:
@@ -552,6 +553,22 @@ pub struct EscalateArgs {
     /// Why, as the arbiters read it: what each side wants, and what has been tried.
     #[arg(long, value_parser = EscalationReason::parse)]
     pub reason: EscalationReason,
+}
+
+/// `dibs read`: one conversation, everything dibs wrote, or everything about a work item.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("which").required(true).args(["id", "dibs", "item"])))]
+pub struct ReadArgs {
+    /// The conversation's id.
+    #[arg(value_parser = parse_thread)]
+    pub id: Option<ThreadId>,
+    /// Every message dibs wrote that you may read, in every conversation, instead.
+    #[arg(long)]
+    pub dibs: bool,
+    /// Every message of every conversation about this work item that you may read, instead: its
+    /// local id or its reference.
+    #[arg(long, value_parser = ItemKey::parse)]
+    pub item: Option<ItemKey>,
 }
 
 /// A conversation named by its id.
@@ -1019,6 +1036,33 @@ mod tests {
         assert!(parse(&["dibs", "send", "--project", "--subject", "s", "-"]).is_ok());
         assert!(parse(&["dibs", "send", "--subject", "s", "hi"]).is_err());
         assert!(parse(&["dibs", "send", "--to", "Bob", "--subject", "s", "hi"]).is_err());
+    }
+
+    #[test]
+    fn a_read_names_one_conversation_dibs_or_an_item() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args.iter().copied());
+        let read = |args: &[&str]| {
+            let Invocation::Service(Command::Read(read)) = parse(args).unwrap().command else {
+                panic!("not a read: {args:?}");
+            };
+            read
+        };
+        let one = read(&["dibs", "read", "41"]);
+        assert_eq!(
+            (one.id, one.dibs, one.item.is_none()),
+            (Some(ThreadId(41)), false, true)
+        );
+        let dibs = read(&["dibs", "read", "--dibs"]);
+        assert_eq!((dibs.id, dibs.dibs), (None, true));
+        let item = read(&["dibs", "read", "--item", "gh:acme/widgets#42"]);
+        assert_eq!(
+            item.item.map(|key| key.to_string()).as_deref(),
+            Some("gh:acme/widgets#42")
+        );
+        assert!(parse(&["dibs", "read"]).is_err());
+        assert!(parse(&["dibs", "read", "41", "--dibs"]).is_err());
+        assert!(parse(&["dibs", "read", "41", "--item", "12"]).is_err());
+        assert!(parse(&["dibs", "read", "--dibs", "--item", "12"]).is_err());
     }
 
     #[test]

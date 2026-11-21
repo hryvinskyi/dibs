@@ -5,11 +5,14 @@ use std::io::Read;
 
 use time::format_description::well_known::Rfc3339;
 
-use dibs_client::api::{EscalationRequest, InboxRequest, Message, Recipients, StartThread};
+use dibs_client::api::{
+    EscalationRequest, InboxRequest, Message, NoSessionAtWork, ReadTogether, Recipients,
+    StartThread,
+};
 use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::message::Body;
 
-use crate::cli::{AckArgs, EscalateArgs, InboxArgs, SendArgs, ThreadArgs};
+use crate::cli::{AckArgs, EscalateArgs, InboxArgs, ReadArgs, SendArgs, ThreadArgs};
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
 use crate::output::{asking_text, author_text, thread_line, unacked_line, unread_line};
@@ -64,14 +67,34 @@ pub async fn send(args: SendArgs, ctx: &Context) -> Result<(), Failure> {
         .await
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&started, || {
-        format!(
+        let mut text = format!(
             "Started conversation #{}: {}.{}",
             started.thread.id,
             started.thread.subject,
             asking_text(&started.message)
-        )
+        );
+        for away in &started.no_session_at_work {
+            text.push('\n');
+            text.push_str(&no_session_text(away));
+        }
+        text
     });
     Ok(())
+}
+
+/// What `dibs send` says of a recipient none of whose sessions was seen within the last hour: the
+/// message waits for their next session, and, when they hold a live claim, how to ask them for an
+/// area rather than wait.
+fn no_session_text(away: &NoSessionAtWork) -> String {
+    let member = &away.member;
+    let mut text = format!("{member} has no session at work now; it waits for their next session.");
+    if away.holds_live_claim {
+        let _ = write!(
+            text,
+            " To get an area {member} holds, ask for a grant: dibs ask-grant <your item> --area <area> (MCP: dibs_ask_grant), which {member}'s agents or the server decide."
+        );
+    }
+    text
 }
 
 /// Asks the project's arbiters to settle a dispute about a work item, a slot or a conversation.
@@ -198,22 +221,44 @@ pub async fn thread(args: ThreadArgs, ctx: &Context) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Marks a conversation read.
+/// Marks a conversation read, or together every message dibs wrote or every message about a work
+/// item, that the caller may read.
 ///
 /// # Errors
 /// The [`Failure`] of the call.
-pub async fn read(args: ThreadArgs, ctx: &Context) -> Result<(), Failure> {
+pub async fn read(args: ReadArgs, ctx: &Context) -> Result<(), Failure> {
     let connection = ctx.connect().await?;
+    if let Some(thread) = args.id {
+        let marked = connection
+            .client
+            .mark_read(thread)
+            .await
+            .map_err(|error| connection.failed(error))?;
+        ctx.printer.show(&marked, || {
+            format!(
+                "Marked #{thread} read ({} new messages).",
+                marked.newly_read
+            )
+        });
+        return Ok(());
+    }
+    let together = match (args.dibs, &args.item) {
+        (true, _) => ReadTogether::FromDibs,
+        (false, Some(key)) => ReadTogether::Item(connection.resolve(key).await?),
+        (false, None) => {
+            return Err(Failure::config(
+                "nothing_to_read",
+                "Name what to mark read: a conversation, --dibs or --item.",
+            ));
+        }
+    };
     let marked = connection
         .client
-        .mark_read(args.id)
+        .mark_read_together(together)
         .await
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&marked, || {
-        format!(
-            "Marked #{} read ({} new messages).",
-            args.id, marked.newly_read
-        )
+        format!("Marked {} messages read.", marked.newly_read)
     });
     Ok(())
 }

@@ -1387,6 +1387,19 @@ pub struct Started {
     pub thread: Thread,
     /// Its first message.
     pub message: Message,
+    /// The members it names none of whose sessions was seen within the last hour: it waits for
+    /// their next session. Empty from a server that does not say.
+    #[serde(default)]
+    pub no_session_at_work: Vec<NoSessionAtWork>,
+}
+
+/// A recipient of what the caller sent none of whose sessions was seen within the last hour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoSessionAtWork {
+    /// The recipient.
+    pub member: Handle,
+    /// Whether they hold a live claim, whose areas may be asked of them with a grant request.
+    pub holds_live_claim: bool,
 }
 
 /// `POST /v1/threads/{id}/messages`.
@@ -1408,6 +1421,10 @@ pub struct PostMessage {
 pub struct Posted {
     /// The message.
     pub message: Message,
+    /// The members it reaches none of whose sessions was seen within the last hour: it waits for
+    /// their next session. Empty from a server that does not say.
+    #[serde(default)]
+    pub no_session_at_work: Vec<NoSessionAtWork>,
 }
 
 /// A conversation with its counts as the caller sees them.
@@ -1656,11 +1673,45 @@ pub struct ThreadDetail {
     pub messages: Vec<Message>,
 }
 
-/// `POST /v1/threads/{id}/read`'s answer.
+/// `POST /v1/threads/{id}/read`'s and `POST /v1/threads/read`'s answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkedRead {
     /// How many messages were unread before.
     pub newly_read: u64,
+}
+
+/// Which messages `POST /v1/threads/read` marks read together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTogether {
+    /// Every message dibs wrote that the caller may read.
+    FromDibs,
+    /// Every message of every conversation filed under this work item that the caller may read.
+    Item(ItemId),
+}
+
+/// The JSON body of [`ReadTogether`].
+#[derive(Serialize)]
+pub(crate) struct ReadTogetherBody {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item: Option<ItemId>,
+}
+
+impl ReadTogetherBody {
+    /// The body naming `which`.
+    pub(crate) const fn of(which: ReadTogether) -> Self {
+        match which {
+            ReadTogether::FromDibs => Self {
+                from: Some("dibs"),
+                item: None,
+            },
+            ReadTogether::Item(item) => Self {
+                from: None,
+                item: Some(item),
+            },
+        }
+    }
 }
 
 /// An event of the project's log.
@@ -1752,6 +1803,28 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_send_answer_from_a_server_that_names_nobody_without_a_session_lists_nobody() {
+        let message = json!({
+            "id": 41, "thread": 31, "author": "alice", "label": "web", "body": "Hello",
+            "created_at": "2026-03-02T09:00:00Z",
+        });
+        let posted: Posted = serde_json::from_value(json!({"message": message})).unwrap();
+        assert!(posted.no_session_at_work.is_empty());
+        let named: Posted = serde_json::from_value(json!({
+            "message": message,
+            "no_session_at_work": [{"member": "bob", "holds_live_claim": true}],
+        }))
+        .unwrap();
+        assert_eq!(
+            named.no_session_at_work,
+            [NoSessionAtWork {
+                member: "bob".parse().unwrap(),
+                holds_live_claim: true,
+            }]
+        );
+    }
 
     #[test]
     fn a_verdict_reads_its_tag_and_flattened_fields() {

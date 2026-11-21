@@ -261,10 +261,19 @@ impl fmt::Display for Importance {
     }
 }
 
-/// Whether a message should reach its recipients while they work rather than wait for them to
-/// look: a raised importance, or an acknowledgement asked of them.
-pub const fn interrupts(importance: Importance, ack_required: bool) -> bool {
-    importance.is_raised() || ack_required
+/// Whether an unread message is handed to a session of each member it reaches while they work,
+/// rather than left for them to look: one a member wrote in a thread addressed to members, at any
+/// importance; any other — what dibs wrote, or a message in a thread addressed to the project —
+/// only at a raised importance. A message that awaits a member's acknowledgement is handed to them
+/// whatever this says.
+pub const fn handed_to_sessions(
+    recipients: &Recipients,
+    message_author: Author,
+    importance: Importance,
+) -> bool {
+    let from_a_member_to_members =
+        matches!(message_author, Author::Member(_)) && matches!(recipients, Recipients::Members(_));
+    from_a_member_to_members || importance.is_raised()
 }
 
 /// How far back the limit on raised messages looks.
@@ -615,11 +624,24 @@ mod tests {
     }
 
     #[test]
-    fn a_message_interrupts_when_raised_or_when_it_asks_for_an_ack() {
-        assert!(!interrupts(Importance::Normal, false));
-        assert!(interrupts(Importance::Normal, true));
-        assert!(interrupts(Importance::High, false));
-        assert!(interrupts(Importance::Urgent, false));
+    fn a_members_message_to_members_reaches_sessions_at_any_importance_and_the_rest_when_raised() {
+        let to_bob = Recipients::members(BTreeSet::from([BOB])).unwrap();
+        let member = Author::Member(ALICE);
+        for importance in Importance::ALL {
+            assert!(
+                handed_to_sessions(&to_bob, member, importance),
+                "{importance}"
+            );
+        }
+        for (recipients, author) in [
+            (&Recipients::Project, member),
+            (&to_bob, Author::System),
+            (&Recipients::Project, Author::System),
+        ] {
+            assert!(!handed_to_sessions(recipients, author, Importance::Normal));
+            assert!(handed_to_sessions(recipients, author, Importance::High));
+            assert!(handed_to_sessions(recipients, author, Importance::Urgent));
+        }
     }
 
     #[test]

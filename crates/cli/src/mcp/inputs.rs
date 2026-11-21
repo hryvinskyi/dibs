@@ -687,7 +687,56 @@ impl EscalateInput {
     }
 }
 
-/// `dibs_thread` and `dibs_read`.
+/// `dibs_read`: exactly one of a conversation, everything dibs wrote, or everything about a work
+/// item.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadInput {
+    /// The id of the one conversation to mark read.
+    pub thread: Option<u64>,
+    /// true to mark read every message dibs wrote to you, in every conversation, instead.
+    pub dibs: Option<bool>,
+    /// The work item whose conversations to mark read, instead: its local id or its reference.
+    pub item: Option<ItemKeyInput>,
+}
+
+/// What a `dibs_read` marks read, once read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reading {
+    /// One conversation.
+    Thread(ThreadId),
+    /// Every message dibs wrote.
+    FromDibs,
+    /// Every conversation about a work item, still to resolve.
+    Item(ItemKey),
+}
+
+impl ReadInput {
+    /// The conversation it names, when it names a valid one.
+    pub fn thread_id(&self) -> Option<ThreadId> {
+        self.thread
+            .and_then(|thread| thread_id("thread", thread).ok())
+    }
+
+    /// The one choice it names.
+    ///
+    /// # Errors
+    /// A [`Failure`] when it names none or more than one, or one that is not valid.
+    pub fn reading(&self) -> Result<Reading, Failure> {
+        let dibs = self.dibs.unwrap_or(false);
+        match (self.thread, dibs, &self.item) {
+            (Some(thread), false, None) => thread_id("thread", thread).map(Reading::Thread),
+            (None, true, None) => Ok(Reading::FromDibs),
+            (None, false, Some(item)) => item.key("item").map(Reading::Item),
+            _ => Err(invalid(
+                "thread",
+                "name exactly one of thread (one conversation), dibs: true (every message dibs wrote) and item (every conversation about a work item)",
+            )),
+        }
+    }
+}
+
+/// `dibs_thread`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadInput {
@@ -1239,6 +1288,43 @@ mod tests {
         }
         assert!(input(json!({"item": 1, "reason": " "})).reason().is_err());
         assert!(serde_json::from_value::<EscalateInput>(json!({"item": 1})).is_err());
+    }
+
+    #[test]
+    fn a_read_names_exactly_one_conversation_dibs_or_an_item() {
+        let reading = |value| parse::<ReadInput>(value).reading();
+        assert_eq!(
+            reading(json!({"thread": 9})).unwrap(),
+            Reading::Thread(ThreadId(9))
+        );
+        assert_eq!(reading(json!({"dibs": true})).unwrap(), Reading::FromDibs);
+        assert_eq!(
+            reading(json!({"item": "gh:acme/widgets#42"})).unwrap(),
+            Reading::Item(ItemKey::parse("gh:acme/widgets#42").unwrap())
+        );
+        assert_eq!(
+            reading(json!({"item": 12})).unwrap(),
+            Reading::Item(ItemKey::parse("12").unwrap())
+        );
+        for refused in [
+            json!({}),
+            json!({"dibs": false}),
+            json!({"thread": 9, "dibs": true}),
+            json!({"thread": 9, "item": 12}),
+            json!({"dibs": true, "item": 12}),
+        ] {
+            let failure = reading(refused.clone()).unwrap_err();
+            assert_eq!(failure.code, "invalid_input", "{refused}");
+            assert!(failure.message.contains("exactly one"), "{refused}");
+        }
+        assert!(reading(json!({"thread": 0})).is_err());
+        assert!(reading(json!({"item": "not a key!"})).is_err());
+        assert!(serde_json::from_value::<ReadInput>(json!({"thread": 9, "all": true})).is_err());
+        assert_eq!(
+            parse::<ReadInput>(json!({"thread": 9})).thread_id(),
+            Some(ThreadId(9))
+        );
+        assert_eq!(parse::<ReadInput>(json!({"dibs": true})).thread_id(), None);
     }
 
     #[test]

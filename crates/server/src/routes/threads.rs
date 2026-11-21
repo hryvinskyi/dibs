@@ -1,6 +1,6 @@
 //! `POST /v1/threads`, `GET /v1/threads`, `GET /v1/threads/{id}`, `POST /v1/threads/{id}/messages`,
-//! `POST /v1/threads/{id}/read` and `GET /v1/inbox`: conversations between the people of a
-//! project. A thread the caller may not read is answered as missing, the same as one that does not
+//! `POST /v1/threads/{id}/read`, `POST /v1/threads/read` and `GET /v1/inbox`: conversations between
+//! the people of a project. A thread the caller may not read is answered as missing, the same as one that does not
 //! exist. Integrations take no part: every route refuses them before reading the request.
 //!
 //! A message is written with an `importance` (`normal` when left out) and may ask each recipient to
@@ -13,7 +13,9 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 
-use dibs_app::use_cases::{Addressees, InboxQuery, PostMessageInput, StartThreadInput};
+use dibs_app::use_cases::{
+    Addressees, InboxQuery, PostMessageInput, ReadTogether, StartThreadInput,
+};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{ItemId, ThreadId};
 use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
@@ -24,8 +26,8 @@ use crate::fields::{item_in_body, parse, parse_required, record_id_text, switch,
 use crate::http::AppState;
 use crate::views::slots::PendingOfferView;
 use crate::views::{
-    DeliverableView, GrantAskView, MessageView, ThreadSummaryView, ThreadView, UnackedView,
-    UnreadConversationsView, reply,
+    DeliverableView, GrantAskView, MessageView, NoSessionAtWorkView, ThreadSummaryView, ThreadView,
+    UnackedView, UnreadConversationsView, reply,
 };
 
 /// The body of `POST /v1/threads`.
@@ -45,12 +47,15 @@ pub struct StartBody {
 struct StartedAnswer {
     thread: ThreadView,
     message: MessageView,
+    no_session_at_work: Vec<NoSessionAtWorkView>,
 }
 
 /// Starts a thread with its first message, addressed either to the members `to` names by handle
 /// or, with `to_project: true`, to every person in the project; `item` is the work item it is
 /// about, `label` the session label it is signed with, `importance` and `ack_required` what the
-/// first message asks of its recipients. Answers `201` with both.
+/// first message asks of its recipients. Answers `201` with both and `no_session_at_work`: the
+/// members it names none of whose sessions was seen within the last hour, each with whether they
+/// hold a live claim. The message is sent all the same.
 ///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for an unknown recipient or item;
@@ -79,6 +84,7 @@ pub async fn start(
     let answer = StartedAnswer {
         thread: ThreadView::of(started.thread),
         message: MessageView::of(started.message),
+        no_session_at_work: NoSessionAtWorkView::all(started.no_session_at_work),
     };
     Ok(reply(StatusCode::CREATED, &answer))
 }
@@ -119,10 +125,14 @@ pub struct PostBody {
 #[derive(Serialize)]
 struct PostedAnswer {
     message: MessageView,
+    no_session_at_work: Vec<NoSessionAtWorkView>,
 }
 
 /// Posts a message to a thread the caller may read, signed with the session label `label`, asking
-/// what `importance` and `ack_required` say of its recipients. Answers `201` with the message.
+/// what `importance` and `ack_required` say of its recipients. Answers `201` with the message and
+/// `no_session_at_work`: the members it reaches in a thread addressed to members (its author and
+/// the members it names, but the caller) none of whose sessions was seen within the last hour,
+/// each with whether they hold a live claim. The message is posted all the same.
 ///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for a thread the caller may not read;
@@ -143,11 +153,12 @@ pub async fn post(
         importance: importance(body.importance.as_deref())?,
         ack_required: body.ack_required.unwrap_or(false),
     };
-    let message = state.app.post_message.execute(&actor, input).await?;
+    let posted = state.app.post_message.execute(&actor, input).await?;
     Ok(reply(
         StatusCode::CREATED,
         &PostedAnswer {
-            message: MessageView::of(message),
+            message: MessageView::of(posted.message),
+            no_session_at_work: NoSessionAtWorkView::all(posted.no_session_at_work),
         },
     ))
 }
@@ -210,9 +221,10 @@ struct InboxAnswer {
 /// the threads that have unread messages. With `unacked=1` the answer also lists, under
 /// `unacked`, every message awaiting the caller's acknowledgement, newest first, with its thread.
 /// With `deliverable=1` it lists, under `deliverable`, the messages still to be delivered to the
-/// caller's agent while it works, newest first: written by someone else within the last day, high
-/// or urgent and unread, or awaiting the caller's acknowledgement, and not yet delivered to any of
-/// the caller's sessions. `offers` lists every slot on offer to the caller, with when the offer
+/// caller's agent while it works, newest first: written by someone else within the last day,
+/// reaching the caller, either awaiting their acknowledgement or unread and either a member's
+/// message in a conversation addressed to members (at any importance) or high or urgent, and not
+/// yet delivered to any of the caller's sessions. `offers` lists every slot on offer to the caller, with when the offer
 /// lapses. `grant_asks` lists the grants asked of the caller that wait for their decision, newest
 /// first: asked in a conversation the caller wrote nothing in, while the asker's claim on the item
 /// and the caller's claim on the area are live and no grant of the caller's answers it.
@@ -321,6 +333,56 @@ pub async fn mark_read(
     Ok(reply(StatusCode::OK, &MarkedAnswer { newly_read }))
 }
 
+/// The body of `POST /v1/threads/read`: exactly one of `from` and `item`.
+#[derive(Deserialize)]
+pub struct ReadTogetherBody {
+    from: Option<String>,
+    item: Option<u64>,
+}
+
+/// The only author whose messages are marked read together.
+const FROM_DIBS: &str = "dibs";
+
+/// Marks many messages read by the caller at once: with `{"from": "dibs"}` every message dibs wrote
+/// in a conversation the caller may read, with `{"item": 12}` every message of every conversation
+/// filed under that work item that the caller may read; never the caller's own. Answers how many
+/// were unread.
+///
+/// # Errors
+/// `forbidden` for an integration; `not_found` for an unknown item; `invalid_request` for a body
+/// that names neither or both, or a `from` other than `dibs`.
+pub async fn mark_read_together(
+    State(state): State<AppState>,
+    Authed(actor): Authed,
+    body: Result<Json<ReadTogetherBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    actor.require_person()?;
+    let Json(body) = body?;
+    let which = read_together(body.from.as_deref(), body.item)?;
+    let newly_read = state.app.mark_read_together.execute(&actor, which).await?;
+    Ok(reply(StatusCode::OK, &MarkedAnswer { newly_read }))
+}
+
+/// Which messages a body of `POST /v1/threads/read` names.
+fn read_together(from: Option<&str>, item: Option<u64>) -> Result<ReadTogether, ApiError> {
+    match (from, item) {
+        (Some(_), Some(_)) => Err(ApiError::invalid_field(
+            "from",
+            &"name 'from' or 'item', not both",
+        )),
+        (Some(FROM_DIBS), None) => Ok(ReadTogether::FromDibs),
+        (Some(_), None) => Err(ApiError::invalid_field(
+            "from",
+            &"only what dibs wrote is marked read together: give \"dibs\"",
+        )),
+        (None, Some(number)) => item_in_body("item", Some(number)).map(ReadTogether::Item),
+        (None, None) => Err(ApiError::invalid_field(
+            "from",
+            &"name 'from' (\"dibs\") or 'item'",
+        )),
+    }
+}
+
 fn path_thread(path: Result<Path<String>, PathRejection>) -> Result<ThreadId, ApiError> {
     let Path(id) = path?;
     thread_in_path(&id)
@@ -337,6 +399,31 @@ mod tests {
         let refused = importance(Some("loud")).unwrap_err();
         assert_eq!(refused.code(), "invalid_request");
         assert_eq!(refused.details()["field"], "importance");
+    }
+
+    #[test]
+    fn messages_are_read_together_from_dibs_or_by_item_never_both_nor_neither() {
+        assert_eq!(
+            read_together(Some("dibs"), None).unwrap(),
+            ReadTogether::FromDibs
+        );
+        assert_eq!(
+            read_together(None, Some(12)).unwrap(),
+            ReadTogether::Item(ItemId(12))
+        );
+        for (from, item) in [
+            (None, None),
+            (Some("dibs"), Some(12)),
+            (Some("alice"), None),
+        ] {
+            let refused = read_together(from, item).unwrap_err();
+            assert_eq!(refused.code(), "invalid_request", "{from:?} {item:?}");
+            assert_eq!(refused.details()["field"], "from");
+        }
+        assert_eq!(
+            read_together(None, Some(0)).unwrap_err().code(),
+            "not_found"
+        );
     }
 
     #[test]

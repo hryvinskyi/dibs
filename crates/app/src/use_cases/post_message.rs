@@ -13,6 +13,7 @@ use crate::error::AppError;
 use crate::named::{NamedMessage, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::records::MessageRecord;
+use crate::use_cases::no_session::{NoSessionAtWork, no_session_at_work};
 use crate::use_cases::readable::readable_thread;
 use crate::use_cases::writing::write_message;
 use crate::work::Work;
@@ -32,8 +33,22 @@ pub struct PostMessageInput {
     pub ack_required: bool,
 }
 
+/// The message posted, its author named, with the recipients no session of whose will show it
+/// soon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedMessage {
+    /// The message.
+    pub message: NamedMessage,
+    /// The members it reaches in a thread addressed to members — the thread's author and the
+    /// members it names, but the caller — none of whose sessions was seen within the last hour,
+    /// ordered by handle; nobody in a thread addressed to the whole project. The message is posted
+    /// all the same and waits for their next session.
+    pub no_session_at_work: Vec<NoSessionAtWork>,
+}
+
 /// Posts a message to a thread the caller may read: its author, its recipients, or anyone in the
-/// project for a project-addressed thread.
+/// project for a project-addressed thread; and says which members it reaches have no session at
+/// work.
 pub struct PostMessage {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -54,7 +69,8 @@ impl PostMessage {
         }
     }
 
-    /// Posts the message, answering it with its author's handle.
+    /// Posts the message, answering it with its author's handle and the members it reaches who have
+    /// no session at work.
     ///
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] for a thread that does not
@@ -64,7 +80,7 @@ impl PostMessage {
         &self,
         actor: &Actor,
         input: PostMessageInput,
-    ) -> Result<NamedMessage, AppError> {
+    ) -> Result<PostedMessage, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
         let mut work = Work::begin_for(&*self.store, actor).await?;
@@ -79,11 +95,8 @@ impl PostMessage {
             ack_required: input.ack_required,
             created_at: now,
         };
-        let limit = work
-            .project_settings(&self.hot_rules)
-            .await?
-            .raised_per_hour();
-        write_message(&mut work, &message, limit, now).await?;
+        let settings = work.project_settings(&self.hot_rules).await?;
+        write_message(&mut work, &message, settings.raised_per_hour(), now).await?;
         work.record(
             now,
             EventKind::MessagePosted(MessagePosted {
@@ -93,7 +106,13 @@ impl PostMessage {
             }),
         )
         .await?;
-        let posted = Names::load(&mut work).await?.message(message)?;
+        let names = Names::load(&mut work).await?;
+        let no_session_at_work =
+            no_session_at_work(&mut work, &thread, &message, &settings, &names, now).await?;
+        let posted = PostedMessage {
+            message: names.message(message)?,
+            no_session_at_work,
+        };
         work.commit(&*self.notifier).await?;
         Ok(posted)
     }
@@ -112,6 +131,58 @@ mod tests {
 
     fn label() -> SessionLabel {
         SessionLabel::parse("web").unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reply_names_whom_it_reaches_with_no_session_seen_in_the_hour_the_author_included() {
+        let env = Env::new().await;
+        let started = StartThread::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                StartThreadInput {
+                    subject: Subject::parse("Billing").unwrap(),
+                    to: Addressees::Members(vec![Handle::parse("bob").unwrap()]),
+                    item: None,
+                    label: label(),
+                    body: Body::parse("Can you look?").unwrap(),
+                    importance: Importance::Normal,
+                    ack_required: false,
+                },
+            )
+            .await
+            .unwrap();
+        let post = PostMessage::new(&env.deps);
+        let reply = |body: &str| PostMessageInput {
+            thread: started.thread.record.id,
+            label: label(),
+            body: Body::parse(body).unwrap(),
+            importance: Importance::Normal,
+            ack_required: false,
+        };
+        let named = |posted: PostedMessage| {
+            posted
+                .no_session_at_work
+                .into_iter()
+                .map(|away| (away.member.as_str().to_owned(), away.holds_live_claim))
+                .collect::<Vec<_>>()
+        };
+        let at_once = post
+            .execute(&env.bob.actor, reply("Looking."))
+            .await
+            .unwrap();
+        assert_eq!(named(at_once), [], "alice's session registered just now");
+        env.advance(time::Duration::minutes(61));
+        let bobs = post.execute(&env.bob.actor, reply("Done.")).await.unwrap();
+        assert_eq!(
+            named(bobs),
+            [("alice".to_owned(), false)],
+            "the conversation's author, never the sender"
+        );
+        let alices = post
+            .execute(&env.alice.actor, reply("Thanks."))
+            .await
+            .unwrap();
+        assert_eq!(named(alices), [("bob".to_owned(), false)]);
     }
 
     #[tokio::test]
@@ -165,11 +236,11 @@ mod tests {
             env.kinds_after(before).await,
             [EventKind::MessagePosted(MessagePosted {
                 thread: started.thread.record.id,
-                message: reply.record.id,
+                message: reply.message.record.id,
                 author: Some(env.bob.actor.member),
             })]
         );
-        assert_eq!(reply.author.as_str(), "bob");
+        assert_eq!(reply.message.author.as_str(), "bob");
         let outsider = post
             .execute(
                 &carol,

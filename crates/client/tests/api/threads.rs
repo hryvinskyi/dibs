@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 
-use dibs_client::api::{InboxRequest, PostMessage, Recipients, StartThread, UnreadConversations};
+use dibs_client::api::{
+    InboxRequest, NewItem, NoSessionAtWork, PostMessage, ReadTogether, Recipients, StartThread,
+    UnreadConversations,
+};
 use dibs_domain::event::EventKind;
 use dibs_domain::message::Importance;
 
@@ -96,6 +99,70 @@ fn a_thread_is_started_answered_read_and_marked() {
             .await
             .unwrap_err();
         assert_eq!(empty.code(), "no_recipients");
+    });
+}
+
+#[test]
+fn a_send_names_whom_no_session_will_show_it_and_messages_are_read_together() {
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    run(async {
+        let item = alice
+            .create_item(&NewItem {
+                external_ref: None,
+                title: "Rounding".parse().unwrap(),
+            })
+            .await
+            .unwrap()
+            .item
+            .id;
+        let started = alice
+            .start_thread(&StartThread {
+                item: Some(item),
+                ..start(
+                    Recipients::Members(vec!["bob".parse().unwrap()]),
+                    "Can you look?",
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            started.no_session_at_work,
+            [NoSessionAtWork {
+                member: "bob".parse().unwrap(),
+                holds_live_claim: false,
+            }]
+        );
+        alice
+            .start_thread(&start(
+                Recipients::Members(vec!["bob".parse().unwrap()]),
+                "About nothing.",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            bob.mark_read_together(ReadTogether::FromDibs)
+                .await
+                .unwrap()
+                .newly_read,
+            0,
+            "dibs wrote nothing"
+        );
+        assert_eq!(
+            bob.mark_read_together(ReadTogether::Item(item))
+                .await
+                .unwrap()
+                .newly_read,
+            1
+        );
+        let inbox = bob.inbox(UNREAD).await.unwrap();
+        assert_eq!(inbox.threads.len(), 1, "the conversation about no item");
+        let unknown = bob
+            .mark_read_together(ReadTogether::Item(dibs_domain::ids::ItemId(9999)))
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.code(), "not_found");
     });
 }
 

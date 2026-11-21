@@ -366,6 +366,7 @@ async fn no_route_here_needs_more_than_a_token() {
         (Method::GET, "/v1/threads/1"),
         (Method::POST, "/v1/threads/1/messages"),
         (Method::POST, "/v1/threads/1/read"),
+        (Method::POST, "/v1/threads/read"),
         (Method::GET, "/v1/inbox"),
     ] {
         let answer = world.call(method, path, None, None).await;
@@ -448,4 +449,130 @@ async fn marking_read_counts_what_the_inbox_called_unread() {
         let after = world.get(who, "/v1/inbox").await;
         assert_eq!(after.body["threads"][0]["unread"], 0);
     }
+}
+
+#[tokio::test]
+async fn messages_are_marked_read_together_from_dibs_or_by_item() {
+    let team = Team::new().await;
+    let world = &team.world;
+    let item = world
+        .item(&team.alice, Some("gh:acme/widgets#7"), "Rounding")
+        .await;
+    let session = world.session(&team.bob, "laptop").await;
+    let claimed = world
+        .post(
+            &team.bob,
+            &format!("/v1/items/{item}/claim"),
+            json!({"session_id": session, "areas": []}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    let forced = world
+        .post(
+            &team.alice,
+            &format!("/v1/admin/items/{item}/force-release"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(forced.status, StatusCode::OK, "{}", forced.body);
+    let filed = world
+        .post(
+            &team.alice,
+            "/v1/threads",
+            json!({
+                "subject": "Rounding", "to": ["bob"], "item": item,
+                "label": "web", "body": "Sorry, it was urgent.",
+            }),
+        )
+        .await;
+    assert_eq!(filed.status, StatusCode::CREATED, "{}", filed.body);
+    world
+        .thread(&team.alice, json!(["bob"]), "Lunch", "Noon?")
+        .await;
+    let unread = |answer: &crate::support::Answer| answer.body["unread_conversations"].clone();
+    assert_eq!(
+        unread(&world.get(&team.bob, "/v1/inbox").await),
+        json!({"from_people": 2, "from_dibs": 1})
+    );
+
+    let from_dibs = world
+        .post(&team.bob, "/v1/threads/read", json!({"from": "dibs"}))
+        .await;
+    assert_eq!(from_dibs.status, StatusCode::OK, "{}", from_dibs.body);
+    assert_eq!(from_dibs.body, json!({"newly_read": 1}));
+    assert_eq!(
+        unread(&world.get(&team.bob, "/v1/inbox").await),
+        json!({"from_people": 2, "from_dibs": 0})
+    );
+    let by_item = world
+        .post(&team.bob, "/v1/threads/read", json!({"item": item}))
+        .await;
+    assert_eq!(by_item.body, json!({"newly_read": 1}), "{}", by_item.body);
+    assert_eq!(
+        unread(&world.get(&team.bob, "/v1/inbox").await),
+        json!({"from_people": 1, "from_dibs": 0}),
+        "the conversation about no item stays unread"
+    );
+
+    for body in [
+        json!({}),
+        json!({"from": "dibs", "item": item}),
+        json!({"from": "alice"}),
+    ] {
+        let refused = world.post(&team.bob, "/v1/threads/read", body).await;
+        assert_error(
+            &refused,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+        );
+        assert_eq!(refused.body["error"]["details"]["field"], "from");
+    }
+    let unknown = world
+        .post(&team.bob, "/v1/threads/read", json!({"item": 9999}))
+        .await;
+    assert_error(&unknown, StatusCode::NOT_FOUND, "not_found");
+}
+
+#[tokio::test]
+async fn the_send_answer_names_whom_no_session_will_show_it_soon() {
+    let team = Team::new().await;
+    let world = &team.world;
+    world.session(&team.carol, "laptop").await;
+    let started = world
+        .post(
+            &team.alice,
+            "/v1/threads",
+            start(json!(["bob", "carol"]), "Can you look?"),
+        )
+        .await;
+    assert_eq!(started.status, StatusCode::CREATED, "{}", started.body);
+    assert_eq!(
+        started.body["no_session_at_work"],
+        json!([{"member": "bob", "holds_live_claim": false}]),
+        "carol's session registered just now"
+    );
+    let thread = started.body["thread"]["id"].as_u64().unwrap();
+    let reply = world
+        .post(
+            &team.carol,
+            &format!("/v1/threads/{thread}/messages"),
+            json!({"label": "web", "body": "Looking."}),
+        )
+        .await;
+    assert_eq!(
+        reply.body["no_session_at_work"],
+        json!([
+            {"member": "alice", "holds_live_claim": false},
+            {"member": "bob", "holds_live_claim": false},
+        ]),
+        "the conversation's author and the other member it names"
+    );
+    let everyone = world
+        .post(
+            &team.alice,
+            "/v1/threads",
+            json!({"subject": "Deploy", "to_project": true, "label": "web", "body": "Noon."}),
+        )
+        .await;
+    assert_eq!(everyone.body["no_session_at_work"], json!([]));
 }

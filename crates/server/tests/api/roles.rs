@@ -210,6 +210,11 @@ async fn an_integration_reaches_its_allow_list_and_nothing_else() {
             Some(json!({})),
         ),
         (Method::POST, format!("/v1/threads/{thread}/read"), None),
+        (
+            Method::POST,
+            "/v1/threads/read".into(),
+            Some(json!({"from": "dibs"})),
+        ),
         (Method::GET, "/v1/inbox".into(), None),
         (Method::GET, "/v1/inbox?unread=maybe".into(), None),
         (Method::GET, "/v1/inbox?unacked=1".into(), None),

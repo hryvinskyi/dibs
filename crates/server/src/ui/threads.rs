@@ -98,7 +98,7 @@ async fn post(
     asks_ack: bool,
 ) -> Result<Response, ApiError> {
     let label = SessionLabel::parse(WEB_LABEL).map_err(|_| ApiError::internal())?;
-    let message = state
+    let posted = state
         .app
         .post_message
         .execute(
@@ -114,7 +114,10 @@ async fn post(
         .await?;
     Ok(signed_page(
         session,
-        see_other(&format!("/ui/inbox/{thread}#m-{}", message.record.id)),
+        see_other(&format!(
+            "/ui/inbox/{thread}#m-{}",
+            posted.message.record.id
+        )),
     ))
 }
 

@@ -60,8 +60,12 @@ async fn a_message_is_delivered_by_the_first_session_that_claims_it_and_never_ag
     let team = Team::new().await;
     let world = &team.world;
     let urgent = team.send(&team.alice, "bob", "urgent").await;
-    team.send(&team.alice, "bob", "normal").await;
-    assert_eq!(team.deliverable(&team.bob).await, [urgent]);
+    let normal = team.send(&team.alice, "bob", "normal").await;
+    assert_eq!(
+        team.deliverable(&team.bob).await,
+        [normal, urgent],
+        "a member's message to a named member is delivered whatever its importance"
+    );
     let asked = world
         .get(&team.bob, "/v1/inbox?unread=true&unacked=1&deliverable=1")
         .await;
@@ -93,7 +97,7 @@ async fn a_message_is_delivered_by_the_first_session_that_claims_it_and_never_ag
         .await;
     assert_error(&again, StatusCode::CONFLICT, "delivered");
     assert_eq!(again.body["error"]["details"]["session_id"], first);
-    assert!(team.deliverable(&team.bob).await.is_empty());
+    assert_eq!(team.deliverable(&team.bob).await, [normal]);
     let own = world.session(&team.alice, "laptop").await;
     let author = world
         .post(

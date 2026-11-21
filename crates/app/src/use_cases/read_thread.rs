@@ -243,7 +243,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(before.acks.len(), 1, "only the message that asks");
-        assert!(!before.acks.contains_key(&reply.record.id));
+        assert!(!before.acks.contains_key(&reply.message.record.id));
         let entries = &before.acks[&id];
         assert_eq!(entries.len(), 1);
         assert_eq!(

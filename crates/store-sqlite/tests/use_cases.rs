@@ -2067,4 +2067,111 @@ mod use_cases {
         assert_eq!(view.stats.claims, 20_000);
         assert!(!view.truncated);
     }
+
+    #[tokio::test]
+    async fn marking_dibs_read_leaves_peoples_messages_and_others_private_conversations() {
+        use dibs_app::records::{MessageRecord, ThreadRecord};
+        use dibs_app::use_cases::ReadTogether;
+        use dibs_domain::ids::{MessageId, ThreadId};
+        use dibs_domain::message::{Author, Importance, Recipients};
+
+        let world = World::new().await;
+        let app = &world.app;
+        let alice = project(app, "widgets", "alice").await;
+        let mut people = Vec::new();
+        for handle in ["bob", "carol"] {
+            let token = app
+                .create_member
+                .execute(
+                    &alice,
+                    CreateMemberInput {
+                        member: member(handle),
+                        role: Role::Member,
+                    },
+                )
+                .await
+                .unwrap()
+                .token;
+            people.push(app.authenticate.execute(token.expose()).await.unwrap());
+        }
+        let (bob, carol) = (&people[0], &people[1]);
+        let to = |handle: &str| Addressees::Members(vec![Handle::parse(handle).unwrap()]);
+        let start = |to: Addressees| StartThreadInput {
+            subject: Subject::parse("Rates").unwrap(),
+            to,
+            item: None,
+            label: SessionLabel::parse("web").unwrap(),
+            body: Body::parse("Where is the table?").unwrap(),
+            importance: Importance::Normal,
+            ack_required: false,
+        };
+        app.start_thread
+            .execute(&alice, start(to("bob")))
+            .await
+            .unwrap();
+        let everyone = app
+            .start_thread
+            .execute(&alice, start(Addressees::Project))
+            .await
+            .unwrap()
+            .thread
+            .record
+            .id;
+        let mut tx = world.store.begin().await.unwrap();
+        let mut id = 9000;
+        let mut dibs_writes = |thread: ThreadId| {
+            id += 1;
+            MessageRecord {
+                id: MessageId(id),
+                thread,
+                author: Author::System,
+                label: SessionLabel::parse("dibs").unwrap(),
+                body: Body::parse("Something happened to your claim.").unwrap(),
+                importance: Importance::Normal,
+                ack_required: false,
+                created_at: OffsetDateTime::UNIX_EPOCH,
+            }
+        };
+        for (thread, member) in [(ThreadId(8001), bob.member), (ThreadId(8002), carol.member)] {
+            tx.insert_thread(
+                alice.project,
+                &ThreadRecord {
+                    id: thread,
+                    subject: Subject::parse("Your claim").unwrap(),
+                    item: None,
+                    author: Author::System,
+                    recipients: Recipients::Members([member].into()),
+                    created_at: OffsetDateTime::UNIX_EPOCH,
+                },
+            )
+            .await
+            .unwrap();
+            tx.insert_message(alice.project, &dibs_writes(thread))
+                .await
+                .unwrap();
+        }
+        tx.insert_message(alice.project, &dibs_writes(everyone))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let unread = |inbox: dibs_app::use_cases::InboxView| inbox.unread_conversations;
+        let marked = app
+            .mark_read_together
+            .execute(bob, ReadTogether::FromDibs)
+            .await
+            .unwrap();
+        assert_eq!(
+            marked, 2,
+            "the notice to bob and dibs's message to everyone"
+        );
+        let bobs = unread(app.inbox.execute(bob, unread_only(true)).await.unwrap());
+        assert_eq!((bobs.from_people, bobs.from_dibs), (2, 0));
+        let carols = unread(app.inbox.execute(carol, unread_only(true)).await.unwrap());
+        assert_eq!(
+            (carols.from_people, carols.from_dibs),
+            (1, 2),
+            "the notice to carol was never bob's to read, and his reading is his own"
+        );
+    }
 }

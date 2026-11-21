@@ -7,12 +7,14 @@ use sqlx::sqlite::SqliteRow;
 use time::OffsetDateTime;
 
 use dibs_app::ports::{AckRows, StoreResult, ThreadRows};
-use dibs_app::records::{MessageRecord, ReadMark, ThreadActivity, ThreadRecord, ThreadSummary};
+use dibs_app::records::{
+    MessageRecord, ReadMark, ThreadActivity, ThreadRecord, ThreadSummary, WrittenBy,
+};
 use dibs_domain::ids::{ItemId, MemberId, MessageId, ProjectId, ThreadId};
 use dibs_domain::message::{Ack, Author, Body, Importance, Recipients, SessionLabel, Subject};
 
 use crate::SqliteTx;
-use crate::codec::{Fields, int, name, nanos};
+use crate::codec::{Fields, int, json, name, nanos};
 
 /// The columns of `messages m` a message is read from by [`message`].
 macro_rules! message_columns {
@@ -388,6 +390,38 @@ impl ThreadRows for SqliteTx {
         .bind(int(reader.get())?)
         .bind(int(thread.get())?)
         .bind(nanos(at)?);
+        self.run(statement).await
+    }
+
+    async fn mark_read_in(
+        &mut self,
+        project: ProjectId,
+        reader: MemberId,
+        threads: &BTreeSet<ThreadId>,
+        written_by: WrittenBy,
+        at: OffsetDateTime,
+    ) -> StoreResult<u64> {
+        if threads.is_empty() {
+            return Ok(0);
+        }
+        let wanted = threads
+            .iter()
+            .map(|thread| int(thread.get()))
+            .collect::<StoreResult<Vec<i64>>>()?;
+        let statement = sqlx::query(
+            "INSERT INTO reads (project_id, member_id, message_id, read_at) \
+             SELECT m.project_id, ?2, m.id, ?4 FROM messages m \
+             JOIN threads t ON t.project_id = m.project_id AND t.id = m.thread_id \
+             WHERE m.project_id = ?1 AND m.thread_id IN (SELECT value FROM json_each(?3)) \
+             AND COALESCE(m.author_id, t.author_id) IS NOT ?2 \
+             AND (?5 = 0 OR m.author_id IS NULL) \
+             ON CONFLICT (project_id, member_id, message_id) DO NOTHING",
+        )
+        .bind(int(project.get())?)
+        .bind(int(reader.get())?)
+        .bind(json(&wanted)?)
+        .bind(nanos(at)?)
+        .bind(written_by.dibs_only());
         self.run(statement).await
     }
 }

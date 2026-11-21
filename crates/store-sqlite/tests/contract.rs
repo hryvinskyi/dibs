@@ -158,6 +158,8 @@ mod contract {
         a_delivery_naming_a_missing_session_fails_the_commit,
         raised_messages_are_counted_per_member_from_a_time,
         what_dibs_writes_has_no_member_author_and_speaks_for_the_threads_starter,
+        many_threads_are_marked_read_at_once_and_dibss_messages_alone_when_asked,
+        members_are_seen_by_their_sessions_from_a_time,
         a_removed_member_is_kept_with_the_first_time_they_were_removed,
         a_deleted_thread_takes_everything_that_refers_to_its_messages,
         a_claims_conversation_keeps_its_claim_and_when_a_moved_base_was_last_told,
@@ -3389,6 +3391,145 @@ mod contract {
         assert_eq!(
             tx.mark_read(A, ALICE, ThreadId(82), at(70)).await.unwrap(),
             1
+        );
+    }
+
+    async fn many_threads_are_marked_read_at_once_and_dibss_messages_alone_when_asked(
+        store: Arc<dyn Store>,
+    ) {
+        use dibs_app::records::WrittenBy;
+
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let of_dibs = ThreadRecord {
+            author: Author::System,
+            ..thread(ThreadId(81), ALICE, None, 60)
+        };
+        tx.insert_thread(A, &of_dibs).await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(82), ALICE, None, 60))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(83), BOB, None, 60))
+            .await
+            .unwrap();
+        tx.insert_thread(A, &thread(ThreadId(84), BOB, None, 60))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(91, ThreadId(81), 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(92, ThreadId(82), 62))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(93, ThreadId(82), BOB, 63))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(94, ThreadId(83), 64))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(95, ThreadId(83), ALICE, 65))
+            .await
+            .unwrap();
+        tx.insert_message(A, &message(96, ThreadId(84), BOB, 66))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let threads = |ids: &[u64]| ids.iter().copied().map(ThreadId).collect::<BTreeSet<_>>();
+        let read_by = |reads: Vec<ReadMark>| {
+            reads
+                .iter()
+                .map(|mark| (mark.member, mark.at))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            tx.mark_read_in(A, ALICE, &threads(&[]), WrittenBy::Anyone, at(70))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            tx.mark_read_in(B, ALICE, &threads(&[81, 82, 83]), WrittenBy::Dibs, at(70))
+                .await
+                .unwrap(),
+            0,
+            "another project's threads of these ids hold nothing"
+        );
+        assert_eq!(
+            tx.mark_read_in(A, ALICE, &threads(&[81, 82, 83]), WrittenBy::Dibs, at(70))
+                .await
+                .unwrap(),
+            2,
+            "what dibs wrote in a thread of dibs's own and in bob's; in alice's own it is hers"
+        );
+        assert_eq!(
+            read_by(tx.reads_of(A, MessageId(91)).await.unwrap()),
+            [(ALICE, at(70))]
+        );
+        assert_eq!(
+            read_by(tx.reads_of(A, MessageId(94)).await.unwrap()),
+            [(ALICE, at(70))]
+        );
+        assert!(tx.reads_of(A, MessageId(92)).await.unwrap().is_empty());
+        assert!(
+            tx.reads_of(A, MessageId(93)).await.unwrap().is_empty(),
+            "a member's message stays unread"
+        );
+        assert_eq!(
+            tx.mark_read_in(A, ALICE, &threads(&[81, 82, 83]), WrittenBy::Anyone, at(71))
+                .await
+                .unwrap(),
+            1,
+            "bob's message; her own and what she read are not counted again"
+        );
+        assert_eq!(
+            read_by(tx.reads_of(A, MessageId(91)).await.unwrap()),
+            [(ALICE, at(70))]
+        );
+        assert!(
+            tx.reads_of(A, MessageId(96)).await.unwrap().is_empty(),
+            "a thread it was not handed"
+        );
+        assert_eq!(
+            tx.mark_read_in(
+                A,
+                BOB,
+                &threads(&[82, 83, 84, 99]),
+                WrittenBy::Anyone,
+                at(72)
+            )
+            .await
+            .unwrap(),
+            2,
+            "dibs's message in alice's thread and alice's message; no thread 99 exists"
+        );
+    }
+
+    async fn members_are_seen_by_their_sessions_from_a_time(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let desktop = SessionRecord {
+            last_seen: at(40),
+            ..session(SessionId(33), ALICE, "desktop/mcp")
+        };
+        tx.save_session(A, &desktop).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.members_seen_since(A, at(2)).await.unwrap(),
+            BTreeSet::from([ALICE, BOB]),
+            "seen exactly then counts"
+        );
+        assert_eq!(
+            tx.members_seen_since(A, at(3)).await.unwrap(),
+            BTreeSet::from([ALICE]),
+            "one recent session of alice's is enough"
+        );
+        assert!(tx.members_seen_since(A, at(41)).await.unwrap().is_empty());
+        assert_eq!(
+            tx.members_seen_since(B, at(0)).await.unwrap(),
+            BTreeSet::from([DAVE])
         );
     }
 

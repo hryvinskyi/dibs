@@ -35,7 +35,9 @@ mod list_items;
 mod list_members;
 mod list_threads;
 mod mark_read;
+mod mark_read_together;
 mod me;
+mod no_session;
 mod open_ui_session;
 mod operate_project;
 mod post_message;
@@ -105,10 +107,12 @@ pub use list_items::{ItemQuery, ListItems};
 pub use list_members::ListMembers;
 pub use list_threads::ListThreads;
 pub use mark_read::MarkRead;
+pub use mark_read_together::{MarkReadTogether, ReadTogether};
 pub use me::{Me, MeView};
+pub use no_session::{AT_WORK_WITHIN, NoSessionAtWork};
 pub use open_ui_session::{OpenUiSession, OpenedUiSession, UI_SESSION_LIFETIME};
 pub use operate_project::OperateProject;
-pub use post_message::{PostMessage, PostMessageInput};
+pub use post_message::{PostMessage, PostMessageInput, PostedMessage};
 pub use prune::{Prune, PruneReport};
 pub use radar::{
     FootprintInput, FootprintRecorded, FromCheckout, NamedOverlap, OnBranch, RecordFootprint,
@@ -235,6 +239,8 @@ pub struct UseCases {
     pub read_thread: ReadThread,
     /// See [`MarkRead`].
     pub mark_read: MarkRead,
+    /// See [`MarkReadTogether`].
+    pub mark_read_together: MarkReadTogether,
     /// See [`AckMessage`].
     pub ack: AckMessage,
     /// See [`Unacked`].
@@ -352,6 +358,7 @@ impl UseCases {
             list_threads: ListThreads::new(deps),
             read_thread: ReadThread::new(deps),
             mark_read: MarkRead::new(deps),
+            mark_read_together: MarkReadTogether::new(deps),
             ack: AckMessage::new(deps),
             unacked: Unacked::new(deps),
             sent_status: SentStatus::new(deps),

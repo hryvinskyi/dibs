@@ -187,6 +187,10 @@ pub fn router(app: Arc<UseCases>, streams: EventStreams, options: HttpOptions) -
             "/v1/threads",
             get(routes::threads::list).post(routes::threads::start),
         )
+        .route(
+            "/v1/threads/read",
+            post(routes::threads::mark_read_together),
+        )
         .route("/v1/threads/{id}", get(routes::threads::read))
         .route("/v1/threads/{id}/messages", post(routes::threads::post))
         .route("/v1/threads/{id}/read", post(routes::threads::mark_read))

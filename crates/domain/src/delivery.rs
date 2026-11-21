@@ -1,4 +1,4 @@
-//! Delivery of what reaches a member while they work: a pressing message, or a slot offered to
+//! Delivery of what reaches a member while they work: a message, or a slot offered to
 //! them. A member runs several sessions, and each could put the same message in front of its agent;
 //! the first session to claim a subject delivers it, and every other one is told it was delivered.
 

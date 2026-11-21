@@ -5,7 +5,10 @@
 //! - only a host that tells the main agent from a subagent, and carries text to the agent after a
 //!   tool or with a prompt, is claimed for: what reaches a subagent ends with it;
 //! - a member's own messages are never delivered to them;
-//! - the server hands each pressing message and each offer to one session of the member, the first
+//! - what to deliver is the server's to say: every message its delivery list holds for the member
+//!   is claimed as it stands — a member's message in a conversation addressed to members at any
+//!   importance, anything else when raised or awaiting the member's acknowledgement;
+//! - the server hands each such message and each offer to one session of the member, the first
 //!   that claims it; a claim is made in the background and shown from the next event on;
 //! - a session shows something at most once a minute, and never the same thing twice.
 //!
@@ -29,7 +32,6 @@ use time::{Duration, OffsetDateTime};
 use dibs_domain::event::EventKind;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::MemberId;
-use dibs_domain::message::interrupts;
 
 use crate::capabilities::Capabilities;
 use crate::ports::{
@@ -237,7 +239,8 @@ pub fn can_deliver(capabilities: Capabilities) -> bool {
 }
 
 /// What a background sync claims, at most [`CLAIMS_PER_SYNC`]: the slots the server offers `me`
-/// and the pressing messages others wrote to them, of which this machine claimed none yet.
+/// and the messages others wrote that the server lists for delivery to them, whatever their
+/// importance, of which this machine claimed none yet.
 pub fn to_claim(inbox: &InboxView, me: &Handle) -> Vec<Pending> {
     let claimed = |pending: &Pending| {
         let subject = pending.subject();
@@ -250,9 +253,7 @@ pub fn to_claim(inbox: &InboxView, me: &Handle) -> Vec<Pending> {
     let messages = inbox
         .deliverable
         .iter()
-        .filter(|message| {
-            message.sender != *me && interrupts(message.importance, message.awaiting_ack)
-        })
+        .filter(|message| message.sender != *me)
         .cloned()
         .map(Pending::Message);
     offers
@@ -443,21 +444,26 @@ mod tests {
     }
 
     #[test]
-    fn a_sync_claims_offers_and_pressing_messages_of_others_not_claimed_yet() {
+    fn a_sync_claims_offers_and_every_listed_message_of_others_not_claimed_yet() {
         let bob = handle("bob");
         let urgent = message(1, "alice", Importance::Urgent, false);
         let mine = message(2, "bob", Importance::Urgent, false);
         let asking = message(3, "alice", Importance::Normal, true);
         let ordinary = message(4, "alice", Importance::Normal, false);
         let inbox = InboxView {
-            deliverable: vec![urgent.clone(), mine, asking.clone(), ordinary],
+            deliverable: vec![urgent.clone(), mine, asking.clone(), ordinary.clone()],
             offers: vec![offer(5)],
             claims: vec![claim(Pending::Message(asking), "s-2", false, 1)],
             ..InboxView::default()
         };
         assert_eq!(
             to_claim(&inbox, &bob),
-            [Pending::Offer(offer(5)), Pending::Message(urgent)]
+            [
+                Pending::Offer(offer(5)),
+                Pending::Message(urgent),
+                Pending::Message(ordinary),
+            ],
+            "a normal message the server lists is claimed; my own never is"
         );
     }
 
@@ -636,7 +642,18 @@ mod tests {
             Importance::High,
             false
         ))));
+        assert!(
+            !pushable(&Pending::Message(message(
+                4,
+                "alice",
+                Importance::Normal,
+                false
+            ))),
+            "a normal message waits for the hooks of a session at work"
+        );
         assert!(pushable(&Pending::Offer(offer(5))));
+        let normal = Pending::Message(message(4, "alice", Importance::Normal, false));
+        assert!(to_push(&SessionLedger::default(), &[normal], &handle("bob"), NOW).is_empty());
     }
 
     #[test]

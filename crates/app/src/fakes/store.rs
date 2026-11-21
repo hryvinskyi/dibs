@@ -44,7 +44,7 @@ use crate::ports::{
 use crate::records::{
     ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter,
     ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
-    ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
+    ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord, WrittenBy,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -641,6 +641,20 @@ impl SessionRows for MemoryTx {
         Ok(found)
     }
 
+    async fn members_seen_since(
+        &mut self,
+        project: ProjectId,
+        since: OffsetDateTime,
+    ) -> StoreResult<BTreeSet<MemberId>> {
+        Ok(self
+            .work
+            .sessions
+            .iter()
+            .filter(|((p, _), s)| *p == project && s.last_seen >= since)
+            .map(|(_, s)| s.member)
+            .collect())
+    }
+
     async fn forget_session_checkouts(
         &mut self,
         project: ProjectId,
@@ -1231,6 +1245,45 @@ impl ThreadRows for MemoryTx {
             })
             .map(|(_, m)| m.id)
             .collect();
+        Ok(self.record_reads(project, reader, ids, at))
+    }
+
+    async fn mark_read_in(
+        &mut self,
+        project: ProjectId,
+        reader: MemberId,
+        threads: &BTreeSet<ThreadId>,
+        written_by: WrittenBy,
+        at: OffsetDateTime,
+    ) -> StoreResult<u64> {
+        let ids: Vec<MessageId> = self
+            .work
+            .messages
+            .iter()
+            .filter(|((p, _), m)| *p == project && threads.contains(&m.thread))
+            .filter(|(_, m)| !written_by.dibs_only() || m.author.is_system())
+            .filter(|(_, m)| {
+                self.work
+                    .threads
+                    .get(&(project, m.thread))
+                    .is_some_and(|t| speaks_for(t.author, m.author) != Some(reader))
+            })
+            .map(|(_, m)| m.id)
+            .collect();
+        Ok(self.record_reads(project, reader, ids, at))
+    }
+}
+
+impl MemoryTx {
+    /// Records each message as read by `reader` at `at`, unless they read it before; answers how
+    /// many were new.
+    fn record_reads(
+        &mut self,
+        project: ProjectId,
+        reader: MemberId,
+        ids: Vec<MessageId>,
+        at: OffsetDateTime,
+    ) -> u64 {
         let mut newly = 0;
         for id in ids {
             if let std::collections::btree_map::Entry::Vacant(entry) =
@@ -1240,7 +1293,7 @@ impl ThreadRows for MemoryTx {
                 newly += 1;
             }
         }
-        Ok(newly)
+        newly
     }
 }
 

@@ -349,6 +349,22 @@ pub struct ThreadSummary {
     pub importance: Importance,
 }
 
+/// Whose messages a mark of reading covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WrittenBy {
+    /// Every message, whoever wrote it.
+    Anyone,
+    /// Only what dibs wrote.
+    Dibs,
+}
+
+impl WrittenBy {
+    /// Whether only what dibs wrote is covered.
+    pub const fn dibs_only(self) -> bool {
+        matches!(self, Self::Dibs)
+    }
+}
+
 /// An item completed, as the log records it: the item, the member who held it, and when.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionRecord {

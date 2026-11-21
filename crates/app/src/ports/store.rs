@@ -46,7 +46,7 @@ use dibs_domain::worktree::{PoolKey, WorktreePool};
 use crate::records::{
     ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter,
     ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
-    ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
+    ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord, WrittenBy,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -251,6 +251,12 @@ pub trait SessionRows: Send {
         member: MemberId,
         since: OffsetDateTime,
     ) -> StoreResult<Vec<SessionCheckout>>;
+    /// The members of the project with a session registered or seen at `since` or later.
+    async fn members_seen_since(
+        &mut self,
+        project: ProjectId,
+        since: OffsetDateTime,
+    ) -> StoreResult<BTreeSet<MemberId>>;
     /// Forgets every checkout the session reported.
     async fn forget_session_checkouts(
         &mut self,
@@ -475,6 +481,17 @@ pub trait ThreadRows: Send {
         project: ProjectId,
         reader: MemberId,
         thread: ThreadId,
+        at: OffsetDateTime,
+    ) -> StoreResult<u64>;
+    /// Records as read by `reader`, in one statement, every message of these threads that does not
+    /// speak for them and that `written_by` covers; answers how many were not read before. Which
+    /// threads the reader may read is decided by the caller; an id of no thread marks nothing.
+    async fn mark_read_in(
+        &mut self,
+        project: ProjectId,
+        reader: MemberId,
+        threads: &BTreeSet<ThreadId>,
+        written_by: WrittenBy,
         at: OffsetDateTime,
     ) -> StoreResult<u64>;
 }

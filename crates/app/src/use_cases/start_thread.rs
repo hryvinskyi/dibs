@@ -14,6 +14,7 @@ use crate::error::AppError;
 use crate::named::{NamedMessage, NamedThread, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::common::{existing_item, present_member_by_handle};
+use crate::use_cases::no_session::{NoSessionAtWork, no_session_at_work};
 use crate::use_cases::writing::{MemberThread, Posted};
 use crate::work::Work;
 
@@ -45,17 +46,23 @@ pub struct StartThreadInput {
     pub ack_required: bool,
 }
 
-/// The new thread and its first message, their members named.
+/// The new thread and its first message, their members named, with the recipients no session of
+/// whose will show it soon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartedThread {
     /// The thread.
     pub thread: NamedThread,
     /// Its first message.
     pub message: NamedMessage,
+    /// The members it names none of whose sessions was seen within the last hour, ordered by
+    /// handle; nobody for a thread addressed to the whole project. The message is sent all the
+    /// same and waits for their next session.
+    pub no_session_at_work: Vec<NoSessionAtWork>,
 }
 
-/// Starts a thread with its first message. Only people write, and only people receive: naming an
-/// integration as a recipient is refused.
+/// Starts a thread with its first message, and says which members it names have no session at
+/// work. Only people write, and only people receive: naming an integration as a recipient is
+/// refused.
 pub struct StartThread {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -108,10 +115,8 @@ impl StartThread {
         if let Some(item) = input.item {
             existing_item(&mut work, item).await?;
         }
-        let limit = work
-            .project_settings(&self.hot_rules)
-            .await?
-            .raised_per_hour();
+        let settings = work.project_settings(&self.hot_rules).await?;
+        let limit = settings.raised_per_hour();
         let (thread, message) = MemberThread {
             ids: Posted::next(&*self.ids),
             subject: input.subject,
@@ -126,9 +131,12 @@ impl StartThread {
         .start(&mut work, limit, now)
         .await?;
         let names = Names::load(&mut work).await?;
+        let no_session_at_work =
+            no_session_at_work(&mut work, &thread, &message, &settings, &names, now).await?;
         let started = StartedThread {
             thread: names.thread(thread)?,
             message: names.message(message)?,
+            no_session_at_work,
         };
         work.commit(&*self.notifier).await?;
         Ok(started)
@@ -199,6 +207,94 @@ mod tests {
         let json = serde_json::to_string(&kinds).unwrap();
         assert!(!json.contains("Secret plans"));
         assert!(!json.contains("Invoice totals"));
+    }
+
+    #[tokio::test]
+    async fn the_answer_names_each_recipient_with_no_session_seen_in_the_hour_and_their_live_claim()
+    {
+        use crate::use_cases::testing::{new_member, session};
+        use crate::use_cases::{Authenticate, ClaimItem, ClaimItemInput, CreateMember};
+
+        let env = Env::new().await;
+        let carol = CreateMember::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                crate::use_cases::CreateMemberInput {
+                    member: new_member("carol"),
+                    role: dibs_domain::member::Role::Member,
+                },
+            )
+            .await
+            .unwrap();
+        Authenticate::new(&env.deps)
+            .execute(carol.token.expose())
+            .await
+            .unwrap();
+        let item = env.item("gh:acme/widgets#1").await;
+        ClaimItem::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                ClaimItemInput {
+                    branches: Default::default(),
+                    item,
+                    session: env.bob.session,
+                    areas: vec!["billing".to_owned()],
+                    wide: None,
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        let start = StartThread::new(&env.deps);
+        let named = |started: StartedThread| {
+            started
+                .no_session_at_work
+                .into_iter()
+                .map(|away| (away.member.as_str().to_owned(), away.holds_live_claim))
+                .collect::<Vec<_>>()
+        };
+        let both = || handles(&["carol", "bob"]);
+
+        let at_once = start
+            .execute(&env.alice.actor, input(both(), "hello"))
+            .await
+            .unwrap();
+        assert_eq!(
+            named(at_once),
+            [("carol".to_owned(), false)],
+            "bob's session registered just now"
+        );
+
+        env.advance(time::Duration::minutes(61));
+        let later = start
+            .execute(&env.alice.actor, input(both(), "hello again"))
+            .await
+            .unwrap();
+        assert_eq!(later.message.record.body.as_str(), "hello again", "sent");
+        assert_eq!(
+            named(later),
+            [("bob".to_owned(), true), ("carol".to_owned(), false)]
+        );
+        let everyone = start
+            .execute(&env.alice.actor, input(Addressees::Project, "noon"))
+            .await
+            .unwrap();
+        assert!(
+            everyone.no_session_at_work.is_empty(),
+            "a conversation with the whole project names nobody"
+        );
+
+        session(&env.deps, &env.bob.actor, "desktop", "desktop/77aa01bc").await;
+        env.advance(time::Duration::minutes(10));
+        let seen = start
+            .execute(&env.alice.actor, input(both(), "and again"))
+            .await
+            .unwrap();
+        assert_eq!(
+            named(seen),
+            [("carol".to_owned(), false)],
+            "a session of bob's was seen ten minutes ago"
+        );
     }
 
     #[tokio::test]

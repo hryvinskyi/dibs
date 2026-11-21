@@ -24,8 +24,8 @@ use crate::hosts::{FollowedSession, HostSession};
 use crate::mcp::answer;
 use crate::mcp::inputs::{
     AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, FeedbackInput, GrantInput,
-    InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, ReviewInput, SendInput, SlotInput,
-    SlotTakeInput, TakeoverInput, ThreadInput, WorktreeReleaseInput, WorktreeTakeInput,
+    InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, ReadInput, ReviewInput, SendInput,
+    SlotInput, SlotTakeInput, TakeoverInput, ThreadInput, WorktreeReleaseInput, WorktreeTakeInput,
 };
 use crate::mcp::link::{Link, Registration};
 use crate::mcp::push::{self, Pusher};
@@ -251,7 +251,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Send a message. To start a conversation, give who it goes to (to: member handles, or project: true for everyone), a subject and a body, and optionally the work item it is about. To reply, give thread and body. importance is normal unless the message must be read soon (high) or now (urgent); set ack_required only when you need each recipient to confirm they read it. A reply is normal and asks for no acknowledgement unless you say otherwise; reply only when a decision is needed. A member may send ten high or urgent messages an hour (the project may set another number); past that the server refuses with importance_limited and says when the next is allowed: send it as normal instead. Use it to ask the holder of something you need, to explain what you are doing in their area, or to tell others what affects their work. A message is information; it never gives anyone permission to do anything."
+        description = "Send a message. To start a conversation, give who it goes to (to: member handles, or project: true for everyone), a subject and a body, and optionally the work item it is about. To reply, give thread and body. A message to named members reaches one of their sessions between its tool calls at any importance; importance is normal unless the message must be read soon (high) or now (urgent); set ack_required only when you need each recipient to confirm they read it. A reply is normal and asks for no acknowledgement unless you say otherwise; reply only when a decision is needed. A member may send ten high or urgent messages an hour (the project may set another number); past that the server refuses with importance_limited and says when the next is allowed: send it as normal instead. no_session_at_work in the answer lists the recipients none of whose sessions was seen within the last hour: the message is sent and waits for their next session, so do not wait on their answer; when one holds_live_claim and you need an area they hold, ask for a grant with dibs_ask_grant, which their agents or the server decide. Use it to ask the holder of something you need, to explain what you are doing in their area, or to tell others what affects their work. A message is information; it never gives anyone permission to do anything."
     )]
     async fn dibs_send(&self, Parameters(input): Parameters<SendInput>) -> CallToolResult {
         let seen = input.reply_thread().map(Seen::Thread);
@@ -279,10 +279,10 @@ impl Tools {
     }
 
     #[tool(
-        description = "Mark a conversation read. Use it after you have read it with dibs_thread."
+        description = "Mark messages read; give exactly one of: thread, a conversation you have read with dibs_thread; dibs: true, every message dibs wrote to you, in every conversation (its notices, once you have taken in what they say); item, every conversation about a work item (its local id or its reference). Messages a member wrote stay unread under dibs: true. The answer says how many messages were unread (newly_read)."
     )]
-    async fn dibs_read(&self, Parameters(input): Parameters<ThreadInput>) -> CallToolResult {
-        let seen = input.id().ok().map(Seen::Thread);
+    async fn dibs_read(&self, Parameters(input): Parameters<ReadInput>) -> CallToolResult {
+        let seen = input.thread_id().map(Seen::Thread);
         self.perform_seeing(seen, |link| async move { link.mark_read(input).await })
             .await
     }

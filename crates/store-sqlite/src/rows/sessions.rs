@@ -1,5 +1,7 @@
 //! Sessions of members, and the checkouts they report working in.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 use time::OffsetDateTime;
@@ -138,6 +140,23 @@ impl SessionRows for SqliteTx {
             .await?
             .iter()
             .map(session_checkout)
+            .collect()
+    }
+
+    async fn members_seen_since(
+        &mut self,
+        project: ProjectId,
+        since: OffsetDateTime,
+    ) -> StoreResult<BTreeSet<MemberId>> {
+        let statement = sqlx::query(
+            "SELECT DISTINCT member_id FROM sessions WHERE project_id = ?1 AND last_seen >= ?2",
+        )
+        .bind(int(project.get())?)
+        .bind(nanos(since)?);
+        self.all(statement)
+            .await?
+            .iter()
+            .map(|row| Ok(MemberId(Fields::of(row, "sessions").number("member_id")?)))
             .collect()
     }
 

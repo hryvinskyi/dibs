@@ -1,7 +1,7 @@
 //! Pushing to a session that waits for its person, for a host whose adapter can: the tool server
 //! follows the project's events, and when one may bring the member something to deliver, reads
-//! the inbox, claims each pressing message or offer from the server as the background sync does
-//! for the hooks, and sends what it won as the host's notification.
+//! the inbox, claims each message or offer the server lists for delivery as the background sync
+//! does for the hooks, and sends what it won as the host's notification.
 //!
 //! - **Opted in per session**, with `DIBS_PUSH_TO_IDLE=1` in the environment the host starts the
 //!   tool server with, and never with `DIBS_OFF` set: a host may drop a push it was not set up to

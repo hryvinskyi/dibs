@@ -16,8 +16,8 @@ use dibs_app::named::{
 use dibs_app::records::{MemberRecord, SessionRecord};
 use dibs_app::use_cases::{
     Acknowledged, DeliverableMessage, ExcludedEntry, FollowedEvent, HeldItem, NamedNotReady,
-    NamedOverlap, PendingGrantAsk, ReadyEntry, ReadyView as ReadyList, RecipientAck,
-    RecipientStatus, UnackedMessage, UnreadConversations,
+    NamedOverlap, NoSessionAtWork, PendingGrantAsk, ReadyEntry, ReadyView as ReadyList,
+    RecipientAck, RecipientStatus, UnackedMessage, UnreadConversations,
 };
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::delivery::Delivery;
@@ -1025,6 +1025,29 @@ impl UnreadConversationsView {
             from_people: counts.from_people,
             from_dibs: counts.from_dibs,
         }
+    }
+}
+
+/// A recipient of what the caller sent none of whose sessions was seen within the last hour: the
+/// message waits for their next session.
+#[derive(Debug, Serialize)]
+pub struct NoSessionAtWorkView {
+    /// The recipient's handle.
+    pub member: Handle,
+    /// Whether they hold a live claim, whose areas may be asked of them with a grant request.
+    pub holds_live_claim: bool,
+}
+
+impl NoSessionAtWorkView {
+    /// The views of the recipients, in the order given.
+    pub fn all(recipients: Vec<NoSessionAtWork>) -> Vec<Self> {
+        recipients
+            .into_iter()
+            .map(|recipient| Self {
+                member: recipient.member,
+                holds_live_claim: recipient.holds_live_claim,
+            })
+            .collect()
     }
 }
 

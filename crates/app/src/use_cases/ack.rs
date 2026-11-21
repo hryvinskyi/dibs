@@ -270,7 +270,9 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            ack.execute(&env.alice.actor, reply.record.id).await.is_ok(),
+            ack.execute(&env.alice.actor, reply.message.record.id)
+                .await
+                .is_ok(),
             "a reply reaches the thread's author"
         );
     }
