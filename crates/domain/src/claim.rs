@@ -684,6 +684,15 @@ pub fn decide_return(claim: &Claim, areas: &BTreeSet<QualifiedArea>) -> Narrowed
     give_up(claim, areas)
 }
 
+/// Decides handing a claim's work on without its holder, as the server does when the item's
+/// tracker moves it into a state at which areas are freed: the claim gives up every area it holds
+/// and every area it waits for, and keeps its item. As with [`decide_return`], nothing else
+/// changes and when the claim was last seen stays as it was. A claim that neither holds nor waits
+/// for an area gives nothing up.
+pub fn decide_hand_on(claim: &Claim) -> Narrowed {
+    decide_return(claim, &held_or_waited(&claim.areas, &claim.pending))
+}
+
 /// The claim without those of `areas` it holds or waits for, and what it gave up.
 fn give_up(claim: &Claim, areas: &BTreeSet<QualifiedArea>) -> Narrowed {
     let mut claim = claim.clone();

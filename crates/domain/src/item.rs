@@ -306,8 +306,9 @@ impl From<Priority> for u8 {
     }
 }
 
-/// The state an outside tracker shows an item in (its board's column, `Todo`), carried as it is
-/// and never interpreted: 1 to 40 characters after trimming, with no control characters.
+/// The state an outside tracker shows an item in (its board's column, `Todo`), carried as it is:
+/// 1 to 40 characters after trimming, with no control characters. Its only meaning is whether it
+/// equals, exactly, one of the states a project's settings list.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct SourceStatus(String);

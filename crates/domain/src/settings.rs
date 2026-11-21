@@ -24,6 +24,7 @@ use crate::handle::Handle;
 use crate::hot_rule::{
     HotRuleConfig, HotRuleRefused, HotRuleRegistry, HotRuleSpec, Note, NoteError,
 };
+use crate::item::{SourceStatus, SourceStatusError};
 use crate::paths::{PathGlob, PathGlobError, RelPath, RepoPath};
 use crate::pr_status::PrStatusSettings;
 use crate::protection::{ProtectedRef, ProtectedTarget, ProtectedTargetError, RefKind};
@@ -148,6 +149,7 @@ pub struct ProjectSettings {
     stale_after: Duration,
     release_after: Duration,
     idle_area_after: Duration,
+    free_areas_at: Vec<SourceStatus>,
     heartbeat_every: Duration,
     yield_escalates_after: Duration,
     edit_policy: EditPolicy,
@@ -183,6 +185,21 @@ pub enum SettingsError {
     /// `idle_area_after` is outside 1 to 90 days.
     #[error("idle_area_after is between 1 and 90 days")]
     IdleAreaAfterOutOfRange,
+    /// A state of `free_areas_at` is not a tracker state.
+    #[error("free_areas_at: '{text}': {error}")]
+    FreeAreasAt {
+        /// The state as written.
+        text: String,
+        /// What is wrong with it.
+        #[source]
+        error: SourceStatusError,
+    },
+    /// `free_areas_at` names one state twice.
+    #[error("free_areas_at names '{state}' twice")]
+    DuplicateFreeAreasAt {
+        /// The state.
+        state: SourceStatus,
+    },
     /// `heartbeat_every` is not a duration.
     #[error("heartbeat_every: {0}")]
     HeartbeatEvery(DurationError),
@@ -503,7 +520,8 @@ impl ProjectSettings {
     /// The rules: `stale_after` between 1 hour and 30 days (default 24 hours); `release_after`
     /// between 1 and 90 days and longer than `stale_after` (default 7 days, or one day more than
     /// `stale_after` when that is 7 days or longer); `idle_area_after` between 1 and 90 days
-    /// (default 7 days); `heartbeat_every`
+    /// (default 7 days); `free_areas_at` a list of tracker states, each 1 to 40 characters with no
+    /// control characters and each once (default none); `heartbeat_every`
     /// between 1 and 15 minutes (default 1 minute); `yield_escalates_after` between 5 minutes and
     /// 24 hours (default 30 minutes); `raised_per_hour` between 1 and 1000 (default
     /// 10); either top-level areas and rules or a `repos`
@@ -552,6 +570,7 @@ impl ProjectSettings {
             SettingsError::IdleAreaAfter,
             SettingsError::IdleAreaAfterOutOfRange,
         )?;
+        let free_areas_at = parse_free_areas_at(&document.free_areas_at)?;
         let heartbeat_every = parse_in_range(
             document.heartbeat_every.as_deref(),
             DEFAULT_HEARTBEAT_EVERY,
@@ -638,6 +657,7 @@ impl ProjectSettings {
             stale_after,
             release_after,
             idle_area_after,
+            free_areas_at,
             heartbeat_every,
             yield_escalates_after,
             edit_policy: document.edit_policy.unwrap_or_default(),
@@ -671,6 +691,18 @@ impl ProjectSettings {
     /// before the server gives the area back.
     pub fn idle_area_after(&self) -> Duration {
         self.idle_area_after
+    }
+
+    /// The tracker states at which a claim gives every area up and keeps its item, in the order
+    /// written; none unless the settings name some.
+    pub fn free_areas_at(&self) -> &[SourceStatus] {
+        &self.free_areas_at
+    }
+
+    /// Whether `state` is one of [`ProjectSettings::free_areas_at`], compared exactly as an import
+    /// sends it.
+    pub fn frees_areas_at(&self, state: &SourceStatus) -> bool {
+        self.free_areas_at.contains(state)
     }
 
     /// How often a session sends a heartbeat.
@@ -756,6 +788,7 @@ impl ProjectSettings {
         Self {
             release_after: default_release_after(self.stale_after),
             idle_area_after: DEFAULT_IDLE_AREA_AFTER,
+            free_areas_at: Vec::new(),
             ..self.clone()
         }
     }
@@ -898,6 +931,7 @@ impl ProjectSettings {
                 .then(|| format_duration(self.release_after)),
             idle_area_after: (self.idle_area_after != DEFAULT_IDLE_AREA_AFTER)
                 .then(|| format_duration(self.idle_area_after)),
+            free_areas_at: self.free_areas_at.iter().map(ToString::to_string).collect(),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
             yield_escalates_after: (self.yield_escalates_after != DEFAULT_YIELD_ESCALATES_AFTER)
                 .then(|| format_duration(self.yield_escalates_after)),
@@ -948,6 +982,23 @@ fn default_release_after(stale_after: Duration) -> Duration {
     } else {
         DEFAULT_RELEASE_AFTER
     }
+}
+
+/// The tracker states of `free_areas_at` as written, each parsed as an import parses an item's
+/// state and each once.
+fn parse_free_areas_at(texts: &[String]) -> Result<Vec<SourceStatus>, SettingsError> {
+    let mut states: Vec<SourceStatus> = Vec::with_capacity(texts.len());
+    for text in texts {
+        let state = SourceStatus::parse(text).map_err(|error| SettingsError::FreeAreasAt {
+            text: text.clone(),
+            error,
+        })?;
+        if states.contains(&state) {
+            return Err(SettingsError::DuplicateFreeAreasAt { state });
+        }
+        states.push(state);
+    }
+    Ok(states)
 }
 
 fn parse_in_range(
@@ -1337,20 +1388,130 @@ mod tests {
     }
 
     #[test]
+    fn no_tracker_state_frees_areas_unless_the_settings_name_some() {
+        let plain = settings("{}");
+        assert!(plain.free_areas_at().is_empty());
+        assert!(plain.to_document().free_areas_at.is_empty());
+        assert!(!plain.frees_areas_at(&SourceStatus::parse("Ready for QA").unwrap()));
+    }
+
+    #[test]
+    fn the_states_that_free_areas_are_kept_as_written_in_order_and_compared_exactly() {
+        let set = settings(r#"{"free_areas_at":["Ready for QA"," In Review "]}"#);
+        let states: Vec<&str> = set
+            .free_areas_at()
+            .iter()
+            .map(SourceStatus::as_str)
+            .collect();
+        assert_eq!(
+            states,
+            ["Ready for QA", "In Review"],
+            "trimmed as an import trims"
+        );
+        assert!(set.frees_areas_at(&SourceStatus::parse("Ready for QA").unwrap()));
+        assert!(
+            !set.frees_areas_at(&SourceStatus::parse("ready for qa").unwrap()),
+            "the case counts"
+        );
+        assert!(!set.frees_areas_at(&SourceStatus::parse("In Progress").unwrap()));
+    }
+
+    #[test]
+    fn a_state_that_frees_areas_is_a_tracker_state_named_once() {
+        let long = "x".repeat(41);
+        let cases = [
+            (
+                r#"{"free_areas_at":["Ready for QA","Ready for QA"]}"#.to_owned(),
+                SettingsError::DuplicateFreeAreasAt {
+                    state: SourceStatus::parse("Ready for QA").unwrap(),
+                },
+            ),
+            (
+                r#"{"free_areas_at":["Ready for QA"," Ready for QA"]}"#.to_owned(),
+                SettingsError::DuplicateFreeAreasAt {
+                    state: SourceStatus::parse("Ready for QA").unwrap(),
+                },
+            ),
+            (
+                format!(r#"{{"free_areas_at":["{long}"]}}"#),
+                SettingsError::FreeAreasAt {
+                    text: long.clone(),
+                    error: SourceStatusError::Malformed,
+                },
+            ),
+            (
+                r#"{"free_areas_at":["  "]}"#.to_owned(),
+                SettingsError::FreeAreasAt {
+                    text: "  ".to_owned(),
+                    error: SourceStatusError::Malformed,
+                },
+            ),
+        ];
+        for (json, expected) in cases {
+            assert_eq!(refusal(&json), expected, "{json}");
+        }
+        assert!(
+            ProjectSettings::parse(
+                &document(&format!(r#"{{"free_areas_at":["{}"]}}"#, "x".repeat(40))),
+                &HotRuleRegistry::standard(),
+            )
+            .is_ok(),
+            "forty characters are a state"
+        );
+        assert_eq!(
+            refusal(r#"{"free_areas_at":["Ready for QA","Ready for QA"]}"#).to_string(),
+            "free_areas_at names 'Ready for QA' twice"
+        );
+        assert_eq!(
+            refusal(r#"{"free_areas_at":[""]}"#).to_string(),
+            "free_areas_at: '': a tracker state is 1 to 40 characters with no control characters"
+        );
+    }
+
+    #[test]
+    fn the_states_that_free_areas_round_trip_through_the_document() {
+        for json in [
+            "{}",
+            r#"{"free_areas_at":["Ready for QA"]}"#,
+            r#"{"free_areas_at":["Ready for QA","In Review"]}"#,
+        ] {
+            let parsed = settings(json);
+            let document = parsed.to_document();
+            assert_eq!(
+                document.free_areas_at,
+                parsed
+                    .free_areas_at()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                "{json}"
+            );
+            assert_eq!(
+                ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+                parsed,
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
     fn without_claim_endings_the_release_delay_is_the_default_and_everything_else_stays() {
         let written = settings(
             r#"{"stale_after":"2d","release_after":"20d","idle_area_after":"30d",
-                "yield_escalates_after":"1h",
+                "free_areas_at":["Ready for QA"],"yield_escalates_after":"1h",
                 "areas":[{"name":"billing","paths":["packages/billing/**"]}]}"#,
         );
         let older = written.without_claim_endings();
         assert_eq!(older.release_after(), Duration::days(7));
         assert_eq!(older.idle_area_after(), Duration::days(7));
+        assert!(older.free_areas_at().is_empty());
         assert_eq!(older.stale_after(), written.stale_after());
         let mut expected = written.to_document();
         assert_eq!(expected.idle_area_after.as_deref(), Some("30d"));
+        assert_eq!(expected.free_areas_at, ["Ready for QA"]);
         expected.release_after = None;
         expected.idle_area_after = None;
+        expected.free_areas_at = Vec::new();
         assert_eq!(older.to_document(), expected);
         let late = settings(r#"{"stale_after":"10d","release_after":"30d"}"#);
         assert_eq!(

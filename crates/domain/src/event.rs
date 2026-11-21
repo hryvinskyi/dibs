@@ -13,7 +13,7 @@ use crate::area::QualifiedArea;
 use crate::escalation::EscalationSubject;
 use crate::handover::WithdrawReason;
 use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
-use crate::item::{ExternalRef, Title};
+use crate::item::{ExternalRef, SourceStatus, Title};
 use crate::paths::RepoPath;
 use crate::radar::{BranchName, BranchSourceKind, OverlapKind};
 use crate::repo::RepoId;
@@ -65,6 +65,9 @@ pub enum EventKind {
     /// The server gave back areas of a live claim that went the project's `idle_area_after` with
     /// no sign of the claim's work in them; the claim holds them no more.
     AreasReturned(AreasReturned),
+    /// An import moved a claim's item into a tracker state the project's `free_areas_at` lists;
+    /// the claim gave every area it held or waited for up and keeps the item.
+    AreasHandedOn(AreasHandedOn),
     /// A claim gained areas or shared paths through an edit check. Appended only when something
     /// was actually added.
     Reserved(Reserved),
@@ -190,6 +193,7 @@ impl EventKind {
             Self::ForceReleased(_) => "force_released",
             Self::ReleasedStale(_) => "released_stale",
             Self::AreasReturned(_) => "areas_returned",
+            Self::AreasHandedOn(_) => "areas_handed_on",
             Self::Reserved(_) => "reserved",
             Self::Granted(_) => "granted",
             Self::GrantRevoked(_) => "grant_revoked",
@@ -269,6 +273,7 @@ impl EventKind {
             Self::ForceReleased(e) => vec![Some(e.member), e.by],
             Self::ReleasedStale(e) => vec![Some(e.member)],
             Self::AreasReturned(e) => vec![Some(e.member)],
+            Self::AreasHandedOn(e) => vec![Some(e.member)],
             Self::Reserved(e) => vec![Some(e.member)],
             Self::Granted(e) => vec![Some(e.from), Some(e.to)],
             Self::GrantRevoked(e) => vec![Some(e.from), Some(e.to)],
@@ -333,6 +338,7 @@ impl EventKind {
             | Self::ForceReleased(_)
             | Self::ReleasedStale(_)
             | Self::AreasReturned(_)
+            | Self::AreasHandedOn(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -409,6 +415,7 @@ impl EventKind {
             | Self::ForceReleased(_)
             | Self::ReleasedStale(_)
             | Self::AreasReturned(_)
+            | Self::AreasHandedOn(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -490,6 +497,7 @@ impl EventKind {
             | Self::ForceReleased(_)
             | Self::ReleasedStale(_)
             | Self::AreasReturned(_)
+            | Self::AreasHandedOn(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -657,6 +665,20 @@ pub struct AreasReturned {
     pub member: MemberId,
     /// The areas it holds no more.
     pub areas: BTreeSet<QualifiedArea>,
+}
+
+/// A claim gave its areas up when its item's tracker moved the item into a state at which areas
+/// are freed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreasHandedOn {
+    /// The item of the claim.
+    pub item: ItemId,
+    /// Its holder.
+    pub member: MemberId,
+    /// The areas it gave up: those it held and those it waited for.
+    pub areas: BTreeSet<QualifiedArea>,
+    /// The tracker state the item moved to.
+    pub state: SourceStatus,
 }
 
 /// A claim gained areas or shared paths through an edit check.
@@ -1882,6 +1904,36 @@ mod tests {
             None,
             "giving areas back completes nothing"
         );
+        let back: EventKind = serde_json::from_value(value).unwrap();
+        assert_eq!(back, kind);
+    }
+
+    #[test]
+    fn areas_handed_on_carry_the_item_its_holder_the_areas_and_the_state() {
+        let kind = EventKind::AreasHandedOn(AreasHandedOn {
+            item: ItemId(4),
+            member: BOB,
+            areas: BTreeSet::from([area("api:billing"), area("web:checkout")]),
+            state: SourceStatus::parse("Ready for QA").unwrap(),
+        });
+        let value = serde_json::to_value(&kind).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "areas_handed_on",
+                "payload": {"item": 4, "member": 2, "areas": ["api:billing", "web:checkout"],
+                            "state": "Ready for QA"},
+            })
+        );
+        assert_eq!(kind.name(), "areas_handed_on");
+        assert!(parsed_names().iter().any(|name| name == "areas_handed_on"));
+        assert_eq!(kind.members(), BTreeSet::from([BOB]));
+        assert_eq!(
+            (kind.message(), kind.thread(), kind.slot()),
+            (None, None, None)
+        );
+        assert_eq!(kind.private_to(), None, "every reader of the log sees it");
+        assert_eq!(kind.completion(), None, "handing work on completes nothing");
         let back: EventKind = serde_json::from_value(value).unwrap();
         assert_eq!(back, kind);
     }

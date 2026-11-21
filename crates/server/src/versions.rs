@@ -42,8 +42,8 @@ pub const PROTECTED_TAGS_SINCE: Version = Version::new(0, 1, 1);
 pub const BRANCH_PATTERNS_SINCE: Version = Version::new(0, 1, 2);
 
 /// The first client that reads the settings by which the server ends claims or takes areas from
-/// them on its own (`release_after`, `idle_area_after`). An older one refuses settings that hold
-/// such a field, and then judges nothing.
+/// them on its own (`release_after`, `idle_area_after`, `free_areas_at`). An older one refuses
+/// settings that hold such a field, and then judges nothing.
 pub const CLAIM_ENDINGS_SINCE: Version = Version::new(0, 1, 11);
 
 /// What the caller's client can read, from the `dibs/<semver>` of its `User-Agent`: everything for
@@ -305,7 +305,8 @@ mod tests {
         }
 
         let document: SettingsDocument = serde_json::from_str(
-            r#"{"stale_after":"1d","release_after":"3d","idle_area_after":"2d"}"#,
+            r#"{"stale_after":"1d","release_after":"3d","idle_area_after":"2d",
+                "free_areas_at":["Ready for QA"]}"#,
         )
         .unwrap();
         let settings = ProjectSettings::parse(
@@ -315,11 +316,15 @@ mod tests {
         .unwrap();
         let endings = |agent: Option<&str>| {
             let document = ClientReads::of(agent).settings(&settings);
-            (document.release_after, document.idle_area_after)
+            (
+                document.release_after,
+                document.idle_area_after,
+                document.free_areas_at,
+            )
         };
         assert_eq!(
             endings(Some("dibs/0.1.10")),
-            (None, None),
+            (None, None, Vec::new()),
             "a client older than the claim endings is served the settings without them"
         );
         for agent in [
@@ -330,7 +335,11 @@ mod tests {
         ] {
             assert_eq!(
                 endings(agent),
-                (Some("3d".to_owned()), Some("2d".to_owned())),
+                (
+                    Some("3d".to_owned()),
+                    Some("2d".to_owned()),
+                    vec!["Ready for QA".to_owned()]
+                ),
                 "{agent:?}"
             );
         }

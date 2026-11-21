@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use super::*;
 use crate::claim::{
-    ClaimOutcome, ClaimRefused, ClaimRequest, TakeoverRefused, decide_claim, decide_narrow,
-    decide_return, decide_takeover,
+    ClaimOutcome, ClaimRefused, ClaimRequest, TakeoverRefused, decide_claim, decide_hand_on,
+    decide_narrow, decide_return, decide_takeover,
 };
 use crate::review::{ClaimState, PrRef, Review};
 use crate::testing::{ALICE, BOB, CAROL, area, areas, at, claim, request, two_repo_settings};
@@ -564,6 +564,29 @@ fn areas_given_back_without_the_holder_go_as_a_narrowing_and_leave_when_the_clai
         returned.claim.last_seen, bob.last_seen,
         "giving areas back is no sign of the claim's work"
     );
+}
+
+#[test]
+fn work_handed_on_gives_up_every_area_held_or_waited_for_and_leaves_when_the_claim_was_seen() {
+    let bob = bob_claims(&[alice_debt()], &["api:billing", "web:checkout"])
+        .unwrap()
+        .claim()
+        .clone();
+    assert!(bob.waits_for(&area("api:billing")) && bob.holds(&area("web:checkout")));
+    let handed = decide_hand_on(&bob);
+    assert_eq!(handed.areas, areas(&["api:billing", "web:checkout"]));
+    assert!(handed.claim.areas.is_empty());
+    assert!(handed.claim.pending.is_empty());
+    assert_eq!(
+        handed.withdrawn.keys().cloned().collect::<BTreeSet<_>>(),
+        areas(&["api:billing"]),
+        "the wait ends"
+    );
+    assert_eq!(handed.claim.item, bob.item, "the claim keeps its item");
+    assert_eq!(handed.claim.last_seen, bob.last_seen, "no sign of its work");
+    let emptied = decide_hand_on(&handed.claim);
+    assert!(emptied.areas.is_empty(), "nothing left to give up");
+    assert_eq!(emptied.claim, handed.claim);
 }
 
 #[test]

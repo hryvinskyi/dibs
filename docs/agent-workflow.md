@@ -236,7 +236,12 @@ other.
 - `dibs_done` when the work shipped without a pull request; a merge of the pull request you recorded completes the claim
   for you.
 - Work handed on to be checked is not done yet: give its areas up (`dibs_narrow`) and keep the claim, so the files are
-  free and the work is still yours when it comes back. If its tracker closes the ticket meanwhile, the next import of
+  free and the work is still yours when it comes back. A project can let its tracker do this: when the next import
+  moves your ticket into a state the settings' `free_areas_at` lists (`Ready for QA`, say), dibs gives up every area
+  your claim holds or waits for, keeps the claim and the item, and tells you in that claim's conversation ("Handed on:
+  …"), whether the claim is worked on or in review. Declare an area again (`dibs_claim`, or
+  `dibs claim <item> --area <area>`) only to edit there; a claim taken while the ticket already sat in that state keeps
+  its areas. If its tracker closes the ticket meanwhile, the next import of
   that tracker that lists it closed, carries it as a closed blocker, or reads the whole tracker without it completes the
   claim; once the tracker reopens it, you can claim it again. A ticket that belongs to no importer's source, such as one
   only ever seen as another tracker's blocker, keeps your claim. A done item whose tracker still has it open can be

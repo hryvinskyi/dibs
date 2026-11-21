@@ -1,27 +1,35 @@
 //! Bringing the project's items and imported dependencies in line with an outside source.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use dibs_domain::claim::Claim;
+use dibs_domain::area::QualifiedArea;
+use dibs_domain::claim::{Claim, decide_hand_on};
 use dibs_domain::event::{
-    CompletedByClose, DependencyAdded, DependencyRemoved, EventKind, ItemCreated, ItemUpdated,
+    AreasHandedOn, CompletedByClose, DependencyAdded, DependencyRemoved, EventKind, ItemCreated,
+    ItemUpdated,
 };
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::ItemId;
 use dibs_domain::import::{
-    Closure, ImportBatch, ImportContext, ItemChange, PlannedItem, RefusedEdge, plan_import,
+    Closure, HandedOn, ImportBatch, ImportContext, ItemChange, PlannedItem, RefusedEdge,
+    plan_import,
 };
-use dibs_domain::item::{ItemMeta, ItemStatus, SourceId};
+use dibs_domain::item::{ItemMeta, ItemStatus, SourceId, SourceStatus};
+use dibs_domain::message::Importance;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::AppError;
+use crate::named::ItemName;
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::{ItemFilter, ItemRecord};
 use crate::use_cases::claim_ending::{Ending, end_claim, tell_holder};
-use crate::use_cases::handover::Handovers;
+use crate::use_cases::claim_notice::ClaimNotice;
+use crate::use_cases::common::existing_item;
+use crate::use_cases::handover::{Handovers, give_areas_up};
+use crate::use_cases::writing::titled_body;
 use crate::work::Work;
 
 /// What a batch did.
@@ -53,11 +61,19 @@ pub struct UpsertReport {
 /// before. Each claim is read again just before it ends, since ending one settles handovers that
 /// can change another.
 ///
-/// A claim on an item the batch reports open, or that a partial batch does not mention, is left as
-/// it is. So is one on an item the batch carries only as a closed blocker while it belongs to
-/// another source or to none, or reports closed without naming a source: that report only marks
-/// the item closed. A batch equal to what is stored, with no claim on an item it finds closed,
-/// writes nothing and appends nothing. Only an admin and the importer may send one.
+/// Then the claim standing on each item the batch moves into a tracker state the project's
+/// `free_areas_at` lists (see [`dibs_domain::import::ImportPlan::handed_on`]), working or in
+/// review, gives every area it holds or waits for up and keeps its item: each wait ends, the
+/// grants its holder gave in those areas end, an area another claim waited for moves to that
+/// claim, `areas_handed_on` is recorded, and its holder is told in the claim's conversation. It
+/// is no sign of the claim's work, so when the claim was last seen stays as it was. A claim that
+/// neither holds nor waits for an area is left alone, and nobody is told.
+///
+/// Any other claim on an item the batch reports open, or that a partial batch does not mention,
+/// is left as it is. So is one on an item the batch carries only as a closed blocker while it
+/// belongs to another source or to none, or reports closed without naming a source: that report
+/// only marks the item closed. A batch equal to what is stored, with no claim on an item it finds
+/// closed, writes nothing and appends nothing. Only an admin and the importer may send one.
 pub struct UpsertItems {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -182,6 +198,9 @@ impl UpsertItems {
             };
             self.complete(&mut work, &claim, &handovers).await?;
         }
+        for handed in &plan.handed_on {
+            self.hand_on(&mut work, handed, &handovers).await?;
+        }
         work.commit(&*self.notifier).await?;
         Ok(UpsertReport {
             closed: plan.closed.iter().map(|closure| closure.id).collect(),
@@ -222,6 +241,57 @@ impl UpsertItems {
         )
         .await
     }
+
+    /// Gives up every area the claim on a handed-on item holds or waits for, without its holder
+    /// and without counting as a sign of its work, and tells its holder. No claim, or one with
+    /// nothing to give up, is left alone. The claim is read just before, since completing or
+    /// handing on another may have changed it.
+    async fn hand_on(
+        &self,
+        work: &mut Work,
+        handed: &HandedOn,
+        handovers: &Handovers<'_>,
+    ) -> Result<(), AppError> {
+        let project = work.project_id();
+        let Some(claim) = work.claim(project, handed.id).await? else {
+            return Ok(());
+        };
+        let narrowed = decide_hand_on(&claim);
+        if narrowed.areas.is_empty() {
+            return Ok(());
+        }
+        let event = EventKind::AreasHandedOn(AreasHandedOn {
+            item: claim.item,
+            member: claim.member,
+            areas: narrowed.areas.clone(),
+            state: handed.state.clone(),
+        });
+        give_areas_up(work, &narrowed, event, handovers).await?;
+        let named = ItemName::of(&existing_item(work, claim.item).await?, &self.ref_schemes);
+        ClaimNotice {
+            claim: &claim,
+            item: &named,
+            body: titled_body(&handed_on(&named, &handed.state, &narrowed.areas), None)?,
+            importance: Importance::Normal,
+        }
+        .send(work, &*self.ids, handovers.now)
+        .await?;
+        Ok(())
+    }
+}
+
+/// What the holder of a claim whose work its tracker handed on is told: where the item moved,
+/// which areas the claim gave up, that the claim and the item stay and complete when the tracker
+/// closes the item, and to declare an area again only to edit there.
+fn handed_on(item: &ItemName, state: &SourceStatus, areas: &BTreeSet<QualifiedArea>) -> String {
+    let listed: Vec<String> = areas.iter().map(ToString::to_string).collect();
+    format!(
+        "Handed on: work item {label} \"{title}\" moved to \"{state}\" in its tracker, so your claim on it gave its areas up ({areas}). The claim and the item stay yours, and the claim completes when the tracker closes the item. Declare an area again (dibs claim {key} --area <area>) only to edit there.",
+        label = item.label(),
+        title = item.title,
+        areas = listed.join(", "),
+        key = item.key(),
+    )
 }
 
 /// The stored item a plan names.
@@ -1204,6 +1274,251 @@ mod tests {
         let bobs = stored_claim(&env, feature).await.unwrap();
         assert!(bobs.holds(&billing));
         assert!(bobs.pending.is_empty());
+    }
+
+    /// The two areas of the standard test settings, and `Ready for QA` as the state that frees
+    /// them.
+    const FREES_AT_QA: &str = r#"{
+        "free_areas_at": ["Ready for QA"],
+        "areas": [
+            {"name": "billing", "paths": ["packages/billing/**"]},
+            {"name": "search", "paths": ["packages/search/**"]}
+        ]
+    }"#;
+
+    /// The item listed in the tracker state `state`.
+    fn listed_in(text: &str, state: &str) -> ReportedItem {
+        let mut item = listed(text, &[]);
+        if let Some(listing) = item.listing.as_mut() {
+            listing.source_status = Some(SourceStatus::parse(state).unwrap());
+        }
+        item
+    }
+
+    fn handed_on_kinds(kinds: &[EventKind]) -> Vec<&AreasHandedOn> {
+        kinds
+            .iter()
+            .filter_map(|kind| match kind {
+                EventKind::AreasHandedOn(handed) => Some(handed),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_feature_claim_waiting_for_an_area_stops_waiting_when_its_item_is_handed_on() {
+        let env = Env::with_settings(FREES_AT_QA).await;
+        let (debt, feature) = bob_waits_for_alices_debt(&env).await;
+        let waiting = stored_claim(&env, feature).await.unwrap();
+        let alice_told = messages(&env, &env.alice).await.len();
+        env.advance(Duration::hours(1));
+        let before = env.events().await.len();
+        import(
+            &env,
+            batch(vec![listed_in("gh:acme/widgets#42", "Ready for QA")]),
+        )
+        .await;
+        let kinds = env.kinds_after(before).await;
+        let billing = QualifiedArea::parse("default:billing").unwrap();
+        assert!(
+            kinds.contains(&EventKind::WaitWithdrawn(
+                dibs_domain::event::WaitWithdrawn {
+                    area: billing.clone(),
+                    from: debt,
+                    to: feature,
+                    reason: dibs_domain::handover::WithdrawReason::Narrowed,
+                }
+            )),
+            "{kinds:?}"
+        );
+        assert_eq!(
+            handed_on_kinds(&kinds),
+            [&AreasHandedOn {
+                item: feature,
+                member: env.bob.actor.member,
+                areas: BTreeSet::from([billing.clone()]),
+                state: SourceStatus::parse("Ready for QA").unwrap(),
+            }]
+        );
+        let after = stored_claim(&env, feature).await.unwrap();
+        assert!(after.pending.is_empty(), "it waits no more");
+        assert!(after.areas.is_empty());
+        assert_eq!(
+            after.last_seen, waiting.last_seen,
+            "handing work on is no sign of it"
+        );
+        let new = messages(&env, &env.alice).await.split_off(alice_told);
+        assert!(
+            new.iter().any(|(_, message)| message
+                .body
+                .as_str()
+                .starts_with("The request for default:billing no longer stands")),
+            "the debt holder's request is withdrawn: {new:?}"
+        );
+        assert!(
+            stored_claim(&env, debt).await.unwrap().holds(&billing),
+            "the debt claim keeps its area"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_import_moving_a_claimed_item_to_a_state_that_frees_areas_hands_its_work_on() {
+        let env = Env::with_settings(FREES_AT_QA).await;
+        let view = |state: &str| {
+            batch(vec![
+                listed_in("gh:acme/widgets#41", state),
+                listed_in("gh:acme/widgets#43", "Todo"),
+            ])
+        };
+        import(&env, view("In Progress")).await;
+        let held = item(&env, "gh:acme/widgets#41").await.id;
+        claim(&env, &env.bob, held, &["billing", "search"], None).await;
+        let claim_before = stored_claim(&env, held).await.unwrap();
+        let told = messages(&env, &env.bob).await.len();
+        env.advance(Duration::hours(1));
+        let before = env.events().await.len();
+        import(&env, view("Ready for QA")).await;
+
+        let kinds = env.kinds_after(before).await;
+        assert_eq!(
+            names(&kinds),
+            [
+                "item_updated",
+                "areas_handed_on",
+                "thread_started",
+                "message_posted"
+            ],
+            "the item, the hand-on, then the message that tells it"
+        );
+        let bob = env.bob.actor.member;
+        assert_eq!(
+            kinds[1],
+            EventKind::AreasHandedOn(AreasHandedOn {
+                item: held,
+                member: bob,
+                areas: BTreeSet::from([
+                    QualifiedArea::parse("default:billing").unwrap(),
+                    QualifiedArea::parse("default:search").unwrap(),
+                ]),
+                state: SourceStatus::parse("Ready for QA").unwrap(),
+            })
+        );
+        let kept = stored_claim(&env, held).await.unwrap();
+        assert_eq!(kept.member, bob, "the claim stays");
+        assert!(kept.areas.is_empty(), "with no area");
+        assert_eq!(kept.claimed_at, claim_before.claimed_at);
+        assert_eq!(kept.last_seen, claim_before.last_seen);
+        let stored = item(&env, "gh:acme/widgets#41").await;
+        assert_eq!(stored.status, ItemStatus::Claimed, "the item stays claimed");
+        assert!(!stored.closed);
+
+        let new = messages(&env, &env.bob).await.split_off(told);
+        assert_eq!(new.len(), 1, "one message to the holder: {new:?}");
+        let (subject, message) = &new[0];
+        assert_eq!(
+            subject,
+            "Your claim on gh:acme/widgets#41 \"Work on gh:acme/widgets#41\""
+        );
+        assert_eq!(message.author, Author::System);
+        assert_eq!(
+            message.body.as_str(),
+            format!(
+                "Handed on: work item gh:acme/widgets#41 \"Work on gh:acme/widgets#41\" moved to \"Ready for QA\" in its tracker, so your claim on it gave its areas up (default:billing, default:search). The claim and the item stay yours, and the claim completes when the tracker closes the item. Declare an area again (dibs claim gh:acme/widgets#41 --area <area>) only to edit there.\n{TITLE_NOTE}"
+            )
+        );
+        assert_eq!(message.importance, Importance::Normal);
+        assert!(!message.ack_required);
+
+        let events = env.events().await.len();
+        let wakes = env.fakes.notifier.calls().len();
+        import(&env, view("Ready for QA")).await;
+        assert_eq!(env.events().await.len(), events, "a repeat appends nothing");
+        assert_eq!(env.fakes.notifier.calls().len(), wakes, "and wakes nobody");
+        assert_eq!(stored_claim(&env, held).await, Some(kept));
+        assert_eq!(messages(&env, &env.bob).await.len(), told + 1);
+
+        let other = item(&env, "gh:acme/widgets#43").await.id;
+        claim(&env, &env.alice, other, &["billing", "search"], None).await;
+        let alices = stored_claim(&env, other).await.unwrap();
+        assert!(
+            alices.holds(&QualifiedArea::parse("default:billing").unwrap())
+                && alices.holds(&QualifiedArea::parse("default:search").unwrap()),
+            "another member may claim the areas now"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claim_in_review_is_handed_on_too() {
+        let env = Env::with_settings(FREES_AT_QA).await;
+        import(
+            &env,
+            batch(vec![listed_in("gh:acme/widgets#41", "In Progress")]),
+        )
+        .await;
+        let held = item(&env, "gh:acme/widgets#41").await.id;
+        claim(&env, &env.bob, held, &["billing"], None).await;
+        StartReview::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                StartReviewInput {
+                    head: None,
+                    item: held,
+                    pr: PrRef::parse("acme/widgets#7").unwrap(),
+                    more: false,
+                },
+            )
+            .await
+            .unwrap();
+        let before = env.events().await.len();
+        import(
+            &env,
+            batch(vec![listed_in("gh:acme/widgets#41", "Ready for QA")]),
+        )
+        .await;
+        let kinds = env.kinds_after(before).await;
+        assert_eq!(handed_on_kinds(&kinds).len(), 1, "{kinds:?}");
+        let kept = stored_claim(&env, held).await.unwrap();
+        assert!(kept.areas.is_empty());
+        assert!(kept.state.is_in_review(), "it stays in review");
+    }
+
+    #[tokio::test]
+    async fn a_claim_with_no_area_is_left_alone_and_nobody_is_told() {
+        let env = Env::with_settings(FREES_AT_QA).await;
+        import(
+            &env,
+            batch(vec![listed_in("gh:acme/widgets#41", "In Progress")]),
+        )
+        .await;
+        let held = item(&env, "gh:acme/widgets#41").await.id;
+        claim(&env, &env.bob, held, &[], None).await;
+        let claim_before = stored_claim(&env, held).await;
+        let told = messages(&env, &env.bob).await.len();
+        let before = env.events().await.len();
+        import(
+            &env,
+            batch(vec![listed_in("gh:acme/widgets#41", "Ready for QA")]),
+        )
+        .await;
+        assert_eq!(names(&env.kinds_after(before).await), ["item_updated"]);
+        assert_eq!(stored_claim(&env, held).await, claim_before);
+        assert_eq!(messages(&env, &env.bob).await.len(), told, "nobody is told");
+    }
+
+    #[tokio::test]
+    async fn a_claim_taken_while_its_item_sat_in_a_state_that_frees_areas_is_left_alone() {
+        let env = Env::with_settings(FREES_AT_QA).await;
+        let view = batch(vec![listed_in("gh:acme/widgets#41", "Ready for QA")]);
+        import(&env, view.clone()).await;
+        let held = item(&env, "gh:acme/widgets#41").await.id;
+        claim(&env, &env.bob, held, &["billing"], None).await;
+        let claim_before = stored_claim(&env, held).await;
+        let told = messages(&env, &env.bob).await.len();
+        let before = env.events().await.len();
+        import(&env, view).await;
+        assert!(env.kinds_after(before).await.is_empty(), "nothing happens");
+        assert_eq!(stored_claim(&env, held).await, claim_before);
+        assert_eq!(messages(&env, &env.bob).await.len(), told);
     }
 
     #[tokio::test]

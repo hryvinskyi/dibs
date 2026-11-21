@@ -2,8 +2,9 @@
 //! the plan that brings the project's items and imported dependencies in line with it.
 //!
 //! The plan changes only what differs from what is stored, and it also names the known items whose
-//! claims the caller ends: those the batch speaks for as their source and finds closed. A batch
-//! equal to the stored state changes no item. An importer sends its whole view again and again;
+//! claims the caller ends: those the batch speaks for as their source and finds closed; and those
+//! whose claims give their areas up: the ones it moves into a state the settings' `free_areas_at`
+//! lists. A batch equal to the stored state changes no item. An importer sends its whole view again and again;
 //! each rule below keeps a repeated or partial view from doing harm:
 //!
 //! - an item the source closed that the project does not know is not created;
@@ -15,7 +16,10 @@
 //! - a closed blocker of another source or of none, or an item a batch naming no source reports
 //!   closed, is only marked closed: such a report is not the item's own tracker's word, so the
 //!   claim on it stands; a closed blocker whose stored source is the batch's own is that tracker's
-//!   word, and the claim on it ends as on a listed item.
+//!   word, and the claim on it ends as on a listed item;
+//! - only a move into a listed state hands an item's work on: an item that already sat in one, a
+//!   blocker row (it carries no state), a listing with no state and a batch naming no source never
+//!   do, and closing the item in the same batch wins over handing it on.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -259,6 +263,15 @@ pub struct Closure {
     pub meta: ItemMeta,
 }
 
+/// A known item a batch moved into a state at which its claim gives every area up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandedOn {
+    /// The item.
+    pub id: ItemId,
+    /// The state it moved to.
+    pub state: SourceStatus,
+}
+
 /// Everything a batch changes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportPlan {
@@ -276,6 +289,10 @@ pub struct ImportPlan {
     pub removed: Vec<Dependency>,
     /// The edges not recorded, each with why.
     pub refused_edges: Vec<RefusedEdge>,
+    /// The known items whose claim gives every area up and keeps the item, in the order reported:
+    /// each one the batch lists as its source, does not report closed, and moves from a state the
+    /// settings' `free_areas_at` does not list, or from none, into one it lists.
+    pub handed_on: Vec<HandedOn>,
 }
 
 impl ImportPlan {
@@ -336,13 +353,12 @@ pub fn plan_import(
         .collect();
     let mut plan = ImportPlan::default();
     for reported in batch.items() {
-        plan.items.push(plan_item(
-            reported,
-            known.get(&reported.reference).copied(),
-            batch,
-            context,
-            new_id,
-        ));
+        let stored = known.get(&reported.reference).copied();
+        let planned = plan_item(reported, stored, batch, context, new_id);
+        if let Some(handed) = handed_on(reported, stored, &planned, context.settings) {
+            plan.handed_on.push(handed);
+        }
+        plan.items.push(planned);
     }
     plan_edges(batch, context, &mut plan);
     if batch.complete()
@@ -452,6 +468,32 @@ fn plan_item(
         change,
         dropped_hints,
     }
+}
+
+/// The item's move into a state that hands its claim's work on, when the batch makes one: the
+/// batch speaks for the known item as its source and lists it with a state, does not report it
+/// closed, and that state is one of the settings' `free_areas_at` while the stored one, as read
+/// before the batch, is not or is absent.
+fn handed_on(
+    reported: &ReportedItem,
+    known: Option<&KnownItem>,
+    planned: &PlannedItem,
+    settings: &ProjectSettings,
+) -> Option<HandedOn> {
+    let known = known?;
+    if !planned.spoken_for_by_source || reported.closed {
+        return None;
+    }
+    let state = reported.listing.as_ref()?.source_status.as_ref()?;
+    let was_free = known
+        .meta
+        .source_status
+        .as_ref()
+        .is_some_and(|before| settings.frees_areas_at(before));
+    (settings.frees_areas_at(state) && !was_free).then(|| HandedOn {
+        id: known.id,
+        state: state.clone(),
+    })
 }
 
 /// The facts a reported item has after the batch: a listed item's are all the batch's, a
@@ -1185,6 +1227,198 @@ mod tests {
         let stored = [known(1, "gh:acme/web#1", board())];
         let planned = plan(&batch(vec![listed("gh:acme/web#1", &[])]), &stored, &[]).plan;
         assert!(planned.closed_items().is_empty());
+    }
+
+    fn status(text: &str) -> SourceStatus {
+        SourceStatus::parse(text).unwrap()
+    }
+
+    /// The item listed in the tracker state `state`, or in none.
+    fn listed_in(text: &str, state: Option<&str>) -> ReportedItem {
+        let mut item = listed(text, &[]);
+        if let Some(listing) = item.listing.as_mut() {
+            listing.source_status = state.map(status);
+        }
+        item
+    }
+
+    /// A known item of the board stored in the tracker state `state`, or in none.
+    fn stored_in(id: u64, text: &str, state: Option<&str>) -> KnownItem {
+        let mut item = known(id, text, board());
+        item.meta.source_status = state.map(status);
+        item
+    }
+
+    /// The plan of `batch` over `known` with settings that free areas at `free`.
+    fn plan_freeing(batch: &ImportBatch, known: &[KnownItem], free: &[&str]) -> ImportPlan {
+        let states: Vec<String> = free.iter().map(|state| format!("\"{state}\"")).collect();
+        let settings = crate::testing::settings(&format!(
+            r#"{{"free_areas_at":[{}],"areas":[{{"name":"billing","paths":["packages/billing/**"]}}]}}"#,
+            states.join(",")
+        ));
+        plan_with(batch, known, &[], &settings, Role::Importer).plan
+    }
+
+    fn handed(id: u64, state: &str) -> HandedOn {
+        HandedOn {
+            id: ItemId(id),
+            state: status(state),
+        }
+    }
+
+    #[test]
+    fn an_item_moved_into_a_listed_state_is_handed_on_with_that_state() {
+        let stored = [
+            stored_in(1, "gh:acme/widgets#41", Some("In Progress")),
+            stored_in(2, "gh:acme/widgets#42", None),
+            stored_in(3, "gh:acme/widgets#43", Some("In Progress")),
+        ];
+        let planned = plan_freeing(
+            &batch(vec![
+                listed_in("gh:acme/widgets#43", Some("Ready for QA")),
+                listed_in("gh:acme/widgets#41", Some("Ready for QA")),
+                listed_in("gh:acme/widgets#42", Some("QA")),
+            ]),
+            &stored,
+            &["Ready for QA", "QA"],
+        );
+        assert_eq!(
+            planned.handed_on,
+            [
+                handed(3, "Ready for QA"),
+                handed(1, "Ready for QA"),
+                handed(2, "QA")
+            ],
+            "from a state not listed or from none, in the order reported"
+        );
+        assert!(planned.closed_items().is_empty());
+    }
+
+    #[test]
+    fn an_item_staying_in_a_listed_state_or_moving_between_listed_states_is_not_handed_on() {
+        let stored = [
+            stored_in(1, "gh:acme/widgets#41", Some("Ready for QA")),
+            stored_in(2, "gh:acme/widgets#42", Some("Ready for QA")),
+        ];
+        let planned = plan_freeing(
+            &batch(vec![
+                listed_in("gh:acme/widgets#41", Some("Ready for QA")),
+                listed_in("gh:acme/widgets#42", Some("QA")),
+            ]),
+            &stored,
+            &["Ready for QA", "QA"],
+        );
+        assert_eq!(
+            planned.items[0].change,
+            ItemChange::Unchanged { id: ItemId(1) }
+        );
+        assert!(planned.handed_on.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn an_item_moved_into_a_state_not_listed_is_not_handed_on() {
+        let stored = [stored_in(1, "gh:acme/widgets#41", Some("Todo"))];
+        let planned = plan_freeing(
+            &batch(vec![listed_in("gh:acme/widgets#41", Some("In Progress"))]),
+            &stored,
+            &["Ready for QA"],
+        );
+        assert!(matches!(planned.items[0].change, ItemChange::Update { .. }));
+        assert!(planned.handed_on.is_empty(), "{planned:?}");
+        let near = plan_freeing(
+            &batch(vec![listed_in("gh:acme/widgets#41", Some("ready for qa"))]),
+            &stored,
+            &["Ready for QA"],
+        );
+        assert!(near.handed_on.is_empty(), "compared exactly: {near:?}");
+    }
+
+    #[test]
+    fn closing_the_item_in_the_same_batch_wins_over_handing_it_on() {
+        let stored = [stored_in(1, "gh:acme/widgets#41", Some("In Progress"))];
+        let planned = plan_freeing(
+            &batch(vec![closed(listed_in(
+                "gh:acme/widgets#41",
+                Some("Ready for QA"),
+            ))]),
+            &stored,
+            &["Ready for QA"],
+        );
+        assert_eq!(planned.closed_items(), [ItemId(1)]);
+        assert!(planned.handed_on.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_blocker_row_never_hands_an_item_on() {
+        let stored = [
+            stored_in(1, "gh:acme/widgets#41", Some("In Progress")),
+            stored_in(2, "gh:acme/widgets#40", Some("Ready for QA")),
+        ];
+        let planned = plan_freeing(
+            &batch(vec![
+                listed("gh:acme/widgets#41", &["gh:acme/widgets#40"]),
+                blocker("gh:acme/widgets#40", false),
+            ]),
+            &stored,
+            &["Ready for QA"],
+        );
+        assert!(planned.items[1].spoken_for_by_source);
+        assert!(planned.handed_on.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn no_item_is_handed_on_when_no_state_is_listed() {
+        let stored = [stored_in(1, "gh:acme/widgets#41", Some("In Progress"))];
+        let planned = plan_freeing(
+            &batch(vec![listed_in("gh:acme/widgets#41", Some("Ready for QA"))]),
+            &stored,
+            &[],
+        );
+        assert!(matches!(planned.items[0].change, ItemChange::Update { .. }));
+        assert!(planned.handed_on.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_batch_naming_no_source_hands_no_item_on() {
+        let stored = [stored_in(1, "gh:acme/widgets#41", Some("In Progress"))];
+        let sourceless = ImportBatch::new(
+            None,
+            false,
+            vec![listed_in("gh:acme/widgets#41", Some("Ready for QA"))],
+        )
+        .unwrap();
+        let planned = plan_freeing(&sourceless, &stored, &["Ready for QA"]);
+        let ItemChange::Update { meta, .. } = &planned.items[0].change else {
+            panic!("not an update: {planned:?}");
+        };
+        assert_eq!(
+            meta.source_status,
+            Some(status("Ready for QA")),
+            "its state is written all the same"
+        );
+        assert!(planned.handed_on.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn a_listing_without_a_state_hands_no_item_on() {
+        let stored = [stored_in(1, "gh:acme/widgets#41", Some("In Progress"))];
+        let planned = plan_freeing(
+            &batch(vec![listed_in("gh:acme/widgets#41", None)]),
+            &stored,
+            &["Ready for QA"],
+        );
+        assert!(planned.handed_on.is_empty(), "{planned:?}");
+    }
+
+    #[test]
+    fn an_item_the_batch_creates_in_a_listed_state_is_not_handed_on() {
+        let planned = plan_freeing(
+            &batch(vec![listed_in("gh:acme/widgets#41", Some("Ready for QA"))]),
+            &[],
+            &["Ready for QA"],
+        );
+        assert!(matches!(planned.items[0].change, ItemChange::Create { .. }));
+        assert!(planned.handed_on.is_empty(), "{planned:?}");
     }
 
     #[test]

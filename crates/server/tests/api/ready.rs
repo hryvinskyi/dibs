@@ -670,3 +670,58 @@ async fn a_held_area_refusal_names_the_holders_item_by_its_reference() {
     );
     assert_eq!(refused.body["error"]["details"]["holder"], "alice");
 }
+
+#[tokio::test]
+async fn an_import_moving_a_claimed_item_to_a_state_that_frees_areas_empties_its_claim_and_logs_it()
+{
+    let board = Board::new().await;
+    board
+        .world
+        .settings(
+            &board.alice,
+            json!({
+                "free_areas_at": ["Ready for QA"],
+                "areas": [
+                    {"name": "billing", "paths": ["packages/billing/**"]},
+                    {"name": "search", "paths": ["packages/search/**"]}
+                ]
+            }),
+        )
+        .await;
+    let view = |state: &str| {
+        json!({"source": "board", "items": [
+            {"ref": "gh:acme/widgets#42", "title": "Search is slow", "source_status": state}
+        ]})
+    };
+    board.import(view("In Progress")).await;
+    let item = board.id("gh:acme/widgets#42").await;
+    board.bob_claims(item).await;
+    board.import(view("Ready for QA")).await;
+
+    let events = board.world.get(&board.alice, "/v1/events").await;
+    assert_eq!(events.status, StatusCode::OK, "{}", events.body);
+    let handed: Vec<&Value> = events.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "areas_handed_on")
+        .collect();
+    assert_eq!(handed.len(), 1, "{}", events.body);
+    let bob = board.bob.actor.member.get();
+    assert_eq!(
+        handed[0]["payload"],
+        json!({"item": item, "member": bob, "areas": ["default:search"],
+               "state": "Ready for QA"})
+    );
+    assert_eq!(handed[0]["members"][bob.to_string()], "bob");
+
+    let shown = board
+        .world
+        .get(&board.alice, &format!("/v1/items/{item}"))
+        .await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
+    assert_eq!(shown.body["claim"]["areas"], json!([]), "{}", shown.body);
+    assert_eq!(shown.body["claim"]["holder"], "bob", "{}", shown.body);
+    assert_eq!(shown.body["item"]["status"], "claimed");
+    assert_eq!(shown.body["item"]["source_status"], "Ready for QA");
+}

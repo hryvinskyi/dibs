@@ -229,8 +229,8 @@ an escalation, and the notice that a member left. dibs writes them itself, in th
 **A claim's conversation.** Everything dibs writes to a claim's holder about that one claim goes into the claim's own
 conversation: an overlap the radar found and a base that moved under its branch (see
 [Branches and overlaps](#branches-and-overlaps)), done by merge, done in the tracker, set aside in review, back from
-review, an area handed over to the claim, a grant given for it, taken over (told to the previous holder, in the previous claim's conversation) and ended by
-an admin. dibs starts that conversation at the first such message: `thread.author` is `"dibs"`, it is addressed to the
+review, an area handed over to the claim, a grant given for it, taken over (told to the previous holder, in the previous claim's conversation), ended by
+an admin, released as stale, areas given back as idle, and areas handed on at a tracker state (see [Items](#items)). dibs starts that conversation at the first such message: `thread.author` is `"dibs"`, it is addressed to the
 holder alone and filed under the claim's item, and its subject is `Your claim on gh:acme/widgets#42 "Refund rounding"`
 (the item's reference, or `#` and its id, and its title). Each message opens with what happened (`Done by merge: pull
 request …`). A claim is the one a member took: a renewal keeps its conversation, while a take-over or a new claim after
@@ -455,6 +455,21 @@ edges are left as they are; a closed blocker is marked closed, and completes the
   none, or an item reported closed by a batch with no `source`, is only marked closed: that is not its own tracker's
   word, so its claim stands. Nothing in a batch claims or releases anything. The answer does not list the completed
   claims; the log does.
+- A claim whose item the batch moves into a tracker state the project's `free_areas_at` lists (see
+  [Settings](#settings); none by default) **hands its work on**, whether it is worked on or in review: it gives up every
+  area it holds and stops waiting for every area it waits for, and keeps its item, which stays `claimed`. The move is
+  read against the item's `source_status` as stored before the batch: the batch names its `source` and lists the item
+  (not as a blocker) with a `source_status` that is one of the listed states, compared exactly, while the stored one is
+  not or is absent. An item that already sat in a listed state, a listing with no `source_status`, a batch with no
+  `source`, and an item the same batch reports closed (that completes the claim instead) hand nothing on, so a claim
+  taken while its item sat in such a state is left alone, and the same batch sent again does nothing more. The grants
+  its holder gave in those areas end, each wait ends (`wait_withdrawn`, the debt holder told the request no longer
+  stands), an area another claim waited for moves to that claim, an event `areas_handed_on` is appended, and the holder
+  is told in the claim's conversation, in a `normal` message from dibs: "Handed on: work item … moved to "Ready for QA"
+  in its tracker, so your claim on it gave its areas up (default:billing). The claim and the item stay yours, and the
+  claim completes when the tracker closes the item. Declare an area again (dibs claim … --area <area>) only to edit
+  there." It is no sign of the claim's work: when the claim was last seen stays as it was. A claim that neither holds
+  nor waits for an area is left alone, and nobody is told. This runs after the closed items' claims are completed.
 
 It answers `200`:
 
@@ -1361,6 +1376,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `force_released` | `item`, `member`, `by` (the admin; `null` for the operator) |
 | `released_stale` | `item`, `member`, `last_seen` (RFC 3339: the claim's last sign of its own work; the server's sweep released it after the project's `release_after`) |
 | `areas_returned` | `item`, `member`, `areas` (what the live claim holds no more; the server's sweep gave them back after the project's `idle_area_after` with no sign of the claim's work in them) |
+| `areas_handed_on` | `item`, `member`, `areas` (what the claim held or waited for and gave up), `state` (the tracker state, one of the project's `free_areas_at`, an import moved the claim's item into; the claim keeps the item) |
 | `reserved` | `item`, `member`, `areas`, `paths` |
 | `granted` | `grant`, `item`, `area`, `from`, `to` |
 | `grant_revoked` | `grant`, `item`, `area`, `from`, `to`, `cause` (`revoked`, `grantor_left`, `grantee_left`) |
@@ -1446,6 +1462,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | `stale_after` | How long a claim stays live after the last sign of its own work (an edit made under it, a push of its branch, claiming it again): `24h`; 1 hour to 30 days; default 24 hours. |
 | `release_after` | How long a working claim may go without a sign of its own work before the server releases it and its item is open again: `7d`; 1 to 90 days, and longer than `stale_after`; default 7 days, or one day more than `stale_after` when that is 7 days or longer. |
 | `idle_area_after` | How long an area of a live claim may go with no sign of the claim's work in it (no edit made there under the claim, no declaration of it, no path of the claim's branch in it) before the server gives the area back: `7d`; 1 to 90 days; default 7 days. |
+| `free_areas_at` | The tracker states, exactly as the import sends an item's `source_status`, at which a claim hands its work on: when an import moves a claimed item into one of them from a state not listed, the claim gives every area up and keeps the item (see [Items](#items)): `["Ready for QA"]`; each 1 to 40 characters with no control characters, trimmed, and named once; default none. |
 | `heartbeat_every` | How often a session sends a heartbeat: `1m`; 1 to 15 minutes; default 1 minute. |
 | `yield_escalates_after` | How long a request to hand an area over from debt work to a feature claim waits before it is escalated to the arbiters: `30m`; 5 minutes to 24 hours; default 30 minutes. A top-level setting in either layout. |
 | `edit_policy` | `require-claim` (default): a governed path needs a live claim. `advise`: it does not. |

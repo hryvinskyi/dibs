@@ -155,7 +155,8 @@ async fn a_client_older_than_branch_patterns_or_the_claim_endings_is_served_the_
                 "slots": [{"name": "release:cut", "max_hold": "1h",
                            "freezes": ["refs/heads/release/*", "refs/heads/main"]}],
                 "release_after": "3d",
-                "idle_area_after": "2d"
+                "idle_area_after": "2d",
+                "free_areas_at": ["Ready for QA"]
             }),
         )
         .await;
@@ -179,6 +180,7 @@ async fn a_client_older_than_branch_patterns_or_the_claim_endings_is_served_the_
     let whole_freezes = ["default:refs/heads/release/*", "default:refs/heads/main"];
     let released = serde_json::Value::from("3d");
     let idle = serde_json::Value::from("2d");
+    let freeing = serde_json::json!(["Ready for QA"]);
     let absent = serde_json::Value::Null;
     for (agent, expected_rules, expected_freezes, expected_release) in [
         (
@@ -239,6 +241,15 @@ async fn a_client_older_than_branch_patterns_or_the_claim_endings_is_served_the_
         };
         assert_eq!(
             &me.body["settings"]["idle_area_after"], expected_idle,
+            "{agent:?}"
+        );
+        let expected_freeing = if expected_release.is_null() {
+            &absent
+        } else {
+            &freeing
+        };
+        assert_eq!(
+            &me.body["settings"]["free_areas_at"], expected_freeing,
             "{agent:?}"
         );
         assert_eq!(

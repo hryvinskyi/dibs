@@ -2174,6 +2174,12 @@ mod contract {
                 member: BOB,
                 areas: areas(&["api:billing", "web:checkout"]),
             }),
+            EventKind::AreasHandedOn(dibs_domain::event::AreasHandedOn {
+                item: FIRST,
+                member: BOB,
+                areas: areas(&["api:billing", "web:checkout"]),
+                state: dibs_domain::item::SourceStatus::parse("Ready for QA").unwrap(),
+            }),
         ];
         let mut tx = store.begin().await.unwrap();
         let mut expected = Vec::new();

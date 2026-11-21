@@ -545,8 +545,29 @@ clock is past the delay has its footprints read, and a project with nothing to g
 `idle_area_after` is a top-level setting, 1 to 90 days, 7 days by default. The upgrade that brings area clocks starts
 the clock of every area held then at the time the migration runs, so nothing is given back for the time before it.
 
-Clients older than 0.1.11 cannot read `release_after` or `idle_area_after`, so the server serves them the settings
-without them (as `GET /v1/me` leaves out what an older client cannot parse; see [client versions](#client-versions)):
+## Work handed on at a tracker state
+
+A project whose tracker has a state meaning "the work is with someone else now", such as a column where the change waits
+to be checked, can let that state free the claim's areas without ending the claim:
+
+```toml
+free_areas_at = ["Ready for QA"]
+```
+
+When an import (`PUT /v1/items`) moves a claimed item into one of these states from a state not listed (or from none),
+the claim, worked on or in review, gives up every area it holds and stops waiting for every area it waits for, and keeps
+its item. The grants given in those areas end, an area another claim waits for moves to that claim, the log records
+`areas_handed_on`, and dibs tells the holder in the claim's conversation. When the claim was last seen stays as it was.
+The claim completes as before when the tracker closes the item. Only the item's own tracker does this: the batch names
+its `source` and lists the item with its `source_status`, which is compared exactly as the importer sends it (an
+importer that reads a board sends the item's status there). An item that already sat in a listed state, a blocker row, a listing
+without a state and an item the same batch closes hand nothing on, so a claim taken while its item sat in such a state
+keeps its areas, and repeating a batch does nothing more. `free_areas_at` is a top-level setting, a list of states of 1
+to 40 characters, each named once (a state named twice is `invalid_settings`); it is empty by default, so nothing
+changes until the settings name a state.
+
+Clients older than 0.1.11 cannot read `release_after`, `idle_area_after` or `free_areas_at`, so the server serves them
+the settings without them (as `GET /v1/me` leaves out what an older client cannot parse; see [client versions](#client-versions)):
 setting them is safe before every member has updated. A server rolled back to a build without them cannot read
 settings that name them: remove them from the settings before rolling back.
 

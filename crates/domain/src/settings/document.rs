@@ -29,6 +29,12 @@ pub struct SettingsDocument {
     /// before the server gives the area back (`7d`; 1 to 90 days; default 7 days).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_area_after: Option<String>,
+    /// The tracker states, exactly as an import sends an item's `source_status`, at which a claim
+    /// gives every area up and keeps its item: when an import moves a claimed item into one of
+    /// them from a state that is not one (`["Ready for QA"]`; each 1 to 40 characters, each once;
+    /// default none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub free_areas_at: Vec<String>,
     /// How often a session sends a heartbeat (`1m`; 1 to 15 minutes; default 1 minute).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_every: Option<String>,
