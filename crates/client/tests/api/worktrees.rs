@@ -39,6 +39,7 @@ fn take(session: SessionId, agent: Option<AgentKey>) -> TakeWorktreeRequest {
         agent,
         purpose: Purpose::parse("fix the invoice totals").unwrap(),
         item: None,
+        learned_item: None,
     }
 }
 

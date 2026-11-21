@@ -35,7 +35,7 @@ pub(crate) fn claim(item: u64, member: MemberId, declared: &[&str], minutes: i64
         member,
         session: SessionId(member.get() * 100),
         host: HostName::parse("laptop").unwrap(),
-        areas: areas(declared),
+        areas: areas(declared).into(),
         wide: None,
         claimed_at: at(minutes),
         renewed_at: at(minutes),

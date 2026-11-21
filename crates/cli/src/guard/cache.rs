@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use dibs_agent_host::ports::{
-    Cached, InboxView, KnownSettings, LocalCache, NewerRelease, PortError, SlotState, StatusView,
+    Cached, InboxView, KnownSettings, LocalCache, NewerRelease, PortError, SessionRef, SlotState,
+    StatusView,
 };
 use dibs_agent_host::upkeep::STATUS_FRESH;
 use dibs_client::state::{StateDir, read_json, write_json};
@@ -116,8 +117,22 @@ impl LocalCache for StateCache {
         logged(self.state.note_holds(areas, at, STATUS_FRESH), "held areas");
     }
 
-    fn last_heartbeat(&self) -> Option<OffsetDateTime> {
-        self.state.heartbeat_at()
+    fn last_heartbeat(&self, session: &SessionRef) -> Option<OffsetDateTime> {
+        self.state
+            .heartbeat_at(session.host.as_str(), session.key.as_str())
+    }
+
+    fn forget_heartbeat(&self, session: &SessionRef) {
+        logged(
+            self.state
+                .forget_heartbeat(session.host.as_str(), session.key.as_str()),
+            "the session's last heartbeat",
+        );
+        logged(
+            self.state
+                .forget_session_sync_started(session.host.as_str(), session.key.as_str()),
+            "the session's last sync start",
+        );
     }
 
     fn unreachable_since(&self) -> Option<OffsetDateTime> {

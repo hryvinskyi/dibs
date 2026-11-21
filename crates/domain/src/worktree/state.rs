@@ -108,6 +108,44 @@ impl Silence {
     }
 }
 
+/// The work item a hold is for, and how the hold came to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HoldItem {
+    /// No item: the take named none, and no edit has taught one yet.
+    Unknown,
+    /// The item the take named. It stays the hold's item until the hold ends.
+    Named(ItemId),
+    /// The item an edit of the holding session taught. A later edit may teach another.
+    Learned(ItemId),
+}
+
+impl HoldItem {
+    /// The item of a take that names `item`, or no item.
+    pub const fn named(item: Option<ItemId>) -> Self {
+        match item {
+            Some(item) => Self::Named(item),
+            None => Self::Unknown,
+        }
+    }
+
+    /// The item, however the hold came to it.
+    pub const fn id(self) -> Option<ItemId> {
+        match self {
+            Self::Unknown => None,
+            Self::Named(item) | Self::Learned(item) => Some(item),
+        }
+    }
+
+    /// The item after an edit taught `item`: a named item stays, and anything else becomes the
+    /// item learned.
+    pub(super) const fn taught(self, item: ItemId) -> Self {
+        match self {
+            Self::Named(_) => self,
+            Self::Unknown | Self::Learned(_) => Self::Learned(item),
+        }
+    }
+}
+
 /// One worktree lent to one holder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeHold {
@@ -119,8 +157,8 @@ pub struct WorktreeHold {
     pub host: HostName,
     /// Why it is held.
     pub purpose: Purpose,
-    /// The work item it is held for, when one was named.
-    pub item: Option<ItemId>,
+    /// The work item it is held for, named at the take or learned from an edit.
+    pub item: HoldItem,
     /// When it was taken.
     pub taken_at: OffsetDateTime,
     /// When its holder was last seen using it.

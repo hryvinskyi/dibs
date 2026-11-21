@@ -26,14 +26,14 @@ use dibs_domain::repo::RepoId;
 use dibs_domain::report::MachineId;
 use dibs_domain::session::HostName;
 use dibs_domain::slot::Purpose;
-use dibs_domain::worktree::{AgentKey, PoolId, WorktreeName};
+use dibs_domain::worktree::{AgentKey, HoldItem, PoolId, WorktreeName};
 
 use crate::auth::Authed;
 use crate::error::ApiError;
 use crate::fields::{item_in_body, parse, parse_required, required, session_in_body};
 use crate::http::AppState;
 use crate::views::reply;
-use crate::views::worktrees::{BeatenView, BoardHoldView, OwnHoldView, OwnPoolView};
+use crate::views::worktrees::{BeatenView, BoardHoldView, KeptView, OwnHoldView, OwnPoolView};
 
 /// The machine and the pool a body names.
 fn pool_in_body(
@@ -108,6 +108,7 @@ pub struct TakeBody {
     agent: Option<String>,
     purpose: Option<String>,
     item: Option<u64>,
+    learned_item: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -126,10 +127,15 @@ struct TakeAnswer {
 /// holder that holds one gets it again (`again`); otherwise the first of `names` nobody holds;
 /// otherwise the answer is `busy` with the hold of each name. The server never queues a take.
 ///
+/// A new hold is for the work item `item` names, for good; or for the one `learned_item` names,
+/// as an item learned from an edit, which a later edit of the holder's session may replace — what
+/// a machine sends to take again a hold the server let go of, with the item that hold had learned.
+/// A holder taking again keeps the item its hold has.
+///
 /// # Errors
 /// `forbidden` for an integration; `not_found` for a session not the caller's or an unknown item;
 /// `worktree_names_invalid` (`422`) for no name or a name given twice; `invalid_request` for a
-/// missing or invalid field.
+/// missing or invalid field, or for both `item` and `learned_item`.
 pub async fn take(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -149,10 +155,7 @@ pub async fn take(
         names,
         agent: agent_in_body("agent", body.agent.as_deref())?,
         purpose: parse_required("purpose", body.purpose.as_deref(), Purpose::parse)?,
-        item: body
-            .item
-            .map(|item| item_in_body("item", Some(item)))
-            .transpose()?,
+        item: item_of_take(body.item, body.learned_item)?,
     };
     let answer = match state.app.take_worktree.execute(&actor, input).await? {
         TookWorktree::Took { worktree, again } => TakeAnswer {
@@ -169,6 +172,22 @@ pub async fn take(
         },
     };
     Ok(reply(StatusCode::OK, &answer))
+}
+
+/// The item a take body names for a new hold: named by `item`, learned by `learned_item`, or none.
+fn item_of_take(item: Option<u64>, learned: Option<u64>) -> Result<HoldItem, ApiError> {
+    match (item, learned) {
+        (Some(item), None) => Ok(HoldItem::Named(item_in_body("item", Some(item))?)),
+        (None, Some(learned)) => Ok(HoldItem::Learned(item_in_body(
+            "learned_item",
+            Some(learned),
+        )?)),
+        (None, None) => Ok(HoldItem::Unknown),
+        (Some(_), Some(_)) => Err(ApiError::invalid_field(
+            "learned_item",
+            &"name either an item or a learned_item",
+        )),
+    }
 }
 
 /// The body of `POST /v1/worktrees/release`.
@@ -268,8 +287,8 @@ pub struct BeatBody {
 
 #[derive(Serialize)]
 struct BeatAnswer {
-    /// The worktrees and holders whose holds the beats kept.
-    kept: Vec<BeatenView>,
+    /// The worktrees and holders whose holds the beats kept, each with its hold's item.
+    kept: Vec<KeptView>,
     /// The worktrees and holders that hold nothing: the worktree is free or another holder has it.
     unknown: Vec<BeatenView>,
 }
@@ -300,7 +319,9 @@ fn beat_in_body(at: usize, beat: &BeatEntry) -> Result<WorktreeBeatInput, ApiErr
 /// caller's sessions and their agents: each beat that names a worktree and its holder keeps that
 /// hold seen at `seen_at` (a time after now counts as now; a hold's last sight never moves back).
 /// A beat naming a worktree that is free or held by another holder changes nothing and is
-/// answered `unknown`. Each worktree and holder is answered once, in the order first named.
+/// answered `unknown`. Each worktree and holder is answered once, in the order first named; a kept
+/// one with the work item its hold is for (`null` for none), so the machine can take the hold
+/// again for that item should the server let it go.
 ///
 /// `repo` names the repository of the pool's worktrees, and a beat's `branch` the branch its
 /// worktree is on. A kept beat with a branch, for a hold that names a work item, records that
@@ -340,7 +361,7 @@ pub async fn beat(
     Ok(reply(
         StatusCode::OK,
         &BeatAnswer {
-            kept: beaten.kept.into_iter().map(BeatenView::of).collect(),
+            kept: beaten.kept.into_iter().map(KeptView::of).collect(),
             unknown: beaten.unknown.into_iter().map(BeatenView::of).collect(),
         },
     ))

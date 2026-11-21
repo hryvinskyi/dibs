@@ -219,7 +219,7 @@ impl ClaimItem {
                     member: claim.member,
                     session: claim.session,
                     host: claim.host.clone(),
-                    areas: claim.areas.clone(),
+                    areas: claim.areas.iter().cloned().collect(),
                 })
             }
             ClaimOutcome::Renewed { claim, .. } => EventKind::Renewed(Renewed {
@@ -227,7 +227,7 @@ impl ClaimItem {
                 member: claim.member,
                 session: claim.session,
                 host: claim.host.clone(),
-                areas: claim.areas.clone(),
+                areas: claim.areas.iter().cloned().collect(),
             }),
         };
         work.record(now, event).await?;
@@ -431,6 +431,8 @@ pub(crate) fn widened(before: Option<&Claim>, after: &Claim) -> Option<EventKind
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use time::Duration;
 
     use dibs_domain::area::QualifiedArea;
@@ -551,7 +553,7 @@ mod tests {
         };
         assert_eq!(
             claim.areas,
-            [area("default:billing"), area("default:search")].into()
+            BTreeSet::from([area("default:billing"), area("default:search")])
         );
         let kinds = env.kinds_after(before).await;
         assert!(

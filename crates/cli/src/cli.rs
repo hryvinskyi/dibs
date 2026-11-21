@@ -185,9 +185,14 @@ pub struct SyncArgs {
     #[arg(long)]
     pub update: bool,
     /// Send a heartbeat, due or not, when this machine counted refusals or failures it has not
-    /// reported yet.
+    /// reported yet. Without `--host` and `--session` the heartbeat names no checkout.
     #[arg(long)]
     pub report: bool,
+    /// Send the session's heartbeat when it is due and nothing else, waiting up to ten seconds
+    /// for another sync of the project to end: what a hook starts for its session when another
+    /// session's sync runs or ran a moment ago.
+    #[arg(long, conflicts_with_all = ["force", "update"])]
+    pub heartbeat_only: bool,
 }
 
 /// `dibs self-update`.

@@ -248,7 +248,10 @@ impl Run<'_> {
             | HostEvent::WorktreeWanted { .. }
             | HostEvent::WorktreeReturned { .. } => return GuardOutcome::silent(),
             HostEvent::AgentEnded { agent, .. } => return self.agent_ended(agent),
-            HostEvent::SessionEnded { .. } => return self.session_ended(),
+            HostEvent::SessionEnded { .. } => {
+                self.workspace.cache().forget_heartbeat(&self.session);
+                return self.session_ended();
+            }
         };
         let outcome = match decided {
             Ok(judged) => self.counted(judged),
@@ -823,7 +826,7 @@ impl Run<'_> {
             heartbeat_every: settings.as_ref().map_or(DEFAULT_HEARTBEAT, |cached| {
                 cached.value.settings.heartbeat_every()
             }),
-            last_heartbeat: cache.last_heartbeat(),
+            last_heartbeat: cache.last_heartbeat(&self.session),
             settings_at: settings.as_ref().map(|cached| cached.at),
             status_at: cache.status().map(|cached| cached.at),
             inbox_at: cache.inbox().map(|cached| cached.at),

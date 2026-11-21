@@ -2,7 +2,8 @@
 //! answering busy, releasing by worktree and by holder, beats, the end of a session, the admin's
 //! forced release, each refusal with its status and code, what other members see, the sweep
 //! that ends a silent agent's hold and keeps a session's, the branch a beat records on the claim
-//! of the item its hold names, and the item an edit made in a worktree teaches its hold.
+//! of the item its hold names, the item an edit made in a worktree teaches its hold, the item a
+//! beat answers for each hold it keeps, and a take that names its item as learned.
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -607,7 +608,8 @@ async fn beats_keep_a_hold_and_name_the_ones_that_hold_nothing() {
     assert_eq!(
         beaten.body,
         json!({
-            "kept": [{"worktree": "worktree1", "holder_session": hook, "agent": "agent-1"}],
+            "kept": [{"worktree": "worktree1", "holder_session": hook, "agent": "agent-1",
+                      "item": null}],
             "unknown": [
                 {"worktree": "worktree2", "holder_session": hook, "agent": null},
                 {"worktree": "worktree1", "holder_session": cli, "agent": null},
@@ -916,7 +918,7 @@ async fn an_edit_in_a_worktree_taken_for_no_item_gives_its_hold_the_item_and_its
         .post(
             &team.alice,
             &format!("/v1/items/{item}/claim"),
-            json!({"session_id": cli}),
+            json!({"session_id": cli, "areas": ["api:billing"]}),
         )
         .await;
     assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
@@ -955,10 +957,34 @@ async fn an_edit_in_a_worktree_taken_for_no_item_gives_its_hold_the_item_and_its
         .await;
     assert_eq!(checked.status, StatusCode::OK, "{}", checked.body);
     assert_eq!(checked.body["verdicts"][0]["verdict"], "allowed");
-
     let pools = world.get(&team.alice, "/v1/worktrees").await;
     let hold = &pools.body["pools"][0]["holds"][0];
     assert_eq!(hold["worktree"], "worktree1", "{}", pools.body);
+    assert_eq!(
+        hold["item"],
+        Value::Null,
+        "a claim another session took teaches nothing: {}",
+        pools.body
+    );
+
+    let renewed = world
+        .post(
+            &team.alice,
+            &format!("/v1/items/{item}/claim"),
+            json!({"session_id": hook}),
+        )
+        .await;
+    assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.body);
+    let checked = world
+        .post(
+            &team.alice,
+            "/v1/edit-check",
+            edit(in_worktree(MACHINE, POOL, "worktree1")),
+        )
+        .await;
+    assert_eq!(checked.status, StatusCode::OK, "{}", checked.body);
+    let pools = world.get(&team.alice, "/v1/worktrees").await;
+    let hold = &pools.body["pools"][0]["holds"][0];
     assert_eq!(hold["item"], item, "{}", pools.body);
     let listed = world.get(&team.alice, "/v1/claims").await;
     assert_eq!(
@@ -974,4 +1000,278 @@ async fn an_edit_in_a_worktree_taken_for_no_item_gives_its_hold_the_item_and_its
         "{}",
         status.body
     );
+}
+
+#[tokio::test]
+async fn a_beat_names_the_item_of_each_hold_it_keeps_and_null_for_a_hold_with_none() {
+    let team = team().await;
+    let world = &team.world;
+    let [hook, cli, _] = team.sessions;
+    let item = world
+        .item(&team.alice, Some("gh:acme/api#7"), "Fix the totals")
+        .await;
+    took(
+        &take(
+            world,
+            &team.alice,
+            hook,
+            json!({"agent": "agent-1", "item": item}),
+        )
+        .await,
+    );
+    took(&take(world, &team.alice, hook, json!({"agent": "agent-2"})).await);
+
+    let beaten = beat(
+        world,
+        &team.alice,
+        cli,
+        json!([
+            {"worktree": "worktree1", "holder_session": hook, "agent": "agent-1",
+             "seen_at": "2026-03-02T09:00:00Z"},
+            {"worktree": "worktree2", "holder_session": hook, "agent": "agent-2",
+             "seen_at": "2026-03-02T09:00:00Z"},
+            {"worktree": "worktree3", "holder_session": hook, "seen_at": "2026-03-02T09:00:00Z"},
+        ]),
+    )
+    .await;
+    assert_eq!(beaten.status, StatusCode::OK, "{}", beaten.body);
+    assert_eq!(
+        beaten.body,
+        json!({
+            "kept": [
+                {"worktree": "worktree1", "holder_session": hook, "agent": "agent-1",
+                 "item": item},
+                {"worktree": "worktree2", "holder_session": hook, "agent": "agent-2",
+                 "item": null},
+            ],
+            "unknown": [{"worktree": "worktree3", "holder_session": hook, "agent": null}],
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_take_naming_a_learned_item_gives_its_hold_an_item_a_later_edit_may_replace() {
+    let team = team().await;
+    let world = &team.world;
+    let [hook, _, _] = team.sessions;
+    world.settings(&team.alice, two_repositories()).await;
+    let earlier = world
+        .item(&team.alice, Some("gh:acme/api#6"), "Fix the rounding")
+        .await;
+    let later = world
+        .item(&team.alice, Some("gh:acme/api#7"), "Fix the totals")
+        .await;
+    let both = take(
+        world,
+        &team.alice,
+        hook,
+        json!({"agent": "agent-1", "item": earlier, "learned_item": earlier}),
+    )
+    .await;
+    assert_error(&both, StatusCode::UNPROCESSABLE_ENTITY, "invalid_request");
+    assert_eq!(both.body["error"]["details"]["field"], "learned_item");
+    assert_error(
+        &take(world, &team.alice, hook, json!({"learned_item": 999})).await,
+        StatusCode::NOT_FOUND,
+        "not_found",
+    );
+
+    took(
+        &take(
+            world,
+            &team.alice,
+            hook,
+            json!({"agent": "agent-1", "learned_item": earlier}),
+        )
+        .await,
+    );
+    took(
+        &take(
+            world,
+            &team.alice,
+            hook,
+            json!({"agent": "agent-2", "item": earlier}),
+        )
+        .await,
+    );
+    assert_eq!(
+        hold_items(world, &team.alice).await,
+        [json!(earlier), json!(earlier)]
+    );
+
+    let claimed = world
+        .post(
+            &team.alice,
+            &format!("/v1/items/{later}/claim"),
+            json!({"session_id": hook, "areas": ["api:billing"]}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    for worktree in ["worktree1", "worktree2"] {
+        let checked = world
+            .post(
+                &team.alice,
+                "/v1/edit-check",
+                json!({"session_id": hook, "repo": "api", "paths": ["src/billing/totals.rs"],
+                       "reserve": true, "checkout": "ab".repeat(16),
+                       "worktree": in_worktree(MACHINE, POOL, worktree)}),
+            )
+            .await;
+        assert_eq!(checked.status, StatusCode::OK, "{}", checked.body);
+    }
+    assert_eq!(
+        hold_items(world, &team.alice).await,
+        [json!(later), json!(earlier)],
+        "the learned item moves to the claim holding the edited area; the named one stays"
+    );
+}
+
+#[tokio::test]
+async fn an_edit_that_reaches_the_newest_claim_only_as_its_target_leaves_the_hold_its_item() {
+    let team = team().await;
+    let world = &team.world;
+    let [hook, _, _] = team.sessions;
+    world.settings(&team.alice, two_repositories()).await;
+    let totals = world
+        .item(&team.alice, Some("gh:acme/api#6"), "Fix the totals")
+        .await;
+    let other = world
+        .item(&team.alice, Some("gh:acme/api#7"), "Tidy the index")
+        .await;
+    for (item, areas) in [(totals, json!(["api:billing"])), (other, json!([]))] {
+        let claimed = world
+            .post(
+                &team.alice,
+                &format!("/v1/items/{item}/claim"),
+                json!({"session_id": hook, "areas": areas}),
+            )
+            .await;
+        assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+        world.fakes.clock.advance(Duration::minutes(5));
+    }
+    took(&take(world, &team.alice, hook, json!({"agent": "agent-1"})).await);
+    for paths in [
+        json!(["src/billing/totals.rs"]),
+        json!(["src/search/index.rs"]),
+        json!(["Cargo.lock"]),
+    ] {
+        let checked = world
+            .post(
+                &team.alice,
+                "/v1/edit-check",
+                json!({"session_id": hook, "repo": "api", "paths": paths,
+                       "reserve": true, "checkout": "ab".repeat(16),
+                       "worktree": in_worktree(MACHINE, POOL, "worktree1")}),
+            )
+            .await;
+        assert_eq!(checked.status, StatusCode::OK, "{}", checked.body);
+        assert_eq!(
+            hold_items(world, &team.alice).await,
+            [json!(totals)],
+            "an area nobody holds and a shared file go to the newest claim, which teaches \
+             nothing: {paths}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_area_the_newest_claim_gained_as_an_edits_target_leaves_the_hold_its_item_after() {
+    let team = team().await;
+    let world = &team.world;
+    let [hook, _, _] = team.sessions;
+    world.settings(&team.alice, two_repositories()).await;
+    let totals = world
+        .item(&team.alice, Some("gh:acme/api#6"), "Fix the totals")
+        .await;
+    let other = world
+        .item(&team.alice, Some("gh:acme/api#7"), "Tidy the index")
+        .await;
+    for (item, areas) in [(totals, json!(["api:billing"])), (other, json!([]))] {
+        let claimed = world
+            .post(
+                &team.alice,
+                &format!("/v1/items/{item}/claim"),
+                json!({"session_id": hook, "areas": areas}),
+            )
+            .await;
+        assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+        world.fakes.clock.advance(Duration::minutes(5));
+    }
+    took(&take(world, &team.alice, hook, json!({"agent": "agent-1"})).await);
+    for path in [
+        "src/billing/totals.rs",
+        "src/search/index.rs",
+        "src/search/index.rs",
+    ] {
+        let checked = world
+            .post(
+                &team.alice,
+                "/v1/edit-check",
+                json!({"session_id": hook, "repo": "api", "paths": [path],
+                       "reserve": true, "checkout": "ab".repeat(16),
+                       "worktree": in_worktree(MACHINE, POOL, "worktree1")}),
+            )
+            .await;
+        assert_eq!(checked.status, StatusCode::OK, "{}", checked.body);
+        assert_eq!(
+            hold_items(world, &team.alice).await,
+            [json!(totals)],
+            "an area the newest claim only gained teaches the hold nothing: {path}"
+        );
+    }
+    let status = world.get(&team.alice, "/v1/status").await;
+    let areas_of = |item: u64| {
+        status.body["live"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|live| live["claim"]["item"] == item)
+            .map(|live| live["claim"]["areas"].clone())
+    };
+    assert_eq!(
+        areas_of(other),
+        Some(json!(["api:search"])),
+        "the first edit gave the newest claim the area: {}",
+        status.body
+    );
+
+    let beaten = world
+        .post(
+            &team.alice,
+            "/v1/worktrees/beat",
+            json!({"session_id": hook, "machine": MACHINE, "pool": POOL, "repo": "api",
+                   "beats": [{"worktree": "worktree1", "holder_session": hook,
+                              "agent": "agent-1", "seen_at": "2026-03-02T09:00:00Z",
+                              "branch": "alice/6-totals"}]}),
+        )
+        .await;
+    assert_eq!(beaten.status, StatusCode::OK, "{}", beaten.body);
+    assert_eq!(beaten.body["kept"][0]["item"], totals, "{}", beaten.body);
+    let listed = world.get(&team.alice, "/v1/claims").await;
+    let branches_of = |item: u64| {
+        listed.body["claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|claim| claim["item"] == item)
+            .map(|claim| claim["branches"].clone())
+    };
+    assert_eq!(
+        branches_of(totals),
+        Some(json!({"api": "alice/6-totals"})),
+        "{}",
+        listed.body
+    );
+    assert_eq!(branches_of(other), Some(json!({})), "{}", listed.body);
+}
+
+/// The item of each hold of `who`'s pool, in the order of their worktrees.
+async fn hold_items(world: &World, who: &Person) -> Vec<Value> {
+    let pools = world.get(who, "/v1/worktrees").await;
+    pools.body["pools"][0]["holds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hold| hold["item"].clone())
+        .collect()
 }

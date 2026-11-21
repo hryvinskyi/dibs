@@ -56,8 +56,8 @@ pub enum BranchSource {
     Checkout,
 }
 
-/// The name of where a branch was learned from, as the log and the views carry it. A branch
-/// recorded before sources were kept was learned from a checkout, so that is the default.
+/// The name of where a branch was learned from, as the log and the views carry it. An entry that
+/// names no source reads as `checkout`, the default.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -517,6 +517,34 @@ mod tests {
             "a worktree no longer held no longer holds"
         );
         assert_eq!(asked.into_inner(), [worktree("worktree1")]);
+    }
+
+    #[test]
+    fn a_checkout_meeting_the_head_of_a_pull_request_the_review_still_records_is_kept() {
+        let reviewed = in_review(
+            on("alice/1-refunds", from_pr("acme/api#1")),
+            &["acme/api#1"],
+        );
+        assert_eq!(
+            record(
+                &reviewed,
+                "alice/1-checkout",
+                BranchSource::Checkout,
+                &none_held
+            ),
+            BranchRecording::Kept,
+            "another branch from a checkout"
+        );
+        assert_eq!(
+            record(
+                &reviewed,
+                "alice/1-refunds",
+                BranchSource::Checkout,
+                &none_held
+            ),
+            BranchRecording::Kept,
+            "the head's own branch from a checkout does not take the source"
+        );
     }
 
     #[test]

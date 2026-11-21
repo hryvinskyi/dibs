@@ -17,6 +17,10 @@ use crate::session::HostName;
 use crate::settings::ProjectSettings;
 use crate::wide::{WideScope, live_wide_naming};
 
+mod areas;
+
+pub use areas::{AreaOrigin, ClaimAreas, GainedNotHeld};
+
 /// A member holding a work item. The claim is the member's: `session` and `host` record where it
 /// was taken and which machine's heartbeat keeps it alive, and any session of the member acts on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +33,8 @@ pub struct Claim {
     pub session: SessionId,
     /// The host of that session.
     pub host: HostName,
-    /// The areas the claim declared, and holds while it is live.
-    pub areas: BTreeSet<QualifiedArea>,
+    /// The areas the claim holds while it is live, each declared or gained by an edit.
+    pub areas: ClaimAreas,
     /// The areas a wide claim names and why; `None` for an ordinary claim. A wide claim holds none
     /// of them: they are disjoint from `areas`.
     pub wide: Option<WideScope>,
@@ -64,8 +68,8 @@ impl Claim {
         !self.state.is_in_review()
     }
 
-    /// Whether the claim holds the area — that is, declared it. The areas a wide claim names are
-    /// not held.
+    /// Whether the claim holds the area, declared or gained. The areas a wide claim names are not
+    /// held.
     pub fn holds(&self, area: &QualifiedArea) -> bool {
         self.areas.contains(area)
     }
@@ -314,7 +318,7 @@ pub fn decide_claim(
             }
             let live = existing.is_live(now, stale_after);
             let own_held = if live {
-                existing.areas.clone()
+                existing.areas.iter().cloned().collect()
             } else {
                 BTreeSet::new()
             };
@@ -374,8 +378,12 @@ pub fn decide_claim(
                 now,
                 settings,
             )?;
-            let (areas, pending) =
-                declare(BTreeSet::new(), BTreeMap::new(), &request.areas, &takes);
+            let (areas, pending) = declare(
+                ClaimAreas::default(),
+                BTreeMap::new(),
+                &request.areas,
+                &takes,
+            );
             let (wide, _) = settle_wide(
                 None,
                 others,
@@ -396,10 +404,11 @@ pub fn decide_claim(
 pub struct Takeover {
     /// The stale claim that ends.
     pub previous: Claim,
-    /// The claim to store. It declares the requested areas and those of the previous claim that
-    /// nobody else holds or waits for now, carries on the previous claim's kind unless the request
-    /// names one, the areas the previous claim waited for when it is a feature claim, and the
-    /// previous claim's wide scope as far as no other live wide claim names it now.
+    /// The claim to store. It holds the requested areas, declared, and those of the previous claim
+    /// that nobody else holds or waits for now, each with the origin it had there, carries on the
+    /// previous claim's kind unless the request names one, the areas the previous claim waited for
+    /// when it is a feature claim, and the previous claim's wide scope as far as no other live wide
+    /// claim names it now.
     pub claim: Claim,
     /// Areas of the previous claim it does not get: another member's live claim holds them,
     /// another claim waits for them to be handed over, another live wide claim names them, or the
@@ -695,7 +704,7 @@ where
 fn new_claim(
     request: &ClaimRequest,
     kind: ClaimKind,
-    areas: BTreeSet<QualifiedArea>,
+    areas: ClaimAreas,
     pending: BTreeMap<QualifiedArea, PendingArea>,
     wide: Option<WideScope>,
     now: OffsetDateTime,
@@ -772,17 +781,14 @@ fn check_areas(
 
 /// The areas a claim holds and waits for once the requested areas are declared on top of `held`
 /// and `pending`: a requested area another claim holds and this one may take waits for it — a wait
-/// for that same claim keeps when it was asked for — and every other one is held and waits no
-/// more.
+/// for that same claim keeps when it was asked for — and every other one is held as declared, a
+/// gained one too, and waits no more. The areas of `held` not requested keep their origin.
 fn declare(
-    mut held: BTreeSet<QualifiedArea>,
+    mut held: ClaimAreas,
     mut pending: BTreeMap<QualifiedArea, PendingArea>,
     requested: &BTreeSet<QualifiedArea>,
     takes: &BTreeMap<QualifiedArea, ItemId>,
-) -> (
-    BTreeSet<QualifiedArea>,
-    BTreeMap<QualifiedArea, PendingArea>,
-) {
+) -> (ClaimAreas, BTreeMap<QualifiedArea, PendingArea>) {
     for area in requested {
         match takes.get(area) {
             Some(from) => {
@@ -792,7 +798,7 @@ fn declare(
             }
             None => {
                 pending.remove(area);
-                held.insert(area.clone());
+                held.declare(area.clone());
             }
         }
     }
@@ -940,26 +946,35 @@ fn settle_wide(
     Ok((WideScope::new(names, reason).ok(), dropped))
 }
 
-/// Splits inherited areas into those the request may keep and those it may not: an area the
-/// settings no longer declare, or another member's live claim holds, is not kept, nor, when the
-/// claim they come from is stale, one another live claim waits for, which that claim gets instead.
-/// A stale claim's wait takes nothing: it is withdrawn when the pending areas are settled.
+/// Splits inherited areas into those the request may keep, each with its origin, and those it may
+/// not: an area the settings no longer declare, or another member's live claim holds, is not kept,
+/// nor, when the claim they come from is stale, one another live claim waits for, which that claim
+/// gets instead. A stale claim's wait takes nothing: it is withdrawn when the pending areas are
+/// settled.
 fn keep_free_areas(
-    inherited: &BTreeSet<QualifiedArea>,
+    inherited: &ClaimAreas,
     others: &[Claim],
     request: &ClaimRequest,
     inherited_stale: bool,
     now: OffsetDateTime,
     settings: &ProjectSettings,
-) -> (BTreeSet<QualifiedArea>, BTreeSet<QualifiedArea>) {
+) -> (ClaimAreas, BTreeSet<QualifiedArea>) {
     let other_items = || others.iter().filter(|claim| claim.item != request.item);
-    inherited.iter().cloned().partition(|area| {
-        settings.area(area).is_some()
-            && held_by_other(area, request.by, other_items(), now, settings.stale_after()).is_none()
+    let mut kept = inherited.clone();
+    let mut dropped = BTreeSet::new();
+    kept.retain(|area| {
+        let free = settings.area(area).is_some()
+            && held_by_other(area, request.by, other_items(), now, settings.stale_after())
+                .is_none()
             && !(inherited_stale
                 && pending_elsewhere(area, request.item, other_items())
-                    .is_some_and(|waiting| waiting.is_live(now, settings.stale_after())))
-    })
+                    .is_some_and(|waiting| waiting.is_live(now, settings.stale_after())));
+        if !free {
+            dropped.insert(area.clone());
+        }
+        free
+    });
+    (kept, dropped)
 }
 
 #[cfg(test)]
@@ -1172,6 +1187,41 @@ mod tests {
         assert_eq!(claim.session, SessionId(99));
         assert_eq!(claim.areas, areas(&["api:billing", "web:checkout"]));
         assert!(dropped_areas.is_empty());
+    }
+
+    #[test]
+    fn a_renewal_declares_a_gained_area_it_names_and_keeps_the_others_gained() {
+        let settings = two_repo_settings();
+        let mut current = claim(1, ALICE, &["api:billing"], 0);
+        current.areas.gain(area("api:search"));
+        current.areas.gain(area("web:checkout"));
+        let req = request(1, ALICE, &["api:search"]);
+        let outcome = decide_claim(Some(&current), &[], &req, at(5), &settings).unwrap();
+        let held = &outcome.claim().areas;
+        assert_eq!(held, &areas(&["api:billing", "api:search", "web:checkout"]));
+        assert_eq!(held.gained(), &areas(&["web:checkout"]));
+        assert!(held.declares(&area("api:search")));
+    }
+
+    #[test]
+    fn a_takeover_keeps_each_inherited_areas_origin() {
+        let settings = two_repo_settings();
+        let mut previous = claim(1, BOB, &["api:billing"], 0);
+        previous.areas.gain(area("api:search"));
+        let late = at(0) + settings.stale_after() + Duration::hours(1);
+        let taken = decide_takeover(
+            Some(&previous),
+            &[],
+            &request(1, ALICE, &["web:checkout"]),
+            late,
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(
+            taken.claim.areas,
+            areas(&["api:billing", "api:search", "web:checkout"])
+        );
+        assert_eq!(taken.claim.areas.gained(), &areas(&["api:search"]));
     }
 
     #[test]

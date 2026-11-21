@@ -275,6 +275,15 @@ keeps — is answered `410 cursor_expired` (`details.pruned_through`): it reads 
 the start (`after=0`). An admin deletes a conversation at once with `dibs admin thread delete <id>` (a secret pasted by
 mistake): its messages go, and the log keeps a `thread_deleted` event with its id alone.
 
+When a project's stored settings no longer parse (a rule kind this build does not know, after a rollback for example),
+the retention still removes that project's old conversations, events, machine reports and pull-request states, keeps
+the checkouts its sessions reported, because the settings say how long those count, and logs at `WARN` *the retention
+was applied to a project whose settings do not parse, so the checkouts its sessions reported were kept* until the
+settings are applied again. An `ERROR` *the retention could not be applied to a project* means the retention did not
+run for that project. Pool beats
+keep their holds alive and pull-request state reports keep recording the state, but neither records a branch. Most
+other requests for that project fail with an internal error meanwhile.
+
 ## Snapshots
 
 With `DIBS_SNAPSHOT_DIR` set, a background task writes a consistent copy of the database (`VACUUM INTO`) every
@@ -565,6 +574,18 @@ reads, page by page, so reading them holds up no heartbeat or edit check.
   as `machine-id`; the server keeps each report by member, machine id and day, so a renamed machine keeps one report a
   day and two machines of one name keep two. The id travels with the reports only and nobody is shown it. Deleting the
   file makes the machine a new one.
+- **The checkout key.** The first heartbeat or edit check that names a checkout makes 32 random bytes and keeps them in
+  the state directory as `checkout-key`, readable by its user only. The checkout tokens the client sends are keyed with
+  it, and it never leaves the machine. A key file other users can read is not used, so no checkout is named until its
+  mode is fixed. Deleting the file gives every checkout a new token; the server forgets the old ones as they go stale.
+- **Each session's heartbeat.** `cache/<scope>/heartbeats.json` holds when each agent session last sent a heartbeat
+  from this machine, by a digest of its host and session id. A session's entry goes when the session ends, and every
+  entry once it is older than the project's `stale_after`. A `cache/<scope>/heartbeat` file left by an older client is
+  no longer read and may be deleted.
+- **Each session's last sync start.** `sessions/<scope>/sync-started-<digest>` holds when a background sync was last
+  started for one agent session, by the same digest of its host and session id; a hook starts no heartbeat-only sync
+  for that session within fifteen seconds of it. The file goes when the session ends. `cache/<scope>/sync-started`
+  holds when the sync that does everything due was last started, and only that moment spaces such a sync.
 - **Refusal ids and feedback.** Each refusal is shown with a short id of six hexadecimal digits (`refusal r-7f3a51`),
   so the agent can say it was wrong: `dibs feedback false-refusal r-7f3a51 --reason …` (MCP `dibs_feedback`). A
   conflict an agent resolved by hand while rebasing is told the same way, `dibs feedback conflict <file> --reason …`;
@@ -692,6 +713,14 @@ follow it, through a record the hooks write in `host-processes/` of the state di
 keeps the session it was started for). On deploy: upgrade the server as for every release (nothing changes on it),
 then, once the 0.1.10 client binaries are published, set `DIBS_LATEST_CLIENT` to 0.1.10. The plugin stays at
 `min_binary` 0.1.9: its hooks ask nothing new.
+
+**0.1.11, a claim's branch keeps where it was learned from.** The migration forgets every branch claims recorded and
+the radar built on them (footprints and overlaps); the log and the conversations stay. A branch is then recorded only
+from what a newer client sends: a checkout token, a named branch, a pull request's head, a pool worktree's branch. An
+older client's heartbeats and edit checks still answer as before, but the `repo` and `branch` they send without a
+checkout token are ignored, so its claims record no branch and see no overlap until it is upgraded. Upgrade the
+server, then publish the 0.1.11 client binaries and set `DIBS_LATEST_CLIENT` to 0.1.11 soon after, so the radar comes
+back as members update.
 
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the

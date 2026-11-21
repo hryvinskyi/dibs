@@ -191,9 +191,10 @@ against its base. It learns the branch from these, the first one that holds winn
 
 - the head of the pull request recorded on the claim (`head` above);
 - the branch of a pool worktree held for the claim's item. A worktree your host gives you is taken for no item; it
-  learns the item from your first edit in it that falls under exactly one of your claims, and from then on its branch
-  is that claim's. When you take a worktree yourself for an item, name the item (`dibs_worktree_take` with `item`,
-  `dibs worktree take --item <item>`);
+  learns the item of the claim an edit in it goes to — of your claims that declared the edited area (or name it wide),
+  the one most recently claimed or renewed — when your session took or last renewed that claim, and its branch is
+  that claim's until an edit there goes to another such claim of your session. When you take a worktree yourself for
+  an item, name the item (`dibs_worktree_take` with `item`, `dibs worktree take --item <item>`);
 - the branch you named when you claimed (`branch` above);
 - the branch of the checkout you work in, but only while your session works on that one claim alone in that checkout.
   A claim's branch is never taken from a checkout another session of yours shares, or from a session that reports

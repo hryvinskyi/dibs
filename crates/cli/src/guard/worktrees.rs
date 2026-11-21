@@ -259,6 +259,7 @@ impl WorktreePool for ClientWorktreePool {
                     agent: holder.agent.clone(),
                     purpose: purpose.clone(),
                     item: None,
+                    learned_item: None,
                 };
                 let took = client.take_worktree(&request).await?;
                 Ok::<_, RemoteError>((session, took))
@@ -277,6 +278,7 @@ impl WorktreePool for ClientWorktreePool {
                 agent: holder.agent.clone(),
                 purpose: Some(purpose),
                 item: None,
+                item_learned: false,
                 taken_at: SystemClock.now(),
                 reset_done: true,
             };

@@ -97,9 +97,13 @@ pub struct TakeWorktreeRequest {
     pub agent: Option<AgentKey>,
     /// Why.
     pub purpose: Purpose,
-    /// The work item, by local id.
+    /// The work item, by local id: a new hold is for it until the hold ends.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub item: Option<ItemId>,
+    /// The work item a hold the server let go of had learned from an edit, by local id, when the
+    /// take does not name `item`: a new hold is for it until an edit teaches it another.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub learned_item: Option<ItemId>,
 }
 
 /// What a take came to.
@@ -194,7 +198,7 @@ pub struct BeatWorktreesRequest {
     /// The pool.
     pub pool: PoolId,
     /// The repository of the pool's worktrees, when this machine recorded it; absent for a pool
-    /// taken from before it was recorded, whose beats carry no branch either.
+    /// with no record, whose beats carry no branch either.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo: Option<RepoId>,
     /// The beats.
@@ -210,6 +214,11 @@ pub struct BeatenWorktree {
     pub holder_session: SessionId,
     /// The holder's agent; `None` for the session itself.
     pub agent: Option<AgentKey>,
+    /// For a hold the beats kept, the work item it is for, whether the take named it or an edit
+    /// taught it; `None` when it has none, for a pair that holds nothing, and from a server that
+    /// does not answer it.
+    #[serde(default)]
+    pub item: Option<ItemId>,
 }
 
 /// The answer of the beats.
@@ -290,6 +299,38 @@ mod tests {
         }))
         .unwrap();
         assert!(by_session.get("agent").is_none());
+    }
+
+    #[test]
+    fn a_kept_hold_reads_its_item_and_an_answer_without_one_reads_as_none() {
+        let beaten: WorktreesBeaten = serde_json::from_str(
+            r#"{"kept":[{"worktree":"worktree1","holder_session":4,"agent":null,"item":7},
+                        {"worktree":"worktree2","holder_session":4,"agent":"a1"}],
+                "unknown":[{"worktree":"worktree3","holder_session":4,"agent":null}]}"#,
+        )
+        .unwrap();
+        let items: Vec<Option<ItemId>> = beaten.kept.iter().map(|kept| kept.item).collect();
+        assert_eq!(items, [Some(ItemId(7)), None]);
+        assert_eq!(beaten.unknown[0].item, None);
+    }
+
+    #[test]
+    fn a_take_names_a_learned_item_only_when_it_has_one() {
+        let take = |item, learned_item| TakeWorktreeRequest {
+            session_id: SessionId(9),
+            machine: MachineId::from_bits(1),
+            pool: PoolId::parse("c0ffee").unwrap(),
+            names: vec![name("worktree1")],
+            agent: None,
+            purpose: Purpose::parse("fix the totals").unwrap(),
+            item,
+            learned_item,
+        };
+        let learned = serde_json::to_value(take(None, Some(ItemId(3)))).unwrap();
+        assert_eq!(learned["learned_item"], 3);
+        assert!(learned.get("item").is_none());
+        let named = serde_json::to_value(take(Some(ItemId(3)), None)).unwrap();
+        assert!(named.get("learned_item").is_none());
     }
 
     #[test]

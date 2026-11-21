@@ -19,6 +19,21 @@
 //! what the hooks counted; such a sync that fails for another reason than an unreachable server
 //! holds the next one back for ten minutes.
 //!
+//! A heartbeat is due per session: each session of the machine remembers when it last sent one, so
+//! one session's heartbeat holds back none of another's and every session whose hooks run reports
+//! its checkout each interval. A heartbeat names the checkout the sync runs in, by its token, and
+//! the branch it is on, so the server learns which session works where. A sync with `--report`
+//! and no host's session runs only to send the counts and works in no checkout, so its heartbeat
+//! names none.
+//!
+//! With `--heartbeat-only` it sends the session's heartbeat when it is due, with the report it
+//! carries, and nothing else, and waits its turn for the lock for up to
+//! [`TURN_PATIENCE`]: what a hook starts for its session when another session's sync runs, or ran
+//! a moment ago and so did the work done once for the whole machine. A sync a hook starts to do
+//! everything due (one that names the host's session) waits as long, since a heartbeat-only sync
+//! of another session may take the lock first and hold it while a slow server answers; one run
+//! from the command line waits a second.
+//!
 //! One runs at a time per project (it holds the project's sync lock for its whole run), every
 //! call is bounded to two seconds, and while the server counted as unreachable within the last
 //! minute nothing is tried. Each answer is written to its cache in one step, so a hook reading
@@ -33,7 +48,7 @@ use time::OffsetDateTime;
 use dibs_agent_host::delivery;
 use dibs_agent_host::ports::{ClaimedDelivery as GuardClaim, LocalCache, Pending, SessionRef};
 use dibs_agent_host::timing::HookTimings;
-use dibs_agent_host::upkeep::{DEFAULT_HEARTBEAT, Due, Freshness, circuit_open};
+use dibs_agent_host::upkeep::{DEFAULT_HEARTBEAT, Due, Freshness, HEARTBEAT_KEPT, circuit_open};
 use dibs_agent_host::{HostId, SessionKey};
 use dibs_client::Client;
 use dibs_client::api::OnBranch;
@@ -50,17 +65,19 @@ use crate::commands::worktree::beats::Beats;
 use crate::context::{AGENT, Context};
 use crate::failure::{Failure, Kind};
 use crate::guard::cache::StateCache;
+use crate::guard::checkout_key::checkout_key;
 use crate::guard::machine::machine_id;
 use crate::guard::remote::{Remote, RemoteError};
 use crate::guard::report;
 use crate::guard::timing;
-use crate::guard::upkeep::{DetachedSync, take_lock};
+use crate::guard::upkeep::{DetachedSync, TURN_PATIENCE, take_lock};
 use crate::guard::views;
 use crate::guard::workspace::GIT_DIR;
 use crate::hosts;
 use crate::release::{self, BackgroundUpdate};
 
-/// How long a sync waits for the hook that started it to let go of the lock.
+/// How long a sync run from the command line waits for the project's sync lock, so a person's
+/// `dibs sync` stays quick.
 const LOCK_PATIENCE: StdDuration = StdDuration::from_secs(1);
 
 /// What a sync did.
@@ -109,7 +126,7 @@ async fn sync_now(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
         ));
     };
     let remote = Remote::new(&checkout, &ctx.locations()?, ctx.env());
-    let lock = take_lock(&remote.state, LOCK_PATIENCE).map_err(|error| {
+    let lock = take_lock(&remote.state, patience(&args)).map_err(|error| {
         tracing::debug!(error = %error, "the sync lock could not be taken");
         Failure::config(
             "state",
@@ -126,7 +143,9 @@ async fn sync_now(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
     };
     let now = OffsetDateTime::now_utc();
     let cache = StateCache::new(remote.state.clone(), checkout.root());
-    let update_due = args.update && (args.force || Due::at(now, &freshness(&cache)).update);
+    let session = session(&args);
+    let update_due =
+        args.update && (args.force || Due::at(now, &freshness(&cache, session.as_ref())).update);
     if circuit_open(cache.unreachable_since(), now) {
         let recommended = if update_due {
             recommended(&remote, now).await
@@ -159,19 +178,30 @@ async fn sync_now(args: SyncArgs, ctx: &Context) -> Result<(), Failure> {
             worktree_beats: true,
         }
     } else {
-        let mut due = Due::at(now, &freshness(&cache));
+        let mut due = Due::at(now, &freshness(&cache, session.as_ref()));
         due.heartbeat |= args.report && report::counts_unsent(&remote.state);
-        due
+        if args.heartbeat_only {
+            due.heartbeat_only()
+        } else {
+            due
+        }
     };
-    let session = session(&args);
     let client = remote.client().map_err(config)?;
-    let on = checkout_branch(&checkout, ctx.env().get(GIT_DIR).map(Path::new));
     let locations = ctx.locations()?;
     let timings = timing::load(locations.state_dir());
     let machine = machine_id(locations.state_dir());
-    let token = machine.as_ref().and_then(|machine| checkout.token(machine));
+    let (token, on) = if reports_only(&args) || !due.heartbeat {
+        (None, None)
+    } else {
+        let key = checkout_key(locations.state_dir(), &remote.principal());
+        (
+            key.and_then(|key| checkout.token(&key)),
+            checkout_branch(&checkout, ctx.env().get(GIT_DIR).map(Path::new)),
+        )
+    };
     let checked = Checked {
         checkout: &checkout,
+        cache: &cache,
         token: token.as_ref(),
         on: on.as_ref(),
         timings: &timings,
@@ -219,7 +249,7 @@ pub fn report_later(ctx: &Context) {
         return;
     }
     let sync = DetachedSync::new(remote.state.clone(), checkout.root());
-    match sync.start_reporting(now) {
+    match sync.start_reporting() {
         Ok(true) => report::note_report_sync_started(&remote.state, now),
         Ok(false) => {}
         Err(error) => tracing::debug!(error = %error, "the sync that reports could not start"),
@@ -277,10 +307,12 @@ fn notify_only(latest: &Version) -> String {
     format!("dibs {latest} is recommended; run dibs self-update in a terminal to install it.")
 }
 
-/// The checkout a sync runs in, the token it is named by, the branch it is on, the machine's hook
-/// timings and its id.
+/// The checkout a sync runs in, what the guard remembers of its project, the token the checkout
+/// is named by and the branch it is on when its heartbeat names them, the machine's hook timings
+/// and its id.
 struct Checked<'a> {
     checkout: &'a Checkout,
+    cache: &'a StateCache,
     token: Option<&'a CheckoutToken>,
     on: Option<&'a OnBranch>,
     timings: &'a HookTimings,
@@ -314,7 +346,17 @@ async fn run(
             .collect();
         report::mark_sent(&remote.state, &accepted, now);
         synced.reported = accepted.len();
-        if let Err(error) = remote.state.remember_heartbeat(now) {
+        let keep = checked
+            .cache
+            .settings()
+            .ok()
+            .flatten()
+            .map_or(HEARTBEAT_KEPT, |cached| cached.value.settings.stale_after());
+        if let Err(error) =
+            remote
+                .state
+                .remember_heartbeat(session.host.as_str(), session.key.as_str(), now, keep)
+        {
             tracing::debug!(error = %error, "the heartbeat could not be remembered");
         }
         synced.heartbeat = true;
@@ -429,14 +471,15 @@ async fn claim_deliveries(
     failure.map_or(Ok(()), |error| Err(RemoteError::Client(error)))
 }
 
-/// When each cache was filled, the heartbeat interval from the cached settings.
-fn freshness(cache: &StateCache) -> Freshness {
+/// When each cache was filled, the heartbeat interval from the cached settings, and when
+/// `session` last sent a heartbeat; a sync for no session has none to send.
+fn freshness(cache: &StateCache, session: Option<&SessionRef>) -> Freshness {
     let settings = cache.settings().ok().flatten();
     Freshness {
         heartbeat_every: settings.as_ref().map_or(DEFAULT_HEARTBEAT, |cached| {
             cached.value.settings.heartbeat_every()
         }),
-        last_heartbeat: cache.last_heartbeat(),
+        last_heartbeat: session.and_then(|session| cache.last_heartbeat(session)),
         settings_at: settings.as_ref().map(|cached| cached.at),
         status_at: cache.status().map(|cached| cached.at),
         inbox_at: cache.inbox().map(|cached| cached.at),
@@ -444,6 +487,31 @@ fn freshness(cache: &StateCache) -> Freshness {
         newest_worktree_beat: cache.newest_worktree_beat(),
         worktree_beats_sent_at: cache.worktree_beats_sent_at(),
     }
+}
+
+/// Whether a host's hook started the sync: a hook names its host's session, the command line
+/// names none.
+const fn for_a_hook(args: &SyncArgs) -> bool {
+    args.session.is_some()
+}
+
+/// How long the sync waits for the project's sync lock: [`TURN_PATIENCE`] for a sync of one
+/// session's heartbeat and for one a hook started, as a heartbeat-only sync of another session
+/// may hold the lock for as long as its server takes to answer; [`LOCK_PATIENCE`] for one run
+/// from the command line.
+const fn patience(args: &SyncArgs) -> StdDuration {
+    if args.heartbeat_only || for_a_hook(args) {
+        TURN_PATIENCE
+    } else {
+        LOCK_PATIENCE
+    }
+}
+
+/// Whether the sync runs only to send what the hooks counted: one started with `--report` for no
+/// host's session acts as the command line's session, which works in no checkout of its own then,
+/// so its heartbeat names no checkout and no branch.
+const fn reports_only(args: &SyncArgs) -> bool {
+    args.report && !for_a_hook(args)
 }
 
 /// The session the heartbeat is for: the host's session the command names, or this machine's

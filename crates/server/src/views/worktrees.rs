@@ -12,7 +12,7 @@ use dibs_domain::message::SessionLabel;
 use dibs_domain::report::MachineId;
 use dibs_domain::session::HostName;
 use dibs_domain::slot::Purpose;
-use dibs_domain::worktree::{AgentKey, HolderKind, PoolId, WorktreeHolder, WorktreeName};
+use dibs_domain::worktree::{AgentKey, HolderKind, KeptHold, PoolId, WorktreeHolder, WorktreeName};
 
 /// A hold of one of the caller's own pools.
 #[derive(Debug, Serialize)]
@@ -31,7 +31,7 @@ pub struct OwnHoldView {
     pub host: HostName,
     /// Why.
     pub purpose: Purpose,
-    /// The work item it is held for, when one was named.
+    /// The work item it is held for, when the take named one or an edit taught one.
     pub item: Option<ItemId>,
     /// When it was taken.
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
@@ -53,7 +53,7 @@ impl OwnHoldView {
             worktree: hold.worktree,
             host: hold.host,
             purpose: hold.purpose,
-            item: hold.item,
+            item: hold.item.id(),
             taken_at: hold.taken_at,
             last_seen: hold.last_seen,
         }
@@ -95,7 +95,7 @@ pub struct BoardHoldView {
     pub holder: HolderKind,
     /// Why.
     pub purpose: Purpose,
-    /// The work item it is held for, when one was named.
+    /// The work item it is held for, when the take named one or an edit taught one.
     pub item: Option<ItemId>,
     /// When it was taken.
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
@@ -135,6 +135,32 @@ impl BeatenView {
             holder_session: pair.holder.session(),
             agent: pair.holder.agent().cloned(),
             worktree: pair.worktree,
+        }
+    }
+}
+
+/// A hold a beat kept: the worktree, its holder, and the item the hold is for.
+#[derive(Debug, Serialize)]
+pub struct KeptView {
+    /// The worktree.
+    pub worktree: WorktreeName,
+    /// The holder's session.
+    pub holder_session: SessionId,
+    /// The holder's agent; `null` for the session itself.
+    pub agent: Option<AgentKey>,
+    /// The work item the hold is for, whether the take named it or an edit taught it; `null` when
+    /// it has none.
+    pub item: Option<ItemId>,
+}
+
+impl KeptView {
+    /// The view of a hold a beat kept.
+    pub fn of(kept: KeptHold) -> Self {
+        Self {
+            holder_session: kept.held.holder.session(),
+            agent: kept.held.holder.agent().cloned(),
+            worktree: kept.held.worktree,
+            item: kept.item.id(),
         }
     }
 }

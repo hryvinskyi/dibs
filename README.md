@@ -167,7 +167,7 @@ revokes their tokens and releases everything they held at once. With the Claude 
   (`dibs claim --branch`), or the checkout its session works in, the first that holds winning. A checkout's branch is
   recorded only on the one claim its session works on there alone, never from a checkout two sessions share
   (`dibs claim` is a session of its own, so beside an agent's session it names the branch with `--branch`); a worktree
-  the hooks take learns its item from the first edit made in it. An integration reports what each branch changes
+  the hooks take learns its item from an edit made in it under a claim of its own session. An integration reports what each branch changes
   against its base (its *footprint*). When two members' branches change one file, when one changes a published
   contract (`contracts`) that the other's area depends on (`area_deps`), or when a merge into the base changes files a
   branch still changes on its old base, dibs tells the holders once, in a message that says to rebase now — and, for a
@@ -475,9 +475,11 @@ leaves a locked worktree for its next run.
 The signs of life are sent for the holder the hold record names, by the detached `dibs sync` and by `upkeep`, at most
 once a minute whatever `heartbeat_every` is. Each names the branch its worktree is on (read from the worktree's own
 `.git`), and a hold that names an item records that branch on your claim on the item. A hold names the item its take
-named (`--item`); one the hooks take for a host's agent or session names none, and learns the item of the first edit
-made in it that falls under your claims on exactly one item, whose edit check then records the worktree's branch on that
-claim too. A sign the server answers as unknown (it let go of the hold while the signs could not reach it) takes that
+named (`--item`); one the hooks take for a host's agent or session names none, and learns the item of the claim an edit
+made in it goes to (of your claims that declared the edited area or name it wide, the one most recently claimed or
+renewed) when its session took or last renewed that claim, whose edit check then records the worktree's branch on that
+claim too; a later edit there that goes to another such claim of the session moves it to that claim's item. A sign the
+server answers as unknown (it let go of the hold while the signs could not reach it) takes that
 same worktree again for the same holder, if it is still free. A server older than the client answers `404` on the
 worktree routes: signs of life are dropped without a word and that server is not asked for them again for a day, or
 until a take, a release or a listing of worktrees is answered (the server was upgraded), a session end it cannot serve
@@ -680,7 +682,7 @@ dibs worktree release worktree2                   # or --agent KEY, as the take 
 dibs worktree list                                # the pool: prepared, who holds each, set aside, rescue branches
 dibs worktree prepare --all                       # prepare the worktrees (or one by name); takes a broken one back
 dibs worktree upkeep                              # send the signs of life, stop the environment of worktrees left free
-dibs sync [--force] [--quiet] [--update] [--report]   # heartbeat and refresh what this machine remembers
+dibs sync [--force] [--quiet] [--update] [--report] [--heartbeat-only]   # heartbeat and refresh what this machine remembers
 dibs self-update [--version 1.2.3]                # install a newer release, checked against the release key
 dibs mcp [--host <host>]                          # the same operations as MCP tools on stdin and stdout
 dibs hook <host> <event>                          # answer an agent host's hook

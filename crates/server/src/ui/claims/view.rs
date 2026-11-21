@@ -370,7 +370,7 @@ mod tests {
                     member: MemberId(1),
                     session: SessionId(1),
                     host: HostName::parse("laptop").unwrap(),
-                    areas: BTreeSet::new(),
+                    areas: Default::default(),
                     wide: None,
                     claimed_at: NOW - Duration::hours(2),
                     renewed_at: NOW - Duration::hours(2),

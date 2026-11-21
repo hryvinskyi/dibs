@@ -188,23 +188,27 @@ impl Pool {
         &self.state
     }
 
-    /// Records the holder `name` was taken for, and with it where the pool's worktrees live and
-    /// the repository the lending checkout names, which the signs of life sent later carry with
-    /// the branch each worktree is on.
+    /// Records the holder `name` was taken for, which every later sign of life is sent for, and
+    /// then where the pool's worktrees live and the repository the lending checkout names, which
+    /// those signs of life carry with the branch each worktree is on. The pool's record is
+    /// optional: one that cannot be written is logged and the hold's record stands.
     ///
     /// # Errors
-    /// The file system's failure.
+    /// The file system's failure to write the hold's record.
     pub fn remember_hold(
         &self,
         name: &WorktreeName,
         record: &WorktreeHoldRecord,
     ) -> io::Result<()> {
+        self.files.remember_hold(name, record)?;
         let pool = PoolRecord {
             root: self.settings.root.clone(),
             repo: self.checkout.named_repo(),
         };
-        self.files.remember_pool(&pool)?;
-        self.files.remember_hold(name, record)
+        if let Err(error) = self.files.remember_pool(&pool) {
+            tracing::debug!(error = %error, "where the pool's worktrees live could not be recorded");
+        }
+        Ok(())
     }
 
     /// The pool's worktrees, in order.

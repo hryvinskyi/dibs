@@ -4,6 +4,8 @@
 
 #[cfg(test)]
 mod repositories {
+    use std::collections::BTreeSet;
+
     use time::OffsetDateTime;
 
     use dibs_app::Actor;
@@ -241,7 +243,7 @@ mod repositories {
             .unwrap();
         assert_eq!(
             outcome.claim().areas,
-            [area("api:billing"), area("api:schema")].into()
+            BTreeSet::from([area("api:billing"), area("api:schema")])
         );
 
         // The web's billing is another area, free for Bob.
@@ -256,7 +258,7 @@ mod repositories {
             .unwrap();
         assert_eq!(
             outcome.claim().areas,
-            [area("web:billing"), area("web:checkout")].into()
+            BTreeSet::from([area("web:billing"), area("web:checkout")])
         );
         assert_eq!(
             project
@@ -400,7 +402,7 @@ mod repositories {
             .unwrap();
         assert_eq!(
             view.claim.unwrap().claim.areas,
-            [area("web:billing")].into()
+            BTreeSet::from([area("web:billing")])
         );
         let alices = project
             .verdicts(

@@ -298,6 +298,198 @@ fn the_background_sync_outlives_the_hook_that_started_it() {
     assert!(started.elapsed() > StdDuration::from_millis(1_600));
 }
 
+/// The neutral input of an event in `cwd` from the session `session`.
+fn input_of(cwd: &Path, session: &str) -> String {
+    json!({
+        "protocol": 1,
+        "session": session,
+        "cwd": cwd.to_string_lossy(),
+        "thread": "main",
+    })
+    .to_string()
+}
+
+/// The server's session id each heartbeat it received names, oldest first.
+fn heartbeat_sessions(setup: &Setup) -> Vec<u64> {
+    const FIELD: &str = r#""session_id":"#;
+    setup
+        .server
+        .request_log()
+        .iter()
+        .filter(|request| request.contains("/v1/heartbeat"))
+        .filter_map(|request| {
+            let start = request.find(FIELD)? + FIELD.len();
+            let digits: String = request[start..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
+        .collect()
+}
+
+#[test]
+fn every_session_in_one_checkout_sends_its_own_heartbeat_however_close_their_hooks() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    claim(&setup, "bob", &api, "gh:acme/api#6", &[]);
+    let sessions = [
+        "sess-1111-aaaa",
+        "sess-2222-bbbb",
+        "sess-3333-cccc",
+        "sess-4444-dddd",
+        "sess-5555-eeee",
+    ];
+    let after_tool = |session: &str| {
+        let out = setup.hook("bob", &api, "after-tool", &input_of(&api, session));
+        assert_eq!(decision(&out), "no_objection", "{session}");
+    };
+
+    setup.server.delay_answers(StdDuration::from_millis(1_500));
+    let before = setup.server.requests();
+    after_tool(sessions[0]);
+    assert!(
+        eventually(StdDuration::from_secs(5), || setup.server.requests()
+            > before),
+        "the first session's sync asks the server: {:?}",
+        setup.server.request_paths()
+    );
+    // That sync holds the project's sync lock for every slow answer it waits for.
+    after_tool(sessions[1]);
+    setup.server.delay_answers(StdDuration::ZERO);
+    assert!(
+        eventually(StdDuration::from_secs(10), || heartbeat_sessions(&setup)
+            .len()
+            >= 2),
+        "the session whose hook found the lock taken sends its heartbeat too: {:?}",
+        setup.server.request_paths()
+    );
+    for session in &sessions[2..] {
+        after_tool(session);
+    }
+    assert!(
+        eventually(StdDuration::from_secs(10), || heartbeat_sessions(&setup)
+            .len()
+            >= sessions.len()),
+        "a session's start is not held back by another session's start a moment ago: {:?}",
+        heartbeat_sessions(&setup)
+    );
+
+    for session in sessions {
+        after_tool(session);
+    }
+    std::thread::sleep(StdDuration::from_secs(2));
+    let mut beats = heartbeat_sessions(&setup);
+    assert_eq!(
+        beats.len(),
+        sessions.len(),
+        "each session sends one heartbeat within the interval: {beats:?}"
+    );
+    beats.sort_unstable();
+    beats.dedup();
+    assert_eq!(beats.len(), sessions.len(), "one per session: {beats:?}");
+}
+
+#[test]
+fn a_session_that_ends_leaves_no_start_behind_to_hold_its_key_back() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    claim(&setup, "bob", &api, "gh:acme/api#7", &[]);
+    let hook = |event: &str| {
+        let out = setup.hook("bob", &api, event, &input_of(&api, "sess-6666-ffff"));
+        assert_eq!(status(&out), 0, "{event}: {}", text(&out.stderr));
+    };
+    hook("after-tool");
+    assert!(
+        eventually(StdDuration::from_secs(5), || heartbeat_sessions(&setup)
+            .len()
+            == 1),
+        "{:?}",
+        setup.server.request_paths()
+    );
+    hook("session-ended");
+    hook("after-tool");
+    assert!(
+        eventually(StdDuration::from_secs(5), || heartbeat_sessions(&setup)
+            .len()
+            == 2),
+        "the ended session's heartbeat and its last start went with it: {:?}",
+        setup.server.request_paths()
+    );
+}
+
+/// The `[worktrees]` table of a pool of one worktree, added from the checkout's `main`, whose reset
+/// does nothing.
+const ONE_WORKTREE: &str = r#"[worktrees]
+count = 1
+base = "main"
+prepare = 'git -C "$DIBS_CHECKOUT" worktree add -q --detach "$DIBS_WORKTREE_PATH" "$DIBS_WORKTREE_BASE"'
+reset = "true"
+"#;
+
+#[cfg(unix)]
+#[test]
+fn the_sync_a_hook_starts_to_do_everything_waits_out_a_slow_heartbeat_only_sync() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    write(&api.join(".git/dibs"), "worktrees.toml", ONE_WORKTREE);
+    setup.ok("bob", &api, &["worktree", "take", "--agent", "agent-1"]);
+    setup.ok("bob", &api, &["worktree", "beat", "worktree1"]);
+    let sync = |session: &str, more: &[&str]| {
+        setup
+            .dibs_as("bob", &api)
+            .args(["sync", "--host", "neutral", "--session", session])
+            .args(more)
+            .output()
+            .unwrap()
+    };
+
+    setup.server.delay_answers(StdDuration::from_millis(1_500));
+    let before = setup.server.requests();
+    let full = std::thread::scope(|scope| {
+        let heartbeat = scope.spawn(|| sync("sess-1111-aaaa", &["--heartbeat-only"]));
+        assert!(
+            eventually(StdDuration::from_secs(5), || setup.server.requests()
+                > before),
+            "the heartbeat-only sync asks the server, holding the lock: {:?}",
+            setup.server.request_paths()
+        );
+        let full = scope.spawn(|| sync("sess-2222-bbbb", &[]));
+        assert!(
+            eventually(StdDuration::from_secs(5), || setup
+                .server
+                .requests_to("/v1/heartbeat")
+                == 1),
+            "{:?}",
+            setup.server.request_paths()
+        );
+        // The heartbeat-only sync holds the lock through two slow answers, its session's and its
+        // heartbeat's, about three seconds from its first request: past the second a terminal's
+        // sync waits, after the other sync is spawned, and within the ten a hook's sync waits.
+        setup.server.delay_answers(StdDuration::ZERO);
+        let heartbeat = heartbeat.join().unwrap();
+        assert_eq!(status(&heartbeat), 0, "{}", text(&heartbeat.stderr));
+        full.join().unwrap()
+    });
+    assert_eq!(status(&full), 0, "{}", text(&full.stderr));
+    let said = text(&full.stdout);
+    assert!(
+        said.contains("worktree beats"),
+        "the full sync ran once the lock was free: {said}"
+    );
+    assert_eq!(
+        setup.server.requests_to("/v1/worktrees/beat"),
+        1,
+        "{:?}",
+        setup.server.request_paths()
+    );
+    assert_eq!(
+        heartbeat_sessions(&setup).len(),
+        2,
+        "each session's heartbeat"
+    );
+}
+
 #[test]
 fn switched_off_a_hook_is_silent_and_asks_nothing() {
     let setup = Setup::new();

@@ -130,7 +130,7 @@ mod support {
             } = &check.plan;
             for add in add_areas {
                 if let Some(claim) = self.claims.iter_mut().find(|c| c.item == add.claim) {
-                    claim.areas.insert(add.area.clone());
+                    claim.areas.gain(add.area.clone());
                 }
             }
             self.shared.extend(share_paths.iter().cloned());
@@ -366,7 +366,7 @@ fn decisions_publish_events_in_the_documented_shape() {
         member: claim.member,
         session: claim.session,
         host: claim.host.clone(),
-        areas: claim.areas.clone(),
+        areas: claim.areas.iter().cloned().collect(),
     });
     let check = world.check(ALICE, &["api:packages/search/a.php", "api:config/app.yaml"]);
     let reserved = EventKind::Reserved(Reserved {

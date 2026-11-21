@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use dibs_domain::ids::{ItemId, SessionId};
+use dibs_domain::ids::SessionId;
 use dibs_domain::report::MachineId;
 use dibs_domain::slot::Purpose;
 use dibs_domain::worktree::{
-    AgentKey, PoolId, PoolKey, TakeAnswer, TakeWorktree as TakeRequest, WorktreeName, decide_take,
+    AgentKey, HoldItem, PoolId, PoolKey, TakeAnswer, TakeWorktree as TakeRequest, WorktreeName,
+    decide_take,
 };
 
 use crate::actor::Actor;
@@ -33,8 +34,9 @@ pub struct TakeWorktreeInput {
     pub agent: Option<AgentKey>,
     /// Why.
     pub purpose: Purpose,
-    /// The work item it is for, by local id.
-    pub item: Option<ItemId>,
+    /// The work item a new hold is for, by local id, and how the hold comes to it: named by the
+    /// take, or learned by a hold the server let go of, which a later edit may replace.
+    pub item: HoldItem,
 }
 
 /// What the take came to.
@@ -90,7 +92,7 @@ impl TakeWorktree {
         let now = self.clock.now();
         let mut work = Work::begin_for(&*self.store, actor).await?;
         let session = own_session(&mut work, actor, input.session).await?;
-        if let Some(item) = input.item {
+        if let Some(item) = input.item.id() {
             existing_item(&mut work, item).await?;
         }
         let key = PoolKey {

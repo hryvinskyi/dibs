@@ -6,7 +6,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::area::QualifiedArea;
-use crate::claim::{Claim, Holder, held_by_other, target_claim};
+use crate::claim::{AreaOrigin, Claim, Holder, held_by_other, target_claim};
 use crate::grant::Grant;
 use crate::hot_rule::{HotContext, HotDecision, HotRuleKind, Note};
 use crate::ids::{ItemId, MemberId};
@@ -117,6 +117,39 @@ pub struct EditCheck {
     /// The member's claims the edits were attributed to. An edit is a sign of life, so the caller
     /// refreshes their `last_seen`, wherever the claim was taken.
     pub touch: BTreeSet<ItemId>,
+    /// Of `touch`, the claims an edit was attributed to by its area: the claim declared the area,
+    /// names it wide, or was granted edits in it. A claim an edit reached only as the member's
+    /// target claim — for an area none of their claims answers for, for an area it holds only
+    /// because such an edit gained it, or for a shared path — is in `touch` alone.
+    pub by_area: BTreeSet<ItemId>,
+}
+
+impl EditCheck {
+    /// How the edits came to be attributed to the claim on `item`, when they were: by an area when
+    /// any of them was, else as the member's target claim.
+    pub fn attribution(&self, item: ItemId) -> Option<Attribution> {
+        if self.by_area.contains(&item) {
+            Some(Attribution::Area)
+        } else if self.touch.contains(&item) {
+            Some(Attribution::Target)
+        } else {
+            None
+        }
+    }
+}
+
+/// How an edit came to be attributed to one of the member's claims, which says whether the
+/// attribution tells what work the edit is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Attribution {
+    /// The claim declared the edit's area, names it wide, or was granted edits in it: the edit is
+    /// that claim's work.
+    Area,
+    /// No claim of the member answers for the edit's area or path, so the edit went to the
+    /// member's target claim, the one most recently claimed or renewed: a guess at the work, which
+    /// keeps the claim alive and nothing more. An edit in an area the claim holds only because
+    /// such a guess gained it is the same guess.
+    Target,
 }
 
 /// What an edit check is decided against.
@@ -172,6 +205,15 @@ pub enum EditCheckRefused {
 /// on its way to that claim. An edit inside my wide scope adds nothing, since a wide claim holds
 /// nothing it names, and is attributed to that wide claim. Edits under a `warn-shared` rule record
 /// the path under the target claim. Nothing already recorded is planned again.
+///
+/// Each claim an edit is attributed to is told apart by how ([`EditCheck::attribution`]): by its
+/// area when the claim declared the area, names it wide or was granted edits in it; as the target
+/// when the edit went to it only because none of my claims answers for the area, or for a shared
+/// path. An area added to a claim this way is gained ([`AreaOrigin::Gained`]): the claim holds it
+/// like a declared one, but a later edit in it is still attributed to the claim as the target,
+/// until a renewal of the claim declares it. When several of my live claims hold the area, the edit
+/// goes to one that declared it — the most recently claimed or renewed of those, the lowest item on
+/// a tie — and to one that only gained it only when none declared it.
 ///
 /// # Errors
 /// [`EditCheckRefused::UnknownRepo`] when a path's repository is not listed.
@@ -249,6 +291,7 @@ impl<'a> EditWorld<'a> {
             return match grant {
                 Some(grant) => {
                     check.touch.insert(grant.item);
+                    check.by_area.insert(grant.item);
                     Verdict::Granted {
                         by: holder.member,
                         area: area.clone(),
@@ -268,7 +311,7 @@ impl<'a> EditWorld<'a> {
                 EditPolicy::Advise => Verdict::Allowed,
             };
         }
-        let holding = target_claim(self.mine.iter().copied().filter(|claim| claim.holds(area)));
+        let declared = self.holding(area, AreaOrigin::Declared);
         let wide = target_claim(
             self.mine
                 .iter()
@@ -279,8 +322,14 @@ impl<'a> EditWorld<'a> {
             .claims
             .iter()
             .any(|claim| claim.member != input.me && claim.waits_for(area));
-        if let Some(claim) = holding.or(wide) {
+        let taker = declared
+            .or(wide)
+            .or_else(|| self.holding(area, AreaOrigin::Gained));
+        if let Some(claim) = taker {
             check.touch.insert(claim.item);
+            if claim.areas.origin(area) != Some(AreaOrigin::Gained) {
+                check.by_area.insert(claim.item);
+            }
         } else if let Some(target) = self.target_for(area) {
             if !waited_for_elsewhere {
                 check.plan.add_area(AddArea {
@@ -291,6 +340,18 @@ impl<'a> EditWorld<'a> {
             check.touch.insert(target.item);
         }
         Verdict::Allowed
+    }
+
+    /// The target among my claims that hold the area with that origin. An edit goes to the one that
+    /// declared the area, else to my live wide claim that names it, else to the one that only
+    /// gained it.
+    fn holding(&self, area: &QualifiedArea, origin: AreaOrigin) -> Option<&'a Claim> {
+        target_claim(
+            self.mine
+                .iter()
+                .copied()
+                .filter(|claim| claim.areas.origin(area) == Some(origin)),
+        )
     }
 
     /// The way on from an area another member's claim holds: its pull requests' merge when that

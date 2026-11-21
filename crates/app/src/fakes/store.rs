@@ -288,7 +288,7 @@ impl State {
                     member(*p, key.member)
                         && pool.holds().iter().all(|h| {
                             self.sessions.contains_key(&(*p, h.holder.session()))
-                                && h.item.is_none_or(|i| item(*p, i))
+                                && h.item.id().is_none_or(|i| item(*p, i))
                         })
                 }),
             ),

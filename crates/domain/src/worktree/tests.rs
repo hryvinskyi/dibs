@@ -3,6 +3,7 @@
 use time::Duration;
 
 use super::*;
+use crate::edit::Attribution;
 use crate::event::{EventKind, WorktreeReleaseCause, WorktreeReleased, WorktreeTaken};
 use crate::ids::{ItemId, SessionId};
 use crate::report::MachineId;
@@ -46,7 +47,7 @@ fn request(holder: &Holder, offered: &[&str]) -> TakeWorktree {
         holder: holder.clone(),
         host: HostName::parse("laptop").unwrap(),
         purpose: Purpose::parse("fix the rounding").unwrap(),
-        item: Some(ItemId(7)),
+        item: HoldItem::Named(ItemId(7)),
     }
 }
 
@@ -129,7 +130,7 @@ fn a_take_lends_the_first_free_worktree_and_records_it() {
     );
     let hold = run.pool.hold(&name("worktree1")).unwrap();
     assert_eq!(hold.holder, holder);
-    assert_eq!(hold.item, Some(ItemId(7)));
+    assert_eq!(hold.item, HoldItem::Named(ItemId(7)));
     assert_eq!((hold.taken_at, hold.last_seen), (at(0), at(0)));
     assert_eq!(run.pool.hold_of(&holder), Some(hold));
 }
@@ -304,9 +305,12 @@ fn a_beat_moves_a_hold_forward_never_back_and_answers_the_pairs_that_hold_nothin
     assert_eq!(
         done.answer,
         Beaten {
-            kept: vec![WorktreeHolder {
-                worktree: name("worktree1"),
-                holder: holder.clone(),
+            kept: vec![KeptHold {
+                held: WorktreeHolder {
+                    worktree: name("worktree1"),
+                    holder: holder.clone(),
+                },
+                item: HoldItem::Named(ItemId(7)),
             }],
             unknown: vec![
                 WorktreeHolder {
@@ -468,7 +472,7 @@ fn a_pool_is_built_in_name_order_and_refuses_a_worktree_or_a_holder_twice() {
         holder,
         host: HostName::parse("laptop").unwrap(),
         purpose: Purpose::parse("fix the rounding").unwrap(),
-        item: None,
+        item: HoldItem::Unknown,
         taken_at: at(0),
         last_seen: at(0),
     };
@@ -603,14 +607,15 @@ impl Run {
     /// A take by `holder` of the first free worktree, for no work item.
     fn take_for_nothing(&mut self, holder: &Holder, minute: i64) {
         let ask = TakeWorktree {
-            item: None,
+            item: HoldItem::Unknown,
             ..request(holder, &ALL)
         };
         self.pool = decide_take(&self.pool, &ask, at(minute)).unwrap().pool;
     }
 
-    /// An edit from `session` in `worktree` at `minute`, attributed to `item` alone when one is
-    /// named; answers the item the hold names after it and keeps the pool it leaves.
+    /// An edit from `session` in `worktree` at `minute`, attributed to `item` alone, a claim of
+    /// that session, when one is named; answers the item the hold names after it and keeps the
+    /// pool it leaves.
     fn edit(
         &mut self,
         worktree: &str,
@@ -618,10 +623,53 @@ impl Run {
         item: Option<u64>,
         minute: i64,
     ) -> Option<u64> {
+        let attributed = item
+            .map(|item| (item, session))
+            .into_iter()
+            .collect::<Vec<_>>();
+        self.edit_attributed(worktree, session, &attributed, minute)
+    }
+
+    /// An edit from `session` in `worktree` at `minute`, attributed by its area to each item of
+    /// `attributed`, a claim of the session paired with it; answers the item the hold names after
+    /// it and keeps the pool it leaves.
+    fn edit_attributed(
+        &mut self,
+        worktree: &str,
+        session: u64,
+        attributed: &[(u64, u64)],
+        minute: i64,
+    ) -> Option<u64> {
+        let by_area: Vec<(u64, u64, Attribution)> = attributed
+            .iter()
+            .map(|(item, of)| (*item, *of, Attribution::Area))
+            .collect();
+        self.edit_by(worktree, session, &by_area, minute)
+    }
+
+    /// An edit from `session` in `worktree` at `minute`, attributed to each item of `attributed`,
+    /// a claim of the session paired with it, the way paired with it; answers the item the hold
+    /// names after it and keeps the pool it leaves.
+    fn edit_by(
+        &mut self,
+        worktree: &str,
+        session: u64,
+        attributed: &[(u64, u64, Attribution)],
+        minute: i64,
+    ) -> Option<u64> {
         let edit = EditInWorktree {
             worktree: name(worktree),
             session: SessionId(session),
-            item: item.map(ItemId),
+            attributed: attributed
+                .iter()
+                .map(|(item, of, by)| {
+                    let of = Attributed {
+                        session: SessionId(*of),
+                        by: *by,
+                    };
+                    (ItemId(*item), of)
+                })
+                .collect(),
         };
         let done = decide_edit_in_worktree(&self.pool, &edit, at(minute), Silence::DEFAULT);
         assert!(done.events.is_empty(), "learning an item records no event");
@@ -629,11 +677,10 @@ impl Run {
         done.answer.map(|item| item.0)
     }
 
-    fn item_of(&self, worktree: &str) -> Option<u64> {
+    fn item_of(&self, worktree: &str) -> HoldItem {
         self.pool
             .hold(&name(worktree))
-            .and_then(|hold| hold.item)
-            .map(|item| item.0)
+            .map_or(HoldItem::Unknown, |hold| hold.item)
     }
 }
 
@@ -642,12 +689,13 @@ fn a_hold_that_names_no_item_learns_the_item_of_an_edit_of_its_session() {
     let mut run = Run::new();
     run.take_for_nothing(&session(1), 0);
     let before = run.pool.hold(&name("worktree1")).cloned().unwrap();
+    assert_eq!(before.item, HoldItem::Unknown);
     assert_eq!(run.edit("worktree1", 1, Some(3), 5), Some(3));
     let after = run.pool.hold(&name("worktree1")).unwrap();
-    assert_eq!(after.item, Some(ItemId(3)));
+    assert_eq!(after.item, HoldItem::Learned(ItemId(3)));
     assert_eq!(
         WorktreeHold {
-            item: None,
+            item: HoldItem::Unknown,
             ..after.clone()
         },
         before,
@@ -660,27 +708,46 @@ fn an_agent_of_the_session_counts_as_the_session() {
     let mut run = Run::new();
     run.take_for_nothing(&agent(1, "a1"), 0);
     assert_eq!(run.edit("worktree1", 1, Some(3), 5), Some(3));
-    assert_eq!(run.item_of("worktree1"), Some(3));
+    assert_eq!(run.item_of("worktree1"), HoldItem::Learned(ItemId(3)));
 }
 
 #[test]
-fn a_hold_that_names_an_item_keeps_it() {
+fn a_hold_whose_take_named_an_item_keeps_it_for_good() {
     let mut run = Run::new();
     run.take(&session(1), 0);
+    assert_eq!(run.item_of("worktree1"), HoldItem::Named(ItemId(7)));
     let before = run.pool.clone();
     assert_eq!(
         run.edit("worktree1", 1, Some(3), 5),
         Some(7),
         "the item the take named"
     );
-    assert_eq!(run.pool, before);
-    run.take_for_nothing(&agent(1, "a1"), 0);
-    run.edit("worktree2", 1, Some(3), 5);
     assert_eq!(
-        run.edit("worktree2", 1, Some(4), 6),
-        Some(3),
-        "the first one"
+        run.edit("worktree1", 1, Some(4), 6),
+        Some(7),
+        "nor another one later"
     );
+    assert_eq!(run.pool, before);
+}
+
+#[test]
+fn a_learned_item_is_learned_again_from_an_edit_attributed_to_another_item_of_the_session() {
+    let mut run = Run::new();
+    run.take_for_nothing(&agent(1, "a1"), 0);
+    assert_eq!(run.edit("worktree1", 1, Some(3), 5), Some(3));
+    assert_eq!(run.edit("worktree1", 1, Some(4), 6), Some(4), "replaced");
+    assert_eq!(run.item_of("worktree1"), HoldItem::Learned(ItemId(4)));
+    assert_eq!(
+        run.edit("worktree1", 1, None, 7),
+        Some(4),
+        "an edit that teaches nothing keeps it"
+    );
+    assert_eq!(
+        run.edit_attributed("worktree1", 1, &[(3, 1), (4, 1)], 8),
+        Some(4),
+        "and so does one attributed to two items"
+    );
+    assert_eq!(run.item_of("worktree1"), HoldItem::Learned(ItemId(4)));
 }
 
 #[test]
@@ -689,7 +756,89 @@ fn an_edit_attributed_to_no_one_item_teaches_nothing() {
     run.take_for_nothing(&session(1), 0);
     let before = run.pool.clone();
     assert_eq!(run.edit("worktree1", 1, None, 5), None);
+    assert_eq!(
+        run.edit_attributed("worktree1", 1, &[(3, 1), (4, 1)], 6),
+        None,
+        "two items of the session"
+    );
     assert_eq!(run.pool, before);
+}
+
+#[test]
+fn an_edit_that_reached_its_claim_as_the_target_teaches_a_hold_with_no_item_nothing() {
+    let mut run = Run::new();
+    run.take_for_nothing(&agent(1, "a1"), 0);
+    let before = run.pool.clone();
+    assert_eq!(
+        run.edit_by("worktree1", 1, &[(4, 1, Attribution::Target)], 5),
+        None,
+        "an area nobody holds, or a shared path, went to the newest claim as a guess"
+    );
+    assert_eq!(run.pool, before);
+}
+
+#[test]
+fn an_edit_that_reached_its_claim_as_the_target_keeps_the_item_learned() {
+    let mut run = Run::new();
+    run.take_for_nothing(&agent(1, "a1"), 0);
+    assert_eq!(run.edit("worktree1", 1, Some(3), 5), Some(3));
+    let learned = run.pool.clone();
+    assert_eq!(
+        run.edit_by("worktree1", 1, &[(4, 1, Attribution::Target)], 6),
+        Some(3),
+        "not replaced by the newest claim"
+    );
+    assert_eq!(
+        run.edit_by(
+            "worktree1",
+            1,
+            &[(3, 1, Attribution::Area), (4, 1, Attribution::Target)],
+            7
+        ),
+        Some(3),
+        "an edit that names two items teaches nothing, whichever reached its area"
+    );
+    assert_eq!(
+        run.edit_by(
+            "worktree1",
+            1,
+            &[(4, 1, Attribution::Area), (3, 1, Attribution::Target)],
+            8
+        ),
+        Some(3),
+        "nor when the other item is the one its area named"
+    );
+    assert_eq!(run.pool, learned);
+    assert_eq!(
+        run.edit_by("worktree1", 1, &[(4, 1, Attribution::Area)], 9),
+        Some(4),
+        "an edit in an area the other claim holds teaches it"
+    );
+    assert_eq!(run.item_of("worktree1"), HoldItem::Learned(ItemId(4)));
+}
+
+#[test]
+fn an_edit_attributed_to_another_sessions_claim_teaches_nothing() {
+    let mut run = Run::new();
+    run.take_for_nothing(&agent(1, "a1"), 0);
+    let before = run.pool.clone();
+    assert_eq!(
+        run.edit_attributed("worktree1", 1, &[(5, 2)], 5),
+        None,
+        "the claim another session of the member renewed"
+    );
+    assert_eq!(
+        run.edit_attributed("worktree1", 1, &[(3, 1), (5, 2)], 6),
+        None,
+        "nor that claim beside one of its own"
+    );
+    assert_eq!(run.pool, before);
+    run.edit("worktree1", 1, Some(3), 7);
+    assert_eq!(
+        run.edit_attributed("worktree1", 1, &[(5, 2)], 8),
+        Some(3),
+        "a learned item stays"
+    );
 }
 
 #[test]
@@ -699,7 +848,7 @@ fn another_sessions_hold_a_silent_hold_and_a_free_worktree_learn_nothing() {
     run.take_for_nothing(&session(2), 0);
     let before = run.pool.clone();
     assert_eq!(
-        run.edit("worktree2", 1, Some(3), 5),
+        run.edit_attributed("worktree2", 1, &[(3, 2)], 5),
         None,
         "another session's"
     );
@@ -732,9 +881,68 @@ fn a_take_again_by_the_holder_keeps_the_item_its_hold_learned() {
     assert!(events.is_empty());
     assert_eq!(
         run.item_of("worktree1"),
-        Some(3),
+        HoldItem::Learned(ItemId(3)),
         "not the item the take names"
     );
     run.take_for_nothing(&holder, 7);
-    assert_eq!(run.item_of("worktree1"), Some(3), "nor none");
+    assert_eq!(
+        run.item_of("worktree1"),
+        HoldItem::Learned(ItemId(3)),
+        "nor none"
+    );
+}
+
+#[test]
+fn a_beat_answers_the_item_of_each_hold_it_keeps() {
+    let mut run = Run::new();
+    run.take(&agent(1, "a1"), 0);
+    run.take_for_nothing(&agent(1, "a2"), 0);
+    run.take_for_nothing(&agent(1, "a3"), 0);
+    run.edit("worktree3", 1, Some(3), 5);
+    let beat = |worktree: &str, key: &str| WorktreeBeat {
+        worktree: name(worktree),
+        holder: agent(1, key),
+        seen_at: at(6),
+    };
+    let done = decide_beat(
+        &run.pool,
+        &[
+            beat("worktree1", "a1"),
+            beat("worktree2", "a2"),
+            beat("worktree3", "a3"),
+        ],
+    );
+    let items: Vec<HoldItem> = done.answer.kept.iter().map(|kept| kept.item).collect();
+    assert_eq!(
+        items,
+        [
+            HoldItem::Named(ItemId(7)),
+            HoldItem::Unknown,
+            HoldItem::Learned(ItemId(3)),
+        ]
+    );
+}
+
+#[test]
+fn a_take_that_names_a_learned_item_gives_its_hold_one_a_later_edit_replaces() {
+    let mut run = Run::new();
+    let ask = TakeWorktree {
+        item: HoldItem::Learned(ItemId(3)),
+        ..request(&agent(1, "a1"), &ALL)
+    };
+    run.pool = decide_take(&run.pool, &ask, at(0)).unwrap().pool;
+    assert_eq!(run.item_of("worktree1"), HoldItem::Learned(ItemId(3)));
+    assert_eq!(run.edit("worktree1", 1, Some(4), 5), Some(4));
+    assert_eq!(run.item_of("worktree1"), HoldItem::Learned(ItemId(4)));
+
+    let again = TakeWorktree {
+        item: HoldItem::Named(ItemId(9)),
+        ..request(&agent(1, "a1"), &ALL)
+    };
+    let took = decide_take(&run.pool, &again, at(6)).unwrap();
+    assert_eq!(
+        took.pool.hold(&name("worktree1")).unwrap().item,
+        HoldItem::Learned(ItemId(4)),
+        "a holder taking again keeps the item its hold has"
+    );
 }

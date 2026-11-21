@@ -839,8 +839,13 @@ pub trait LocalCache {
     /// Remembers that the member holds these areas as of `at`.
     fn note_holds(&self, areas: &[QualifiedArea], at: OffsetDateTime);
 
-    /// When the member's last heartbeat from this machine was sent.
-    fn last_heartbeat(&self) -> Option<OffsetDateTime>;
+    /// When `session` last sent a heartbeat from this machine. Each session keeps its own moment:
+    /// another session's heartbeat holds none of this one's back.
+    fn last_heartbeat(&self, session: &SessionRef) -> Option<OffsetDateTime>;
+
+    /// Forgets what this machine keeps of `session`'s heartbeats — when it last sent one and when
+    /// one was last started for it — as the session ended.
+    fn forget_heartbeat(&self, session: &SessionRef);
 
     /// When a call last found the server unreachable, unless one reached it since.
     fn unreachable_since(&self) -> Option<OffsetDateTime>;
@@ -947,7 +952,9 @@ pub trait LedgerEntry {
 /// newer client.
 pub trait Upkeep {
     /// Starts the upkeep of what is `due` in the background for `session`, unless it is already
-    /// running or was started a moment ago; answers whether it was started now.
+    /// running or was started a moment ago; answers whether it was started now. A heartbeat due
+    /// for `session` is held back only by a start for that same session a moment ago: the
+    /// upkeep another session runs or started does not send it.
     ///
     /// # Errors
     /// [`PortError::Refused`] when it could not be started.

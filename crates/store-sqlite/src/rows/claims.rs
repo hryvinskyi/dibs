@@ -8,7 +8,7 @@ use sqlx::sqlite::SqliteRow;
 
 use dibs_app::ports::{ClaimRows, StoreResult};
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::claim::Claim;
+use dibs_domain::claim::{Claim, ClaimAreas};
 use dibs_domain::handover::{ClaimKind, PendingArea};
 use dibs_domain::ids::{ItemId, MemberId, ProjectId, SessionId, ThreadId};
 use dibs_domain::paths::{RelPath, RepoPath};
@@ -76,8 +76,8 @@ impl BranchColumn {
 /// The columns a claim is read from.
 macro_rules! claim_columns {
     () => {
-        "item_id, member_id, session_id, host, areas, wide_areas, wide_reason, claimed_at, \
-         renewed_at, last_seen, review_prs, review_since, review_more, branches, kind"
+        "item_id, member_id, session_id, host, areas, gained_areas, wide_areas, wide_reason, \
+         claimed_at, renewed_at, last_seen, review_prs, review_since, review_more, branches, kind"
     };
 }
 
@@ -98,6 +98,8 @@ fn claim(row: &SqliteRow, pending: BTreeMap<QualifiedArea, PendingArea>) -> Stor
             ));
         }
     };
+    let areas = ClaimAreas::new(f.json("areas")?, f.json("gained_areas")?)
+        .map_err(|error| f.bad("gained_areas", error))?;
     let columns: BTreeMap<RepoId, BranchColumn> = f.json("branches")?;
     let branches = columns
         .into_iter()
@@ -128,7 +130,7 @@ fn claim(row: &SqliteRow, pending: BTreeMap<QualifiedArea, PendingArea>) -> Stor
         member: MemberId(f.number("member_id")?),
         session: SessionId(f.number("session_id")?),
         host: f.parse("host", HostName::parse)?,
-        areas: f.json("areas")?,
+        areas,
         wide,
         claimed_at: f.time("claimed_at")?,
         renewed_at: f.time("renewed_at")?,
@@ -245,12 +247,12 @@ impl ClaimRows for SqliteTx {
         let review = record.state.review();
         let statement = sqlx::query(
             "INSERT INTO claims (project_id, item_id, member_id, session_id, host, areas, \
-             wide_areas, wide_reason, claimed_at, renewed_at, last_seen, review_prs, review_since, \
-             review_more, branches, kind) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+             gained_areas, wide_areas, wide_reason, claimed_at, renewed_at, last_seen, review_prs, \
+             review_since, review_more, branches, kind) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
              ON CONFLICT (project_id, item_id) DO UPDATE SET member_id = excluded.member_id, \
              session_id = excluded.session_id, host = excluded.host, areas = excluded.areas, \
-             wide_areas = excluded.wide_areas, wide_reason = excluded.wide_reason, \
+             gained_areas = excluded.gained_areas, wide_areas = excluded.wide_areas, wide_reason = excluded.wide_reason, \
              claimed_at = excluded.claimed_at, renewed_at = excluded.renewed_at, \
              last_seen = excluded.last_seen, review_prs = excluded.review_prs, \
              review_since = excluded.review_since, review_more = excluded.review_more, \
@@ -261,7 +263,8 @@ impl ClaimRows for SqliteTx {
         .bind(int(record.member.get())?)
         .bind(int(record.session.get())?)
         .bind(record.host.as_str().to_owned())
-        .bind(json(&record.areas)?)
+        .bind(json(&*record.areas)?)
+        .bind(json(record.areas.gained())?)
         .bind(
             record
                 .wide

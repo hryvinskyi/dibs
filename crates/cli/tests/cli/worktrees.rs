@@ -20,8 +20,10 @@
 //! leaves a worktree another dibs is resetting alone, and names what lies beyond the pool's count;
 //! a server without the worktree routes has the signs of life dropped without a word, until it
 //! answers them again. A worktree taken for a work item gives the claim on it the branch the
-//! worktree is on, sent with its signs of life; one the hooks took for no item learns the item of
-//! the claim its first edit falls under, and gives that claim its branch.
+//! worktree is on, sent with its signs of life; one the hooks took for no item learns nothing from
+//! a claim another session of the member took, learns the item of the claim its own session
+//! renewed once an edit falls under it, and gives that claim its branch; a hold the server let go
+//! of is taken again with the item it had learned.
 //!
 //! Through the tools: a take mints an agent of its own for each call, rescues what the worktree
 //! held, and waits for a release; the listing and a release by agent or by name agree with the
@@ -1138,6 +1140,44 @@ impl Pool {
 }
 
 #[test]
+fn a_take_whose_pool_record_cannot_be_written_keeps_its_hold_record_and_its_beats() {
+    let pool = Pool::new(2);
+    pool.take("agent-1");
+    let pool_file = pool
+        .state_file("worktree1", "hold.json")
+        .with_file_name("pool.json");
+    fs::remove_file(&pool_file).unwrap();
+    write(&pool_file, "kept", "an entry no record can replace\n");
+
+    let tree = pool.take("agent-2");
+    assert_eq!(tree, pool.worktree("worktree2"));
+    let record = pool.state_file("worktree2", "hold.json");
+    assert!(
+        record.is_file(),
+        "the hold is recorded without the pool's record"
+    );
+    let before = pool.setup.server.request_log().len();
+    pool.beat("worktree2");
+    let upkept = pool.upkeep();
+    assert!(upkept["beats"]["beats"].as_u64() >= Some(1), "{upkept}");
+    let beats: Vec<String> = pool.setup.server.request_log()[before..]
+        .iter()
+        .filter(|request| request.contains("/v1/worktrees/beat"))
+        .cloned()
+        .collect();
+    assert!(
+        beats
+            .iter()
+            .any(|request| request.contains(r#""worktree":"worktree2""#)),
+        "the next beat names the worktree: {beats:?}"
+    );
+    assert!(
+        beats.iter().all(|request| !request.contains(r#""repo":"#)),
+        "a pool without its record sends no repository: {beats:?}"
+    );
+}
+
+#[test]
 fn a_worktree_taken_for_an_item_gives_its_claim_the_branch_it_is_on() {
     let pool = Pool::new(2);
     let made = pool.dibs(&["new", "gh:acme/api#7", "--title", "Fix the totals"]);
@@ -1183,10 +1223,17 @@ fn a_worktree_taken_for_an_item_gives_its_claim_the_branch_it_is_on() {
 }
 
 #[test]
-fn an_edit_in_a_worktree_the_hooks_took_for_no_item_gives_it_the_claims_item_and_branch() {
+fn an_edit_in_a_worktree_the_hooks_took_for_no_item_learns_only_its_own_sessions_claim() {
     let pool = Pool::new(1);
-    let made = pool.dibs(&["new", "gh:acme/api#7", "--title", "Fix the totals"]);
+    let made = pool.dibs(&[
+        "new",
+        "gh:acme/api#7",
+        "--title",
+        "Fix the totals",
+        "--json",
+    ]);
     assert_eq!(status(&made), 0, "{}", text(&made.stderr));
+    let item = json(&made)["item"]["id"].as_u64().unwrap();
     let claimed = pool.dibs(&["claim", "gh:acme/api#7"]);
     assert_eq!(status(&claimed), 0, "{}", text(&claimed.stderr));
     let worktree = pool.take("agent-1");
@@ -1202,23 +1249,16 @@ fn an_edit_in_a_worktree_the_hooks_took_for_no_item_gives_it_the_claims_item_and
         "the hooks name no item"
     );
 
-    let path = worktree.join("src/billing/totals.rs");
-    let edit = serde_json::json!({"tool": {"kind": "edit", "paths": [path.to_string_lossy()]}});
-    let edited = Pool::decided(&pool.hook(&worktree, "before-tool", edit));
+    let edit = |file: &str| {
+        let path = worktree.join(file);
+        serde_json::json!({"tool": {"kind": "edit", "paths": [path.to_string_lossy()]}})
+    };
+    let edited = Pool::decided(&pool.hook(&worktree, "before-tool", edit("src/billing/totals.rs")));
     assert_eq!(edited["decision"], "no_objection", "{edited}");
-    let state = pool.dibs(&["status", "--json"]);
-    assert_eq!(status(&state), 0, "{}", text(&state.stderr));
-    let claim = json(&state)["live"][0]["claim"].clone();
-    assert!(claim["item"].is_u64(), "{claim}");
     assert_eq!(
         held()["item"],
-        claim["item"],
-        "the hold learned the claim's item"
-    );
-    assert_eq!(
-        claim["branches"],
-        serde_json::json!({"api": "alice/7-totals"}),
-        "the worktree's branch is the claim's"
+        serde_json::Value::Null,
+        "the command line's session took the claim, so the hooks' hold learns nothing from it"
     );
     let log = pool.setup.server.request_log();
     assert!(
@@ -1228,6 +1268,36 @@ fn an_edit_in_a_worktree_the_hooks_took_for_no_item_gives_it_the_claims_item_and
                 && request.contains(r#""name":"worktree1"}"#)
         }),
         "the check names the pool worktree it is made in: {log:?}"
+    );
+
+    let session = held()["session_id"].as_u64().unwrap();
+    pool.setup
+        .server
+        .claim(&pool.setup.alice, item, session, &["search"])
+        .unwrap();
+    let checks = || {
+        let log = pool.setup.server.request_log();
+        log.iter()
+            .filter(|request| request.contains("/v1/edit-check"))
+            .count()
+    };
+    let before = checks();
+    let edited = Pool::decided(&pool.hook(&worktree, "before-tool", edit("src/search/index.rs")));
+    assert_eq!(edited["decision"], "no_objection", "{edited}");
+    assert!(checks() > before, "{:?}", pool.setup.server.request_log());
+    assert_eq!(
+        held()["item"],
+        item,
+        "the claim the hooks' session renewed is the one the hold learns"
+    );
+    let state = pool.dibs(&["status", "--json"]);
+    assert_eq!(status(&state), 0, "{}", text(&state.stderr));
+    let claim = json(&state)["live"][0]["claim"].clone();
+    assert_eq!(claim["item"], item, "{claim}");
+    assert_eq!(
+        claim["branches"],
+        serde_json::json!({"api": "alice/7-totals"}),
+        "the worktree's branch is the claim's"
     );
 }
 
@@ -1293,6 +1363,75 @@ fn a_hold_the_server_let_go_of_while_its_holder_worked_is_taken_again_for_it() {
         text(&said.stdout).contains("Nothing was due."),
         "{}",
         text(&said.stdout)
+    );
+}
+
+#[test]
+fn a_hold_the_server_let_go_of_is_taken_again_with_the_item_it_had_learned() {
+    let pool = Pool::new(1);
+    let made = pool.dibs(&[
+        "new",
+        "gh:acme/api#7",
+        "--title",
+        "Fix the totals",
+        "--json",
+    ]);
+    assert_eq!(status(&made), 0, "{}", text(&made.stderr));
+    let item = json(&made)["item"]["id"].as_u64().unwrap();
+    let worktree = pool.take("agent-1");
+    pool.release("worktree1");
+    let by_agent = |tool: serde_json::Value| serde_json::json!({"agent": "b2", "thread": "subagent", "tool": tool});
+    let command = by_agent(serde_json::json!({"kind": "shell", "command": "ls"}));
+    Pool::decided(&pool.hook(&worktree, "before-tool", command));
+    let listed = || pool.listed()["worktrees"][0].clone();
+    let taken = listed();
+    assert_eq!(taken["held"]["agent"], "b2", "{taken}");
+    assert_eq!(taken["held"]["item"], serde_json::Value::Null);
+    let session = taken["held"]["session_id"].as_u64().unwrap();
+    pool.setup
+        .server
+        .claim(&pool.setup.alice, item, session, &["billing"])
+        .unwrap();
+    let path = worktree.join("src/billing/totals.rs");
+    let edit = by_agent(serde_json::json!({"kind": "edit", "paths": [path.to_string_lossy()]}));
+    let edited = Pool::decided(&pool.hook(&worktree, "before-tool", edit));
+    assert_eq!(edited["decision"], "no_objection", "{edited}");
+    assert_eq!(
+        listed()["held"]["item"],
+        item,
+        "the hold learned the item of its session's claim"
+    );
+
+    pool.beat("worktree1");
+    let upkept = pool.upkeep();
+    assert_eq!(upkept["beats"]["beats"], 1, "{upkept}");
+    let recorded = listed();
+    assert_eq!(
+        recorded["record"]["item"], item,
+        "the beat's answer taught this machine's record the hold's item: {recorded}"
+    );
+
+    pool.setup.server.advance(time::Duration::minutes(21));
+    pool.beat("worktree1");
+    let upkept = pool.upkeep();
+    assert_eq!(
+        upkept["beats"]["retaken"],
+        serde_json::json!(["worktree1"]),
+        "{upkept}"
+    );
+    let retaken = listed();
+    assert_eq!(retaken["held"]["agent"], "b2", "{retaken}");
+    assert_eq!(
+        retaken["held"]["item"], item,
+        "the hold taken again names the item the ended one had learned"
+    );
+    let log = pool.setup.server.request_log();
+    assert!(
+        log.iter().any(|request| {
+            request.contains("/v1/worktrees/take")
+                && request.contains(&format!(r#""learned_item":{item}"#))
+        }),
+        "the take again names the item as learned, so a later edit may still replace it: {log:?}"
     );
 }
 

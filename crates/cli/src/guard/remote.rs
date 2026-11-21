@@ -14,6 +14,7 @@ use dibs_client::api::{Me, RegisterSession};
 use dibs_client::checkout::Checkout;
 use dibs_client::credentials::{CredentialKey, Credentials, OsKeychain, ReadMode, TokenLookup};
 use dibs_client::locations::Locations;
+use dibs_client::private_file::Principal;
 use dibs_client::state::StateDir;
 use dibs_client::{Client, ClientError, ClientOptions};
 use dibs_domain::ids::SessionId;
@@ -65,6 +66,11 @@ impl Remote {
             key,
             env: env.clone(),
         }
+    }
+
+    /// The user this machine's private files are made private to, as the environment names them.
+    pub fn principal(&self) -> Principal {
+        Principal::from_env(&|name| self.env.get(name).cloned())
     }
 
     /// A client signed in with the stored token, its calls bounded by [`CALL_LIMIT`].

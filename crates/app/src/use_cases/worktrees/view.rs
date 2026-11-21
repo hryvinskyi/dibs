@@ -51,7 +51,7 @@ pub struct BoardHold {
     pub holder: HolderKind,
     /// Why.
     pub purpose: Purpose,
-    /// The work item it is held for, when one was named.
+    /// The work item it is held for, when the take named one or an edit taught one.
     pub item: Option<ItemId>,
     /// When it was taken.
     pub since: OffsetDateTime,
@@ -66,7 +66,7 @@ impl BoardHold {
             worktree: hold.worktree.clone(),
             holder: hold.holder.kind(),
             purpose: hold.purpose.clone(),
-            item: hold.item,
+            item: hold.item.id(),
             since: hold.taken_at,
         }
     }

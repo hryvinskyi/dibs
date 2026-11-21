@@ -41,6 +41,7 @@ struct Case {
     add_areas: Vec<AddArea>,
     share_paths: Vec<SharedPath>,
     touch: Vec<u64>,
+    by_area: Vec<u64>,
 }
 
 impl Default for Case {
@@ -56,6 +57,7 @@ impl Default for Case {
             add_areas: Vec::new(),
             share_paths: Vec::new(),
             touch: Vec::new(),
+            by_area: Vec::new(),
         }
     }
 }
@@ -171,6 +173,7 @@ fn verdict_table() {
             claims: vec![alice_billing()],
             path: "api:packages/billing/src/Invoice.php",
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -181,6 +184,7 @@ fn verdict_table() {
             }],
             path: "api:packages/billing/src/Invoice.php",
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -228,6 +232,7 @@ fn verdict_table() {
                 area: area("api:search"),
             },
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -372,6 +377,7 @@ fn verdict_table() {
             claims: vec![alice_billing()],
             path: "api:deploy/billing.yaml",
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -393,6 +399,7 @@ fn verdict_table() {
             claims: vec![alice_wide()],
             path: "api:packages/billing/src/Invoice.php",
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -410,6 +417,7 @@ fn verdict_table() {
                 area: area("api:billing"),
             },
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -451,6 +459,7 @@ fn verdict_table() {
             claims: vec![alice_wide(), claim(3, ALICE, &[], 5)],
             path: "api:packages/search/src/Index.php",
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -524,6 +533,7 @@ fn verdict_table() {
                 area: area("api:billing"),
             },
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -531,6 +541,7 @@ fn verdict_table() {
             claims: vec![reviewing(alice_billing(), &["acme/api#12"])],
             path: "api:packages/billing/src/Invoice.php",
             touch: vec![1],
+            by_area: vec![1],
             ..Case::default()
         },
         Case {
@@ -595,6 +606,7 @@ fn verdict_table() {
             ],
             path: "api:packages/billing/src/Invoice.php",
             touch: vec![5],
+            by_area: vec![5],
             ..Case::default()
         },
         Case {
@@ -759,13 +771,15 @@ fn verdict_table() {
             case.name
         );
         assert_eq!(check.touch, expected_touch, "{}: touch", case.name);
+        let expected_by_area: BTreeSet<ItemId> = case.by_area.iter().copied().map(ItemId).collect();
+        assert_eq!(check.by_area, expected_by_area, "{}: by area", case.name);
     }
 }
 
 fn apply(plan: &ReservationPlan, claims: &mut [Claim], shared: &mut Vec<SharedPath>) {
     for add in &plan.add_areas {
         for claim in claims.iter_mut().filter(|claim| claim.item == add.claim) {
-            claim.areas.insert(add.area.clone());
+            claim.areas.gain(add.area.clone());
         }
     }
     shared.extend(plan.share_paths.iter().cloned());
@@ -874,4 +888,207 @@ fn a_claim_seen_just_within_stale_after_still_counts() {
     };
     let check = edit_verdicts(&[path("api:packages/billing/a.php")], &late).unwrap();
     assert_eq!(check.verdicts[0].verdict, Verdict::NeedsClaim);
+}
+
+#[test]
+fn a_claim_reached_by_its_area_is_told_from_one_reached_as_the_target() {
+    let settings = settings(&two_repo_json("require-claim"));
+    let claims = [
+        claim(5, ALICE, &["api:billing"], 0),
+        claim(9, ALICE, &[], 10),
+    ];
+    let input = EditCheckInput {
+        me: ALICE,
+        claims: &claims,
+        grants: &[],
+        shared: &[],
+        settings: &settings,
+        now: at(11),
+    };
+    let check = |paths: &[&str]| {
+        let paths: Vec<RepoPath> = paths.iter().map(|text| path(text)).collect();
+        edit_verdicts(&paths, &input).unwrap()
+    };
+    let both = check(&[
+        "api:packages/billing/a.php",
+        "api:packages/search/a.php",
+        "api:config/app.yaml",
+    ]);
+    assert_eq!(both.touch, [ItemId(5), ItemId(9)].into());
+    assert_eq!(both.by_area, [ItemId(5)].into());
+    assert_eq!(both.attribution(ItemId(5)), Some(Attribution::Area));
+    assert_eq!(
+        both.attribution(ItemId(9)),
+        Some(Attribution::Target),
+        "an area nobody holds and a shared path go to the newest claim as a guess"
+    );
+    assert_eq!(both.attribution(ItemId(7)), None);
+
+    let shared_only = check(&["api:config/app.yaml"]);
+    assert_eq!(shared_only.touch, [ItemId(9)].into());
+    assert!(
+        shared_only.by_area.is_empty(),
+        "a shared path names no area"
+    );
+
+    let holding = [claim(9, ALICE, &["api:billing"], 10)];
+    let one = EditCheckInput {
+        claims: &holding,
+        ..input
+    };
+    let paths = [
+        path("api:packages/billing/a.php"),
+        path("api:config/app.yaml"),
+    ];
+    let check = edit_verdicts(&paths, &one).unwrap();
+    assert_eq!(
+        check.attribution(ItemId(9)),
+        Some(Attribution::Area),
+        "a claim reached by its area and as the target is reached by its area"
+    );
+}
+
+#[test]
+fn an_edit_in_an_area_a_claim_gained_as_the_target_is_still_the_targets() {
+    let settings = settings(&two_repo_json("require-claim"));
+    let mut claims = vec![
+        claim(5, ALICE, &["api:billing"], 0),
+        claim(9, ALICE, &[], 10),
+    ];
+    let search = [path("api:packages/search/a.php")];
+    let check = |claims: &[Claim]| {
+        let input = EditCheckInput {
+            me: ALICE,
+            claims,
+            grants: &[],
+            shared: &[],
+            settings: &settings,
+            now: at(11),
+        };
+        edit_verdicts(&search, &input).unwrap()
+    };
+    let first = check(&claims);
+    assert_eq!(first.plan.add_areas, vec![add(9, "api:search")]);
+    assert_eq!(first.attribution(ItemId(9)), Some(Attribution::Target));
+    apply(&first.plan, &mut claims, &mut Vec::new());
+    assert_eq!(
+        claims[1].areas.origin(&area("api:search")),
+        Some(AreaOrigin::Gained),
+        "the fallback adds the area as gained"
+    );
+
+    let again = check(&claims);
+    assert!(again.plan.is_empty(), "{:?}", again.plan);
+    assert_eq!(again.touch, [ItemId(9)].into(), "the area holds like any");
+    assert_eq!(
+        again.attribution(ItemId(9)),
+        Some(Attribution::Target),
+        "an area the claim only gained tells no more of the work than the first edit did"
+    );
+
+    claims[1].areas.declare(area("api:search"));
+    assert_eq!(
+        check(&claims).attribution(ItemId(9)),
+        Some(Attribution::Area),
+        "once declared, the area tells the claim's work"
+    );
+}
+
+#[test]
+fn an_area_another_member_gained_still_holds_against_me() {
+    let settings = settings(&two_repo_json("require-claim"));
+    let mut bobs = claim(4, BOB, &[], 0);
+    bobs.areas.gain(area("api:search"));
+    let claims = [bobs, claim(5, ALICE, &[], 0)];
+    let input = EditCheckInput {
+        me: ALICE,
+        claims: &claims,
+        grants: &[],
+        shared: &[],
+        settings: &settings,
+        now: at(1),
+    };
+    let check = edit_verdicts(&[path("api:packages/search/a.php")], &input).unwrap();
+    assert_eq!(check.verdicts[0].verdict, held(BOB, 4, "api:search"));
+}
+
+#[test]
+fn of_my_claims_holding_an_area_the_one_that_declared_it_takes_the_edit() {
+    let settings = settings(&two_repo_json("require-claim"));
+    let search = [path("api:packages/search/a.php")];
+    let check = |claims: &[Claim], minute: i64| {
+        let input = EditCheckInput {
+            me: ALICE,
+            claims,
+            grants: &[],
+            shared: &[],
+            settings: &settings,
+            now: at(minute),
+        };
+        edit_verdicts(&search, &input).unwrap()
+    };
+    let mut claims = vec![claim(9, ALICE, &[], 0)];
+    let first = check(&claims, 1);
+    assert_eq!(first.plan.add_areas, vec![add(9, "api:search")]);
+    apply(&first.plan, &mut claims, &mut Vec::new());
+
+    claims.push(claim(12, ALICE, &["api:search"], 10));
+    claims[0].renewed_at = at(20);
+    claims[0].last_seen = at(20);
+
+    let edit = check(&claims, 21);
+    assert_eq!(edit.verdicts[0].verdict, Verdict::Allowed);
+    assert!(edit.plan.is_empty(), "{:?}", edit.plan);
+    assert_eq!(
+        edit.touch,
+        [ItemId(12)].into(),
+        "the claim that declared the area takes the edit, not the newer one that only gained it"
+    );
+    assert_eq!(edit.attribution(ItemId(12)), Some(Attribution::Area));
+    assert_eq!(edit.attribution(ItemId(9)), None);
+
+    claims[1].areas = crate::claim::ClaimAreas::default();
+    claims[1].areas.gain(area("api:search"));
+    assert_eq!(
+        check(&claims, 21).touch,
+        [ItemId(9)].into(),
+        "among claims that only gained the area, the newest takes the edit"
+    );
+}
+
+#[test]
+fn my_wide_claim_naming_an_area_takes_the_edit_over_a_claim_that_only_gained_it() {
+    let settings = settings(&two_repo_json("require-claim"));
+    let search = [path("api:packages/search/a.php")];
+    let check = |claims: &[Claim], minute: i64| {
+        let input = EditCheckInput {
+            me: ALICE,
+            claims,
+            grants: &[],
+            shared: &[],
+            settings: &settings,
+            now: at(minute),
+        };
+        edit_verdicts(&search, &input).unwrap()
+    };
+    let mut claims = vec![claim(9, ALICE, &[], 0)];
+    let first = check(&claims, 1);
+    assert_eq!(first.plan.add_areas, vec![add(9, "api:search")]);
+    apply(&first.plan, &mut claims, &mut Vec::new());
+
+    claims.push(Claim {
+        wide: Some(scope(&["api:search"])),
+        ..claim(12, ALICE, &[], 10)
+    });
+    claims[0].renewed_at = at(20);
+    claims[0].last_seen = at(20);
+
+    let edit = check(&claims, 21);
+    assert_eq!(edit.verdicts[0].verdict, Verdict::Allowed);
+    assert_eq!(
+        edit.touch,
+        [ItemId(12)].into(),
+        "the wide claim that names the area takes the edit, not the one that only gained it"
+    );
+    assert_eq!(edit.attribution(ItemId(12)), Some(Attribution::Area));
 }

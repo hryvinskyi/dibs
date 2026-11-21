@@ -395,7 +395,7 @@ impl Step<'_> {
     ) {
         if let Some(waiting) = claim_mut(working, claims, self.to) {
             waiting.pending.remove(self.area);
-            waiting.areas.insert(self.area.clone());
+            waiting.areas.declare(self.area.clone());
         }
         if from.is_some_and(|from| from.holds(self.area))
             && let Some(giving) = claim_mut(working, claims, self.from)

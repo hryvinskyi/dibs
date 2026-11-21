@@ -38,12 +38,12 @@ pub struct HeartbeatOutcome {
 /// whether or not the checkout is on a branch. When the checkout is on a branch of a repository the
 /// project lists, that branch, learned from the checkout, is recorded on one claim at most: the
 /// one live claim its session took or last renewed and works on, and only while the session
-/// reported no other checkout and no other session of the member reported this one, within the
-/// project's `stale_after`. A branch the claim learned from a stronger source that still holds is
-/// kept. A `BranchRecorded` event marks a change of branch, and the claim's footprint of the
-/// repository, which measured the branch before, goes with what it made; a change of source alone
-/// is stored and nothing more. A heartbeat that names no checkout stores none and records no
-/// branch.
+/// reported no other checkout and no other session of the member reported this one, within a few
+/// of the project's heartbeat intervals ([`sharing_window`](dibs_domain::radar::sharing_window)).
+/// A branch the claim learned from a stronger source that still holds is kept. A `BranchRecorded`
+/// event marks a change of branch, and the claim's footprint of the repository, which measured the
+/// branch before, goes with what it made; a change of source alone is stored and nothing more. A
+/// heartbeat that names no checkout stores none and records no branch.
 ///
 /// The reports it carries are kept one per member, machine (by the id its dibs gave it, whatever it
 /// is called) and day: a report that differs from the one kept replaces it and appends a
@@ -122,7 +122,7 @@ impl Heartbeat {
                 .filter(|on| settings.repo(&on.repo).is_some());
             if let Some(on) = on
                 && let Some(claim) =
-                    fed_by_checkout(&mut work, &reported, &kept, stale_after, |_| true).await?
+                    fed_by_checkout(&mut work, &reported, &kept, &settings, |_| true).await?
             {
                 let radar = Radar {
                     ids: &*self.ids,
@@ -451,7 +451,7 @@ mod tests {
         use dibs_domain::radar::WorktreeRef;
         use dibs_domain::report::MachineId;
         use dibs_domain::slot::Purpose;
-        use dibs_domain::worktree::{PoolId, WorktreeName};
+        use dibs_domain::worktree::{HoldItem, PoolId, WorktreeName};
 
         use crate::use_cases::{TakeWorktree, TakeWorktreeInput};
 
@@ -473,7 +473,7 @@ mod tests {
                     names: vec![worktree.worktree.clone()],
                     agent: None,
                     purpose: Purpose::parse("refunds").unwrap(),
-                    item: Some(item),
+                    item: HoldItem::Named(item),
                 },
             )
             .await

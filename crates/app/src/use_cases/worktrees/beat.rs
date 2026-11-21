@@ -66,7 +66,8 @@ pub struct BeatWorktreesInput {
 /// branch on the caller's live claim on the item, if there is one, as the claim's branch in the
 /// pool's repository, learned from that worktree of that pool. Nothing is recorded for a hold that
 /// names no item, a beat answered as unknown, a beat without a branch, or a pool whose repository
-/// is not named or not one the project lists. A branch the claim learned from a pull request it
+/// is not named or not one the project lists, nor while the project's stored settings do not parse:
+/// the holds are kept all the same. A branch the claim learned from a pull request it
 /// still records, or from another worktree still held for the item, is kept; the same worktree
 /// moves the branch it gave. A `BranchRecorded` event marks a change of branch, and the claim's
 /// footprint of the repository, which measured the branch before, goes with what it made.
@@ -141,7 +142,7 @@ impl BeatWorktrees {
     }
 
     /// Records each worktree's branch on the caller's live claim on the item its hold names, in a
-    /// repository the project lists.
+    /// repository the project lists; records none when the stored settings do not parse.
     async fn record_branches(
         &self,
         work: &mut Work,
@@ -151,7 +152,11 @@ impl BeatWorktrees {
         worked: BTreeMap<WorktreeName, (ItemId, BranchName)>,
         now: OffsetDateTime,
     ) -> Result<(), AppError> {
-        let settings = work.project_settings(&self.hot_rules).await?;
+        let settings = match work.project_settings(&self.hot_rules).await {
+            Ok(settings) => settings,
+            Err(AppError::StoredSettings(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
         if settings.repo(repo).is_none() {
             return Ok(());
         }
@@ -184,10 +189,142 @@ fn worked_on(
         let item = pool
             .hold(&beat.worktree)
             .filter(|hold| hold.holder == beat.holder)
-            .and_then(|hold| hold.item);
+            .and_then(|hold| hold.item.id());
         if let (Some(item), Some(branch)) = (item, branch) {
             worked.insert(beat.worktree.clone(), (item, branch.clone()));
         }
     }
     worked
+}
+
+#[cfg(test)]
+mod tests {
+    use time::Duration;
+
+    use dibs_domain::ids::ItemId;
+    use dibs_domain::slot::Purpose;
+    use dibs_domain::worktree::{AgentKey, HoldItem, Holder, KeptHold, WorktreeHolder};
+
+    use super::*;
+    use crate::use_cases::testing::{Env, document};
+    use crate::use_cases::{
+        ClaimItem, ClaimItemInput, TakeWorktree, TakeWorktreeInput, TickWorktrees, TookWorktree,
+    };
+
+    fn machine() -> MachineId {
+        MachineId::parse("0123456789abcdef0123456789abcdef").unwrap()
+    }
+
+    fn pool() -> PoolId {
+        PoolId::parse("a1b2c3").unwrap()
+    }
+
+    fn worktree() -> WorktreeName {
+        WorktreeName::parse("worktree1").unwrap()
+    }
+
+    fn agent() -> AgentKey {
+        AgentKey::parse("agent-1").unwrap()
+    }
+
+    /// Alice claims `item` and her agent takes a worktree of her pool for it.
+    async fn held_for(env: &Env, item: ItemId) {
+        ClaimItem::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                ClaimItemInput {
+                    branches: Default::default(),
+                    wide: None,
+                    item,
+                    session: env.alice.session,
+                    areas: Vec::new(),
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        let took = TakeWorktree::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                TakeWorktreeInput {
+                    session: env.alice.session,
+                    machine: machine(),
+                    pool: pool(),
+                    names: vec![worktree()],
+                    agent: Some(agent()),
+                    purpose: Purpose::parse("fix the totals").unwrap(),
+                    item: HoldItem::Named(item),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(took, TookWorktree::Took { .. }), "{took:?}");
+    }
+
+    /// Stores settings for the project that name a hot-file rule kind this build does not know,
+    /// as a rollback to an older build leaves them.
+    async fn store_settings_that_do_not_parse(env: &Env) {
+        let unknown = r#"{"hot": [{"paths": ["**/*.lock"], "kind": "rebuild-on-merge"}]}"#;
+        let mut tx = env.deps.store.begin().await.unwrap();
+        tx.put_settings(env.project, &document(unknown))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_that_do_not_parse_keep_the_hold_a_beat_names_and_record_no_branch() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        held_for(&env, item).await;
+        store_settings_that_do_not_parse(&env).await;
+        env.advance(Duration::minutes(15));
+
+        let beaten = BeatWorktrees::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                BeatWorktreesInput {
+                    session: env.alice.session,
+                    machine: machine(),
+                    pool: pool(),
+                    repo: Some(RepoId::implicit()),
+                    beats: vec![WorktreeBeatInput {
+                        worktree: worktree(),
+                        session: env.alice.session,
+                        agent: Some(agent()),
+                        seen_at: env.now(),
+                        branch: Some(BranchName::parse("alice/1-totals").unwrap()),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let holder = Holder::Agent {
+            session: env.alice.session,
+            agent: agent(),
+        };
+        assert_eq!(
+            beaten.kept,
+            [KeptHold {
+                held: WorktreeHolder {
+                    worktree: worktree(),
+                    holder,
+                },
+                item: HoldItem::Named(item),
+            }]
+        );
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let claim = tx.claim(env.project, item).await.unwrap().unwrap();
+        assert!(claim.branches.is_empty(), "no branch is recorded");
+        drop(tx);
+
+        env.advance(Duration::minutes(15));
+        let before = env.events().await.len();
+        let swept = TickWorktrees::new(&env.deps).execute().await.unwrap();
+        assert!(swept.failed.is_empty());
+        assert!(
+            env.kinds_after(before).await.is_empty(),
+            "the beat kept the hold: thirty minutes after the take, fifteen after the beat"
+        );
+    }
 }

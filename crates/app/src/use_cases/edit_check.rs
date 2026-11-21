@@ -109,16 +109,23 @@ impl EditVerdicts {
 /// now. When the checkout is on a branch, that branch, learned from the checkout, is recorded on
 /// one claim at most: the one live claim the session took or last renewed and works on, when the
 /// edits were attributed to it, the session reported no other checkout and no other session of
-/// the member reported this one, within the project's `stale_after`. A branch the claim learned
-/// from a stronger source that still holds is kept. A `BranchRecorded` event marks a change of
-/// branch, and the claim's footprint of the repository, which measured the branch before, goes
-/// with what it made.
+/// the member reported this one, within a few of the project's heartbeat intervals
+/// ([`sharing_window`](dibs_domain::radar::sharing_window)). A branch the claim learned from a
+/// stronger source that still holds is kept. A `BranchRecorded` event marks a change of branch,
+/// and the claim's footprint of the repository, which measured the branch before, goes with what
+/// it made.
 ///
 /// A check that reserves and names a worktree of the caller's pool it is made in teaches the
 /// worktree's hold the item its edits are for: when the hold is held under the check's session, by
-/// the session or one of its agents, has not gone silent and names no item, and the edits were
-/// attributed to the claims of exactly one item, the hold takes that item; a hold that names one
-/// keeps it, and learning appends no event. Whenever that hold names an item, the checkout's branch
+/// the session or one of its agents, has not gone silent, and the edits were attributed to exactly
+/// one claim, which that session took or last renewed and which declared an edited area, names it
+/// wide or was granted edits in it, a hold whose take named an item keeps it and any other hold
+/// learns that claim's item, replacing an item it learned before. Edits attributed to no claim, to
+/// several or to another session's teach nothing, and so do edits attributed only because the
+/// claim is the member's newest — in an area none of their claims holds, in an area the claim
+/// holds only because such an edit added it, or of a shared path — and learning appends no event.
+/// An area such an edit adds to the claim is recorded as gained, not declared.
+/// Whenever that hold names an item, the checkout's branch
 /// is recorded on the caller's live claim on it, learned from that worktree of that pool, as a
 /// worktree's signs of life record it; that recording comes before the checkout's own, which then
 /// waits while the worktree holds.
@@ -206,7 +213,6 @@ impl EditCheck {
                 .paths
                 .insert(share.path.clone());
         }
-        let stale_after = settings.stale_after();
         let on = input
             .checkout
             .as_ref()
@@ -218,7 +224,7 @@ impl EditCheck {
                 report_checkout(&mut work, actor.member, input.session, &from.token, now).await?;
             if on.is_some() {
                 let touched = |claim: &Claim| check.touch.contains(&claim.item);
-                fed = fed_by_checkout(&mut work, &reported, &claims, stale_after, touched)
+                fed = fed_by_checkout(&mut work, &reported, &claims, &settings, touched)
                     .await?
                     .map(|claim| claim.item);
             }
@@ -226,16 +232,13 @@ impl EditCheck {
         let mut held_for = None;
         if let Some(worktree) = &input.worktree {
             let session = input.session;
-            held_for = edit_in_worktree(
-                &mut work,
-                actor.member,
-                session,
-                worktree,
-                &check.touch,
-                now,
-            )
-            .await?
-            .map(|item| (item, worktree.clone()));
+            let touched = claims
+                .iter()
+                .filter(|claim| claim.member == actor.member)
+                .filter_map(|claim| check.attribution(claim.item).map(|by| (claim, by)));
+            held_for = edit_in_worktree(&mut work, actor.member, session, worktree, touched, now)
+                .await?
+                .map(|item| (item, worktree.clone()));
         }
         let changed = claims.into_iter().filter(|claim| {
             claim.member == actor.member
@@ -243,7 +246,9 @@ impl EditCheck {
         });
         for mut claim in changed {
             if let Some(gain) = gains.get(&claim.item) {
-                claim.areas.extend(gain.areas.iter().cloned());
+                for area in &gain.areas {
+                    claim.areas.gain(area.clone());
+                }
             }
             if check.touch.contains(&claim.item) {
                 claim.last_seen = now;

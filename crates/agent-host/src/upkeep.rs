@@ -25,6 +25,10 @@ pub const DEFAULT_HEARTBEAT: Duration = Duration::minutes(1);
 /// How often, at most, the server is asked which client it recommends, and a newer one installed.
 pub const UPDATE_EVERY: Duration = Duration::days(1);
 
+/// How long a session's last heartbeat is remembered while the project's settings are not known:
+/// the shortest time a project may let a claim live without a heartbeat.
+pub const HEARTBEAT_KEPT: Duration = Duration::hours(1);
+
 /// How often, at most, the signs of life left in pool worktrees are sent. It does not follow the
 /// project's heartbeat interval: a hold of an agent ends after minutes of silence, and a long
 /// interval must never bring a working agent near that.
@@ -35,7 +39,7 @@ pub const WORKTREE_BEATS_EVERY: Duration = Duration::minutes(1);
 pub struct Freshness {
     /// The project's heartbeat interval.
     pub heartbeat_every: Duration,
-    /// The last heartbeat from this machine.
+    /// The last heartbeat the session the upkeep is for sent from this machine.
     pub last_heartbeat: Option<OffsetDateTime>,
     /// When the settings were fetched.
     pub settings_at: Option<OffsetDateTime>,
@@ -98,6 +102,16 @@ impl Due {
             || self.inbox
             || self.update
             || self.worktree_beats
+    }
+
+    /// Only the session's heartbeat, when it is due: nothing of the work done once for the whole
+    /// machine (the caches, the signs of life in pool worktrees, the check for a newer client).
+    #[must_use]
+    pub fn heartbeat_only(self) -> Self {
+        Self {
+            heartbeat: self.heartbeat,
+            ..Self::default()
+        }
     }
 
     /// Only what asks the server nothing about the project: the check for a newer client, when it
@@ -262,6 +276,21 @@ mod tests {
             !due.update_only().worktree_beats,
             "nothing for the project while the server is unreachable"
         );
+    }
+
+    #[test]
+    fn only_the_heartbeat_keeps_nothing_of_the_machines_work() {
+        let everything = Due::at(NOW, &fresh_all(NOW - Duration::days(2)));
+        assert!(everything.status && everything.update && everything.heartbeat);
+        assert_eq!(
+            everything.heartbeat_only(),
+            Due {
+                heartbeat: true,
+                ..Due::default()
+            }
+        );
+        let nothing = Due::at(NOW, &fresh_all(NOW)).heartbeat_only();
+        assert!(!nothing.any(), "a heartbeat not due is not sent alone");
     }
 
     #[test]

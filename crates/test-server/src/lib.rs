@@ -29,12 +29,12 @@ use tokio::runtime::Runtime;
 
 use dibs_app::fakes::Fakes;
 use dibs_app::use_cases::{
-    Addressees, CreateMemberInput, FootprintInput, FootprintRecorded, InitProjectInput, NewMember,
-    StartThreadInput, UseCases,
+    Addressees, ClaimItemInput, CreateMemberInput, FootprintInput, FootprintRecorded,
+    InitProjectInput, NewMember, StartThreadInput, UseCases,
 };
 use dibs_app::{Actor, Dependencies};
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::ItemId;
+use dibs_domain::ids::{ItemId, SessionId};
 use dibs_domain::member::{DisplayName, Role};
 use dibs_domain::message::{Body, Importance, SessionLabel, Subject};
 use dibs_domain::paths::RelPath;
@@ -466,6 +466,29 @@ impl TestServer {
                 why.code()
             ))),
         }
+    }
+
+    /// Claims the item `item` for `who`, from their session `session` — one the command line
+    /// does not act as, such as the session an agent host's hooks registered — declaring
+    /// `areas`, written as a person names them.
+    ///
+    /// # Errors
+    /// When the claim is refused.
+    pub fn claim(&self, who: &Person, item: u64, session: u64, areas: &[&str]) -> Setup<()> {
+        self.runtime
+            .block_on(self.app.claim_item.execute(
+                &who.actor,
+                ClaimItemInput {
+                    item: ItemId(item),
+                    session: SessionId(session),
+                    areas: areas.iter().map(|area| (*area).to_owned()).collect(),
+                    wide: None,
+                    kind: None,
+                    branches: Default::default(),
+                },
+            ))
+            .map_err(failed("the item is claimed"))?;
+        Ok(())
     }
 
     /// Moves the server's clock forward.

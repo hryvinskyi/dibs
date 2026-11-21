@@ -1338,3 +1338,48 @@ async fn a_merge_through_a_regenerated_file_alone_moves_no_base_and_names_only_h
         assert!(!text.contains("composer.lock"), "{text}");
     }
 }
+
+#[tokio::test]
+async fn a_report_left_by_a_session_gone_quiet_stops_blocking_its_checkout_after_a_few_beats() {
+    let env = Env::with_settings(SETTINGS).await;
+    let item = env.item("gh:acme/widgets#9").await;
+    let crashed = session(&env.deps, &env.bob.actor, "desktop", "desktop/crashed").await;
+    let heartbeat = Heartbeat::new(&env.deps);
+    heartbeat
+        .execute(&env.bob.actor, crashed, Some(&on("bob/8-totals")))
+        .await
+        .unwrap();
+    env.advance(time::Duration::minutes(1));
+    claim(&env, &env.bob, item).await;
+    let before = env.events().await.len();
+    heartbeat
+        .execute(&env.bob.actor, env.bob.session, Some(&on("bob/9-search")))
+        .await
+        .unwrap();
+    let branch_of = || async {
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let claim = tx.claim(env.project, item).await.unwrap().unwrap();
+        claim.branch(&repo()).map(ToString::to_string)
+    };
+    assert_eq!(
+        branch_of().await,
+        None,
+        "a report a minute old may still be a session sharing the checkout"
+    );
+    env.advance(time::Duration::minutes(3));
+    heartbeat
+        .execute(&env.bob.actor, env.bob.session, Some(&on("bob/9-search")))
+        .await
+        .unwrap();
+    assert_eq!(branch_of().await.as_deref(), Some("bob/9-search"));
+    let recorded: Vec<String> = env
+        .kinds_after(before)
+        .await
+        .into_iter()
+        .filter_map(|kind| match kind {
+            EventKind::BranchRecorded(recorded) => Some(recorded.branch.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(recorded, ["bob/9-search"]);
+}

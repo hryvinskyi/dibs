@@ -33,7 +33,8 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
   worktree and for its reset, up to the host's hook timeout less a minute, and is left out of the hook timings.
   On Windows the detached sync still inherits the hook's own output pipe (the standard library has no stable way
   yet to stop that), so a host that waits for the hook's output to close waits for the sync too: up to a few
-  seconds, at most once per refresh interval. That is also why the background sync never installs a newer release
+  seconds, at most once per refresh interval and once per session per heartbeat interval (a sync a hook starts
+  waits up to ten seconds for another session's sync to end). That is also why the background sync never installs a newer release
   on Windows: there it only remembers it for the brief, and the person runs `dibs self-update`.
 - **A newer client is installed in the background only.** Only the start of a session, at most once a day, asks the
   detached sync to check which client the server recommends (`dibs sync --update`) and to install it when it is newer;

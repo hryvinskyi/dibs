@@ -3,6 +3,7 @@
 //! lends.
 
 pub mod cache;
+pub mod checkout_key;
 pub mod gateway;
 pub mod ledger;
 pub mod machine;

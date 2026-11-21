@@ -2,6 +2,8 @@
 //! claim holds, the debt holder is asked, the area moves in the transaction that lets it go, and the
 //! sweep hands over from stale claims and escalates what nobody answered.
 
+use std::collections::BTreeSet;
+
 use time::Duration;
 
 use dibs_domain::area::QualifiedArea;
@@ -226,7 +228,10 @@ async fn narrowing_hands_the_area_over_in_the_same_transaction_and_tells_the_fea
     let before = env.events().await.len();
     let narrowed = narrow(&env, &env.alice, debt, &["billing"]).await;
     assert_eq!(narrowed.areas, [area("default:billing")].into());
-    assert_eq!(narrowed.claim.claim.areas, [area("default:search")].into());
+    assert_eq!(
+        narrowed.claim.claim.areas,
+        BTreeSet::from([area("default:search")])
+    );
     assert_eq!(narrowed.handed_over.len(), 1);
     assert_eq!(narrowed.handed_over[0].holder.as_str(), "bob");
     assert_eq!(narrowed.handed_over[0].to.id, feature);
@@ -275,7 +280,7 @@ async fn completing_or_releasing_the_debt_claim_hands_its_waited_for_areas_over(
     let bobs = stored(&env, feature).await.unwrap();
     assert_eq!(
         bobs.areas,
-        [area("default:billing"), area("default:search")].into()
+        BTreeSet::from([area("default:billing"), area("default:search")])
     );
 
     let env = Env::with_settings(SETTINGS).await;

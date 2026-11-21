@@ -267,22 +267,37 @@ session's sign of life: a session that can be woken registers again every minute
 `POST /v1/heartbeat`, body
 `{ "session_id": 7, "checkout": "3f0c9a4e1b7d2c8a5e6f0b1a2c3d4e5f", "repo": "api", "branch": "bob/42-refunds" }`,
 answers `{ "refreshed": [12] }`: the items whose claims the heartbeat kept alive. A claim is *live* while its holder was
-seen within the project's `stale_after`; a heartbeat, an edit check that reserves, or a renewal counts as seen.
+seen within the project's `stale_after`; a heartbeat, an edit check that reserves, or a renewal counts as seen. The
+command line keeps a heartbeat clock for each session: every session whose hooks run sends a heartbeat at most once per
+`heartbeat_every`, and one session's heartbeat never holds back another's, so every active session reports its
+checkout each interval. Another session's sync does not hold a session's heartbeat back: when one runs, or started
+less than fifteen seconds ago, a hook whose session's heartbeat is due starts a sync of that heartbeat alone
+(`dibs sync --heartbeat-only`), which waits up to ten seconds for the running one to end. The sync a hook starts to do
+everything due waits as long, since such a heartbeat-only sync may take the lock first; `dibs sync` run in a terminal
+waits a second. The work done once for the
+machine (refreshing its caches, the pool worktrees' signs of life, the check for a newer client) still starts at most
+once in fifteen seconds. A session busy in one long tool call fires no hook, and sends none, until the call ends.
 
 `checkout`, `repo` and `branch` are optional. `checkout` names the checkout the session works in: 32 lowercase
-hexadecimal characters, the first half of the SHA-256 of the machine's id (see [Pilot figures](#pilot-figures)), a NUL
-byte and the absolute path of the checkout's root as the file system resolves it. The server compares these only
-between sessions of one member and never learns the path; a machine without an id sends none. `repo` and `branch` name
+hexadecimal characters, the first 16 bytes of the HMAC-SHA-256 of the absolute path of the checkout's root, as the file
+system resolves it, keyed with 32 random bytes the client makes once and keeps in its state directory (`checkout-key`,
+readable by its user only). The key is never sent, and the machine's id is not part of the token, so the server can
+tell a member's checkouts apart, but neither it nor anyone holding its database can work out where a checkout is. The
+server compares tokens only between sessions of one member. A client that cannot read or keep its key sends no
+`checkout`. The sync the command line starts in the background after a command, to send what the hooks counted
+(`dibs sync --report` without `--session`), sends no `checkout`, `repo` or `branch`: only a session that works in a
+checkout reports it. `repo` and `branch` name
 the repository the checkout is of and the branch it is on; a checkout on a detached head sends no `branch`, and a
 `branch` needs its `repo`.
 
 A heartbeat that names its checkout stores that the session reported working there now, on a branch or not. When it is
 on a branch of a repository the project lists, the branch is recorded, learned from the checkout, on one claim at
 most: the one live claim this session took or last renewed and works on (not in review), and only while, within the
-project's `stale_after`, the session reported no other checkout and no other session of the member reported this one
-(see [Branches and overlaps](#branches-and-overlaps)). A heartbeat that names no checkout stores none and records no
-branch. Refusals add `invalid_request` for a malformed `checkout`, a malformed `repo` (whether or not a `branch` comes
-with it) or `branch`, or a `branch` without `repo`.
+last three heartbeat intervals (`heartbeat_every`), the session reported no other checkout and no other session of the
+member reported this one (see [Branches and overlaps](#branches-and-overlaps)). A heartbeat that names no checkout
+stores none and records no branch; one that sends `repo` and `branch` without `checkout`, as a client older than the
+checkout token does, has them checked and then ignored. Refusals add `invalid_request` for a malformed `checkout`, a
+malformed `repo` (whether or not a `branch` comes with it) or `branch`, or a `branch` without `repo`.
 
 `reports`, optional, carries what the session's machine counted, at most 7 days, each day once, and `machine` the id
 the member's dibs gave that machine once (32 lowercase hexadecimal digits, 128 random bits; see
@@ -718,23 +733,34 @@ carries the `source`, marks each change of branch. What records it, strongest fi
    life (`branch` of `POST /v1/worktrees/beat`, see [Worktrees](#worktrees)) or with an edit check that reserves and
    names the worktree it is made in (`worktree` of `POST /v1/edit-check`), and recorded on the member's live claim on
    the item the hold names. Only a hold that names an item records. The holds the guard takes for a host's agents and
-   sessions name none when they are taken; such a hold learns the item of the first edit made in it whose check
-   attributes the edits to the claims of exactly one item, and records from then on;
+   sessions name none when they are taken; such a hold learns its item from an edit check that reserves, names the
+   worktree and comes from the holding session or one of its agents, when the check attributes the edits to exactly
+   one claim, the holding session took or last renewed that claim, and the claim declared an edited area (not one it
+   gained only because an edit fell to it), names it in its wide scope or was granted edits in it (see
+   [Edit check](#edit-check)). A later such check attributed to another claim
+   of that session teaches the hold that claim's item instead, and the claim it named before no longer has this
+   worktree as a source that holds. An item named when the worktree was taken is never replaced;
 3. `named`: a branch the claim named when it was taken or renewed (`branches` of `POST /v1/items/{id}/claim`);
 4. `checkout`: the branch of the checkout a session works in, sent by a heartbeat or an edit check that reserves, under
-   three conditions judged within the project's `stale_after`: the session took or last renewed exactly one live claim
+   three conditions judged within the last three heartbeat intervals (`heartbeat_every`: 3 minutes by default, 45 at
+   most): the session took or last renewed exactly one live claim
    it works on (a claim in review does not count), and for an edit check the edits were attributed to that claim; the
    session reported no other checkout (an agent of it editing in a worktree is another); and no other session of the
    member reported this checkout. Several sessions in one checkout, whose branch changes under all of them, say nothing
-   of which claim the branch is for, and record nothing.
+   of which claim the branch is for, and record nothing. A claim is live within the project's `stale_after` as ever;
+   the shorter window applies to the reports alone, so a session that crashed, moved to another checkout or ended
+   without its host saying so stops blocking the next session in its checkout after a few beats. A session sharing
+   the checkout that sends no heartbeat and no edit check for that long is not seen either.
 
 A weaker source never replaces a stronger one while the stronger one holds: a pull request's head while the claim is in
 review and records that pull request, a worktree's branch while the worktree is held for the item by a hold that has
 not gone silent, a named branch until the claim names another or a stronger source replaces it. A checkout's branch
 holds against nothing. Two sources of one strength but another pull request or another worktree do not replace each
 other while the recorded one holds: while a claim records the pull request whose head it holds, another pull
-request's head in that repository waits, whichever route sends it, and takes over once the first is merged, closed or
-dropped. Once a claim leaves review, a pull request's head no longer holds, and a named branch, or even a checkout's,
+request's head in that repository is not stored, whichever route sends it; the answer and the claim keep the first
+head. Once the first pull request leaves the claim (merged, closed or dropped) and the claim stays in review on the
+second, the next report that carries the second head records it: a review with `head`, or `POST /v1/prs/state` with
+`head`. Once a claim leaves review, a pull request's head no longer holds, and a named branch, or even a checkout's,
 replaces it. The same branch learned from another source changes the source alone. When the
 branch changes, the claim's footprint of that repository goes with what it made: it measured the branch the claim left.
 The command line reads the branch from git's own files (`HEAD` of the directory `GIT_DIR` names, or of the nearest
@@ -814,18 +840,28 @@ check writes nothing. An optional `checkout` names the checkout the edits are ma
 [Sessions](#sessions)), and an optional `branch` the branch it is on. A check with `reserve: true` that names its
 checkout stores that the session reported working there, and records the branch, learned from the checkout, on the
 session's one working claim when the edits were attributed to it and the checkout rule allows it (see
-[Branches and overlaps](#branches-and-overlaps)); one that names no checkout records no branch. A malformed `checkout`
-is `invalid_request`.
+[Branches and overlaps](#branches-and-overlaps)). `branch` is read only together with `checkout`: a check that names no
+checkout records no branch, from its checkout or from a worktree it names. A malformed `checkout` is
+`invalid_request`.
 
 An optional `worktree`, `{ "machine": "…", "pool": "…", "name": "worktree2" }`, names the worktree of one of the
 caller's pools the edits are made in, its machine and pool spelled as a take spells them (see [Worktrees](#worktrees)).
 A check with `reserve: true` that names it teaches the worktree's hold the item its edits are for: when the hold is
-held under the check's session (the session itself or one of its agents), has not gone silent and names no item, and
-the check attributed the edits to the caller's claims of exactly one item, the hold takes that item. A hold that names
-an item keeps it, and a check attributed to claims of no item or of several teaches nothing; no event marks the
-learning. Then, whenever that hold names an item, `branch` is recorded on the caller's live claim on it, learned from
-that worktree (`worktree`), as the worktree's signs of life record it; the checkout's own branch then waits while the
-hold stands. A worktree held under another session, a silent hold or a free worktree changes nothing and records no
+held under the check's session (the session itself or one of its agents) and has not gone silent, and the check
+attributed the edits to exactly one of the caller's claims, which that session took or last renewed and which declared
+an edited area, names it in its wide scope or was granted edits in it, the hold learns that claim's item, replacing an
+item it learned before. A hold whose take named an item keeps it. A check attributed to no claim, to several, or to a
+claim another session took or last renewed teaches nothing. An edit in an area none of the caller's claims holds, or
+of a path under a `warn-shared` rule, still goes to the caller's most recently claimed or renewed claim (keeping it
+alive and, for an area, adding the area to it), but teaches the hold nothing and replaces no item it learned. An area a
+claim gained that way holds against other members like one it declared — it refuses their edits and claims, keeps the
+claim alive and counts in footprints — but a later edit in it is still a guess at the work and teaches no hold either,
+until a claim or renewal of that claim names the area. An edit in an area goes to one claim of the caller: the most
+recently claimed or renewed of those that declared it, else of the live wide claims that name it, else of those that
+only gained it; whichever session took that claim, so a check from another session teaches nothing. `areas` in answers
+lists every area a claim holds, declared or gained. No event marks the learning. Then, whenever that hold names an item and the check names its checkout, `branch` is recorded on
+the caller's live claim on it, learned from that worktree (`worktree`), as the worktree's signs of life record it; the
+checkout's own branch then waits while the hold stands. A worktree held under another session, a silent hold or a free worktree changes nothing and records no
 branch. A malformed `worktree` is `invalid_request` naming it. Answers a verdict per path, in the order asked:
 
 ```json
@@ -1120,10 +1156,10 @@ board hold { member, host, worktree, holder: "session" | "agent", purpose, item 
 ```
 
 An *own hold* is a hold of the caller's own pool; a *board hold* is a hold as every member sees it, naming neither the
-machine, the pool, the session nor the agent. A hold's `item` is the work item its take named. A hold taken with none
-learns one from the first edit check that reserves, names the worktree, comes from its session or an agent of it, and
-attributes its edits to the claims of exactly one item (see [Edit check](#edit-check)); a hold that names an item keeps
-it, through a take again too.
+machine, the pool, the session nor the agent. A hold's `item` is the work item its take named, or the item it learned
+from an edit check (see [Edit check](#edit-check)). A named item stays until the hold ends, through a take again too. A
+learned item is replaced when a later check from the holding session is attributed to another single claim of that
+session. `item` is `null` until either happens.
 
 `GET /v1/worktrees`, optionally `?machine=<id>`, answers `{ "pools": [own pool, …], "board": [board hold, …] }`: the
 caller's own pools with a hold (only those on `machine` when it is named), ordered by machine and pool, and every
@@ -1131,8 +1167,11 @@ member's holds, the caller's included, ordered by member, host and worktree. An 
 `invalid_request` for a `machine` that is no machine id.
 
 `POST /v1/worktrees/take`, body `{ "session_id": 9, "machine": "…", "pool": "…", "names": ["worktree1", "worktree2"],
-"agent": "a1b2", "purpose": "fix the totals", "item": 12 }` (`agent` and `item` optional). `names` are the worktrees the
-machine can hand out, best first; `purpose` is 1 to 200 characters every member reads. Answers
+"agent": "a1b2", "purpose": "fix the totals", "item": 12 }` (`agent`, `item` and `learned_item` optional). `names` are the
+worktrees the machine can hand out, best first; `purpose` is 1 to 200 characters every member reads. A new hold is for
+the item `item` names until it ends. `learned_item` instead names an item the hold has as learned from an edit, which a
+later check from the holding session may replace: a machine sends it to take again a hold the server let go of, with
+the item that hold had learned. A holder that takes again keeps the item its hold has. Answers
 `{ "outcome": "took" | "busy", "worktree": "worktree2" | null, "again": false, "held": [own hold, …] }`:
 
 - a holder that holds a worktree of the pool gets it again, `again: true`, seen now and otherwise unchanged, whatever
@@ -1142,7 +1181,8 @@ machine can hand out, best first; `purpose` is 1 to 200 characters every member 
   nothing: the machine asks again.
 
 Refusals: `worktree_names_invalid` (`422`) for no name, or a name given twice (details `worktree`); `not_found` for a
-session or item not the caller's; `invalid_request` for a missing or invalid field.
+session or item not the caller's, `learned_item` included; `invalid_request` for a missing or invalid field, and
+(naming `learned_item`) for naming both `item` and `learned_item`.
 
 `POST /v1/worktrees/release`, body `{ "session_id": 9, "machine": "…", "pool": "…", "worktree": "worktree2" }` or
 `{ …, "holder_session": 9, "agent": "a1b2" }` (`agent` optional), ends the hold of that worktree, whichever of the
@@ -1156,10 +1196,13 @@ its `holder_session`.
 (`repo`, `agent` and `branch` optional), carries the holders' signs of life, sent by any session of the caller on behalf
 of any of the caller's sessions and their agents. A beat that names a worktree and its holder moves the hold's
 `last_seen` to `seen_at` — never back, and a time after now counts as now. Answers
-`{ "kept": [beaten, …], "unknown": [beaten, …] }`, each `{ worktree, holder_session, agent | null }` once, in the order
-first named: `kept` the holds the beats named, `unknown` the pairs that hold nothing — the worktree is free or another
-holder has it, as when a hold ended while its beats could not reach the server. Silent holds end before the beats are
-applied, whenever they were sent.
+`{ "kept": [kept, …], "unknown": [beaten, …] }`. A beaten entry is `{ worktree, holder_session, agent | null }`; a kept
+entry adds `item`, the work item the hold is for (named by its take or learned from an edit), or `null` when it has
+none. Each pair is answered once, in the order first named: `kept` the holds the beats named, `unknown` the pairs that
+hold nothing — the worktree is free or another holder has it, as when a hold ended while its beats could not reach the
+server. Silent holds end before the beats are applied, whenever they were sent. The command line keeps a kept entry's
+`item` with its record of the hold, so when the server ended the hold while the beats could not reach it, it takes the
+hold again for that item: as `item` when the take named it, as `learned_item` when an edit taught it.
 
 `repo` is the id of the repository the pool's worktrees are of, and a beat's `branch` the branch its worktree is on (the
 command line sends none on a detached head, and neither for a pool it took from before it kept the pool's repository). A

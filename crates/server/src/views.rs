@@ -314,7 +314,7 @@ pub struct ClaimView {
     pub session_id: SessionId,
     /// That session's machine.
     pub host: HostName,
-    /// The areas it declared.
+    /// The areas it holds: those it declared and those an edit added to it.
     pub areas: BTreeSet<QualifiedArea>,
     /// For a wide claim, the areas it names and holds none of, and why; `null` otherwise.
     pub wide: Option<WideScopeView>,
@@ -387,7 +387,7 @@ impl ClaimView {
             holder: named.holder,
             session_id: claim.session,
             host: claim.host,
-            areas: claim.areas,
+            areas: claim.areas.iter().cloned().collect(),
             wide: claim.wide.map(|scope| WideScopeView {
                 areas: scope.areas().clone(),
                 reason: scope.reason().as_str().to_owned(),
@@ -1090,7 +1090,7 @@ mod tests {
             member: MemberId(1),
             session: SessionId(9),
             host: HostName::parse("laptop").unwrap(),
-            areas: BTreeSet::from([QualifiedArea::parse("api:billing").unwrap()]),
+            areas: BTreeSet::from([QualifiedArea::parse("api:billing").unwrap()]).into(),
             wide: None,
             claimed_at: datetime!(2026-01-02 03:04:05 UTC),
             renewed_at: datetime!(2026-01-02 03:04:05 UTC),

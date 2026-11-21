@@ -277,6 +277,7 @@ impl<P: ProjectCommands> Taker<'_, P> {
             agent: ask.agent.clone(),
             purpose: ask.purpose.clone(),
             item: ask.item,
+            learned_item: None,
         }
     }
 
@@ -426,6 +427,7 @@ impl<P: ProjectCommands> Taker<'_, P> {
             agent: ask.agent.clone(),
             purpose: Some(ask.purpose.clone()),
             item: ask.item,
+            item_learned: false,
             taken_at,
             reset_done: done,
         };

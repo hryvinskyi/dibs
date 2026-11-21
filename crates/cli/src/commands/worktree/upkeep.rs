@@ -392,6 +392,7 @@ mod tests {
             agent: None,
             purpose: None,
             item: None,
+            item_learned: false,
             taken_at,
             reset_done: true,
         }

@@ -69,7 +69,8 @@ struct State {
     cached_slots: Option<Cached<Vec<crate::ports::SlotState>>>,
     inbox: Option<Cached<InboxView>>,
     noted: Vec<Cached<QualifiedArea>>,
-    last_heartbeat: Option<OffsetDateTime>,
+    /// When each session's last heartbeat was sent, by the session's key.
+    heartbeats: std::collections::BTreeMap<String, OffsetDateTime>,
     unreachable: Option<OffsetDateTime>,
     last_warning: Option<OffsetDateTime>,
     last_repo_warning: Option<OffsetDateTime>,
@@ -145,7 +146,7 @@ impl State {
                 at: at(0),
             }),
             noted: Vec::new(),
-            last_heartbeat: Some(at(0)),
+            heartbeats: std::collections::BTreeMap::from([("s-1".to_owned(), at(0))]),
             unreachable: None,
             last_warning: None,
             last_repo_warning: None,
@@ -541,8 +542,16 @@ impl LocalCache for World {
         }
     }
 
-    fn last_heartbeat(&self) -> Option<OffsetDateTime> {
-        self.0.borrow().last_heartbeat
+    fn last_heartbeat(&self, session: &SessionRef) -> Option<OffsetDateTime> {
+        self.0
+            .borrow()
+            .heartbeats
+            .get(session.key.as_str())
+            .copied()
+    }
+
+    fn forget_heartbeat(&self, session: &SessionRef) {
+        self.0.borrow_mut().heartbeats.remove(session.key.as_str());
     }
 
     fn unreachable_since(&self) -> Option<OffsetDateTime> {
@@ -902,7 +911,7 @@ fn an_unknown_event_or_unreadable_input_is_no_objection_with_a_notice() {
 
 #[test]
 fn switched_off_every_event_is_silent_asks_the_server_nothing_and_counts_its_session() {
-    let world = World::new().with(|state| state.last_heartbeat = None);
+    let world = World::new().with(|state| state.heartbeats.clear());
     for (event, input) in [
         ("session-started", input(None)),
         ("before-tool", edit(&["src/billing/a.rs"])),
@@ -1022,7 +1031,7 @@ fn every_answer_given_without_the_server_is_counted() {
 fn outside_every_checkout_nothing_is_asked() {
     let world = World::new().with(|state| {
         state.checkout = false;
-        state.last_heartbeat = None;
+        state.heartbeats.clear();
     });
     for event in ["session-started", "after-tool"] {
         let answer = run(&world, "neutral", event, &input(None));
@@ -1654,7 +1663,7 @@ fn a_session_starts_with_a_brief_from_a_fresh_cache() {
 fn a_stale_cache_is_refreshed_for_the_brief() {
     let world = World::new().with(|state| {
         state.now = at(120);
-        state.last_heartbeat = Some(at(120));
+        state.heartbeats.insert("s-1".to_owned(), at(120));
         state.server_inbox = Ok(InboxView {
             unread: 1,
             subjects: vec!["Rates".parse().unwrap()],
@@ -1754,7 +1763,7 @@ fn a_sign_of_life_in_a_worktree_starts_the_upkeep_once_the_last_sending_is_a_min
         state.now = at(60);
         state.status.as_mut().unwrap().at = at(60);
         state.inbox.as_mut().unwrap().at = at(60);
-        state.last_heartbeat = Some(at(60));
+        state.heartbeats.insert("s-1".to_owned(), at(60));
     });
     run(&world, "neutral", "after-tool", &input(None));
     let state = world.0.borrow();
@@ -1798,9 +1807,55 @@ fn the_heartbeat_follows_the_projects_interval_from_the_cached_settings() {
 }
 
 #[test]
+fn a_heartbeat_is_due_per_session_and_another_sessions_moment_holds_none_back() {
+    let world = World::new().with(|state| {
+        state.now = at(10);
+        state.heartbeats = std::collections::BTreeMap::from([("s-2".to_owned(), at(10))]);
+    });
+    run(&world, "neutral", "after-tool", &input(None));
+    assert_eq!(
+        world.0.borrow().upkeep_due,
+        [crate::upkeep::Due {
+            heartbeat: true,
+            ..crate::upkeep::Due::default()
+        }],
+        "s-1 sent no heartbeat yet; the one s-2 sent a moment ago is s-2's alone"
+    );
+    world.set(|state| {
+        state.heartbeats.insert("s-1".to_owned(), at(10));
+    });
+    run(&world, "neutral", "after-tool", &input(None));
+    assert_eq!(
+        world.0.borrow().upkeep_starts,
+        1,
+        "the session's own heartbeat holds its next one back"
+    );
+}
+
+#[test]
+fn a_sessions_end_forgets_its_heartbeat_moment_and_no_other() {
+    let world = World::new().with(|state| {
+        state.heartbeats = std::collections::BTreeMap::from([
+            ("s-1".to_owned(), at(0)),
+            ("s-2".to_owned(), at(0)),
+        ]);
+    });
+    run(
+        &world,
+        "neutral",
+        "session-ended",
+        &worktree_input(json!({})),
+    );
+    assert_eq!(
+        world.0.borrow().heartbeats.keys().collect::<Vec<_>>(),
+        ["s-2"]
+    );
+}
+
+#[test]
 fn no_upkeep_starts_before_a_tool_or_while_the_server_is_unreachable() {
     let world = World::new().with(|state| {
-        state.last_heartbeat = None;
+        state.heartbeats.clear();
         state.answers = Ok(vec![PathAnswer::Allowed]);
     });
     run(
@@ -1856,7 +1911,7 @@ fn an_unreachable_server_still_lets_the_start_of_a_session_look_for_a_newer_clie
     let world = World::new().with(|state| {
         state.now = at(3600);
         state.unreachable = Some(at(3590));
-        state.last_heartbeat = None;
+        state.heartbeats.clear();
         state.versions_checked = None;
     });
     run(&world, "neutral", "after-tool", &input(None));
@@ -1899,7 +1954,7 @@ fn the_brief_names_a_newer_release_the_server_recommends() {
 #[test]
 fn upkeep_that_cannot_start_is_a_notice() {
     let world = World::new().with(|state| {
-        state.last_heartbeat = None;
+        state.heartbeats.clear();
         state.upkeep = Err(PortError::Refused(
             "the state directory is read-only.".to_owned(),
         ));
@@ -2963,7 +3018,7 @@ fn a_host_that_can_wake_a_session_has_its_work_and_its_waits_stamped_and_no_othe
 
 #[test]
 fn the_end_of_a_turn_answers_nothing_and_starts_no_upkeep() {
-    let world = World::new().with(|state| state.last_heartbeat = None);
+    let world = World::new().with(|state| state.heartbeats.clear());
     let answer = run(&world, "waking", "stopped", &input(None));
     assert_eq!(context(&answer), None);
     assert_eq!(world.0.borrow().upkeep_starts, 0);

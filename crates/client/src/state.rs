@@ -13,10 +13,15 @@
 //!   and what was pushed to it while it waited;
 //! - `sessions/<scope>/activity-<digest>.{working,waiting}` — when that session last worked and last
 //!   began to wait for its person;
+//! - `sessions/<scope>/sync-started-<digest>` — when a background sync was last started for that
+//!   session, forgotten when it ends;
 //! - `cache/<scope>/held.json` — areas edit checks found the member holding, each with when;
-//! - `cache/<scope>/heartbeat`, `warned`, `sync-started` — when the last heartbeat was sent, when
-//!   the person was last warned about an unreachable server, when a background sync was last
-//!   started;
+//! - `cache/<scope>/heartbeats.json` — when each agent session last sent a heartbeat from this
+//!   machine, by the digest of its host and its id; a session's moment is forgotten when it ends,
+//!   and every moment once it is older than the project lets a claim live without a heartbeat;
+//! - `cache/<scope>/warned`, `sync-started` — when the person was last warned about an unreachable
+//!   server, when a background sync that does everything due, the machine's work included, was
+//!   last started;
 //! - `cache/<scope>/versions.json` — the client versions the server serves and recommends, and when
 //!   they were last asked for;
 //! - `cache/<scope>/worktree-beats-sent` — when the signs of life left in the pools' worktrees were
@@ -99,9 +104,14 @@ pub struct WorktreeHoldRecord {
     /// Why it was taken, so that a hold the server let go of is taken again for the same reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<Purpose>,
-    /// The work item it was taken for, by local id.
+    /// The work item the hold is for, by local id: the one the take named, or the one a beat's
+    /// answer last said the server's hold had learned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item: Option<ItemId>,
+    /// Whether the hold learned `item` from an edit rather than from the take, so that a hold the
+    /// server let go of is taken again with an item a later edit may still replace.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub item_learned: bool,
     /// When it was taken.
     #[serde(with = "time::serde::rfc3339")]
     pub taken_at: OffsetDateTime,
@@ -124,6 +134,28 @@ impl WorktreeHoldRecord {
     /// Whether it records this holder: the session and, for an agent, its key.
     pub fn is_of(&self, session: SessionId, agent: Option<&AgentKey>) -> bool {
         self.session_id == session && self.agent.as_ref() == agent
+    }
+
+    /// The record once a beat's answer said its hold is for `item`, when that changes it. An item
+    /// other than the recorded one was learned from an edit, as the item a take names stays the
+    /// hold's while it lasts. An answer that names no item changes nothing: a live hold never
+    /// loses its item, and a server that does not answer it names none.
+    pub fn answered(&self, item: Option<ItemId>) -> Option<Self> {
+        let item = item.filter(|item| self.item != Some(*item))?;
+        Some(Self {
+            item: Some(item),
+            item_learned: true,
+            ..self.clone()
+        })
+    }
+
+    /// What a take of the hold again names: the item, and the item learned, of which one at most.
+    pub const fn retaken_item(&self) -> (Option<ItemId>, Option<ItemId>) {
+        if self.item_learned {
+            (None, self.item)
+        } else {
+            (self.item, None)
+        }
     }
 }
 
@@ -270,6 +302,17 @@ struct Moment {
     #[serde(with = "time::serde::rfc3339")]
     at: OffsetDateTime,
 }
+
+/// When one session last sent a heartbeat, the session named by [`session_digest`].
+#[derive(Serialize, Deserialize)]
+struct SessionMoment {
+    session: String,
+    #[serde(with = "time::serde::rfc3339")]
+    at: OffsetDateTime,
+}
+
+/// The file of every session's last heartbeat in the project's cache.
+const HEARTBEATS: &str = "heartbeats.json";
 
 impl StateDir {
     /// The state of the key's project under the state directory `base`.
@@ -519,11 +562,7 @@ impl StateDir {
     /// The file system's failure to make the directory.
     pub fn delivery_files(&self, host: &str, session: &str) -> io::Result<(PathBuf, PathBuf)> {
         fs::create_dir_all(&self.sessions)?;
-        let digest = Sha256::digest(format!("{host}\n{session}").as_bytes());
-        let name: String = digest[..12]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let name = session_digest(host, session);
         Ok((
             self.sessions.join(format!("delivery-{name}.json")),
             self.sessions.join(format!("delivery-{name}.lock")),
@@ -576,17 +615,60 @@ impl StateDir {
         write_json(&self.cache.join("held.json"), &holds)
     }
 
-    /// When the last heartbeat from this machine was sent.
-    pub fn heartbeat_at(&self) -> Option<OffsetDateTime> {
-        self.moment("heartbeat")
+    /// When the session `session` of the host `host` last sent a heartbeat from this machine. Every
+    /// session keeps its own moment, so one session's heartbeat never stands for another's.
+    pub fn heartbeat_at(&self, host: &str, session: &str) -> Option<OffsetDateTime> {
+        let digest = session_digest(host, session);
+        self.heartbeats()
+            .into_iter()
+            .find(|moment| moment.session == digest)
+            .map(|moment| moment.at)
     }
 
-    /// Remembers that a heartbeat was sent at `at`.
+    /// Remembers that the session `session` of the host `host` sent a heartbeat at `at`, and
+    /// forgets every other session's moment that is `keep` or more before `at` or after it.
+    ///
+    /// The file is read and replaced without a lock: a session's end written at the same moment
+    /// may be lost, and that session's moment then stays until it is `keep` old.
     ///
     /// # Errors
     /// The file system's failure.
-    pub fn remember_heartbeat(&self, at: OffsetDateTime) -> io::Result<()> {
-        self.remember_moment("heartbeat", at)
+    pub fn remember_heartbeat(
+        &self,
+        host: &str,
+        session: &str,
+        at: OffsetDateTime,
+        keep: time::Duration,
+    ) -> io::Result<()> {
+        let digest = session_digest(host, session);
+        let mut moments: Vec<SessionMoment> = self
+            .heartbeats()
+            .into_iter()
+            .filter(|moment| moment.session != digest && moment.at <= at && at - moment.at < keep)
+            .collect();
+        moments.push(SessionMoment {
+            session: digest,
+            at,
+        });
+        write_json(&self.cache.join(HEARTBEATS), &moments)
+    }
+
+    /// Forgets when the session `session` of the host `host` last sent a heartbeat, as it ended.
+    /// Nothing is written when no moment of it is kept.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn forget_heartbeat(&self, host: &str, session: &str) -> io::Result<()> {
+        let digest = session_digest(host, session);
+        let moments = self.heartbeats();
+        if !moments.iter().any(|moment| moment.session == digest) {
+            return Ok(());
+        }
+        let kept: Vec<SessionMoment> = moments
+            .into_iter()
+            .filter(|moment| moment.session != digest)
+            .collect();
+        write_json(&self.cache.join(HEARTBEATS), &kept)
     }
 
     /// When the person was last warned that the server could not be reached.
@@ -602,17 +684,50 @@ impl StateDir {
         self.remember_moment("warned", at)
     }
 
-    /// When a background sync was last started.
+    /// When a background sync that does everything due, the machine's work included, was last
+    /// started.
     pub fn sync_started_at(&self) -> Option<OffsetDateTime> {
         self.moment("sync-started")
     }
 
-    /// Remembers that a background sync was started at `at`.
+    /// Remembers that a background sync that does everything due was started at `at`.
     ///
     /// # Errors
     /// The file system's failure.
     pub fn remember_sync_started(&self, at: OffsetDateTime) -> io::Result<()> {
         self.remember_moment("sync-started", at)
+    }
+
+    /// When a background sync was last started for the session `session` of the host `host`.
+    pub fn session_sync_started_at(&self, host: &str, session: &str) -> Option<OffsetDateTime> {
+        read_json::<Moment>(&self.session_sync_file(host, session)).map(|moment| moment.at)
+    }
+
+    /// Remembers that a background sync was started for the session `session` of the host
+    /// `host` at `at`. Each session has a file of its own, so sessions starting syncs at the same
+    /// moment never overwrite one another's.
+    ///
+    /// # Errors
+    /// The file system's failure.
+    pub fn remember_session_sync_started(
+        &self,
+        host: &str,
+        session: &str,
+        at: OffsetDateTime,
+    ) -> io::Result<()> {
+        write_json(&self.session_sync_file(host, session), &Moment { at })
+    }
+
+    /// Forgets when a background sync was last started for the session `session` of the host
+    /// `host`, as it ended; nothing happens when none was.
+    ///
+    /// # Errors
+    /// The file system's failure, other than the file being gone already.
+    pub fn forget_session_sync_started(&self, host: &str, session: &str) -> io::Result<()> {
+        match fs::remove_file(self.session_sync_file(host, session)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// The lock file of this name (`sync` → `cache/<scope>/sync.lock`), its directory made.
@@ -642,12 +757,21 @@ impl StateDir {
         self.cache.join(format!("{}.json", file_name(name)))
     }
 
+    fn heartbeats(&self) -> Vec<SessionMoment> {
+        read_json(&self.cache.join(HEARTBEATS)).unwrap_or_default()
+    }
+
     fn moment(&self, name: &str) -> Option<OffsetDateTime> {
         read_json::<Moment>(&self.cache.join(name)).map(|moment| moment.at)
     }
 
     fn remember_moment(&self, name: &str, at: OffsetDateTime) -> io::Result<()> {
         write_json(&self.cache.join(name), &Moment { at })
+    }
+
+    fn session_sync_file(&self, host: &str, session: &str) -> PathBuf {
+        self.sessions
+            .join(format!("sync-started-{}", session_digest(host, session)))
     }
 
     fn session_file(&self, label: &SessionLabel) -> PathBuf {
@@ -898,6 +1022,16 @@ fn scope(key: &CredentialKey) -> String {
         .collect()
 }
 
+/// The digest naming one session of one host: any id makes one file name, and no id is kept as
+/// it was given.
+fn session_digest(host: &str, session: &str) -> String {
+    let digest = Sha256::digest(format!("{host}\n{session}").as_bytes());
+    digest[..12]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// A label written so it is one file name on every platform: letters, digits, `-` and `_` as
 /// they are, every other byte as `%XX`.
 fn file_name(label: &str) -> String {
@@ -1132,13 +1266,10 @@ mod tests {
             written_before_acks.inbox.grant_asks.is_empty(),
             "a cache written before grant requests were listed reads as none waiting"
         );
-        assert_eq!(state.heartbeat_at(), None);
-        state.remember_heartbeat(at).unwrap();
         state.remember_warning(at + Duration::seconds(1)).unwrap();
         state
             .remember_sync_started(at + Duration::seconds(2))
             .unwrap();
-        assert_eq!(state.heartbeat_at(), Some(at));
         assert_eq!(state.warned_at(), Some(at + Duration::seconds(1)));
         assert_eq!(state.sync_started_at(), Some(at + Duration::seconds(2)));
         let lock = state.lock_file("sync").unwrap();
@@ -1241,6 +1372,7 @@ mod tests {
             agent: None,
             purpose: None,
             item: None,
+            item_learned: false,
             taken_at: OffsetDateTime::UNIX_EPOCH,
             reset_done: true,
         };
@@ -1251,6 +1383,50 @@ mod tests {
             "the pool's record is no worktree's, even one named pool"
         );
         assert!(worktrees.pool().is_some());
+    }
+
+    #[test]
+    fn a_hold_record_follows_the_item_a_beats_answer_names_as_learned() {
+        let record = |item: Option<u64>, item_learned| WorktreeHoldRecord {
+            session_id: SessionId(4),
+            agent: None,
+            purpose: None,
+            item: item.map(ItemId),
+            item_learned,
+            taken_at: OffsetDateTime::UNIX_EPOCH,
+            reset_done: true,
+        };
+        let none = record(None, false);
+        assert_eq!(none.retaken_item(), (None, None));
+        assert_eq!(none.answered(None), None, "nothing said, nothing learned");
+        let learned = none.answered(Some(ItemId(3)));
+        assert_eq!(learned, Some(record(Some(3), true)));
+        assert_eq!(
+            learned.as_ref().map(WorktreeHoldRecord::retaken_item),
+            Some((None, Some(ItemId(3)))),
+            "taken again with the item it learned"
+        );
+        let learned = record(Some(3), true);
+        assert_eq!(learned.answered(Some(ItemId(3))), None);
+        assert_eq!(learned.answered(None), None, "a hold keeps its item");
+        assert_eq!(
+            learned.answered(Some(ItemId(4))),
+            Some(record(Some(4), true)),
+            "an edit taught it another"
+        );
+        let named = record(Some(7), false);
+        assert_eq!(named.answered(Some(ItemId(7))), None);
+        assert_eq!(named.retaken_item(), (Some(ItemId(7)), None));
+        let read: WorktreeHoldRecord = serde_json::from_str(
+            r#"{"session_id":4,"item":7,"taken_at":"1970-01-01T00:00:00Z","reset_done":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read, named,
+            "a record written before it said how reads as named"
+        );
+        let written = serde_json::to_value(&named).unwrap();
+        assert!(written.get("item_learned").is_none());
     }
 
     #[test]
@@ -1268,6 +1444,7 @@ mod tests {
             agent: Some(AgentKey::parse("a1b2").unwrap()),
             purpose: Some(Purpose::parse("fix the totals").unwrap()),
             item: Some(ItemId(7)),
+            item_learned: false,
             taken_at: at,
             reset_done: false,
         };
@@ -1396,6 +1573,95 @@ mod tests {
         let cached = state.inbox().unwrap();
         assert_eq!(cached.fetched_at, later);
         assert_eq!(cached.claims, [claim]);
+    }
+
+    #[test]
+    fn each_session_keeps_its_own_heartbeat_moment_until_it_ends_or_grows_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path(), &key("acme"));
+        let at = OffsetDateTime::UNIX_EPOCH + Duration::hours(10);
+        let keep = Duration::hours(1);
+        assert_eq!(state.heartbeat_at("neutral", "s-1"), None);
+        state.forget_heartbeat("neutral", "s-1").unwrap();
+
+        state
+            .remember_heartbeat("neutral", "s-1", at, keep)
+            .unwrap();
+        assert_eq!(state.heartbeat_at("neutral", "s-1"), Some(at));
+        assert_eq!(
+            state.heartbeat_at("neutral", "s-2"),
+            None,
+            "one session's heartbeat is not another's"
+        );
+        assert_eq!(
+            state.heartbeat_at("other", "s-1"),
+            None,
+            "nor that of another host's session with the same id"
+        );
+        let later = at + Duration::minutes(1);
+        state
+            .remember_heartbeat("neutral", "s-2", later, keep)
+            .unwrap();
+        assert_eq!(state.heartbeat_at("neutral", "s-1"), Some(at));
+        assert_eq!(state.heartbeat_at("neutral", "s-2"), Some(later));
+
+        state.forget_heartbeat("neutral", "s-1").unwrap();
+        assert_eq!(state.heartbeat_at("neutral", "s-1"), None, "it ended");
+        assert_eq!(state.heartbeat_at("neutral", "s-2"), Some(later));
+
+        let newer = later + Duration::minutes(30);
+        state
+            .remember_heartbeat("neutral", "s-3", newer, keep)
+            .unwrap();
+        state
+            .remember_heartbeat("neutral", "s-4", later + keep, keep)
+            .unwrap();
+        assert_eq!(
+            state.heartbeat_at("neutral", "s-2"),
+            None,
+            "a moment as old as the project lets a claim live without a heartbeat is forgotten"
+        );
+        assert_eq!(state.heartbeat_at("neutral", "s-3"), Some(newer));
+        assert_eq!(state.heartbeat_at("neutral", "s-4"), Some(later + keep));
+    }
+
+    #[test]
+    fn each_session_keeps_when_a_sync_was_last_started_for_it_until_it_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateDir::new(dir.path(), &key("acme"));
+        let at = OffsetDateTime::UNIX_EPOCH + Duration::hours(10);
+        assert_eq!(state.session_sync_started_at("neutral", "s-1"), None);
+        state.forget_session_sync_started("neutral", "s-1").unwrap();
+
+        state
+            .remember_session_sync_started("neutral", "s-1", at)
+            .unwrap();
+        state
+            .remember_session_sync_started("neutral", "s-2", at + Duration::seconds(1))
+            .unwrap();
+        assert_eq!(state.session_sync_started_at("neutral", "s-1"), Some(at));
+        assert_eq!(
+            state.session_sync_started_at("neutral", "s-2"),
+            Some(at + Duration::seconds(1)),
+            "one session's start is not another's"
+        );
+        assert_eq!(state.session_sync_started_at("other", "s-1"), None);
+        assert_eq!(
+            state.sync_started_at(),
+            None,
+            "nor the start of the sync that does the machine's work"
+        );
+
+        state.forget_session_sync_started("neutral", "s-1").unwrap();
+        assert_eq!(
+            state.session_sync_started_at("neutral", "s-1"),
+            None,
+            "it ended"
+        );
+        assert_eq!(
+            state.session_sync_started_at("neutral", "s-2"),
+            Some(at + Duration::seconds(1))
+        );
     }
 
     #[test]

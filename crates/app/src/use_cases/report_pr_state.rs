@@ -34,7 +34,8 @@ pub struct PrStateReport {
 /// A report that names the pull request's head records it on the claim in review that records the
 /// pull request, as the claim's branch in the pull request's repository learned from that pull
 /// request, as recording the pull request with its head does. A pull request no claim in review
-/// records, or one of a repository the project does not list, records nothing.
+/// records, or one of a repository the project does not list, records nothing; nor does any head
+/// while the project's stored settings do not parse, whose report records the state all the same.
 pub struct ReportPrState {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -85,8 +86,15 @@ impl ReportPrState {
             )
             .await?;
         }
-        if let Some(head) = head {
-            let settings = work.project_settings(&self.hot_rules).await?;
+        let settings = match &head {
+            None => None,
+            Some(_) => match work.project_settings(&self.hot_rules).await {
+                Ok(settings) => Some(settings),
+                Err(AppError::StoredSettings(_)) => None,
+                Err(error) => return Err(error),
+            },
+        };
+        if let (Some(head), Some(settings)) = (head, settings) {
             let repo = settings.repo_of_pr(&pr).map(|repo| repo.id.clone());
             let claims = work.claims(actor.project).await?;
             let recording = claims.iter().find(|claim| claim.state.records(&pr));
@@ -378,5 +386,39 @@ mod tests {
             stored.state.records(&pr("acme/api#7")),
             "the claim still records the pull request, of a repository no longer listed"
         );
+    }
+
+    #[tokio::test]
+    async fn settings_that_do_not_parse_record_the_state_of_a_report_with_a_head_and_no_head() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        in_review(&env, &env.bob, item, &["acme/widgets#7"]).await;
+        let unknown = r#"{"hot": [{"paths": ["**/*.lock"], "kind": "rebuild-on-merge"}]}"#;
+        let mut tx = env.deps.store.begin().await.unwrap();
+        tx.put_settings(env.project, &document(unknown))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let before = env.events().await.len();
+        let report = PrStateReport {
+            pr: pr("acme/widgets#7"),
+            mergeable: false,
+            head: Some(branch("bob/1-refunds")),
+        };
+        let told = ReportPrState::new(&env.deps)
+            .execute(&env.importer, report)
+            .await
+            .unwrap();
+        assert!(told, "the conflict is told");
+        let mut tx = env.deps.store.begin().await.unwrap();
+        assert_eq!(
+            tx.pr_mergeable(env.project, &pr("acme/widgets#7"))
+                .await
+                .unwrap(),
+            Some(false)
+        );
+        drop(tx);
+        assert!(recordings(&env, before).await.is_empty());
+        assert_eq!(recorded(&env, item, "default").await, None);
     }
 }

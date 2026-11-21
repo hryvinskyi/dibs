@@ -1177,7 +1177,7 @@ mod use_cases {
         use dibs_domain::radar::{BranchName, BranchSource, WorktreeRef};
         use dibs_domain::repo::RepoId;
         use dibs_domain::report::MachineId;
-        use dibs_domain::worktree::{AgentKey, PoolId, PoolKey, WorktreeName};
+        use dibs_domain::worktree::{AgentKey, HoldItem, PoolId, PoolKey, WorktreeName};
 
         let world = World::new().await;
         let app = &world.app;
@@ -1195,7 +1195,7 @@ mod use_cases {
                     branches: Default::default(),
                     item,
                     session,
-                    areas: Vec::new(),
+                    areas: vec!["billing".to_owned()],
                     wide: None,
                     kind: None,
                 },
@@ -1218,7 +1218,7 @@ mod use_cases {
                     names: vec![worktree.worktree.clone()],
                     agent: Some(AgentKey::parse("agent-1").unwrap()),
                     purpose: Purpose::parse("fix the totals").unwrap(),
-                    item: None,
+                    item: HoldItem::Unknown,
                 },
             )
             .await
@@ -1252,7 +1252,11 @@ mod use_cases {
         let mut tx = world.store.begin().await.unwrap();
         let pool = tx.worktree_pool(admin.project, &key).await.unwrap();
         let hold = pool.hold(&worktree.worktree).unwrap();
-        assert_eq!(hold.item, Some(item), "read back from the file");
+        assert_eq!(
+            hold.item,
+            dibs_domain::worktree::HoldItem::Learned(item),
+            "read back from the file, learned from the edit"
+        );
         let claim = tx.claim(admin.project, item).await.unwrap().unwrap();
         assert_eq!(claim.branch(&RepoId::implicit()), Some(&branch));
         assert_eq!(

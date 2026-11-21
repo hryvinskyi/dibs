@@ -41,6 +41,7 @@ criterion = "0.8.2"
 dibs-test-server = { path = "../test-server" }
 minisign = "0.10.0"
 serde_json = "1.0.154"
+sha2 = "0.11.1"
 tempfile = "3.27.0"
 url = "2.5.8"
 

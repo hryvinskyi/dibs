@@ -23,6 +23,10 @@ pub struct PruneReport {
     pub ui_sessions: u64,
     /// The projects the pass could not apply, each with why; the others were applied all the same.
     pub failed: Vec<(ProjectId, AppError)>,
+    /// The projects whose retention was applied but whose sessions' reported checkouts were all
+    /// kept, each with why: their stored settings, which say how long a reported checkout counts,
+    /// do not parse.
+    pub checkouts_kept: Vec<(ProjectId, AppError)>,
 }
 
 /// Removes, in every project and each project in a transaction of its own, the conversations quiet
@@ -32,8 +36,10 @@ pub struct PruneReport {
 /// requests before them; then records what went in one `pruned` event per project that lost
 /// anything. A reader whose cursor is behind what went is told so. The checkouts sessions reported
 /// longer ago than the project's `stale_after` go too, without counting in that event: no rule
-/// reads them any more. Browser sessions past their end go as well. The service runs it once a
-/// day; it acts for nobody.
+/// reads them any more. When the project's stored settings do not parse, its reported checkouts
+/// are kept, everything else goes all the same, and the report names the project among those
+/// whose checkouts were kept, not among the failed. Browser
+/// sessions past their end go as well. The service runs it once a day; it acts for nobody.
 pub struct Prune {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -70,15 +76,25 @@ impl Prune {
         let cutoffs = Cutoffs::at(now);
         for project in projects {
             match self.prune(project, &cutoffs).await {
-                Ok(counts) if counts.is_empty() => {}
-                Ok(counts) => report.pruned.push((project, counts)),
+                Ok(pruned) => {
+                    if !pruned.counts.is_empty() {
+                        report.pruned.push((project, pruned.counts));
+                    }
+                    if let Some(error) = pruned.checkouts_kept {
+                        report.checkouts_kept.push((project, error));
+                    }
+                }
                 Err(error) => report.failed.push((project, error)),
             }
         }
         Ok(report)
     }
 
-    async fn prune(&self, project: ProjectId, cutoffs: &Cutoffs) -> Result<PruneCounts, AppError> {
+    async fn prune(
+        &self,
+        project: ProjectId,
+        cutoffs: &Cutoffs,
+    ) -> Result<ProjectPruned, AppError> {
         let now = self.clock.now();
         let mut work = Work::begin_unattended(&*self.store, project).await?;
         let mut counts = PruneCounts::default();
@@ -113,16 +129,34 @@ impl Prune {
             .await?;
         work.delete_pr_states_before(project, cutoffs.events)
             .await?;
-        let stale_after = work.project_settings(&self.hot_rules).await?.stale_after();
-        work.delete_session_checkouts_before(project, now - stale_after)
-            .await?;
+        let checkouts_kept = match work.project_settings(&self.hot_rules).await {
+            Ok(settings) => {
+                work.delete_session_checkouts_before(project, now - settings.stale_after())
+                    .await?;
+                None
+            }
+            Err(error @ AppError::StoredSettings(_)) => Some(error),
+            Err(error) => return Err(error),
+        };
         if !counts.is_empty() {
             work.record(now, EventKind::Pruned(Pruned { counts }))
                 .await?;
         }
         work.commit(&*self.notifier).await?;
-        Ok(counts)
+        Ok(ProjectPruned {
+            counts,
+            checkouts_kept,
+        })
     }
+}
+
+/// What one project's pass removed, and why it kept what it could not decide on.
+struct ProjectPruned {
+    /// What went.
+    counts: PruneCounts,
+    /// Why the checkouts sessions reported were kept: the stored settings that say how long they
+    /// count do not parse.
+    checkouts_kept: Option<AppError>,
 }
 
 #[cfg(test)]
@@ -398,6 +432,69 @@ mod tests {
             [(other, "b".repeat(32))],
             "the project keeps them for 24 hours"
         );
+    }
+
+    /// Stores settings for the project that name a hot-file rule kind this build does not know,
+    /// as a rollback to an older build leaves them.
+    async fn store_settings_that_do_not_parse(env: &Env) {
+        let unknown = r#"{"hot": [{"paths": ["**/*.lock"], "kind": "rebuild-on-merge"}]}"#;
+        let mut tx = env.deps.store.begin().await.unwrap();
+        tx.put_settings(env.project, &crate::use_cases::testing::document(unknown))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn settings_that_do_not_parse_keep_the_reported_checkouts_and_say_so_apart_from_failures()
+    {
+        use crate::use_cases::Heartbeat;
+        use crate::use_cases::testing::in_checkout;
+
+        let env = Env::new().await;
+        Heartbeat::new(&env.deps)
+            .execute(
+                &env.bob.actor,
+                env.bob.session,
+                Some(&in_checkout('a', None)),
+            )
+            .await
+            .unwrap();
+        env.advance(Duration::days(100));
+        store_settings_that_do_not_parse(&env).await;
+
+        let report = Prune::new(&env.deps).execute().await.unwrap();
+        assert!(
+            report.failed.is_empty(),
+            "the retention ran: {:?}",
+            report.failed
+        );
+        let kept: Vec<ProjectId> = report
+            .checkouts_kept
+            .iter()
+            .map(|(project, _)| *project)
+            .collect();
+        assert_eq!(kept, [env.project]);
+        assert!(matches!(
+            report.checkouts_kept[0].1,
+            AppError::StoredSettings(_)
+        ));
+        assert_eq!(report.pruned.len(), 1, "the retention was applied");
+        let (project, counts) = report.pruned[0];
+        assert_eq!(project, env.project);
+        assert!(counts.events > 0);
+        let kinds = env.kinds_after(0).await;
+        assert_eq!(kinds, [EventKind::Pruned(Pruned { counts })]);
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let kept = tx
+            .session_checkouts(
+                env.project,
+                env.bob.actor.member,
+                crate::use_cases::testing::START,
+            )
+            .await
+            .unwrap();
+        assert_eq!(kept.len(), 1, "how long they count is not known");
     }
 
     #[tokio::test]

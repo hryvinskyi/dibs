@@ -169,7 +169,7 @@ impl TakeOver {
                 previous: takeover.previous.member,
                 session: session.id,
                 host: session.host.clone(),
-                areas: takeover.claim.areas.clone(),
+                areas: takeover.claim.areas.iter().cloned().collect(),
             }),
         )
         .await?;
@@ -230,6 +230,8 @@ impl TakeOver {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use time::Duration;
 
     use dibs_domain::area::QualifiedArea;
@@ -289,11 +291,10 @@ mod tests {
         assert_eq!(taken.takeover.claim.member, env.alice.actor.member);
         assert_eq!(
             taken.takeover.claim.areas,
-            [
+            BTreeSet::from([
                 QualifiedArea::parse("default:billing").unwrap(),
                 QualifiedArea::parse("default:search").unwrap()
-            ]
-            .into()
+            ])
         );
         let kinds = env.kinds_after(before).await;
         assert_eq!(kinds.len(), 3, "{kinds:?}");

@@ -7,11 +7,14 @@
 //! sends one beat per such worktree, for the holder the record names, dated by the file's change.
 //! Each beat names the branch its worktree is on, and the pool's beats the repository its
 //! worktrees are of, as the pool's record says where they live and which repository the lending
-//! checkout names; a pool without that record, taken before it was kept, sends neither.
+//! checkout names; a pool with no record sends no repository and no branch.
 //!
-//! A beat the server answers as unknown names a hold the server ended while the beats could not
-//! reach it. The worktree is then taken again, by its name alone, for the same holder and the same
-//! purpose; when another holder has it by then, this machine forgets its record of the earlier
+//! A beat the server answers as kept names the work item its hold is for; an item other than the
+//! one the record names was learned from an edit, and the record learns it too. A beat the server
+//! answers as unknown names a hold the server ended while the beats could not reach it. The
+//! worktree is then taken again, by its name alone, for the same holder, the same purpose and the
+//! item the record names — as learned when the hold had learned it, so a later edit may still
+//! replace it; when another holder has it by then, this machine forgets its record of the earlier
 //! holder and touches nothing else.
 //!
 //! A server without the worktree routes is older than this client: the signs of life are dropped
@@ -155,6 +158,9 @@ impl Beats<'_> {
                 }
             };
             sent.beats += count;
+            for kept in &answer.kept {
+                learn_item(&files, kept);
+            }
             for unknown in &answer.unknown {
                 self.take_again(&pool, &files, unknown, &mut sent).await?;
             }
@@ -186,6 +192,7 @@ impl Beats<'_> {
         else {
             return Ok(());
         };
+        let (item, learned_item) = record.retaken_item();
         let request = TakeWorktreeRequest {
             session_id: record.session_id,
             machine: self.machine.clone(),
@@ -193,7 +200,8 @@ impl Beats<'_> {
             names: vec![name.clone()],
             agent: record.agent.clone(),
             purpose,
-            item: record.item,
+            item,
+            learned_item,
         };
         match self.client.take_worktree(&request).await {
             Ok(took)
@@ -225,6 +233,23 @@ impl Beats<'_> {
         if let Err(error) = self.state.remember_worktree_beats_sent(at) {
             tracing::debug!(error = %error, "the sending of signs of life could not be remembered");
         }
+    }
+}
+
+/// Writes the item the server says a kept hold is for into this machine's record of that hold,
+/// when the record names the kept hold's holder and the item changes it.
+fn learn_item(files: &WorktreeState, kept: &BeatenWorktree) {
+    let Some(record) = files
+        .hold(&kept.worktree)
+        .filter(|record| record.is_of(kept.holder_session, kept.agent.as_ref()))
+    else {
+        return;
+    };
+    let Some(learned) = record.answered(kept.item) else {
+        return;
+    };
+    if let Err(error) = files.remember_hold(&kept.worktree, &learned) {
+        tracing::debug!(error = %error, "the item a worktree's hold learned could not be recorded");
     }
 }
 
@@ -278,6 +303,7 @@ mod tests {
             agent: agent.map(|agent| AgentKey::parse(agent).unwrap()),
             purpose: None,
             item: None,
+            item_learned: false,
             taken_at,
             reset_done: true,
         }

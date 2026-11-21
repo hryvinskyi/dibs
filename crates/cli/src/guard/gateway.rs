@@ -14,6 +14,7 @@ use dibs_agent_host::ports::{
 use dibs_client::Client;
 use dibs_client::api::{EditCheckRequest, InWorktree};
 use dibs_client::checkout::Checkout;
+use dibs_client::checkout_token::CheckoutKey;
 use dibs_client::git_dirs::GitDirs;
 use dibs_client::worktree_pool::{pool_id, read_marker, read_settings};
 use dibs_domain::paths::RelPath;
@@ -24,6 +25,7 @@ use dibs_domain::session::CheckoutToken;
 use dibs_domain::slot::SlotName;
 
 use crate::failure::sentence;
+use crate::guard::checkout_key::checkout_key;
 use crate::guard::machine::machine_id;
 use crate::guard::remote::{Remote, RemoteError};
 use crate::guard::views;
@@ -36,13 +38,14 @@ pub struct HookGateway {
     runtime: OnceCell<Runtime>,
     client: OnceCell<Client>,
     machine: OnceCell<Option<MachineId>>,
+    key: OnceCell<Option<CheckoutKey>>,
     token: OnceCell<Option<CheckoutToken>>,
     worktree: OnceCell<Option<InWorktree>>,
 }
 
 impl HookGateway {
     /// The gateway of `checkout`'s project; `state_base` is the state directory that keeps this
-    /// machine's id.
+    /// machine's id and its checkout key.
     pub fn new(remote: Remote, checkout: Checkout, state_base: PathBuf) -> Self {
         Self {
             remote,
@@ -51,6 +54,7 @@ impl HookGateway {
             runtime: OnceCell::new(),
             client: OnceCell::new(),
             machine: OnceCell::new(),
+            key: OnceCell::new(),
             token: OnceCell::new(),
             worktree: OnceCell::new(),
         }
@@ -63,11 +67,18 @@ impl HookGateway {
             .as_ref()
     }
 
+    /// This machine's checkout key, read or made once; none when it can be neither read nor kept.
+    fn key(&self) -> Option<&CheckoutKey> {
+        self.key
+            .get_or_init(|| checkout_key(&self.state_base, &self.remote.principal()))
+            .as_ref()
+    }
+
     /// The token the checkout is named by on this machine, worked out once; none when the
-    /// machine has no id.
+    /// machine has no checkout key.
     fn token(&self) -> Option<&CheckoutToken> {
         self.token
-            .get_or_init(|| self.checkout.token(self.machine()?))
+            .get_or_init(|| self.checkout.token(self.key()?))
             .as_ref()
     }
 

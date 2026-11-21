@@ -892,6 +892,11 @@ async fn a_head_named_with_a_pull_request_is_kept_against_weaker_recordings_whil
         )
         .await
         .unwrap();
+    assert_eq!(
+        branch_of(&env, item).await,
+        from_pr("bob/42-refunds", "acme/widgets#7"),
+        "a claim in review is not fed by its checkout at all"
+    );
     name_branch(&env, &env.bob, item, "bob/42-named").await;
     assert!(recordings(&env, later).await.is_empty());
     assert_eq!(
@@ -979,4 +984,69 @@ async fn once_a_claim_leaves_review_a_named_branch_replaces_the_pull_requests_he
             Some(("bob/named".to_owned(), BranchSource::Named))
         );
     }
+}
+
+#[tokio::test]
+async fn a_second_head_dropped_while_the_first_holds_is_recorded_by_its_next_state_report() {
+    use crate::use_cases::{PrStateReport, ReportPrState};
+
+    let env = Env::with_settings(SETTINGS).await;
+    let item = env.item("gh:acme/widgets#42").await;
+    claim(&env, &env.bob, item, &[]).await;
+    review_head(&env, &env.bob, item, "acme/widgets#7", true, "bob/42-first").await;
+    assert_eq!(
+        branch_of(&env, item).await,
+        from_pr("bob/42-first", "acme/widgets#7")
+    );
+
+    let before = env.events().await.len();
+    let second = review_head(
+        &env,
+        &env.bob,
+        item,
+        "acme/widgets#8",
+        true,
+        "bob/42-second",
+    )
+    .await;
+    let repo = dibs_domain::repo::RepoId::implicit();
+    assert_eq!(
+        second.claim.claim.branch(&repo).map(ToString::to_string),
+        Some("bob/42-first".to_owned()),
+        "the answer shows the second head was not recorded"
+    );
+    assert!(recordings(&env, before).await.is_empty());
+
+    assert_eq!(
+        report(&env, "acme/widgets#7", merged()).await,
+        PrReportOutcome::StillInReview(item)
+    );
+    let claim = stored(&env, item).await.unwrap();
+    assert!(claim.state.records(&pr("acme/widgets#8")));
+    assert!(!claim.state.records(&pr("acme/widgets#7")));
+
+    let merged_at = env.events().await.len();
+    ReportPrState::new(&env.deps)
+        .execute(
+            &env.importer,
+            PrStateReport {
+                pr: pr("acme/widgets#8"),
+                mergeable: true,
+                head: Some(BranchName::parse("bob/42-second").unwrap()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_of(&env, item).await,
+        from_pr("bob/42-second", "acme/widgets#8"),
+        "the next state report carrying the second head records it"
+    );
+    assert_eq!(
+        recordings(&env, merged_at).await,
+        [(
+            "bob/42-second".to_owned(),
+            dibs_domain::radar::BranchSourceKind::PullRequest
+        )]
+    );
 }

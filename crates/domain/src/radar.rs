@@ -13,7 +13,7 @@ mod names;
 mod overlap;
 mod source;
 
-pub use checkout::{checkout_candidate, checkout_claim};
+pub use checkout::{SHARING_BEATS, checkout_candidate, checkout_claim, sharing_window};
 pub use contract::{Consumer, ConsumerError, Contract};
 pub use footprint::{
     Footprint, FootprintBase, FootprintDigest, FootprintEntry, FootprintOutcome, FootprintReport,

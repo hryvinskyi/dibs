@@ -27,12 +27,11 @@ use thiserror::Error;
 use dibs_domain::paths::RelPath;
 use dibs_domain::project::ProjectSlug;
 use dibs_domain::repo::{RemoteUrl, RepoId};
-use dibs_domain::report::MachineId;
 use dibs_domain::session::CheckoutToken;
 use dibs_domain::settings::{CheckoutRefused, ProjectSettings, RepoSpec};
 
 use crate::api::Me;
-use crate::checkout_token::checkout_token;
+use crate::checkout_token::{CheckoutKey, checkout_token};
 use crate::git_dirs::GitDirs;
 use crate::paths::{canonical, resolve_existing, resolved};
 use crate::server_url::ServerUrl;
@@ -305,10 +304,11 @@ impl Checkout {
         &self.root
     }
 
-    /// The token this checkout is named by on the machine `machine`: a digest of the machine's id
-    /// and the root as the file system resolves it, so every spelling of the root gives one token.
-    pub fn token(&self, machine: &MachineId) -> Option<CheckoutToken> {
-        checkout_token(machine, &resolved(&self.root)).ok()
+    /// The token this checkout is named by on the machine that keeps `key`: a digest of the root
+    /// as the file system resolves it, keyed with `key`, so every spelling of the root gives one
+    /// token.
+    pub fn token(&self, key: &CheckoutKey) -> Option<CheckoutToken> {
+        checkout_token(key, &resolved(&self.root)).ok()
     }
 
     /// The configuration file that governs the checkout.
@@ -958,12 +958,12 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&root, &link).unwrap();
         let config = checkout(Some("api")).config().clone();
-        let machine = MachineId::from_bits(7);
-        let real = Checkout::new(root.clone(), config.clone()).token(&machine);
-        let linked = Checkout::new(link, config.clone()).token(&machine);
+        let key = CheckoutKey::from_bytes([7; CheckoutKey::BYTES]);
+        let real = Checkout::new(root.clone(), config.clone()).token(&key);
+        let linked = Checkout::new(link, config.clone()).token(&key);
         assert!(real.is_some());
         assert_eq!(linked, real);
-        let other = Checkout::new(dir.path().join("web"), config).token(&machine);
+        let other = Checkout::new(dir.path().join("web"), config).token(&key);
         assert_ne!(other, real);
     }
 

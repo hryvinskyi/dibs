@@ -1001,7 +1001,7 @@ mod migrations {
         use dibs_domain::session::HostName;
         use dibs_domain::slot::Purpose;
         use dibs_domain::worktree::{
-            Holder, PoolId, PoolKey, WorktreeHold, WorktreeName, WorktreePool,
+            HoldItem, Holder, PoolId, PoolKey, WorktreeHold, WorktreeName, WorktreePool,
         };
         use time::OffsetDateTime;
 
@@ -1061,7 +1061,7 @@ mod migrations {
                 holder: Holder::Session(SessionId(31)),
                 host: HostName::parse("laptop").unwrap(),
                 purpose: Purpose::parse("fix the totals").unwrap(),
-                item: Some(ItemId(51)),
+                item: HoldItem::Named(ItemId(51)),
                 taken_at: OffsetDateTime::UNIX_EPOCH,
                 last_seen: OffsetDateTime::UNIX_EPOCH,
             }],
@@ -1202,8 +1202,13 @@ mod migrations {
              (1, 'same_file 51 52', 51), (1, 'same_file 51 52', 52);\n\
              INSERT INTO events (project_id, kind, payload, at) VALUES (1, 'branch_recorded', \
              '{{\"item\": 51, \"member\": 11, \"repo\": \"default\", \
-             \"branch\": \"alice/51-rates\"}}', 30);",
-            rows_at_deliveries()
+             \"branch\": \"alice/51-rates\"}}', 30);\n\
+             INSERT INTO worktree_holds (project_id, member_id, machine, pool, worktree, \
+             session_id, agent, host, purpose, item_id, taken_at, last_seen) VALUES \
+             (1, 11, '{laptop}', 'a1', 'worktree1', 31, NULL, 'laptop', 'fix the totals', 51, 0, 0), \
+             (1, 11, '{laptop}', 'a1', 'worktree2', 32, NULL, 'laptop', 'look around', NULL, 0, 0);",
+            rows_at_deliveries(),
+            laptop = format!("{:032x}", 1)
         );
         let (_dir, path) = database_at(13, &rows).await;
         let store = open(&path).await.unwrap();
@@ -1332,5 +1337,175 @@ mod migrations {
                 .is_err(),
             "a checkout of a missing session"
         );
+        for (what, bad) in [
+            (
+                "an item learned without an item",
+                "UPDATE worktree_holds SET item_learned = 1 WHERE worktree = 'worktree2'",
+            ),
+            (
+                "a flag neither 0 nor 1",
+                "UPDATE worktree_holds SET item_learned = 2 WHERE worktree = 'worktree1'",
+            ),
+        ] {
+            assert!(sqlx::query(bad).execute(&pool).await.is_err(), "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_holds_item_reads_as_named_from_before_and_keeps_whether_it_was_learned() {
+        use dibs_app::ports::StoreError;
+        use dibs_domain::ids::SessionId;
+        use dibs_domain::report::MachineId;
+        use dibs_domain::session::HostName;
+        use dibs_domain::slot::Purpose;
+        use dibs_domain::worktree::{
+            HoldItem, Holder, PoolId, PoolKey, WorktreeHold, WorktreeName, WorktreePool,
+        };
+        use time::OffsetDateTime;
+
+        let rows = format!(
+            "{}\n\
+             INSERT INTO worktree_holds (project_id, member_id, machine, pool, worktree, \
+             session_id, agent, host, purpose, item_id, taken_at, last_seen) VALUES \
+             (1, 11, '{laptop}', 'a1', 'worktree1', 31, NULL, 'laptop', 'fix the totals', 51, 0, 0), \
+             (1, 11, '{laptop}', 'a1', 'worktree2', 32, NULL, 'laptop', 'look around', NULL, 0, 0);",
+            rows_at_deliveries(),
+            laptop = format!("{:032x}", 1)
+        );
+        let (_dir, path) = database_at(13, &rows).await;
+        let store = open(&path).await.unwrap();
+        let project = ProjectId(1);
+        let key = PoolKey {
+            member: MemberId(11),
+            machine: MachineId::from_bits(1),
+            pool: PoolId::parse("a1").unwrap(),
+        };
+        let mut tx = store.begin().await.unwrap();
+        let before = tx.worktree_pool(project, &key).await.unwrap();
+        let items: Vec<(&str, HoldItem)> = before
+            .holds()
+            .iter()
+            .map(|hold| (hold.worktree.as_str(), hold.item))
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("worktree1", HoldItem::Named(ItemId(51))),
+                ("worktree2", HoldItem::Unknown),
+            ],
+            "only a take named an item before"
+        );
+        let hold = |worktree: &str, session: u64, item: HoldItem| WorktreeHold {
+            worktree: WorktreeName::parse(worktree).unwrap(),
+            holder: Holder::Session(SessionId(session)),
+            host: HostName::parse("laptop").unwrap(),
+            purpose: Purpose::parse("fix the totals").unwrap(),
+            item,
+            taken_at: OffsetDateTime::UNIX_EPOCH,
+            last_seen: OffsetDateTime::UNIX_EPOCH,
+        };
+        let learned = WorktreePool::new(
+            key.clone(),
+            vec![
+                hold("worktree1", 31, HoldItem::Named(ItemId(51))),
+                hold("worktree2", 32, HoldItem::Learned(ItemId(52))),
+            ],
+        )
+        .unwrap();
+        tx.put_worktree_pool(project, &learned).await.unwrap();
+        tx.commit().await.unwrap();
+        drop(store);
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.worktree_pool(project, &key).await.unwrap(),
+            learned,
+            "read back from the file"
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA ignore_check_constraints = ON")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE worktree_holds SET item_id = NULL WHERE worktree = 'worktree2'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert!(matches!(
+            tx.worktree_pool(project, &key).await,
+            Err(StoreError::Corrupt { what }) if what.starts_with("worktree_holds.item_learned")
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_claims_areas_read_as_declared_from_before_and_keep_what_an_edit_gained() {
+        use dibs_app::ports::StoreError;
+        use dibs_domain::claim::AreaOrigin;
+
+        let (_dir, path) = database_at(13, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let project = ProjectId(1);
+        let mut tx = store.begin().await.unwrap();
+        let claims = tx.claims(project).await.unwrap();
+        let billing = QualifiedArea::parse("default:billing").unwrap();
+        assert_eq!(claims[0].areas.origin(&billing), Some(AreaOrigin::Declared));
+        assert!(
+            claims.iter().all(|claim| claim.areas.gained().is_empty()),
+            "every area of before was declared"
+        );
+        let search = QualifiedArea::parse("default:search").unwrap();
+        let mut gaining = claims[0].clone();
+        gaining.areas.gain(search.clone());
+        tx.save_claim(project, &gaining).await.unwrap();
+        tx.commit().await.unwrap();
+        drop(store);
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let read = tx.claim(project, gaining.item).await.unwrap().unwrap();
+        assert_eq!(read, gaining, "read back from the file");
+        assert_eq!(read.areas.origin(&search), Some(AreaOrigin::Gained));
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for (what, bad) in [
+            ("no JSON", "'default:search'"),
+            ("no array", "'{}'"),
+            ("nothing", "NULL"),
+        ] {
+            let update = format!("UPDATE claims SET gained_areas = {bad} WHERE item_id = 51");
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{what}"
+            );
+        }
+        sqlx::query("UPDATE claims SET gained_areas = '[\"default:checkout\"]' WHERE item_id = 51")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert!(matches!(
+            tx.claim(project, ItemId(51)).await,
+            Err(StoreError::Corrupt { what }) if what.starts_with("claims.gained_areas")
+        ));
     }
 }

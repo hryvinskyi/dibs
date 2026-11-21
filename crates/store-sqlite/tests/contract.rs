@@ -115,6 +115,7 @@ mod contract {
         claims_are_kept_live_or_stale_and_replaced_per_item,
         a_claim_in_review_keeps_its_pull_requests_start_and_whether_more_follow,
         a_claim_keeps_the_branch_of_each_repository,
+        a_claim_keeps_which_of_its_areas_it_gained,
         session_checkouts_are_kept_per_checkout_read_by_member_and_time_and_forgotten,
         session_checkouts_reported_before_a_time_go_in_their_project_only,
         a_claim_keeps_its_kind_and_the_areas_it_waits_for,
@@ -253,7 +254,7 @@ mod contract {
             member,
             session,
             host: HostName::parse("laptop").unwrap(),
-            areas: areas(names),
+            areas: areas(names).into(),
             wide: None,
             claimed_at: at(10),
             renewed_at: at(11),
@@ -813,7 +814,7 @@ mod contract {
         let taken = Claim {
             member: BOB,
             session: BOB_LAPTOP,
-            areas: BTreeSet::new(),
+            areas: Default::default(),
             claimed_at: at(40),
             renewed_at: at(40),
             last_seen: at(40),
@@ -865,6 +866,32 @@ mod contract {
         tx.commit().await.unwrap();
         let mut tx = store.begin().await.unwrap();
         assert_eq!(tx.claim(A, THIRD).await.unwrap(), Some(working));
+    }
+
+    async fn a_claim_keeps_which_of_its_areas_it_gained(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let area = |name: &str| QualifiedArea::parse(name).unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let mut gaining = claim(FIRST, ALICE, ALICE_LAPTOP, &["api:billing"]);
+        gaining.areas.gain(area("api:search"));
+        gaining.areas.gain(area("web:checkout"));
+        tx.save_claim(A, &gaining).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let read = tx.claim(A, FIRST).await.unwrap().unwrap();
+        assert_eq!(read, gaining);
+        assert_eq!(read.areas.gained(), &areas(&["api:search", "web:checkout"]));
+        assert!(read.areas.declares(&area("api:billing")));
+        let mut declared = read;
+        declared.areas.declare(area("api:search"));
+        declared.areas.remove(&area("web:checkout"));
+        tx.save_claim(A, &declared).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let read = tx.claim(A, FIRST).await.unwrap().unwrap();
+        assert_eq!(read, declared, "a renewal's declaration replaces the gain");
+        assert!(read.areas.gained().is_empty());
+        assert_eq!(tx.claims(A).await.unwrap(), [declared]);
     }
 
     async fn a_claim_keeps_the_branch_of_each_repository(store: Arc<dyn Store>) {
@@ -1082,7 +1109,7 @@ mod contract {
         assert_eq!(tx.claim(A, SECOND).await.unwrap(), Some(debt.clone()));
         assert_eq!(tx.claims(A).await.unwrap(), vec![waiting.clone(), debt]);
         let handed = Claim {
-            areas: areas(&["web:checkout", "api:billing"]),
+            areas: areas(&["web:checkout", "api:billing"]).into(),
             pending: [(
                 QualifiedArea::parse("api:search").unwrap(),
                 PendingArea::waiting_for(SECOND),
@@ -2950,7 +2977,7 @@ mod contract {
             holder,
             host: HostName::parse("laptop").unwrap(),
             purpose: purpose("fix the invoice totals"),
-            item: None,
+            item: dibs_domain::worktree::HoldItem::Unknown,
             taken_at: at(10),
             last_seen: at(seen),
         }
@@ -2978,7 +3005,7 @@ mod contract {
         assert!(tx.worktree_pools(A).await.unwrap().is_empty());
         assert!(tx.busy_worktree_pools().await.unwrap().is_empty());
         let for_item = dibs_domain::worktree::WorktreeHold {
-            item: Some(FIRST),
+            item: dibs_domain::worktree::HoldItem::Learned(FIRST),
             ..worktree_hold("worktree3", agent(ALICE_LAPTOP, "agent-7f"), 40)
         };
         let alices = worktree_pool(
@@ -2990,7 +3017,10 @@ mod contract {
         );
         let bobs = worktree_pool(
             bob.clone(),
-            vec![worktree_hold("worktree2", Holder::Session(BOB_LAPTOP), 20)],
+            vec![dibs_domain::worktree::WorktreeHold {
+                item: dibs_domain::worktree::HoldItem::Named(FIRST),
+                ..worktree_hold("worktree2", Holder::Session(BOB_LAPTOP), 20)
+            }],
         );
         let daves = worktree_pool(
             dave.clone(),
@@ -3160,7 +3190,7 @@ mod contract {
                 worktree_pool(
                     alice.clone(),
                     vec![dibs_domain::worktree::WorktreeHold {
-                        item: Some(ItemId(999)),
+                        item: dibs_domain::worktree::HoldItem::Named(ItemId(999)),
                         ..worktree_hold("worktree1", Holder::Session(ALICE_LAPTOP), 1)
                     }],
                 ),
@@ -3170,7 +3200,7 @@ mod contract {
                 worktree_pool(
                     alice.clone(),
                     vec![dibs_domain::worktree::WorktreeHold {
-                        item: Some(GADGET),
+                        item: dibs_domain::worktree::HoldItem::Learned(GADGET),
                         ..worktree_hold("worktree1", Holder::Session(ALICE_LAPTOP), 1)
                     }],
                 ),

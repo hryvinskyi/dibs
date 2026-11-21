@@ -19,9 +19,10 @@ use crate::use_cases::worktrees::PoolScene;
 use crate::work::Work;
 
 /// The pool worktrees of a claim's member still held for the claim's item, by holds that have not
-/// gone silent. The pools are read only when the claim's branch in the repository asked about was
-/// learned from a pool worktree, the one source whose standing they decide; for any other source
-/// nothing is read and nothing is held.
+/// gone silent: holds whose item is the claim's now, named at the take or learned from an edit, so
+/// a hold that learns another item stops holding this one. The pools are read only when the
+/// claim's branch in the repository asked about was learned from a pool worktree, the one source
+/// whose standing they decide; for any other source nothing is read and nothing is held.
 pub(crate) struct HeldForItem(BTreeSet<WorktreeRef>);
 
 impl HeldForItem {
@@ -50,7 +51,7 @@ impl HeldForItem {
                     .pool
                     .holds()
                     .iter()
-                    .filter(|hold| hold.item == Some(claim.item))
+                    .filter(|hold| hold.item.id() == Some(claim.item))
                     .map(|hold| WorktreeRef::of(key, &hold.worktree)),
             );
         }

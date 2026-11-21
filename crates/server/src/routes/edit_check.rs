@@ -50,9 +50,14 @@ struct CheckAnswer {
 /// when the edits were attributed to it and no other checkout of the session and no other session
 /// in this checkout stand in the way; one that names none records no branch. `worktree`,
 /// `{machine, pool, name}`, names the worktree of the caller's pool the edits are made in: a check
-/// that reserves gives its hold, when held under the check's session, not silent and naming no
-/// item, the item of the one claim the edits were attributed to, and records `branch` on the
-/// caller's live claim on the item the hold names, learned from that worktree.
+/// that reserves, when the hold is held under the check's session and not silent and the edits
+/// were attributed to exactly one claim, which that session took or last renewed and which holds
+/// an edited area, names it wide or was granted edits in it — not one the edits went to only as
+/// the caller's newest claim — gives a hold whose take named no item that claim's item, replacing
+/// one it learned before, and records
+/// `branch` on the caller's live claim on the item the hold names, learned from that worktree. A
+/// `branch` is read only with its `checkout`: a check naming a worktree and no checkout may teach
+/// the hold its item, and records no branch.
 ///
 /// # Errors
 /// `forbidden` for an integration;

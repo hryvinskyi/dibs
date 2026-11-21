@@ -9,7 +9,7 @@ use dibs_domain::report::MachineId;
 use dibs_domain::session::HostName;
 use dibs_domain::slot::Purpose;
 use dibs_domain::worktree::{
-    AgentKey, Holder, PoolId, PoolKey, WorktreeHold, WorktreeName, WorktreePool,
+    AgentKey, HoldItem, Holder, PoolId, PoolKey, WorktreeHold, WorktreeName, WorktreePool,
 };
 
 use crate::SqliteTx;
@@ -22,7 +22,7 @@ const TABLE: &str = "worktree_holds";
 macro_rules! columns {
     () => {
         "project_id, member_id, machine, pool, worktree, session_id, agent, host, purpose, \
-         item_id, taken_at, last_seen"
+         item_id, item_learned, taken_at, last_seen"
     };
 }
 
@@ -45,10 +45,22 @@ fn hold(f: &Fields<'_>) -> StoreResult<WorktreeHold> {
         holder,
         host: f.parse("host", HostName::parse)?,
         purpose: f.parse("purpose", Purpose::parse)?,
-        item: f.opt_number("item_id")?.map(ItemId),
+        item: item(f)?,
         taken_at: f.time("taken_at")?,
         last_seen: f.time("last_seen")?,
     })
+}
+
+/// The item a hold is for, and whether it was learned or named; a hold with no item that says it
+/// learned one is a corrupt record.
+fn item(f: &Fields<'_>) -> StoreResult<HoldItem> {
+    let item = f.opt_number("item_id")?.map(ItemId);
+    match (item, f.flag("item_learned")?) {
+        (None, false) => Ok(HoldItem::Unknown),
+        (Some(item), false) => Ok(HoldItem::Named(item)),
+        (Some(item), true) => Ok(HoldItem::Learned(item)),
+        (None, true) => Err(f.bad("item_learned", "an item learned without an item")),
+    }
 }
 
 /// The pool of these holds; rows that break a pool's rules are a corrupt record.
@@ -138,11 +150,12 @@ impl WorktreeRows for SqliteTx {
         .bind(key.pool.as_str());
         self.run(clear).await?;
         for hold in pool.holds() {
-            let item = hold.item.map(|item| int(item.get())).transpose()?;
+            let item = hold.item.id().map(|item| int(item.get())).transpose()?;
+            let learned = matches!(hold.item, HoldItem::Learned(_));
             let statement = sqlx::query(concat!(
                 "INSERT INTO worktree_holds (",
                 columns!(),
-                ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                ") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ))
             .bind(project)
             .bind(member)
@@ -154,6 +167,7 @@ impl WorktreeRows for SqliteTx {
             .bind(hold.host.as_str())
             .bind(hold.purpose.as_str())
             .bind(item)
+            .bind(i64::from(learned))
             .bind(nanos(hold.taken_at)?)
             .bind(nanos(hold.last_seen)?);
             self.run(statement).await?;

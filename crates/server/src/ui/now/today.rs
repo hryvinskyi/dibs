@@ -102,7 +102,7 @@ pub(crate) fn date(now: OffsetDateTime, offset: UtcOffset) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use time::Duration;
@@ -154,7 +154,7 @@ mod tests {
                     member: MemberId(1),
                     session: SessionId(1),
                     host: HostName::parse("laptop").unwrap(),
-                    areas: BTreeSet::new(),
+                    areas: Default::default(),
                     wide: None,
                     claimed_at: at,
                     renewed_at: at,

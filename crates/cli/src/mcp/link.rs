@@ -689,6 +689,7 @@ mod tests {
             agent: agent.map(|agent| AgentKey::parse(agent).unwrap()),
             purpose: None,
             item: None,
+            item_learned: false,
             taken_at: OffsetDateTime::UNIX_EPOCH,
             reset_done: true,
         }

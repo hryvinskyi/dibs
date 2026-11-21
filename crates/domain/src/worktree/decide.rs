@@ -6,15 +6,20 @@
 //! only moves forward; a hold ends when it is released, when its session ends, when its member
 //! leaves the project, or when it has been silent for longer than its kind of holder may be.
 
+use std::collections::BTreeMap;
+
 use thiserror::Error;
 use time::OffsetDateTime;
 
+use crate::edit::Attribution;
 use crate::event::{EventKind, WorktreeReleaseCause, WorktreeReleased, WorktreeTaken};
 use crate::ids::{ItemId, MemberId, SessionId};
 use crate::session::HostName;
 use crate::slot::Purpose;
 use crate::worktree::name::WorktreeName;
-use crate::worktree::state::{Holder, Silence, WorktreeHold, WorktreeHolder, WorktreePool};
+use crate::worktree::state::{
+    HoldItem, Holder, Silence, WorktreeHold, WorktreeHolder, WorktreePool,
+};
 
 /// The pool after a transition, the events it records, and its answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,8 +60,11 @@ pub struct TakeWorktree {
     pub host: HostName,
     /// Why.
     pub purpose: Purpose,
-    /// The work item, when one is named.
-    pub item: Option<ItemId>,
+    /// The work item of a new hold, and how the hold comes to it: an item the take names is the
+    /// hold's until the hold ends, whatever its edits are attributed to; a learned item is the
+    /// hold's until an edit of its session teaches it another. A holder that holds a worktree
+    /// already keeps the item its hold has.
+    pub item: HoldItem,
 }
 
 /// What a take came to.
@@ -106,11 +114,20 @@ pub struct WorktreeBeat {
     pub seen_at: OffsetDateTime,
 }
 
+/// A hold a beat kept: its worktree and holder, and the work item it is for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptHold {
+    /// The worktree and its holder.
+    pub held: WorktreeHolder,
+    /// The item the hold is for, and how it came to it.
+    pub item: HoldItem,
+}
+
 /// What a batch of beats came to: each named worktree and holder once, in the order first named.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Beaten {
-    /// The pairs that hold: their holds were seen.
-    pub kept: Vec<WorktreeHolder>,
+    /// The pairs that hold, each with its hold's item: their holds were seen.
+    pub kept: Vec<KeptHold>,
     /// The pairs that do not: the worktree is free or another holder has it.
     pub unknown: Vec<WorktreeHolder>,
 }
@@ -123,17 +140,44 @@ pub struct EditInWorktree {
     pub worktree: WorktreeName,
     /// The session the edit came from.
     pub session: SessionId,
-    /// The one work item the edit was attributed to; `None` when it was attributed to none, or to
-    /// several.
-    pub item: Option<ItemId>,
+    /// The work items the edit was attributed to, each with the session that took or last renewed
+    /// its claim and how the edit came to it.
+    pub attributed: BTreeMap<ItemId, Attributed>,
+}
+
+/// One claim an edit was attributed to: whose it is and how the edit came to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Attributed {
+    /// The session that took or last renewed the claim.
+    pub session: SessionId,
+    /// Whether the edit's area named the claim, or the edit went to it as the member's target.
+    pub by: Attribution,
+}
+
+impl EditInWorktree {
+    /// The item the edit teaches a hold under `session`: the one item it was attributed to, when
+    /// that item's claim is the session's own and the edit's area named it. An edit attributed to
+    /// no item, to several, to a claim of another session, or to a claim it reached only as the
+    /// member's target teaches nothing.
+    fn teaches(&self, session: SessionId) -> Option<ItemId> {
+        let mut attributed = self.attributed.iter();
+        match (attributed.next(), attributed.next()) {
+            (Some((item, of)), None) if of.session == session && of.by == Attribution::Area => {
+                Some(*item)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Decides what an edit made in a worktree teaches its hold. When the worktree is held under the
 /// edit's session — by the session itself or by one of its agents — by a hold that is not silent
-/// at `now` under `silence`, a hold that names no item takes the edit's one item, and a hold that
-/// names one keeps it. Answers the item the hold names after the edit, which is `None` when the
-/// worktree is free, held under another session, or held by a silent hold, and then nothing
-/// changes. Learning an item records no event: a take records none of its item either.
+/// at `now` under `silence`, and the edit teaches that session an item (one item, the session's
+/// own claim, which the edit's area named), a hold whose item the take named keeps it, and any
+/// other hold learns the item taught, replacing an item it learned before.
+/// Answers the item the hold names after the edit, which is `None` when the worktree is free, held
+/// under another session, or held by a silent hold, and then nothing changes. Learning an item
+/// records no event: a take records none of its item either.
 pub fn decide_edit_in_worktree(
     pool: &WorktreePool,
     edit: &EditInWorktree,
@@ -145,10 +189,10 @@ pub fn decide_edit_in_worktree(
         .hold_mut(&edit.worktree)
         .filter(|hold| hold.holder.session() == edit.session && !hold.is_silent(now, silence));
     let item = hold.and_then(|hold| {
-        if hold.item.is_none() {
-            hold.item = edit.item;
+        if let Some(taught) = edit.teaches(hold.holder.session()) {
+            hold.item = hold.item.taught(taught);
         }
-        hold.item
+        hold.item.id()
     });
     Transition {
         pool: next,
@@ -257,9 +301,10 @@ pub fn decide_release(
 }
 
 /// Decides a batch of beats: a hold is seen at a beat's time when the beat names its worktree and
-/// its holder and the time is later than its last sight. A beat for a free worktree, or for a
-/// worktree another holder has, changes nothing and is answered as unknown, so the machine that
-/// sent it can take the worktree again.
+/// its holder and the time is later than its last sight, and is answered as kept with the item it
+/// is for, so the machine that sent the beat can take it again for that item should it end. A beat
+/// for a free worktree, or for a worktree another holder has, changes nothing and is answered as
+/// unknown, so the machine that sent it can take the worktree again.
 pub fn decide_beat(pool: &WorktreePool, beats: &[WorktreeBeat]) -> Transition<Beaten> {
     let mut next = pool.clone();
     let mut answer = Beaten::default();
@@ -271,15 +316,21 @@ pub fn decide_beat(pool: &WorktreePool, beats: &[WorktreeBeat]) -> Transition<Be
         let held = next
             .hold_mut(&beat.worktree)
             .filter(|hold| hold.holder == beat.holder);
-        let list = match held {
+        match held {
             Some(hold) => {
                 hold.last_seen = hold.last_seen.max(beat.seen_at);
-                &mut answer.kept
+                if !answer.kept.iter().any(|kept| kept.held == pair) {
+                    answer.kept.push(KeptHold {
+                        held: pair,
+                        item: hold.item,
+                    });
+                }
             }
-            None => &mut answer.unknown,
-        };
-        if !list.contains(&pair) {
-            list.push(pair);
+            None => {
+                if !answer.unknown.contains(&pair) {
+                    answer.unknown.push(pair);
+                }
+            }
         }
     }
     Transition {
