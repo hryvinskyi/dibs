@@ -195,7 +195,8 @@ impl Captured {
 }
 
 #[tokio::test]
-async fn a_project_whose_settings_do_not_parse_is_retained_and_logged_as_a_warning_not_a_failure() {
+async fn a_project_whose_settings_do_not_parse_is_retained_like_any_other_with_nothing_to_warn_of()
+{
     let place = Place::new();
     let served = Served::new(&place).await;
     served.note_to_self().await;
@@ -250,10 +251,8 @@ async fn a_project_whose_settings_do_not_parse_is_retained_and_logged_as_a_warni
     assert_eq!(said("ERROR"), Vec::<&str>::new(), "nothing failed");
     assert_eq!(
         said("WARN"),
-        [
-            "the retention was applied to a project whose settings do not parse, so the checkouts \
-             its sessions reported were kept"
-        ]
+        Vec::<&str>::new(),
+        "the retention reads no settings"
     );
     served.store.close().await;
 }

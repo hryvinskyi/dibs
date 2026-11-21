@@ -38,9 +38,9 @@ pub struct HeartbeatOutcome {
 /// whether or not the checkout is on a branch. When the checkout is on a branch of a repository the
 /// project lists, that branch, learned from the checkout, is recorded on one claim at most: the
 /// one live claim its session took or last renewed and works on, and only while the session
-/// reported no other checkout and no other session of the member reported this one, within a few
-/// of the project's heartbeat intervals ([`sharing_window`](dibs_domain::radar::sharing_window)).
-/// A branch the claim learned from a stronger source that still holds is kept. A `BranchRecorded`
+/// reported no other checkout and no other session of the member reported this one, within the
+/// last hour ([`SHARED_FOR`](dibs_domain::radar::SHARED_FOR)). A branch the claim learned from a
+/// stronger source that still holds is kept. A `BranchRecorded`
 /// event marks a change of branch, and the claim's footprint of the repository, which measured the
 /// branch before, goes with what it made; a change of source alone is stored and nothing more. A
 /// heartbeat that names no checkout stores none and records no branch.

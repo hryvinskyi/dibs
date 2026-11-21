@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use dibs_domain::event::{EventKind, Pruned};
-use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ProjectId, ThreadId};
+use dibs_domain::radar::SHARED_FOR;
 use dibs_domain::report::ReportDay;
 use dibs_domain::retention::{Cutoffs, Keeps, PruneCounts, thread_expired};
 
@@ -23,10 +23,6 @@ pub struct PruneReport {
     pub ui_sessions: u64,
     /// The projects the pass could not apply, each with why; the others were applied all the same.
     pub failed: Vec<(ProjectId, AppError)>,
-    /// The projects whose retention was applied but whose sessions' reported checkouts were all
-    /// kept, each with why: their stored settings, which say how long a reported checkout counts,
-    /// do not parse.
-    pub checkouts_kept: Vec<(ProjectId, AppError)>,
 }
 
 /// Removes, in every project and each project in a transaction of its own, the conversations quiet
@@ -35,16 +31,13 @@ pub struct PruneReport {
 /// the log keeps, with the reports of days before them and what integrations last said of pull
 /// requests before them; then records what went in one `pruned` event per project that lost
 /// anything. A reader whose cursor is behind what went is told so. The checkouts sessions reported
-/// longer ago than the project's `stale_after` go too, without counting in that event: no rule
-/// reads them any more. When the project's stored settings do not parse, its reported checkouts
-/// are kept, everything else goes all the same, and the report names the project among those
-/// whose checkouts were kept, not among the failed. Browser
-/// sessions past their end go as well. The service runs it once a day; it acts for nobody.
+/// longer ago than a report counts ([`SHARED_FOR`]) go too, without counting in that event: no
+/// rule reads them any more. Browser sessions past their end go as well. The service runs it once
+/// a day; it acts for nobody.
 pub struct Prune {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
     notifier: Arc<dyn EventNotifier>,
-    hot_rules: Arc<HotRuleRegistry>,
 }
 
 impl Prune {
@@ -54,7 +47,6 @@ impl Prune {
             store: deps.store.clone(),
             clock: deps.clock.clone(),
             notifier: deps.notifier.clone(),
-            hot_rules: deps.hot_rules.clone(),
         }
     }
 
@@ -76,12 +68,9 @@ impl Prune {
         let cutoffs = Cutoffs::at(now);
         for project in projects {
             match self.prune(project, &cutoffs).await {
-                Ok(pruned) => {
-                    if !pruned.counts.is_empty() {
-                        report.pruned.push((project, pruned.counts));
-                    }
-                    if let Some(error) = pruned.checkouts_kept {
-                        report.checkouts_kept.push((project, error));
+                Ok(counts) => {
+                    if !counts.is_empty() {
+                        report.pruned.push((project, counts));
                     }
                 }
                 Err(error) => report.failed.push((project, error)),
@@ -90,11 +79,7 @@ impl Prune {
         Ok(report)
     }
 
-    async fn prune(
-        &self,
-        project: ProjectId,
-        cutoffs: &Cutoffs,
-    ) -> Result<ProjectPruned, AppError> {
+    async fn prune(&self, project: ProjectId, cutoffs: &Cutoffs) -> Result<PruneCounts, AppError> {
         let now = self.clock.now();
         let mut work = Work::begin_unattended(&*self.store, project).await?;
         let mut counts = PruneCounts::default();
@@ -129,34 +114,15 @@ impl Prune {
             .await?;
         work.delete_pr_states_before(project, cutoffs.events)
             .await?;
-        let checkouts_kept = match work.project_settings(&self.hot_rules).await {
-            Ok(settings) => {
-                work.delete_session_checkouts_before(project, now - settings.stale_after())
-                    .await?;
-                None
-            }
-            Err(error @ AppError::StoredSettings(_)) => Some(error),
-            Err(error) => return Err(error),
-        };
+        work.delete_session_checkouts_before(project, now - SHARED_FOR)
+            .await?;
         if !counts.is_empty() {
             work.record(now, EventKind::Pruned(Pruned { counts }))
                 .await?;
         }
         work.commit(&*self.notifier).await?;
-        Ok(ProjectPruned {
-            counts,
-            checkouts_kept,
-        })
+        Ok(counts)
     }
-}
-
-/// What one project's pass removed, and why it kept what it could not decide on.
-struct ProjectPruned {
-    /// What went.
-    counts: PruneCounts,
-    /// Why the checkouts sessions reported were kept: the stored settings that say how long they
-    /// count do not parse.
-    checkouts_kept: Option<AppError>,
 }
 
 #[cfg(test)]
@@ -388,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_checkout_reported_longer_ago_than_stale_after_goes_and_a_recent_one_stays() {
+    async fn a_checkout_reported_longer_ago_than_an_hour_goes_and_one_within_the_hour_stays() {
         use crate::use_cases::Heartbeat;
         use crate::use_cases::testing::{in_checkout, session};
 
@@ -403,12 +369,12 @@ mod tests {
             )
             .await
             .unwrap();
-        env.advance(Duration::hours(23));
+        env.advance(Duration::minutes(2));
         heartbeat
             .execute(&env.bob.actor, other, Some(&in_checkout('b', None)))
             .await
             .unwrap();
-        env.advance(Duration::hours(2));
+        env.advance(Duration::minutes(59));
         let before = env.events().await.len();
         let report = Prune::new(&env.deps).execute().await.unwrap();
         assert!(report.failed.is_empty());
@@ -430,7 +396,7 @@ mod tests {
         assert_eq!(
             kept,
             [(other, "b".repeat(32))],
-            "the project keeps them for 24 hours"
+            "a report counts for an hour: the one 59 minutes old stays, the one 61 minutes old went"
         );
     }
 
@@ -446,8 +412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_that_do_not_parse_keep_the_reported_checkouts_and_say_so_apart_from_failures()
-    {
+    async fn settings_that_do_not_parse_change_nothing_the_retention_removes() {
         use crate::use_cases::Heartbeat;
         use crate::use_cases::testing::in_checkout;
 
@@ -469,16 +434,6 @@ mod tests {
             "the retention ran: {:?}",
             report.failed
         );
-        let kept: Vec<ProjectId> = report
-            .checkouts_kept
-            .iter()
-            .map(|(project, _)| *project)
-            .collect();
-        assert_eq!(kept, [env.project]);
-        assert!(matches!(
-            report.checkouts_kept[0].1,
-            AppError::StoredSettings(_)
-        ));
         assert_eq!(report.pruned.len(), 1, "the retention was applied");
         let (project, counts) = report.pruned[0];
         assert_eq!(project, env.project);
@@ -494,7 +449,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(kept.len(), 1, "how long they count is not known");
+        assert!(
+            kept.is_empty(),
+            "a report counts for an hour whatever the stored settings say"
+        );
     }
 
     #[tokio::test]

@@ -265,7 +265,7 @@ checkpointed.
 | An event of the log | 90 days |
 | A day's report of a member's machine | as long as the events of that day (90 days) |
 | What an integration last said of a pull request | 90 days after it last reported the pull request |
-| That a session works in a checkout | the project's `stale_after` after the session last reported it; until the session ends, when it ends first |
+| That a session works in a checkout | an hour after the session last reported it, as long as the report counts; until the session ends, when it ends first |
 | A browser session | 12 hours after it was last used |
 | A snapshot | the newest `DIBS_SNAPSHOT_KEEP`, and of those none older than 30 days, but the newest always |
 
@@ -276,13 +276,10 @@ the start (`after=0`). An admin deletes a conversation at once with `dibs admin 
 mistake): its messages go, and the log keeps a `thread_deleted` event with its id alone.
 
 When a project's stored settings no longer parse (a rule kind this build does not know, after a rollback for example),
-the retention still removes that project's old conversations, events, machine reports and pull-request states, keeps
-the checkouts its sessions reported, because the settings say how long those count, and logs at `WARN` *the retention
-was applied to a project whose settings do not parse, so the checkouts its sessions reported were kept* until the
-settings are applied again. An `ERROR` *the retention could not be applied to a project* means the retention did not
-run for that project. Pool beats
-keep their holds alive and pull-request state reports keep recording the state, but neither records a branch. Most
-other requests for that project fail with an internal error meanwhile.
+the retention reads no settings and runs for that project as for any other; an `ERROR` *the retention could not be
+applied to a project* means it did not run for that project. Pool beats keep their holds alive and pull-request state
+reports keep recording the state, but neither records a branch. Most other requests for that project fail with an
+internal error meanwhile.
 
 ## Snapshots
 

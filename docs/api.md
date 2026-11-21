@@ -293,8 +293,8 @@ the repository the checkout is of and the branch it is on; a checkout on a detac
 A heartbeat that names its checkout stores that the session reported working there now, on a branch or not. When it is
 on a branch of a repository the project lists, the branch is recorded, learned from the checkout, on one claim at
 most: the one live claim this session took or last renewed and works on (not in review), and only while, within the
-last three heartbeat intervals (`heartbeat_every`), the session reported no other checkout and no other session of the
-member reported this one (see [Branches and overlaps](#branches-and-overlaps)). A heartbeat that names no checkout
+last hour, the session reported no other checkout and no other session of the member reported this one (see
+[Branches and overlaps](#branches-and-overlaps)). A heartbeat that names no checkout
 stores none and records no branch; one that sends `repo` and `branch` without `checkout`, as a client older than the
 checkout token does, has them checked and then ignored. Refusals add `invalid_request` for a malformed `checkout`, a
 malformed `repo` (whether or not a `branch` comes with it) or `branch`, or a `branch` without `repo`.
@@ -742,15 +742,17 @@ carries the `source`, marks each change of branch. What records it, strongest fi
    worktree as a source that holds. An item named when the worktree was taken is never replaced;
 3. `named`: a branch the claim named when it was taken or renewed (`branches` of `POST /v1/items/{id}/claim`);
 4. `checkout`: the branch of the checkout a session works in, sent by a heartbeat or an edit check that reserves, under
-   three conditions judged within the last three heartbeat intervals (`heartbeat_every`: 3 minutes by default, 45 at
-   most): the session took or last renewed exactly one live claim
-   it works on (a claim in review does not count), and for an edit check the edits were attributed to that claim; the
-   session reported no other checkout (an agent of it editing in a worktree is another); and no other session of the
-   member reported this checkout. Several sessions in one checkout, whose branch changes under all of them, say nothing
-   of which claim the branch is for, and record nothing. A claim is live within the project's `stale_after` as ever;
-   the shorter window applies to the reports alone, so a session that crashed, moved to another checkout or ended
-   without its host saying so stops blocking the next session in its checkout after a few beats. A session sharing
-   the checkout that sends no heartbeat and no edit check for that long is not seen either.
+   three conditions judged within the last hour: the session took or last renewed exactly one live claim it works on
+   (a claim in review does not count), and for an edit check the edits were attributed to that claim; the session
+   reported no other checkout (an agent of it editing in a worktree is another); and no other session of the member
+   reported this checkout. Several sessions in one checkout, whose branch changes under all of them, say nothing of
+   which claim the branch is for, and record nothing. A session reports nothing while it waits on one long tool call or
+   on its person, so its report counts for an hour: a session silent for less than that still shares the checkout. A
+   claim is live within the project's `stale_after` as ever; the hour applies to the reports alone, so a session that
+   crashed, moved to another checkout or ended without its host saying so stops blocking the next session in its
+   checkout an hour after its last report. A session sharing the checkout that sends no heartbeat and no edit check for
+   longer than an hour is not seen either, and the branch is then recorded as if the checkout were the session's alone:
+   name the branch (`branches`) where several sessions share a checkout.
 
 A weaker source never replaces a stronger one while the stronger one holds: a pull request's head while the claim is in
 review and records that pull request, a worktree's branch while the worktree is held for the item by a hold that has

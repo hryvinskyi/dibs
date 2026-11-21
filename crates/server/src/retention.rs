@@ -12,9 +12,7 @@ use crate::stream::StopSignal;
 pub const RETAIN_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Runs one pass at once and then one every `every` until `stop` is given. A project that fails is
-/// logged as an error and the others are applied; a project whose retention was applied with its
-/// sessions' reported checkouts kept, because its settings do not parse, is logged as a warning. A
-/// pass already running when the stop comes is finished first.
+/// logged and the others are applied; a pass already running when the stop comes is finished first.
 pub async fn run_retention(app: Arc<UseCases>, every: Duration, mut stop: StopSignal) {
     tracing::info!(every_s = every.as_secs(), "the retention is scheduled");
     loop {
@@ -22,9 +20,6 @@ pub async fn run_retention(app: Arc<UseCases>, every: Duration, mut stop: StopSi
             Ok(report) => {
                 for (project, error) in &report.failed {
                     tracing::error!(project = %project, code = error.code(), error = ?error, "the retention could not be applied to a project");
-                }
-                for (project, error) in &report.checkouts_kept {
-                    tracing::warn!(project = %project, code = error.code(), error = ?error, "the retention was applied to a project whose settings do not parse, so the checkouts its sessions reported were kept");
                 }
                 for (project, counts) in &report.pruned {
                     tracing::info!(

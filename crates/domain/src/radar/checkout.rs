@@ -5,26 +5,21 @@
 //! says where a claim's work is only when nothing else can be working there: the session works on
 //! one claim, reports no other checkout, and no other session of the member reports this one.
 //! Whether another session is there is known only from what it reported lately, so a report counts
-//! for a few heartbeat intervals ([`SHARING_BEATS`]), not for as long as a claim stays live.
+//! for an hour ([`SHARED_FOR`]), not for as long as a claim stays live.
 
 use time::Duration;
 
 use crate::claim::Claim;
 use crate::session::SessionCheckout;
 
-/// How many of the project's heartbeat intervals a session's report of a checkout counts for when
-/// deciding whether the checkout is shared. A session reports its checkout with its heartbeats and
-/// its edit checks, so one that misses a beat or two still counts as present; a report older than
-/// that, from a session that crashed, moved to another checkout or ended without its host saying
-/// so, no longer keeps the next session in that checkout from recording its branch. A session
-/// sharing the checkout that reports nothing for that long is missed in the same way.
-pub const SHARING_BEATS: i32 = 3;
-
-/// How far back, from a report, the reports that can make a checkout shared reach: [`SHARING_BEATS`]
-/// times the project's heartbeat interval `heartbeat_every`.
-pub fn sharing_window(heartbeat_every: Duration) -> Duration {
-    heartbeat_every * SHARING_BEATS
-}
+/// How long a session's report of a checkout counts when deciding whether the checkout is shared.
+/// A session reports its checkout with its heartbeats and its edit checks, and reports nothing
+/// while it waits on one long tool call or on its person, so it still counts as present an hour
+/// after its last report. A report older than that, from a session that crashed, moved to another
+/// checkout or ended without its host saying so, no longer keeps the next session in that checkout
+/// from recording its branch; a session sharing the checkout that reports nothing for longer is
+/// missed in the same way.
+pub const SHARED_FOR: Duration = Duration::hours(1);
 
 /// The claim a session's checkout could feed its branch to before the other sessions' checkouts
 /// are known: the one live claim, among `claims`, that the session of `reported` took or last
@@ -48,18 +43,17 @@ pub fn checkout_candidate<'a>(
 /// The claim the checkout of `reported` records its branch on, if any: the session's one claim
 /// live within `stale_after` that it works on ([`checkout_candidate`]), provided that, among
 /// `checkouts`, the session reported no other checkout and no other session of the same member
-/// reported this one. Only reports made within the [`sharing_window`] of `heartbeat_every` before
-/// the time of `reported` count; another member's sessions never do, since a checkout's token tells
-/// checkouts apart only within one member.
+/// reported this one. Only reports made within [`SHARED_FOR`] before the time of `reported` count;
+/// another member's sessions never do, since a checkout's token tells checkouts apart only within
+/// one member.
 pub fn checkout_claim<'a>(
     claims: &'a [Claim],
     reported: &SessionCheckout,
     checkouts: &[SessionCheckout],
     stale_after: Duration,
-    heartbeat_every: Duration,
 ) -> Option<&'a Claim> {
     let claim = checkout_candidate(claims, reported, stale_after)?;
-    let since = reported.reported_at - sharing_window(heartbeat_every);
+    let since = reported.reported_at - SHARED_FOR;
     let shared = checkouts
         .iter()
         .filter(|other| other.member == reported.member && other.reported_at >= since)
@@ -82,7 +76,6 @@ mod tests {
     use crate::testing::{ALICE, BOB, at, claim};
 
     const STALE: Duration = Duration::hours(24);
-    const BEAT: Duration = Duration::minutes(1);
 
     fn token(digit: char) -> CheckoutToken {
         CheckoutToken::parse(&digit.to_string().repeat(32)).unwrap()
@@ -116,7 +109,7 @@ mod tests {
         reported: &SessionCheckout,
         checkouts: &[SessionCheckout],
     ) -> Option<u64> {
-        checkout_claim(claims, reported, checkouts, STALE, BEAT).map(|claim| claim.item.0)
+        checkout_claim(claims, reported, checkouts, STALE).map(|claim| claim.item.0)
     }
 
     #[test]
@@ -177,60 +170,37 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_three_heartbeat_intervals() {
-        assert_eq!(sharing_window(Duration::minutes(1)), Duration::minutes(3));
-        assert_eq!(sharing_window(Duration::minutes(15)), Duration::minutes(45));
-    }
-
-    #[test]
-    fn another_sessions_report_older_than_the_window_blocks_nothing_and_one_within_it_blocks() {
+    fn another_sessions_report_older_than_an_hour_blocks_nothing_and_one_within_it_blocks() {
         let claims = [taken(1, 7), taken(2, 8)];
         let now = report(7, ALICE, 'a', 2000);
-        let window = sharing_window(BEAT).whole_minutes();
-        let gone = report(8, ALICE, 'a', 2000 - window - 1);
+        let gone = report(8, ALICE, 'a', 2000 - 61);
         assert_eq!(
             fed(&claims, &now, &[now.clone(), gone]),
             Some(1),
-            "a session quiet for longer than the window, though its claim is live"
+            "a session quiet for longer than an hour, though its claim is live"
         );
-        let edge = report(8, ALICE, 'a', 2000 - window);
+        let edge = report(8, ALICE, 'a', 2000 - 60);
         assert_eq!(
             fed(&claims, &now, &[edge]),
             None,
-            "exactly the window ago still counts"
+            "exactly an hour ago still counts"
         );
-        let missed_a_beat = report(8, ALICE, 'a', 2000 - 2);
-        assert_eq!(fed(&claims, &now, &[missed_a_beat]), None);
+        let waiting = report(8, ALICE, 'a', 2000 - 45);
+        assert_eq!(
+            fed(&claims, &now, &[waiting]),
+            None,
+            "a session silent through a long tool call or while it waits on its person still shares"
+        );
     }
 
     #[test]
-    fn the_sessions_own_report_of_another_checkout_follows_the_same_window() {
+    fn the_sessions_own_report_of_another_checkout_counts_for_an_hour_too() {
         let claims = [taken(1, 7)];
         let now = report(7, ALICE, 'a', 2000);
-        let window = sharing_window(BEAT).whole_minutes();
-        let left = report(7, ALICE, 'b', 2000 - window - 1);
+        let left = report(7, ALICE, 'b', 2000 - 61);
         assert_eq!(fed(&claims, &now, &[now.clone(), left]), Some(1));
-        let edge = report(7, ALICE, 'b', 2000 - window);
+        let edge = report(7, ALICE, 'b', 2000 - 60);
         assert_eq!(fed(&claims, &now, &[now.clone(), edge]), None);
-    }
-
-    #[test]
-    fn the_window_follows_the_projects_heartbeat_interval() {
-        let claims = [taken(1, 7), taken(2, 8)];
-        let now = report(7, ALICE, 'a', 2000);
-        let sharer = report(8, ALICE, 'a', 2000 - 10);
-        let slow = Duration::minutes(5);
-        assert_eq!(
-            checkout_claim(&claims, &now, std::slice::from_ref(&sharer), STALE, slow)
-                .map(|claim| claim.item.0),
-            None,
-            "two beats missed at five minutes a beat"
-        );
-        assert_eq!(
-            fed(&claims, &now, &[sharer]),
-            Some(1),
-            "ten at one a minute"
-        );
     }
 
     #[test]

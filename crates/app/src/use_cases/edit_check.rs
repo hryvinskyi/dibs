@@ -109,9 +109,9 @@ impl EditVerdicts {
 /// now. When the checkout is on a branch, that branch, learned from the checkout, is recorded on
 /// one claim at most: the one live claim the session took or last renewed and works on, when the
 /// edits were attributed to it, the session reported no other checkout and no other session of
-/// the member reported this one, within a few of the project's heartbeat intervals
-/// ([`sharing_window`](dibs_domain::radar::sharing_window)). A branch the claim learned from a
-/// stronger source that still holds is kept. A `BranchRecorded` event marks a change of branch,
+/// the member reported this one, within the last hour
+/// ([`SHARED_FOR`](dibs_domain::radar::SHARED_FOR)). A branch the claim learned from a stronger
+/// source that still holds is kept. A `BranchRecorded` event marks a change of branch,
 /// and the claim's footprint of the repository, which measured the branch before, goes with what
 /// it made.
 ///

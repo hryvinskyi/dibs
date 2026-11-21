@@ -203,8 +203,10 @@ against its base. It learns the branch from these, the first one that holds winn
   an item, name the item (`dibs_worktree_take` with `item`, `dibs worktree take --item <item>`);
 - the branch you named when you claimed (`branch` above);
 - the branch of the checkout you work in, but only while your session works on that one claim alone in that checkout.
-  A claim's branch is never taken from a checkout another session of yours shares, or from a session that reports
-  more than one checkout or works on several claims.
+  A claim's branch is never taken from a checkout another session of yours reported within the last hour, or from a
+  session that reports more than one checkout or works on several claims. A session that waits on you or on one long
+  tool call reports nothing, so beside one silent for longer than an hour your checkout looks like yours alone: where
+  sessions share a checkout, name your branch.
 
 `dibs_claim` claims as your session, the one your host's hooks report, when your host tells the tool server which
 session it serves; otherwise as the tool server's own session. A claim taken with `dibs claim` on the command line is

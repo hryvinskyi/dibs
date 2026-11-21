@@ -14,8 +14,9 @@
 //! work done once for the whole machine (the caches, the report the heartbeat carries, the signs
 //! of life in pool worktrees, the check for a newer client) is not repeated by every session.
 //!
-//! A session's heartbeat is due by the session's own clock, and the server counts on every active
-//! session naming its checkout each interval, so another session's start does not hold it back:
+//! A session's heartbeat is due by the session's own clock, and each session's heartbeat keeps its
+//! own session seen and reports its own checkout, which no other session's can do for it, so
+//! another session's start does not hold it back:
 //! when the start that does everything is refused, a hook whose session's heartbeat is due starts a
 //! sync of that heartbeat alone (`--heartbeat-only`), unless one was started for the same session
 //! within the same few seconds. A sync of the heartbeat alone waits its turn while another sync

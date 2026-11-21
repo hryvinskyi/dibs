@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 
 use dibs_domain::claim::Claim;
 use dibs_domain::ids::{MemberId, SessionId};
-use dibs_domain::radar::{checkout_candidate, checkout_claim, sharing_window};
+use dibs_domain::radar::{SHARED_FOR, checkout_candidate, checkout_claim};
 use dibs_domain::session::{CheckoutToken, SessionCheckout};
 use dibs_domain::settings::ProjectSettings;
 
@@ -50,8 +50,8 @@ pub(crate) async fn report_checkout(
 /// The claim, among `claims`, that the checkout of `reported` records its branch on: the session's
 /// one claim live within the project's `stale_after` that it works on, when `eligible` accepts it,
 /// provided the session reported no other checkout and no other session of the member reported
-/// this one within a few of the project's heartbeat intervals ([`sharing_window`]). The member's
-/// reported checkouts are read only once a claim is eligible.
+/// this one within the last hour ([`SHARED_FOR`]). The member's reported checkouts are read only
+/// once a claim is eligible.
 ///
 /// # Errors
 /// [`AppError::Store`] when the store fails.
@@ -68,16 +68,9 @@ pub(crate) async fn fed_by_checkout<'a>(
         return Ok(None);
     }
     let project = work.project_id();
-    let heartbeat_every = settings.heartbeat_every();
-    let since = reported.reported_at - sharing_window(heartbeat_every);
+    let since = reported.reported_at - SHARED_FOR;
     let checkouts = work
         .session_checkouts(project, reported.member, since)
         .await?;
-    Ok(checkout_claim(
-        claims,
-        reported,
-        &checkouts,
-        stale_after,
-        heartbeat_every,
-    ))
+    Ok(checkout_claim(claims, reported, &checkouts, stale_after))
 }
