@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use super::*;
 use crate::claim::{
     ClaimOutcome, ClaimRefused, ClaimRequest, TakeoverRefused, decide_claim, decide_narrow,
-    decide_takeover,
+    decide_return, decide_takeover,
 };
 use crate::review::{ClaimState, PrRef, Review};
 use crate::testing::{ALICE, BOB, CAROL, area, areas, at, claim, request, two_repo_settings};
@@ -546,6 +546,24 @@ fn narrowing_gives_up_what_the_claim_holds_or_waits_for_and_nothing_else() {
     assert_eq!(narrowed.claim.last_seen, at(9));
     assert!(decide_narrow(Some(&bob), ALICE, &areas(&["web:checkout"]), at(9)).is_err());
     assert!(decide_narrow(None, BOB, &areas(&["web:checkout"]), at(9)).is_err());
+}
+
+#[test]
+fn areas_given_back_without_the_holder_go_as_a_narrowing_and_leave_when_the_claim_was_seen() {
+    let bob = bob_claims(&[alice_debt()], &["api:billing", "web:checkout"])
+        .unwrap()
+        .claim()
+        .clone();
+    let returned = decide_return(&bob, &areas(&["api:billing", "web:checkout", "api:search"]));
+    assert_eq!(returned.areas, areas(&["api:billing", "web:checkout"]));
+    assert!(returned.claim.pending.is_empty());
+    assert_eq!(returned.withdrawn.len(), 1, "the wait for api:billing ends");
+    assert!(returned.claim.areas.is_empty());
+    assert!(returned.claim.areas.clocks().is_empty());
+    assert_eq!(
+        returned.claim.last_seen, bob.last_seen,
+        "giving areas back is no sign of the claim's work"
+    );
 }
 
 #[test]

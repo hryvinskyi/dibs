@@ -35,9 +35,10 @@ pub struct HeartbeatOutcome {
 /// under: a heartbeat itself keeps no claim alive. Its machine's hooks let edits through without
 /// asking the server when the member is known to hold the edit's area, or when no area governs the
 /// path, and the heartbeat reports them: every live claim of the caller that holds a reported area
-/// is seen now, and an edit outside every area makes the caller's target claim (the live claim
-/// most recently claimed or renewed) seen now ([`claims_shown_by`]), wherever those claims were
-/// taken. A report of no edit refreshes no claim, and so does a heartbeat that carries no report
+/// is seen now, and the clock of each reported area it holds moves to now, as an edit check moves
+/// it ([`Claim::saw_work`](dibs_domain::claim::Claim::saw_work)); an edit outside every area makes
+/// the caller's target claim (the live claim most recently claimed or renewed) seen now
+/// ([`claims_shown_by`]) and moves no clock, wherever those claims were taken. A report of no edit refreshes no claim, and so does a heartbeat that carries no report
 /// at all, as a client that does not report its edits sends: its member's claims stay live by the
 /// edit checks that reach the server, the pushes of their branches and their renewals. A claim
 /// that already went stale is renewed only by claiming it again. The caller's places in slot
@@ -126,7 +127,7 @@ impl Heartbeat {
         let mut kept = Vec::new();
         for mut claim in claims {
             if shown.contains(&claim.item) {
-                claim.last_seen = now;
+                claim.saw_work(edits.into_iter().flat_map(ReportedEdits::areas), now);
                 work.save_claim(actor.project, &claim).await?;
                 refreshed.push(claim.item);
             }
@@ -351,6 +352,62 @@ mod tests {
         assert_eq!(outcome.refreshed, [newer]);
         assert_eq!(last_seen(&env, newer).await, env.now());
         assert!(last_seen(&env, older).await < env.now());
+    }
+
+    #[tokio::test]
+    async fn a_reported_edit_in_an_area_moves_its_clock_and_one_outside_every_area_moves_none() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        let other = env.item("gh:acme/widgets#2").await;
+        claim_with(&env, item, env.bob.session, &["billing", "search"]).await;
+        env.advance(Duration::minutes(1));
+        let declared = env.now();
+        claim_with(&env, other, env.bob.session, &["billing"]).await;
+        let clock = |claim: &dibs_domain::claim::Claim, name: &str| {
+            claim
+                .areas
+                .clock(&dibs_domain::area::QualifiedArea::parse(name).unwrap())
+        };
+        let stored = |item: ItemId| {
+            let env = &env;
+            async move {
+                let mut tx = env.deps.store.begin().await.unwrap();
+                tx.claim(env.project, item).await.unwrap().unwrap()
+            }
+        };
+
+        env.advance(Duration::minutes(10));
+        let outcome = beat_reporting(&env, env.bob.session, Some(&edits(&[], true))).await;
+        assert_eq!(outcome.refreshed, [other], "the target claim is seen");
+        let seen = stored(other).await;
+        assert_eq!(seen.last_seen, env.now());
+        assert_eq!(
+            clock(&seen, "default:billing"),
+            Some(declared),
+            "an edit outside every area moves no clock"
+        );
+
+        env.advance(Duration::minutes(10));
+        let outcome = beat_reporting(
+            &env,
+            env.bob.session,
+            Some(&edits(&["default:billing"], false)),
+        )
+        .await;
+        assert_eq!(outcome.refreshed, [item, other]);
+        for item in [item, other] {
+            let claim = stored(item).await;
+            assert_eq!(
+                clock(&claim, "default:billing"),
+                Some(env.now()),
+                "on every live claim of the member holding it"
+            );
+        }
+        assert_eq!(
+            clock(&stored(item).await, "default:search"),
+            Some(START),
+            "an area no edit was reported in keeps its clock"
+        );
     }
 
     #[tokio::test]

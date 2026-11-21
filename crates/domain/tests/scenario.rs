@@ -130,7 +130,7 @@ mod support {
             } = &check.plan;
             for add in add_areas {
                 if let Some(claim) = self.claims.iter_mut().find(|c| c.item == add.claim) {
-                    claim.areas.gain(add.area.clone());
+                    claim.areas.gain(add.area.clone(), self.now);
                 }
             }
             self.shared.extend(share_paths.iter().cloned());
@@ -140,7 +140,7 @@ mod support {
                 .iter_mut()
                 .filter(|c| check.touch.contains(&c.item))
             {
-                claim.last_seen = now;
+                claim.saw_work(check.edited_areas(claim.item), now);
             }
         }
 

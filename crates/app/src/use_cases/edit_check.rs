@@ -100,7 +100,8 @@ impl EditVerdicts {
 
 /// Answers a verdict per path. When the edits are being made, it records what the domain planned —
 /// areas added to the caller's claims, paths recorded as shared — and refreshes the claims the edits
-/// were attributed to, wherever those claims were taken. A `Reserved` event is appended per claim
+/// were attributed to, wherever those claims were taken, moving the clock of each area such a claim
+/// holds that an edit attributed to it was made in. A `Reserved` event is appended per claim
 /// that actually gained something, so a repeated check appends nothing. An area an edit adds to the
 /// caller's claim that another member's live wide claim names makes the caller one of that wide
 /// claim's holders, so its announcement is sent to them in the same transaction.
@@ -247,11 +248,11 @@ impl EditCheck {
         for mut claim in changed {
             if let Some(gain) = gains.get(&claim.item) {
                 for area in &gain.areas {
-                    claim.areas.gain(area.clone());
+                    claim.areas.gain(area.clone(), now);
                 }
             }
             if check.touch.contains(&claim.item) {
-                claim.last_seen = now;
+                claim.saw_work(check.edited_areas(claim.item), now);
             }
             work.save_claim(project, &claim).await?;
         }

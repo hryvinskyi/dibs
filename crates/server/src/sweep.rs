@@ -7,7 +7,9 @@
 //! wait for — an area whose debt claim went stale moves to the claim waiting for it, and a request
 //! to hand one over that nobody answered within the project's `yield_escalates_after` goes to the
 //! project's arbiters. For claims — a working claim that went the project's `release_after`
-//! without a sign of its own work is released, its item open again and its holder told.
+//! without a sign of its own work is released, its item open again and its holder told; and an area
+//! of a live claim that went the project's `idle_area_after` with no sign of the claim's work in it
+//! is given back, its holder told.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,10 +113,11 @@ async fn sweep_claims(app: &UseCases) {
             for (project, error) in &report.failed {
                 tracing::error!(project = %project, code = error.code(), error = ?error, "the claims of a project could not be swept");
             }
-            if report.released > 0 {
+            if report.released > 0 || report.returned > 0 {
                 tracing::debug!(
                     projects = report.projects,
                     released = report.released,
+                    returned = report.returned,
                     "the claims were swept"
                 );
             }

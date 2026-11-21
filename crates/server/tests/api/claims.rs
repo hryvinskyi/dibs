@@ -563,3 +563,87 @@ async fn the_sweep_releases_a_claim_unseen_past_the_release_delay_and_the_log_sh
     assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
     assert_eq!(taken.body["outcome"], "new");
 }
+
+#[tokio::test]
+async fn the_sweep_gives_back_an_area_no_work_showed_in_for_a_week_and_the_log_shows_it() {
+    let team = Team::new().await;
+    let item = team
+        .world
+        .item(&team.bob, Some("gh:acme/api#42"), "Billing fix")
+        .await;
+    let claimed = team
+        .claim(
+            &team.bob,
+            team.bob_session,
+            item,
+            json!(["api:billing", "api:search"]),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    team.world
+        .fakes
+        .clock
+        .advance(Duration::days(7) + Duration::minutes(1));
+    let renewed = team
+        .claim(&team.bob, team.bob_session, item, json!(["api:search"]))
+        .await;
+    assert_eq!(renewed.status, StatusCode::OK, "{}", renewed.body);
+
+    let shutdown = Shutdown::new();
+    let sweeper = tokio::spawn(run_sweeper(
+        Arc::clone(&team.world.app),
+        StdDuration::from_millis(20),
+        shutdown.signal(),
+    ));
+    let mut returned = None;
+    for _ in 0..200 {
+        let events = team.world.get(&team.alice, "/v1/events").await;
+        assert_eq!(events.status, StatusCode::OK, "{}", events.body);
+        returned = events.body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "areas_returned")
+            .cloned();
+        if returned.is_some() {
+            break;
+        }
+        tokio::time::sleep(StdDuration::from_millis(10)).await;
+    }
+    shutdown.stop();
+    tokio::time::timeout(StdDuration::from_secs(5), sweeper)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let returned = returned.expect("the sweep gave the area back");
+    let bob = team.bob.actor.member.get();
+    assert_eq!(
+        returned["payload"],
+        json!({"item": item, "member": bob, "areas": ["api:billing"]})
+    );
+    assert_eq!(returned["members"][bob.to_string()], "bob");
+    let read = team
+        .world
+        .get(&team.bob, &format!("/v1/items/{item}"))
+        .await;
+    assert_eq!(
+        read.body["claim"]["areas"],
+        json!(["api:search"]),
+        "{}",
+        read.body
+    );
+    let other = team
+        .world
+        .item(&team.alice, Some("gh:acme/api#43"), "Rates")
+        .await;
+    let taken = team
+        .claim(
+            &team.alice,
+            team.alice_session,
+            other,
+            json!(["api:billing"]),
+        )
+        .await;
+    assert_eq!(taken.status, StatusCode::OK, "{}", taken.body);
+}

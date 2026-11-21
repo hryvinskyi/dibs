@@ -1,6 +1,6 @@
 //! The edit check: for each path a member is about to change, may they, and what is recorded.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
@@ -128,9 +128,25 @@ pub struct EditCheck {
     /// target claim — for an area none of their claims answers for, for an area it holds only
     /// because such an edit gained it, or for a shared path — is in `touch` alone.
     pub by_area: BTreeSet<ItemId>,
+    /// For each claim of `touch` an edit in an area was attributed to, the areas of those edits.
+    /// The caller moves the clocks of those the claim holds ([`Claim::saw_work`]); an area it only
+    /// names wide, was granted edits in, or that waits to be handed over to another claim has no
+    /// clock there.
+    pub edited: BTreeMap<ItemId, BTreeSet<QualifiedArea>>,
 }
 
 impl EditCheck {
+    /// The areas of the edits attributed to the claim on `item`, in order; none when no edit in an
+    /// area was.
+    pub fn edited_areas(&self, item: ItemId) -> impl Iterator<Item = &QualifiedArea> {
+        self.edited.get(&item).into_iter().flatten()
+    }
+
+    /// Notes that an edit in `area` was attributed to the claim on `item`.
+    fn edited_in(&mut self, item: ItemId, area: &QualifiedArea) {
+        self.edited.entry(item).or_default().insert(area.clone());
+    }
+
     /// How the edits came to be attributed to the claim on `item`, when they were: by an area when
     /// any of them was, else as the member's target claim.
     pub fn attribution(&self, item: ItemId) -> Option<Attribution> {
@@ -294,6 +310,7 @@ impl<'a> EditWorld<'a> {
                 Some(grant) => {
                     check.touch.insert(grant.item);
                     check.by_area.insert(grant.item);
+                    check.edited_in(grant.item, area);
                     Verdict::Granted {
                         by: holder.member,
                         area: area.clone(),
@@ -329,6 +346,7 @@ impl<'a> EditWorld<'a> {
             .or_else(|| self.holding(area, AreaOrigin::Gained));
         if let Some(claim) = taker {
             check.touch.insert(claim.item);
+            check.edited_in(claim.item, area);
             if claim.areas.origin(area) != Some(AreaOrigin::Gained) {
                 check.by_area.insert(claim.item);
             }
@@ -340,6 +358,7 @@ impl<'a> EditWorld<'a> {
                 });
             }
             check.touch.insert(target.item);
+            check.edited_in(target.item, area);
         }
         Verdict::Allowed
     }

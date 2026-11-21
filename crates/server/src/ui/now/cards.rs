@@ -621,7 +621,7 @@ mod tests {
     use dibs_app::named::{AuthorName, ItemName, NamedClaim, NamedItem, NamedThread};
     use dibs_app::records::{ItemRecord, ThreadRecord};
     use dibs_app::use_cases::{ReadyView, UnreadConversations};
-    use dibs_domain::claim::Claim;
+    use dibs_domain::claim::{Claim, ClaimAreas};
     use dibs_domain::escalation::EscalationSubject;
     use dibs_domain::forge::ForgeRegistry;
     use dibs_domain::handover::ClaimKind;
@@ -773,7 +773,7 @@ mod tests {
                     member: MemberId(1),
                     session: SessionId(1),
                     host: HostName::parse("laptop").unwrap(),
-                    areas: areas.iter().map(|text| area(text)).collect(),
+                    areas: ClaimAreas::declared(areas.iter().map(|text| area(text)), NOW - held),
                     wide: None,
                     claimed_at: NOW - held,
                     renewed_at: NOW - held,

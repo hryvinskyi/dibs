@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::claim::decide_narrow;
+use dibs_domain::claim::{Narrowed, decide_narrow};
 use dibs_domain::event::{ClaimNarrowed, EventKind};
 use dibs_domain::handle::Handle;
 use dibs_domain::handover::{AreaMove, WithdrawReason, Withdrawal};
@@ -19,7 +19,7 @@ use crate::named::{ItemName, NamedClaim, Names, refuse};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::common::{existing_item, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
-use crate::use_cases::handover::Handovers;
+use crate::use_cases::handover::{Handovers, Settled};
 use crate::work::Work;
 
 /// The narrowing to make.
@@ -108,44 +108,18 @@ impl NarrowClaim {
             Ok(narrowed) => narrowed,
             Err(reason) => return Err(refuse(&mut work, reason).await),
         };
-        let others = work.claims(project).await?;
-        work.save_claim(project, &narrowed.claim).await?;
         let handovers = Handovers {
             ids: &*self.ids,
             schemes: &self.ref_schemes,
             settings: &settings,
             now,
         };
-        if !narrowed.withdrawn.is_empty() {
-            let names = Names::load(&mut work).await?;
-            for (area, pending) in &narrowed.withdrawn {
-                let withdrawal = Withdrawal {
-                    moved: AreaMove {
-                        area: area.clone(),
-                        from: pending.from,
-                        to: item.id,
-                    },
-                    reason: WithdrawReason::Narrowed,
-                    request: pending.request,
-                };
-                handovers
-                    .withdraw(&mut work, &names, &others, &withdrawal)
-                    .await?;
-            }
-        }
-        if !narrowed.areas.is_empty() {
-            work.record(
-                now,
-                EventKind::ClaimNarrowed(ClaimNarrowed {
-                    item: item.id,
-                    member: actor.member,
-                    areas: narrowed.areas.clone(),
-                }),
-            )
-            .await?;
-            end_orphaned_grants(&mut work, now).await?;
-        }
-        let settled = handovers.settle(&mut work).await?;
+        let event = EventKind::ClaimNarrowed(ClaimNarrowed {
+            item: item.id,
+            member: actor.member,
+            areas: narrowed.areas.clone(),
+        });
+        let settled = give_areas_up(&mut work, &narrowed, event, &handovers).await?;
         let names = Names::load(&mut work).await?;
         let mut handed_over = Vec::new();
         for moved in settled
@@ -178,4 +152,43 @@ impl NarrowClaim {
         work.commit(&*self.notifier).await?;
         Ok(narrowed)
     }
+}
+
+/// Carries out a decision that a claim gives areas up, whoever made it: stores the claim as the
+/// decision left it, ends each wait it gave up (`wait_withdrawn`, the debt holder asked told that
+/// the request no longer stands), records `event` and ends the grants its holder gave in areas it
+/// no longer holds, when it gave any area up, and settles every pending area of the project, so an
+/// area another claim waited for moves to that claim. Answers what settling did.
+pub(crate) async fn give_areas_up(
+    work: &mut Work,
+    narrowed: &Narrowed,
+    event: EventKind,
+    handovers: &Handovers<'_>,
+) -> Result<Settled, AppError> {
+    let project = work.project_id();
+    let now = handovers.now;
+    let others = work.claims(project).await?;
+    work.save_claim(project, &narrowed.claim).await?;
+    if !narrowed.withdrawn.is_empty() {
+        let names = Names::load(work).await?;
+        for (area, pending) in &narrowed.withdrawn {
+            let withdrawal = Withdrawal {
+                moved: AreaMove {
+                    area: area.clone(),
+                    from: pending.from,
+                    to: narrowed.claim.item,
+                },
+                reason: WithdrawReason::Narrowed,
+                request: pending.request,
+            };
+            handovers
+                .withdraw(work, &names, &others, &withdrawal)
+                .await?;
+        }
+    }
+    if !narrowed.areas.is_empty() {
+        work.record(now, event).await?;
+        end_orphaned_grants(work, now).await?;
+    }
+    handovers.settle(work).await
 }

@@ -257,7 +257,7 @@ pub fn settle_pending(claims: &[Claim], now: OffsetDateTime, stale_after: Durati
             let holders = other_holders(area, waiting, claims, now, stale_after);
             if holders.is_empty() {
                 let from = claims.iter().find(|claim| claim.item == pending.from);
-                step.hand_over(&mut working, claims, from);
+                step.hand_over(&mut working, claims, from, now);
                 settlement.handed_over.push(step.into_move());
                 continue;
             }
@@ -385,17 +385,18 @@ struct Step<'a> {
 }
 
 impl Step<'_> {
-    /// The area moves to the waiting claim; the claim it waited for drops it, when it still lists
-    /// it.
+    /// The area moves to the waiting claim, declared there at `now`; the claim it waited for drops
+    /// it, when it still lists it.
     fn hand_over(
         &self,
         working: &mut BTreeMap<ItemId, Claim>,
         claims: &[Claim],
         from: Option<&Claim>,
+        now: OffsetDateTime,
     ) {
         if let Some(waiting) = claim_mut(working, claims, self.to) {
             waiting.pending.remove(self.area);
-            waiting.areas.declare(self.area.clone());
+            waiting.areas.declare(self.area.clone(), now);
         }
         if from.is_some_and(|from| from.holds(self.area))
             && let Some(giving) = claim_mut(working, claims, self.from)

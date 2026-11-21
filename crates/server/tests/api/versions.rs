@@ -139,7 +139,7 @@ async fn a_client_older_than_protected_tags_is_served_the_settings_without_them(
 }
 
 #[tokio::test]
-async fn a_client_older_than_branch_patterns_or_the_release_delay_is_served_the_settings_and_slots_without_them()
+async fn a_client_older_than_branch_patterns_or_the_claim_endings_is_served_the_settings_and_slots_without_them()
  {
     let world = World::new().await;
     let alice = world.project("acme", "alice").await;
@@ -154,7 +154,8 @@ async fn a_client_older_than_branch_patterns_or_the_release_delay_is_served_the_
                 ],
                 "slots": [{"name": "release:cut", "max_hold": "1h",
                            "freezes": ["refs/heads/release/*", "refs/heads/main"]}],
-                "release_after": "3d"
+                "release_after": "3d",
+                "idle_area_after": "2d"
             }),
         )
         .await;
@@ -177,6 +178,7 @@ async fn a_client_older_than_branch_patterns_or_the_release_delay_is_served_the_
     let whole_rules = vec!["refs/heads/main", "refs/heads/release/*", "refs/tags/v*"];
     let whole_freezes = ["default:refs/heads/release/*", "default:refs/heads/main"];
     let released = serde_json::Value::from("3d");
+    let idle = serde_json::Value::from("2d");
     let absent = serde_json::Value::Null;
     for (agent, expected_rules, expected_freezes, expected_release) in [
         (
@@ -228,6 +230,15 @@ async fn a_client_older_than_branch_patterns_or_the_release_delay_is_served_the_
         assert_eq!(rules(&me), expected_rules, "{agent:?}");
         assert_eq!(
             &me.body["settings"]["release_after"], expected_release,
+            "{agent:?}"
+        );
+        let expected_idle = if expected_release.is_null() {
+            &absent
+        } else {
+            &idle
+        };
+        assert_eq!(
+            &me.body["settings"]["idle_area_after"], expected_idle,
             "{agent:?}"
         );
         assert_eq!(

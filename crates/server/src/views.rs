@@ -1123,7 +1123,7 @@ mod tests {
     use serde_json::json;
     use time::macros::datetime;
 
-    use dibs_domain::claim::{Claim, Holder};
+    use dibs_domain::claim::{Claim, ClaimAreas, Holder};
     use dibs_domain::edit::PathVerdict;
     use dibs_domain::hot_rule::HotRuleRegistry;
     use dibs_domain::ids::MemberId;
@@ -1143,7 +1143,10 @@ mod tests {
             member: MemberId(1),
             session: SessionId(9),
             host: HostName::parse("laptop").unwrap(),
-            areas: BTreeSet::from([QualifiedArea::parse("api:billing").unwrap()]).into(),
+            areas: ClaimAreas::declared(
+                [QualifiedArea::parse("api:billing").unwrap()],
+                datetime!(2026-01-02 03:04:05 UTC),
+            ),
             wide: None,
             claimed_at: datetime!(2026-01-02 03:04:05 UTC),
             renewed_at: datetime!(2026-01-02 03:04:05 UTC),

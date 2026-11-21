@@ -33,7 +33,7 @@ use crate::ui::slots::{SlotRow, SlotState};
 const STATUS_CHANGES: &str = "claimed renewed taken_over released completed force_released \
      reserved wide_claimed wide_granted_by_ack granted grant_revoked review_started pr_merged \
      pr_closed pr_dropped review_ended completed_by_merge completed_by_close branch_recorded \
-     area_handed_over wait_withdrawn claim_narrowed released_stale";
+     area_handed_over wait_withdrawn claim_narrowed released_stale areas_returned";
 
 /// The kinds of event that change the items, the slots, the worktrees, the escalations and the
 /// overlaps between claims.
@@ -42,7 +42,7 @@ const PROJECT_CHANGES: &str = "item_created item_updated dependency_added depend
      slot_offer_lapsed slot_released slot_expired slot_force_released slot_stalled slot_resumed \
      slot_stall_taken_over escalated acked thread_started member_removed overlap_found \
      footprint_changed yield_requested area_handed_over wait_withdrawn claim_narrowed \
-     item_reopened worktree_taken worktree_released released_stale";
+     item_reopened worktree_taken worktree_released released_stale areas_returned";
 
 /// The kinds of event that change the conversations: one started, written in, acknowledged,
 /// deleted by an admin, or removed by the daily retention.

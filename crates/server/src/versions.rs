@@ -8,7 +8,7 @@
 //!
 //! What a client older than a feature cannot read is left out of what it is served: the settings
 //! of `GET /v1/me` (protected tags, branch patterns, the settings by which the server ends claims
-//! on its own), and the frozen refs of the slots in the answers of `GET /v1/status` and of the
+//! or takes areas from them on its own), and the frozen refs of the slots in the answers of `GET /v1/status` and of the
 //! slot routes.
 
 use std::borrow::Cow;
@@ -41,9 +41,10 @@ pub const PROTECTED_TAGS_SINCE: Version = Version::new(0, 1, 1);
 /// a slot's frozen refs. An older one refuses settings and slots that hold one.
 pub const BRANCH_PATTERNS_SINCE: Version = Version::new(0, 1, 2);
 
-/// The first client that reads `release_after` in the settings. An older one refuses settings
-/// that hold the field, and then judges nothing.
-pub const CLAIM_RELEASE_SINCE: Version = Version::new(0, 1, 11);
+/// The first client that reads the settings by which the server ends claims or takes areas from
+/// them on its own (`release_after`, `idle_area_after`). An older one refuses settings that hold
+/// such a field, and then judges nothing.
+pub const CLAIM_ENDINGS_SINCE: Version = Version::new(0, 1, 11);
 
 /// What the caller's client can read, from the `dibs/<semver>` of its `User-Agent`: everything for
 /// a current client and for any caller that names no `dibs` version.
@@ -65,12 +66,13 @@ impl ClientReads {
         Self {
             protected_tags: since(&PROTECTED_TAGS_SINCE),
             branch_patterns: since(&BRANCH_PATTERNS_SINCE),
-            claim_endings: since(&CLAIM_RELEASE_SINCE),
+            claim_endings: since(&CLAIM_ENDINGS_SINCE),
         }
     }
 
     /// The settings as this client can read them: for a `dibs` client older than
-    /// [`CLAIM_RELEASE_SINCE`], with the settings by which the server ends claims on its own left
+    /// [`CLAIM_ENDINGS_SINCE`], with the settings by which the server ends claims or takes areas
+    /// from them on its own left
     /// at their defaults, so the document leaves them out; older than [`BRANCH_PATTERNS_SINCE`]
     /// also without branch patterns, protected or frozen, and older than
     /// [`PROTECTED_TAGS_SINCE`] also without protected tags; whole for any other caller.
@@ -302,19 +304,23 @@ mod tests {
             assert_eq!(reads(agent), (true, true, true), "{agent:?}");
         }
 
-        let document: SettingsDocument =
-            serde_json::from_str(r#"{"stale_after":"1d","release_after":"3d"}"#).unwrap();
+        let document: SettingsDocument = serde_json::from_str(
+            r#"{"stale_after":"1d","release_after":"3d","idle_area_after":"2d"}"#,
+        )
+        .unwrap();
         let settings = ProjectSettings::parse(
             &document,
             &dibs_domain::hot_rule::HotRuleRegistry::standard(),
         )
         .unwrap();
-        let release_after =
-            |agent: Option<&str>| ClientReads::of(agent).settings(&settings).release_after;
+        let endings = |agent: Option<&str>| {
+            let document = ClientReads::of(agent).settings(&settings);
+            (document.release_after, document.idle_area_after)
+        };
         assert_eq!(
-            release_after(Some("dibs/0.1.10")),
-            None,
-            "a client older than the release delay is served the settings without it"
+            endings(Some("dibs/0.1.10")),
+            (None, None),
+            "a client older than the claim endings is served the settings without them"
         );
         for agent in [
             Some("dibs/0.1.11"),
@@ -322,7 +328,11 @@ mod tests {
             Some("curl/8.5.0"),
             None,
         ] {
-            assert_eq!(release_after(agent).as_deref(), Some("3d"), "{agent:?}");
+            assert_eq!(
+                endings(agent),
+                (Some("3d".to_owned()), Some("2d".to_owned())),
+                "{agent:?}"
+            );
         }
     }
 

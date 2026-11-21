@@ -1465,7 +1465,9 @@ mod migrations {
         );
         let search = QualifiedArea::parse("default:search").unwrap();
         let mut gaining = claims[0].clone();
-        gaining.areas.gain(search.clone());
+        gaining
+            .areas
+            .gain(search.clone(), time::OffsetDateTime::UNIX_EPOCH);
         tx.save_claim(project, &gaining).await.unwrap();
         tx.commit().await.unwrap();
         drop(store);
@@ -1506,6 +1508,91 @@ mod migrations {
         assert!(matches!(
             tx.claim(project, ItemId(51)).await,
             Err(StoreError::Corrupt { what }) if what.starts_with("claims.gained_areas")
+        ));
+    }
+
+    #[tokio::test]
+    async fn every_area_held_before_starts_its_clock_at_the_upgrade_and_a_held_area_needs_one() {
+        use dibs_app::ports::StoreError;
+        use time::{Duration, OffsetDateTime};
+
+        let rows = format!(
+            "{}\n\
+             UPDATE claims SET areas = '[\"default:billing\",\"default:search\"]', \
+             gained_areas = '[\"default:search\"]' WHERE item_id = 51;",
+            rows_at_deliveries()
+        );
+        let (_dir, path) = database_at(15, &rows).await;
+        let before = OffsetDateTime::now_utc() - Duration::milliseconds(1);
+        let store = open(&path).await.unwrap();
+        let after = OffsetDateTime::now_utc();
+        let project = ProjectId(1);
+        let mut tx = store.begin().await.unwrap();
+        let claims = tx.claims(project).await.unwrap();
+        let billing = QualifiedArea::parse("default:billing").unwrap();
+        let search = QualifiedArea::parse("default:search").unwrap();
+        let held = &claims[0].areas;
+        assert_eq!(held.gained(), &[search.clone()].into(), "the origins stay");
+        let clocks: Vec<&QualifiedArea> = held.clocks().keys().collect();
+        assert_eq!(clocks, [&billing, &search], "a clock for every held area");
+        for (area, clock) in held.clocks() {
+            assert!(
+                (before..=after).contains(clock),
+                "{area} starts at the upgrade, not at the claim: {clock} outside {before}..{after}"
+            );
+        }
+        assert_eq!(
+            held.clock(&billing),
+            held.clock(&search),
+            "one upgrade, one time"
+        );
+        assert!(claims[1].areas.clocks().is_empty(), "a claim with no area");
+        let mut moved = claims[0].clone();
+        moved.areas.note_edit(&billing, OffsetDateTime::UNIX_EPOCH);
+        tx.save_claim(project, &moved).await.unwrap();
+        tx.commit().await.unwrap();
+        drop(store);
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim(project, ItemId(51)).await.unwrap(),
+            Some(moved),
+            "read back from the file"
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for (what, bad) in [
+            ("no JSON", "'default:billing'"),
+            ("no object", "'[]'"),
+            ("nothing", "NULL"),
+        ] {
+            let update = format!("UPDATE claims SET area_clocks = {bad} WHERE item_id = 51");
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{what}"
+            );
+        }
+        sqlx::query(
+            "UPDATE claims SET area_clocks = '{\"default:billing\": 0}' WHERE item_id = 51",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert!(matches!(
+            tx.claim(project, ItemId(51)).await,
+            Err(StoreError::Corrupt { what }) if what.starts_with("claims.area_clocks")
         ));
     }
 

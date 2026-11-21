@@ -43,6 +43,7 @@ use crate::use_cases::wide_asks::Announcer;
 use crate::use_cases::writing::{Posted, SystemPost, SystemReply, system_body, titled_body};
 use crate::work::Work;
 
+pub(crate) use narrow::give_areas_up;
 pub use narrow::{HandedOver, NarrowClaim, NarrowClaimInput, NarrowedClaim};
 pub use tick::{HandoverSweep, TickHandovers};
 

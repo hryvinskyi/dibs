@@ -298,6 +298,23 @@ push of its branch, no renewal. The item is open again. If the work goes on, cla
 released this way. The sweep decides on the claims as stored when it takes the project, so a request that showed the
 claim's work first keeps it.
 
+Each area a claim holds keeps a clock: when the claim declared it (taking or renewing the claim with it named, or having
+it handed over) or gained it by an edit, moved by every later declaration of it and by every edit attributed to the
+claim in it, whether the server checked the edit or a heartbeat reported it. A renewal that names an area restarts its
+clock; one that names none keeps the clocks the claim had. A take-over is a new claim, so every area it keeps from the
+previous one starts its clock at the take-over. Areas held when the server was upgraded to keep clocks start theirs at
+the upgrade. The same sweep **gives back** an area of a live claim (worked on and seen within `stale_after`, or in
+review) whose clock is older than the project's `idle_area_after` (7 days unless the settings say otherwise) and that no
+path of the claim's stored footprints falls in (a path falls in the first area of its repository, in declaration
+order, that contains it); an area of a repository whose footprint is `truncated` stays, since a path the forge left out
+may fall in it. The claim holds the area no more, the grants its holder gave in it end, an area another claim waits for
+moves to that claim, an event `areas_returned` is appended, and its holder is told in the claim's conversation, in a
+`normal` message from dibs: "Areas given back: dibs gave back api:billing of your claim on work item … : no path of its
+branch is in them and nothing was edited there under the claim for 7d. To take them back while they are free, declare
+them again (dibs claim … --area api:billing)." Giving areas back is no sign of the claim's work: when the claim was last
+seen stays as it was. A stale claim keeps its areas for the release rule. To keep an area the branch has not touched
+yet, edit in it or name it when claiming again.
+
 The guard answers most edits from what its machine knows (an area the member is known to hold, from a status or an
 edit check under 30 seconds old) and never asks about a path no area governs, so the hooks record each edit they let
 through that way and the next heartbeat reports it in `edits`: `areas`, at most 200, each `repo:area`, the areas of
@@ -1343,6 +1360,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `item_reopened` | `item`, `by` (the member whose claim brought the done item back) |
 | `force_released` | `item`, `member`, `by` (the admin; `null` for the operator) |
 | `released_stale` | `item`, `member`, `last_seen` (RFC 3339: the claim's last sign of its own work; the server's sweep released it after the project's `release_after`) |
+| `areas_returned` | `item`, `member`, `areas` (what the live claim holds no more; the server's sweep gave them back after the project's `idle_area_after` with no sign of the claim's work in them) |
 | `reserved` | `item`, `member`, `areas`, `paths` |
 | `granted` | `grant`, `item`, `area`, `from`, `to` |
 | `grant_revoked` | `grant`, `item`, `area`, `from`, `to`, `cause` (`revoked`, `grantor_left`, `grantee_left`) |
@@ -1427,6 +1445,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 |---|---|
 | `stale_after` | How long a claim stays live after the last sign of its own work (an edit made under it, a push of its branch, claiming it again): `24h`; 1 hour to 30 days; default 24 hours. |
 | `release_after` | How long a working claim may go without a sign of its own work before the server releases it and its item is open again: `7d`; 1 to 90 days, and longer than `stale_after`; default 7 days, or one day more than `stale_after` when that is 7 days or longer. |
+| `idle_area_after` | How long an area of a live claim may go with no sign of the claim's work in it (no edit made there under the claim, no declaration of it, no path of the claim's branch in it) before the server gives the area back: `7d`; 1 to 90 days; default 7 days. |
 | `heartbeat_every` | How often a session sends a heartbeat: `1m`; 1 to 15 minutes; default 1 minute. |
 | `yield_escalates_after` | How long a request to hand an area over from debt work to a feature claim waits before it is escalated to the arbiters: `30m`; 5 minutes to 24 hours; default 30 minutes. A top-level setting in either layout. |
 | `edit_policy` | `require-claim` (default): a governed path needs a live claim. `advise`: it does not. |

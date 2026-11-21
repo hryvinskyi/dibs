@@ -779,7 +779,7 @@ fn verdict_table() {
 fn apply(plan: &ReservationPlan, claims: &mut [Claim], shared: &mut Vec<SharedPath>) {
     for add in &plan.add_areas {
         for claim in claims.iter_mut().filter(|claim| claim.item == add.claim) {
-            claim.areas.gain(add.area.clone());
+            claim.areas.gain(add.area.clone(), at(0));
         }
     }
     shared.extend(plan.share_paths.iter().cloned());
@@ -986,7 +986,7 @@ fn an_edit_in_an_area_a_claim_gained_as_the_target_is_still_the_targets() {
         "an area the claim only gained tells no more of the work than the first edit did"
     );
 
-    claims[1].areas.declare(area("api:search"));
+    claims[1].areas.declare(area("api:search"), at(0));
     assert_eq!(
         check(&claims).attribution(ItemId(9)),
         Some(Attribution::Area),
@@ -998,7 +998,7 @@ fn an_edit_in_an_area_a_claim_gained_as_the_target_is_still_the_targets() {
 fn an_area_another_member_gained_still_holds_against_me() {
     let settings = settings(&two_repo_json("require-claim"));
     let mut bobs = claim(4, BOB, &[], 0);
-    bobs.areas.gain(area("api:search"));
+    bobs.areas.gain(area("api:search"), at(0));
     let claims = [bobs, claim(5, ALICE, &[], 0)];
     let input = EditCheckInput {
         me: ALICE,
@@ -1046,9 +1046,23 @@ fn of_my_claims_holding_an_area_the_one_that_declared_it_takes_the_edit() {
     );
     assert_eq!(edit.attribution(ItemId(12)), Some(Attribution::Area));
     assert_eq!(edit.attribution(ItemId(9)), None);
+    let edited: Vec<String> = edit
+        .edited_areas(ItemId(12))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        edited,
+        ["api:search"],
+        "the edit's area is told with the claim it went to"
+    );
+    assert_eq!(edit.edited_areas(ItemId(9)).count(), 0);
+    let mut seen = claims[1].clone();
+    seen.saw_work(edit.edited_areas(ItemId(12)), at(21));
+    assert_eq!(seen.last_seen, at(21));
+    assert_eq!(seen.areas.clock(&area("api:search")), Some(at(21)));
 
     claims[1].areas = crate::claim::ClaimAreas::default();
-    claims[1].areas.gain(area("api:search"));
+    claims[1].areas.gain(area("api:search"), at(0));
     assert_eq!(
         check(&claims, 21).touch,
         [ItemId(9)].into(),

@@ -147,6 +147,7 @@ impl RepoSpec {
 pub struct ProjectSettings {
     stale_after: Duration,
     release_after: Duration,
+    idle_area_after: Duration,
     heartbeat_every: Duration,
     yield_escalates_after: Duration,
     edit_policy: EditPolicy,
@@ -176,6 +177,12 @@ pub enum SettingsError {
     /// went stale.
     #[error("release_after is longer than stale_after")]
     ReleaseAfterNotPastStale,
+    /// `idle_area_after` is not a duration.
+    #[error("idle_area_after: {0}")]
+    IdleAreaAfter(DurationError),
+    /// `idle_area_after` is outside 1 to 90 days.
+    #[error("idle_area_after is between 1 and 90 days")]
+    IdleAreaAfterOutOfRange,
     /// `heartbeat_every` is not a duration.
     #[error("heartbeat_every: {0}")]
     HeartbeatEvery(DurationError),
@@ -466,6 +473,8 @@ const DEFAULT_HEARTBEAT_EVERY: Duration = Duration::minutes(1);
 const STALE_AFTER_RANGE: (Duration, Duration) = (Duration::hours(1), Duration::days(30));
 const DEFAULT_RELEASE_AFTER: Duration = Duration::days(7);
 const RELEASE_AFTER_RANGE: (Duration, Duration) = (Duration::days(1), Duration::days(90));
+const DEFAULT_IDLE_AREA_AFTER: Duration = Duration::days(7);
+const IDLE_AREA_AFTER_RANGE: (Duration, Duration) = (Duration::days(1), Duration::days(90));
 const HEARTBEAT_EVERY_RANGE: (Duration, Duration) = (Duration::minutes(1), Duration::minutes(15));
 const DEFAULT_YIELD_ESCALATES_AFTER: Duration = Duration::minutes(30);
 const YIELD_ESCALATES_AFTER_RANGE: (Duration, Duration) =
@@ -493,7 +502,8 @@ impl ProjectSettings {
     ///
     /// The rules: `stale_after` between 1 hour and 30 days (default 24 hours); `release_after`
     /// between 1 and 90 days and longer than `stale_after` (default 7 days, or one day more than
-    /// `stale_after` when that is 7 days or longer); `heartbeat_every`
+    /// `stale_after` when that is 7 days or longer); `idle_area_after` between 1 and 90 days
+    /// (default 7 days); `heartbeat_every`
     /// between 1 and 15 minutes (default 1 minute); `yield_escalates_after` between 5 minutes and
     /// 24 hours (default 30 minutes); `raised_per_hour` between 1 and 1000 (default
     /// 10); either top-level areas and rules or a `repos`
@@ -535,6 +545,13 @@ impl ProjectSettings {
         if release_after <= stale_after {
             return Err(SettingsError::ReleaseAfterNotPastStale);
         }
+        let idle_area_after = parse_in_range(
+            document.idle_area_after.as_deref(),
+            DEFAULT_IDLE_AREA_AFTER,
+            IDLE_AREA_AFTER_RANGE,
+            SettingsError::IdleAreaAfter,
+            SettingsError::IdleAreaAfterOutOfRange,
+        )?;
         let heartbeat_every = parse_in_range(
             document.heartbeat_every.as_deref(),
             DEFAULT_HEARTBEAT_EVERY,
@@ -620,6 +637,7 @@ impl ProjectSettings {
         Ok(Self {
             stale_after,
             release_after,
+            idle_area_after,
             heartbeat_every,
             yield_escalates_after,
             edit_policy: document.edit_policy.unwrap_or_default(),
@@ -646,6 +664,13 @@ impl ProjectSettings {
     /// it: always longer than [`ProjectSettings::stale_after`], so a claim is stale first.
     pub fn release_after(&self) -> Duration {
         self.release_after
+    }
+
+    /// How long an area of a live claim may go with no sign of the claim's work in it — no edit
+    /// made there under the claim, no declaration of it, no path of the claim's branch in it —
+    /// before the server gives the area back.
+    pub fn idle_area_after(&self) -> Duration {
+        self.idle_area_after
     }
 
     /// How often a session sends a heartbeat.
@@ -730,6 +755,7 @@ impl ProjectSettings {
     pub fn without_claim_endings(&self) -> Self {
         Self {
             release_after: default_release_after(self.stale_after),
+            idle_area_after: DEFAULT_IDLE_AREA_AFTER,
             ..self.clone()
         }
     }
@@ -870,6 +896,8 @@ impl ProjectSettings {
             stale_after: Some(format_duration(self.stale_after)),
             release_after: (self.release_after != default_release_after(self.stale_after))
                 .then(|| format_duration(self.release_after)),
+            idle_area_after: (self.idle_area_after != DEFAULT_IDLE_AREA_AFTER)
+                .then(|| format_duration(self.idle_area_after)),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
             yield_escalates_after: (self.yield_escalates_after != DEFAULT_YIELD_ESCALATES_AFTER)
                 .then(|| format_duration(self.yield_escalates_after)),
@@ -1256,16 +1284,73 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_area_is_given_back_after_seven_days_unless_the_settings_say_one_to_ninety() {
+        assert_eq!(settings("{}").idle_area_after(), Duration::days(7));
+        assert_eq!(
+            settings(r#"{"idle_area_after":"3d"}"#).idle_area_after(),
+            Duration::days(3)
+        );
+        let cases: &[(&str, Option<SettingsError>)] = &[
+            (r#"{"idle_area_after":"1d"}"#, None),
+            (r#"{"idle_area_after":"90d"}"#, None),
+            (r#"{"stale_after":"30d","idle_area_after":"1d"}"#, None),
+            (
+                r#"{"idle_area_after":"23h59m"}"#,
+                Some(SettingsError::IdleAreaAfterOutOfRange),
+            ),
+            (
+                r#"{"idle_area_after":"90d1s"}"#,
+                Some(SettingsError::IdleAreaAfterOutOfRange),
+            ),
+            (
+                r#"{"idle_area_after":"a week"}"#,
+                Some(SettingsError::IdleAreaAfter(DurationError::Malformed)),
+            ),
+        ];
+        for (json, expected) in cases {
+            let got = ProjectSettings::parse(&document(json), &HotRuleRegistry::standard()).err();
+            assert_eq!(&got, expected, "{json}");
+        }
+        assert_eq!(
+            refusal(r#"{"idle_area_after":"91d"}"#).to_string(),
+            "idle_area_after is between 1 and 90 days"
+        );
+    }
+
+    #[test]
+    fn the_idle_area_delay_is_written_back_only_when_it_is_not_the_default() {
+        for (json, written) in [
+            ("{}", None),
+            (r#"{"idle_area_after":"7d"}"#, None),
+            (r#"{"idle_area_after":"168h"}"#, None),
+            (r#"{"idle_area_after":"3d"}"#, Some("3d")),
+        ] {
+            let parsed = settings(json);
+            let document = parsed.to_document();
+            assert_eq!(document.idle_area_after.as_deref(), written, "{json}");
+            assert_eq!(
+                ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+                parsed,
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
     fn without_claim_endings_the_release_delay_is_the_default_and_everything_else_stays() {
         let written = settings(
-            r#"{"stale_after":"2d","release_after":"20d","yield_escalates_after":"1h",
+            r#"{"stale_after":"2d","release_after":"20d","idle_area_after":"30d",
+                "yield_escalates_after":"1h",
                 "areas":[{"name":"billing","paths":["packages/billing/**"]}]}"#,
         );
         let older = written.without_claim_endings();
         assert_eq!(older.release_after(), Duration::days(7));
+        assert_eq!(older.idle_area_after(), Duration::days(7));
         assert_eq!(older.stale_after(), written.stale_after());
         let mut expected = written.to_document();
+        assert_eq!(expected.idle_area_after.as_deref(), Some("30d"));
         expected.release_after = None;
+        expected.idle_area_after = None;
         assert_eq!(older.to_document(), expected);
         let late = settings(r#"{"stale_after":"10d","release_after":"30d"}"#);
         assert_eq!(

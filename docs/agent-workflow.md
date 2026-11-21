@@ -250,6 +250,13 @@ that goes the project's `release_after` (7 days unless the settings say otherwis
 the server: the item is open again, its areas are free, and dibs tells you in that claim's conversation. If the work
 goes on, claim the item again.
 
+An area your claim holds that the work never touched goes back too: when the project's `idle_area_after` (7 days unless
+the settings say otherwise) passes with no edit made there under the claim and no path of its branch in it, the server
+gives the area back and tells you in that claim's conversation; the claim keeps the rest. Declare it again (`dibs_claim`,
+or `dibs claim <item> --area <area>`) to take it back while it is free. Naming an area when you claim again restarts
+its clock; claiming again without naming it does not, so to keep an area the branch has not touched yet, edit in it or
+name it when claiming again.
+
 ## Taking over
 
 Only a stale claim can be taken over, and only with a reason (`dibs_takeover`, `dibs takeover <item> --reason

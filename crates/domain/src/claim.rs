@@ -18,9 +18,11 @@ use crate::settings::ProjectSettings;
 use crate::wide::{WideScope, live_wide_naming};
 
 mod areas;
+mod idle;
 mod release;
 
-pub use areas::{AreaOrigin, ClaimAreas, GainedNotHeld};
+pub use areas::{AreaOrigin, ClaimAreas, ClaimAreasError};
+pub use idle::{FootprintPaths, idle_areas};
 pub use release::due_for_release;
 
 /// A member holding a work item. The claim is the member's: `session` and `host` record where it
@@ -38,7 +40,8 @@ pub struct Claim {
     pub session: SessionId,
     /// The host of that session.
     pub host: HostName,
-    /// The areas the claim holds while it is live, each declared or gained by an edit.
+    /// The areas the claim holds while it is live, each declared or gained by an edit, each with
+    /// the clock of when its work last showed there.
     pub areas: ClaimAreas,
     /// The areas a wide claim names and why; `None` for an ordinary claim. A wide claim holds none
     /// of them: they are disjoint from `areas`.
@@ -78,6 +81,21 @@ impl Claim {
     /// held.
     pub fn holds(&self, area: &QualifiedArea) -> bool {
         self.areas.contains(area)
+    }
+
+    /// Takes an edit of its own work at `now`, made in `areas`: the claim is seen now, and each of
+    /// those areas it holds, declared or gained, starts its clock again at `now`. An area it does
+    /// not hold changes nothing. Every edit attributed to the claim comes here, whether the server
+    /// checked it or the hooks reported it with a heartbeat.
+    pub fn saw_work<'a>(
+        &mut self,
+        areas: impl IntoIterator<Item = &'a QualifiedArea>,
+        now: OffsetDateTime,
+    ) {
+        self.last_seen = now;
+        for area in areas {
+            self.areas.note_edit(area, now);
+        }
     }
 
     /// Whether the claim waits for the area to be handed over to it.
@@ -203,6 +221,8 @@ pub enum ClaimOutcome {
     },
     /// The member already held the item (a stale claim of theirs included). The claim moves to the
     /// asking session and host, keeps `claimed_at` and adds the requested areas to the ones it had.
+    /// Each requested area starts its clock again now; an area it keeps without naming it keeps
+    /// its clock.
     Renewed {
         /// The claim to store.
         claim: Claim,
@@ -364,7 +384,8 @@ pub fn decide_claim(
             )?;
             let (kept, mut dropped_areas) =
                 keep_free_areas(&existing.areas, others, request, !live, now, settings);
-            let (areas, pending) = declare(kept, existing.pending.clone(), &request.areas, &takes);
+            let (areas, pending) =
+                declare(kept, existing.pending.clone(), &request.areas, &takes, now);
             let (wide, dropped_wide) = settle_wide(
                 existing.wide.as_ref(),
                 others,
@@ -414,6 +435,7 @@ pub fn decide_claim(
                 BTreeMap::new(),
                 &request.areas,
                 &takes,
+                now,
             );
             let (wide, _) = settle_wide(
                 None,
@@ -436,7 +458,8 @@ pub struct Takeover {
     /// The stale claim that ends.
     pub previous: Claim,
     /// The claim to store. It holds the requested areas, declared, and those of the previous claim
-    /// that nobody else holds or waits for now, each with the origin it had there, carries on the
+    /// that nobody else holds or waits for now, each with the origin it had there and its clock
+    /// started at the takeover, since the claim is a new one; it carries on the
     /// previous claim's kind unless the request names one, the areas the previous claim waited for
     /// when it is a feature claim, and the previous claim's wide scope as far as no other live wide
     /// claim names it now.
@@ -548,7 +571,8 @@ pub fn decide_takeover(
     } else {
         BTreeMap::new()
     };
-    let (areas, pending) = declare(kept, inherited, &request.areas, &takes);
+    let (mut areas, pending) = declare(kept, inherited, &request.areas, &takes, now);
+    areas.restart_clocks(now);
     let (wide, dropped_wide) = settle_wide(
         previous.wide.as_ref(),
         others,
@@ -624,10 +648,11 @@ pub fn decide_complete(current: Option<&Claim>, by: MemberId) -> Result<Complete
     })
 }
 
-/// A claim its holder narrowed.
+/// A claim that gave areas up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Narrowed {
-    /// The claim to store: it neither holds nor waits for the areas any more, and was seen now.
+    /// The claim to store: it neither holds nor waits for the areas any more. A narrowing by its
+    /// holder also saw it now; areas given back without its holder leave when it was last seen.
     pub claim: Claim,
     /// The areas it gave up: those asked for that it held or waited for, in order.
     pub areas: BTreeSet<QualifiedArea>,
@@ -647,7 +672,21 @@ pub fn decide_narrow(
     areas: &BTreeSet<QualifiedArea>,
     now: OffsetDateTime,
 ) -> Result<Narrowed, HolderOnly> {
-    let mut claim = holder_only(current, by)?.clone();
+    let mut narrowed = give_up(holder_only(current, by)?, areas);
+    narrowed.claim.last_seen = now;
+    Ok(narrowed)
+}
+
+/// Decides giving areas of a claim back without its holder, as the server does on its own: the
+/// claim neither holds nor waits for those of `areas` it held or waited for, and nothing else
+/// changes. It is no sign of the claim's work, so when the claim was last seen stays as it was.
+pub fn decide_return(claim: &Claim, areas: &BTreeSet<QualifiedArea>) -> Narrowed {
+    give_up(claim, areas)
+}
+
+/// The claim without those of `areas` it holds or waits for, and what it gave up.
+fn give_up(claim: &Claim, areas: &BTreeSet<QualifiedArea>) -> Narrowed {
+    let mut claim = claim.clone();
     let given: BTreeSet<QualifiedArea> = areas
         .iter()
         .filter(|area| claim.holds(area) || claim.waits_for(area))
@@ -660,12 +699,11 @@ pub fn decide_narrow(
             withdrawn.insert(area.clone(), pending);
         }
     }
-    claim.last_seen = now;
-    Ok(Narrowed {
+    Narrowed {
         claim,
         areas: given,
         withdrawn,
-    })
+    }
 }
 
 /// A claim an admin ended.
@@ -810,15 +848,17 @@ fn check_areas(
     Ok(takes)
 }
 
-/// The areas a claim holds and waits for once the requested areas are declared on top of `held`
-/// and `pending`: a requested area another claim holds and this one may take waits for it — a wait
-/// for that same claim keeps when it was asked for — and every other one is held as declared, a
-/// gained one too, and waits no more. The areas of `held` not requested keep their origin.
+/// The areas a claim holds and waits for once the requested areas are declared at `now` on top of
+/// `held` and `pending`: a requested area another claim holds and this one may take waits for it —
+/// a wait for that same claim keeps when it was asked for — and every other one is held as
+/// declared, a gained one too, its clock started at `now`, and waits no more. The areas of `held`
+/// not requested keep their origin and their clock.
 fn declare(
     mut held: ClaimAreas,
     mut pending: BTreeMap<QualifiedArea, PendingArea>,
     requested: &BTreeSet<QualifiedArea>,
     takes: &BTreeMap<QualifiedArea, ItemId>,
+    now: OffsetDateTime,
 ) -> (ClaimAreas, BTreeMap<QualifiedArea, PendingArea>) {
     for area in requested {
         match takes.get(area) {
@@ -829,7 +869,7 @@ fn declare(
             }
             None => {
                 pending.remove(area);
-                held.declare(area.clone());
+                held.declare(area.clone(), now);
             }
         }
     }
@@ -1224,8 +1264,8 @@ mod tests {
     fn a_renewal_declares_a_gained_area_it_names_and_keeps_the_others_gained() {
         let settings = two_repo_settings();
         let mut current = claim(1, ALICE, &["api:billing"], 0);
-        current.areas.gain(area("api:search"));
-        current.areas.gain(area("web:checkout"));
+        current.areas.gain(area("api:search"), at(1));
+        current.areas.gain(area("web:checkout"), at(2));
         let req = request(1, ALICE, &["api:search"]);
         let outcome = decide_claim(Some(&current), &[], &req, at(5), &settings).unwrap();
         let held = &outcome.claim().areas;
@@ -1235,10 +1275,56 @@ mod tests {
     }
 
     #[test]
-    fn a_takeover_keeps_each_inherited_areas_origin() {
+    fn a_renewal_restarts_the_clock_of_each_area_it_names_and_keeps_the_others() {
+        let settings = two_repo_settings();
+        let mut current = claim(1, ALICE, &["api:billing", "api:search"], 0);
+        current.areas.gain(area("web:checkout"), at(2));
+        let named = decide_claim(
+            Some(&current),
+            &[],
+            &request(1, ALICE, &["api:search", "web:billing"]),
+            at(50),
+            &settings,
+        )
+        .unwrap();
+        let clocks: Vec<(String, OffsetDateTime)> = named
+            .claim()
+            .areas
+            .clocks()
+            .iter()
+            .map(|(area, clock)| (area.to_string(), *clock))
+            .collect();
+        assert_eq!(
+            clocks,
+            [
+                ("api:billing".to_owned(), at(0)),
+                ("api:search".to_owned(), at(50)),
+                ("web:billing".to_owned(), at(50)),
+                ("web:checkout".to_owned(), at(2)),
+            ]
+        );
+        let late = at(0) + settings.stale_after() + Duration::hours(1);
+        let unnamed = decide_claim(
+            Some(&current),
+            &[],
+            &request(1, ALICE, &[]),
+            late,
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(
+            unnamed.claim().areas.clocks(),
+            current.areas.clocks(),
+            "a renewal that names no area keeps the clocks the claim had, stale or not"
+        );
+        assert_eq!(unnamed.claim().last_seen, late);
+    }
+
+    #[test]
+    fn a_takeover_keeps_each_inherited_areas_origin_and_starts_its_clock() {
         let settings = two_repo_settings();
         let mut previous = claim(1, BOB, &["api:billing"], 0);
-        previous.areas.gain(area("api:search"));
+        previous.areas.gain(area("api:search"), at(1));
         let late = at(0) + settings.stale_after() + Duration::hours(1);
         let taken = decide_takeover(
             Some(&previous),
@@ -1253,6 +1339,15 @@ mod tests {
             areas(&["api:billing", "api:search", "web:checkout"])
         );
         assert_eq!(taken.claim.areas.gained(), &areas(&["api:search"]));
+        assert!(
+            taken
+                .claim
+                .areas
+                .clocks()
+                .values()
+                .all(|clock| *clock == late),
+            "a takeover is a new claim, so every area it keeps starts its clock then"
+        );
     }
 
     #[test]
@@ -1309,9 +1404,11 @@ mod tests {
         let req = request(1, ALICE, &["api:billing"]);
         let first = decide_claim(None, &[], &req, at(0), &settings).unwrap();
         let again = decide_claim(Some(first.claim()), &[], &req, at(3), &settings).unwrap();
-        assert_eq!(again.claim().areas, first.claim().areas);
+        assert_eq!(*again.claim().areas, *first.claim().areas);
+        assert_eq!(again.claim().areas.gained(), first.claim().areas.gained());
         assert_eq!(again.claim().claimed_at, first.claim().claimed_at);
         assert_eq!(again.claim().renewed_at, at(3));
+        assert_eq!(again.claim().areas.clock(&area("api:billing")), Some(at(3)));
     }
 
     #[test]

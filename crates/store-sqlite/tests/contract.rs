@@ -19,7 +19,7 @@ mod contract {
     };
     use dibs_app::token::{TokenHash, TokenPrefix};
     use dibs_domain::area::QualifiedArea;
-    use dibs_domain::claim::{Claim, ClaimInstance};
+    use dibs_domain::claim::{Claim, ClaimAreas, ClaimInstance};
     use dibs_domain::delivery::{Delivery, DeliverySubject};
     use dibs_domain::dependency::{Dependency, DependencySource};
     use dibs_domain::event::{
@@ -115,7 +115,7 @@ mod contract {
         claims_are_kept_live_or_stale_and_replaced_per_item,
         a_claim_in_review_keeps_its_pull_requests_start_and_whether_more_follow,
         a_claim_keeps_the_branch_of_each_repository,
-        a_claim_keeps_which_of_its_areas_it_gained,
+        a_claim_keeps_which_of_its_areas_it_gained_and_the_clock_of_each,
         session_checkouts_are_kept_per_checkout_read_by_member_and_time_and_forgotten,
         session_checkouts_reported_before_a_time_go_in_their_project_only,
         a_claim_keeps_its_kind_and_the_areas_it_waits_for,
@@ -261,7 +261,7 @@ mod contract {
             member,
             session,
             host: HostName::parse("laptop").unwrap(),
-            areas: areas(names).into(),
+            areas: ClaimAreas::declared(areas(names), at(10)),
             wide: None,
             claimed_at: at(10),
             renewed_at: at(11),
@@ -875,13 +875,15 @@ mod contract {
         assert_eq!(tx.claim(A, THIRD).await.unwrap(), Some(working));
     }
 
-    async fn a_claim_keeps_which_of_its_areas_it_gained(store: Arc<dyn Store>) {
+    async fn a_claim_keeps_which_of_its_areas_it_gained_and_the_clock_of_each(
+        store: Arc<dyn Store>,
+    ) {
         seed(&store).await;
         let area = |name: &str| QualifiedArea::parse(name).unwrap();
         let mut tx = store.begin().await.unwrap();
         let mut gaining = claim(FIRST, ALICE, ALICE_LAPTOP, &["api:billing"]);
-        gaining.areas.gain(area("api:search"));
-        gaining.areas.gain(area("web:checkout"));
+        gaining.areas.gain(area("api:search"), at(20));
+        gaining.areas.gain(area("web:checkout"), at(-30));
         tx.save_claim(A, &gaining).await.unwrap();
         tx.commit().await.unwrap();
         let mut tx = store.begin().await.unwrap();
@@ -889,8 +891,16 @@ mod contract {
         assert_eq!(read, gaining);
         assert_eq!(read.areas.gained(), &areas(&["api:search", "web:checkout"]));
         assert!(read.areas.declares(&area("api:billing")));
+        assert_eq!(read.areas.clock(&area("api:billing")), Some(at(10)));
+        assert_eq!(
+            read.areas.clock(&area("api:search")),
+            Some(at(20)),
+            "to the nanosecond"
+        );
+        assert_eq!(read.areas.clock(&area("web:checkout")), Some(at(-30)));
         let mut declared = read;
-        declared.areas.declare(area("api:search"));
+        declared.areas.declare(area("api:search"), at(40));
+        declared.areas.note_edit(&area("api:billing"), at(50));
         declared.areas.remove(&area("web:checkout"));
         tx.save_claim(A, &declared).await.unwrap();
         tx.commit().await.unwrap();
@@ -898,6 +908,20 @@ mod contract {
         let read = tx.claim(A, FIRST).await.unwrap().unwrap();
         assert_eq!(read, declared, "a renewal's declaration replaces the gain");
         assert!(read.areas.gained().is_empty());
+        let clocks: Vec<(String, OffsetDateTime)> = read
+            .areas
+            .clocks()
+            .iter()
+            .map(|(area, clock)| (area.to_string(), *clock))
+            .collect();
+        assert_eq!(
+            clocks,
+            [
+                ("api:billing".to_owned(), at(50)),
+                ("api:search".to_owned(), at(40)),
+            ],
+            "an area given up takes its clock with it"
+        );
         assert_eq!(tx.claims(A).await.unwrap(), [declared]);
     }
 
@@ -1116,7 +1140,7 @@ mod contract {
         assert_eq!(tx.claim(A, SECOND).await.unwrap(), Some(debt.clone()));
         assert_eq!(tx.claims(A).await.unwrap(), vec![waiting.clone(), debt]);
         let handed = Claim {
-            areas: areas(&["web:checkout", "api:billing"]).into(),
+            areas: ClaimAreas::declared(areas(&["web:checkout", "api:billing"]), at(30)),
             pending: [(
                 QualifiedArea::parse("api:search").unwrap(),
                 PendingArea::waiting_for(SECOND),
@@ -2144,6 +2168,11 @@ mod contract {
                 item: FIRST,
                 member: BOB,
                 last_seen: at(-3) + time::Duration::nanoseconds(123_456_789),
+            }),
+            EventKind::AreasReturned(dibs_domain::event::AreasReturned {
+                item: FIRST,
+                member: BOB,
+                areas: areas(&["api:billing", "web:checkout"]),
             }),
         ];
         let mut tx = store.begin().await.unwrap();

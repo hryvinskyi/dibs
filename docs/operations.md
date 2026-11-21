@@ -532,10 +532,23 @@ is 7 days or longer, so settings written before the setting existed keep parsing
 and left without a write. A failure to sweep one project, its stored settings not parsing included, is logged (*the
 claims of a project could not be swept*) and the other projects are swept all the same.
 
-Clients older than 0.1.11 cannot read `release_after`, so the server serves them the settings without it (as `GET
-/v1/me` leaves out what an older client cannot parse; see [client versions](#client-versions)): setting it is safe before
-every member has updated. A server rolled back to a build without `release_after` cannot read settings that name it:
-remove the setting from the settings before rolling back.
+## Idle areas given back
+
+The same sweep gives back, from each live claim (worked on and seen within `stale_after`, or in review), every area it
+held for the project's `idle_area_after` with no sign of the claim's work in it: the area's clock (when the claim
+declared or gained it, moved by every later declaration of it and every edit of the claim in it) is older than that,
+no path of the claim's stored footprints falls in it, and the footprint of its repository, when there is one, is not
+truncated. The claim holds the area no more, the grants given in it end, an area another claim waits for moves to that
+claim, the log records `areas_returned`, and dibs tells the holder in the claim's conversation. When the claim was last
+seen stays as it was, so a claim whose areas went back still reaches the release rule. Only a claim with an area whose
+clock is past the delay has its footprints read, and a project with nothing to give back is left without a write.
+`idle_area_after` is a top-level setting, 1 to 90 days, 7 days by default. The upgrade that brings area clocks starts
+the clock of every area held then at the time the migration runs, so nothing is given back for the time before it.
+
+Clients older than 0.1.11 cannot read `release_after` or `idle_area_after`, so the server serves them the settings
+without them (as `GET /v1/me` leaves out what an older client cannot parse; see [client versions](#client-versions)):
+setting them is safe before every member has updated. A server rolled back to a build without them cannot read
+settings that name them: remove them from the settings before rolling back.
 
 ## Sessions woken while they wait
 

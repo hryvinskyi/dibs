@@ -24,6 +24,11 @@ pub struct SettingsDocument {
     /// days, or one day more than `stale_after` when that is 7 days or longer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_after: Option<String>,
+    /// How long an area of a live claim may go with no sign of the claim's work in it — no edit
+    /// made there under the claim, no declaration of it, no path of the claim's branch in it —
+    /// before the server gives the area back (`7d`; 1 to 90 days; default 7 days).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_area_after: Option<String>,
     /// How often a session sends a heartbeat (`1m`; 1 to 15 minutes; default 1 minute).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_every: Option<String>,

@@ -62,6 +62,9 @@ pub enum EventKind {
     /// The server released a working claim that went the project's `release_after` without a
     /// sign of its own work; the item is open again.
     ReleasedStale(ReleasedStale),
+    /// The server gave back areas of a live claim that went the project's `idle_area_after` with
+    /// no sign of the claim's work in them; the claim holds them no more.
+    AreasReturned(AreasReturned),
     /// A claim gained areas or shared paths through an edit check. Appended only when something
     /// was actually added.
     Reserved(Reserved),
@@ -186,6 +189,7 @@ impl EventKind {
             Self::ItemReopened(_) => "item_reopened",
             Self::ForceReleased(_) => "force_released",
             Self::ReleasedStale(_) => "released_stale",
+            Self::AreasReturned(_) => "areas_returned",
             Self::Reserved(_) => "reserved",
             Self::Granted(_) => "granted",
             Self::GrantRevoked(_) => "grant_revoked",
@@ -264,6 +268,7 @@ impl EventKind {
             Self::ItemReopened(e) => vec![Some(e.by)],
             Self::ForceReleased(e) => vec![Some(e.member), e.by],
             Self::ReleasedStale(e) => vec![Some(e.member)],
+            Self::AreasReturned(e) => vec![Some(e.member)],
             Self::Reserved(e) => vec![Some(e.member)],
             Self::Granted(e) => vec![Some(e.from), Some(e.to)],
             Self::GrantRevoked(e) => vec![Some(e.from), Some(e.to)],
@@ -327,6 +332,7 @@ impl EventKind {
             | Self::ItemReopened(_)
             | Self::ForceReleased(_)
             | Self::ReleasedStale(_)
+            | Self::AreasReturned(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -402,6 +408,7 @@ impl EventKind {
             | Self::ItemReopened(_)
             | Self::ForceReleased(_)
             | Self::ReleasedStale(_)
+            | Self::AreasReturned(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -482,6 +489,7 @@ impl EventKind {
             | Self::ItemReopened(_)
             | Self::ForceReleased(_)
             | Self::ReleasedStale(_)
+            | Self::AreasReturned(_)
             | Self::Reserved(_)
             | Self::Granted(_)
             | Self::GrantRevoked(_)
@@ -638,6 +646,17 @@ pub struct ReleasedStale {
     /// The claim's last sign of its own work, written in RFC 3339.
     #[serde(with = "time::serde::rfc3339")]
     pub last_seen: OffsetDateTime,
+}
+
+/// The server gave back areas of a live claim nothing of its work showed in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreasReturned {
+    /// The item of the claim.
+    pub item: ItemId,
+    /// Its holder.
+    pub member: MemberId,
+    /// The areas it holds no more.
+    pub areas: BTreeSet<QualifiedArea>,
 }
 
 /// A claim gained areas or shared paths through an edit check.
@@ -1831,6 +1850,38 @@ mod tests {
         );
         assert_eq!(kind.private_to(), None, "every reader of the log sees it");
         assert_eq!(kind.completion(), None, "a release completes nothing");
+        let back: EventKind = serde_json::from_value(value).unwrap();
+        assert_eq!(back, kind);
+    }
+
+    #[test]
+    fn areas_given_back_carry_the_item_its_holder_and_the_areas() {
+        let kind = EventKind::AreasReturned(AreasReturned {
+            item: ItemId(4),
+            member: BOB,
+            areas: BTreeSet::from([area("api:billing"), area("web:checkout")]),
+        });
+        let value = serde_json::to_value(&kind).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "areas_returned",
+                "payload": {"item": 4, "member": 2, "areas": ["api:billing", "web:checkout"]},
+            })
+        );
+        assert_eq!(kind.name(), "areas_returned");
+        assert!(parsed_names().iter().any(|name| name == "areas_returned"));
+        assert_eq!(kind.members(), BTreeSet::from([BOB]));
+        assert_eq!(
+            (kind.message(), kind.thread(), kind.slot()),
+            (None, None, None)
+        );
+        assert_eq!(kind.private_to(), None, "every reader of the log sees it");
+        assert_eq!(
+            kind.completion(),
+            None,
+            "giving areas back completes nothing"
+        );
         let back: EventKind = serde_json::from_value(value).unwrap();
         assert_eq!(back, kind);
     }

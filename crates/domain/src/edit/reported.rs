@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn an_area_gained_by_an_edit_is_held_like_a_declared_one() {
         let mut gained = claim(1, BOB, &[], 0);
-        gained.areas.gain(area("api:billing"));
+        gained.areas.gain(area("api:billing"), at(0));
         assert_eq!(shown(&edits(&["api:billing"], false), &[gained]), [1]);
     }
 

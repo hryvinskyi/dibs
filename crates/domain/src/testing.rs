@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use time::{Duration, OffsetDateTime};
 
 use crate::area::QualifiedArea;
-use crate::claim::{Claim, ClaimRequest};
+use crate::claim::{Claim, ClaimAreas, ClaimRequest};
 use crate::hot_rule::HotRuleRegistry;
 use crate::ids::{ItemId, MemberId, SessionId};
 use crate::session::HostName;
@@ -28,14 +28,20 @@ pub(crate) fn areas(texts: &[&str]) -> BTreeSet<QualifiedArea> {
     texts.iter().map(|text| area(text)).collect()
 }
 
-/// A claim claimed, renewed and last seen `minutes` after the fixed instant.
-pub(crate) fn claim(item: u64, member: MemberId, declared: &[&str], minutes: i64) -> Claim {
+/// The areas, each declared `minutes` after the fixed instant.
+pub(crate) fn declared(texts: &[&str], minutes: i64) -> ClaimAreas {
+    ClaimAreas::declared(areas(texts), at(minutes))
+}
+
+/// A claim claimed, renewed and last seen `minutes` after the fixed instant, its areas declared
+/// then.
+pub(crate) fn claim(item: u64, member: MemberId, names: &[&str], minutes: i64) -> Claim {
     Claim {
         item: ItemId(item),
         member,
         session: SessionId(member.get() * 100),
         host: HostName::parse("laptop").unwrap(),
-        areas: areas(declared).into(),
+        areas: declared(names, minutes),
         wide: None,
         claimed_at: at(minutes),
         renewed_at: at(minutes),

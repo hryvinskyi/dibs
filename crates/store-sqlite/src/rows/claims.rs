@@ -8,7 +8,7 @@ use sqlx::sqlite::SqliteRow;
 
 use dibs_app::ports::{ClaimRows, StoreResult};
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::claim::{Claim, ClaimAreas};
+use dibs_domain::claim::{Claim, ClaimAreas, ClaimAreasError};
 use dibs_domain::handover::{ClaimKind, PendingArea};
 use dibs_domain::ids::{ItemId, MemberId, ProjectId, SessionId, ThreadId};
 use dibs_domain::paths::{RelPath, RepoPath};
@@ -22,7 +22,7 @@ use dibs_domain::wide::{WideReason, WideScope};
 use dibs_domain::worktree::{PoolId, WorktreeName};
 
 use crate::SqliteTx;
-use crate::codec::{Fields, int, json, nanos, opt_nanos};
+use crate::codec::{Fields, int, json, nanos, opt_nanos, times_by};
 
 /// One entry of `claims.branches` as the column holds it: the branch, where it was learned from,
 /// and what identifies that source — the pull request of a pull request's head, the machine, pool
@@ -76,8 +76,9 @@ impl BranchColumn {
 /// The columns a claim is read from.
 macro_rules! claim_columns {
     () => {
-        "item_id, member_id, session_id, host, areas, gained_areas, wide_areas, wide_reason, \
-         claimed_at, renewed_at, last_seen, review_prs, review_since, review_more, branches, kind"
+        "item_id, member_id, session_id, host, areas, gained_areas, area_clocks, wide_areas, \
+         wide_reason, claimed_at, renewed_at, last_seen, review_prs, review_since, review_more, \
+         branches, kind"
     };
 }
 
@@ -98,8 +99,20 @@ fn claim(row: &SqliteRow, pending: BTreeMap<QualifiedArea, PendingArea>) -> Stor
             ));
         }
     };
-    let areas = ClaimAreas::new(f.json("areas")?, f.json("gained_areas")?)
-        .map_err(|error| f.bad("gained_areas", error))?;
+    let areas = ClaimAreas::new(
+        f.json("areas")?,
+        f.json("gained_areas")?,
+        f.times_by("area_clocks")?,
+    )
+    .map_err(|error| {
+        let column = match error {
+            ClaimAreasError::GainedNotHeld { .. } => "gained_areas",
+            ClaimAreasError::Unclocked { .. } | ClaimAreasError::ClockNotHeld { .. } => {
+                "area_clocks"
+            }
+        };
+        f.bad(column, error)
+    })?;
     let columns: BTreeMap<RepoId, BranchColumn> = f.json("branches")?;
     let branches = columns
         .into_iter()
@@ -248,11 +261,13 @@ impl ClaimRows for SqliteTx {
         let statement = sqlx::query(
             "INSERT INTO claims (project_id, item_id, member_id, session_id, host, areas, \
              gained_areas, wide_areas, wide_reason, claimed_at, renewed_at, last_seen, review_prs, \
-             review_since, review_more, branches, kind) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
+             review_since, review_more, branches, kind, area_clocks) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+             ?18) \
              ON CONFLICT (project_id, item_id) DO UPDATE SET member_id = excluded.member_id, \
              session_id = excluded.session_id, host = excluded.host, areas = excluded.areas, \
-             gained_areas = excluded.gained_areas, wide_areas = excluded.wide_areas, wide_reason = excluded.wide_reason, \
+             gained_areas = excluded.gained_areas, area_clocks = excluded.area_clocks, \
+             wide_areas = excluded.wide_areas, wide_reason = excluded.wide_reason, \
              claimed_at = excluded.claimed_at, renewed_at = excluded.renewed_at, \
              last_seen = excluded.last_seen, review_prs = excluded.review_prs, \
              review_since = excluded.review_since, review_more = excluded.review_more, \
@@ -291,7 +306,8 @@ impl ClaimRows for SqliteTx {
                 .map(|(repo, recorded)| (repo, BranchColumn::from(recorded)))
                 .collect::<BTreeMap<_, _>>(),
         )?)
-        .bind(record.kind.code());
+        .bind(record.kind.code())
+        .bind(times_by(record.areas.clocks())?);
         self.run(statement).await?;
         self.delete_pending(project, record.item).await?;
         for (area, waits) in &record.pending {

@@ -6,6 +6,7 @@
 //! Whatever a row holds that does not parse is reported as a corrupt record, naming the table and
 //! the column but never the value.
 
+use std::collections::BTreeMap;
 use std::fmt::Display;
 
 use serde::Serialize;
@@ -32,6 +33,18 @@ pub(crate) fn nanos(at: OffsetDateTime) -> StoreResult<i64> {
 /// An optional time as nanoseconds since the Unix epoch.
 pub(crate) fn opt_nanos(at: Option<OffsetDateTime>) -> StoreResult<Option<i64>> {
     at.map(nanos).transpose()
+}
+
+/// A map to times as a JSON object from each key, as its serde derive writes it, to the time in
+/// nanoseconds since the Unix epoch.
+pub(crate) fn times_by<K: Serialize + Ord>(
+    times: &BTreeMap<K, OffsetDateTime>,
+) -> StoreResult<String> {
+    let nanos = times
+        .iter()
+        .map(|(key, at)| Ok((key, nanos(*at)?)))
+        .collect::<StoreResult<BTreeMap<&K, i64>>>()?;
+    json(&nanos)
 }
 
 /// A value as the JSON text its serde derive writes.
@@ -162,6 +175,17 @@ impl<'r> Fields<'r> {
     /// A JSON column read into the value it holds.
     pub(crate) fn json<T: DeserializeOwned>(&self, column: &str) -> StoreResult<T> {
         self.parse(column, |text| serde_json::from_str::<T>(text))
+    }
+
+    /// A JSON object column from each key to a time, as [`times_by`] writes it.
+    pub(crate) fn times_by<K: DeserializeOwned + Ord>(
+        &self,
+        column: &str,
+    ) -> StoreResult<BTreeMap<K, OffsetDateTime>> {
+        self.json::<BTreeMap<K, i64>>(column)?
+            .into_iter()
+            .map(|(key, value)| Ok((key, self.at(column, value)?)))
+            .collect()
     }
 
     fn at(&self, column: &str, nanos: i64) -> StoreResult<OffsetDateTime> {
