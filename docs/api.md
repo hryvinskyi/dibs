@@ -222,8 +222,9 @@ them to acknowledge it; `acks` is in a thread read only, for a message that asks
 feature claim and the notice that it was handed over, the notice to a member whose stale
 claim was taken over, whose claim an admin ended, whose slot hold an admin ended or another member took over, whose slot
 hold expired or whose offer lapsed, whose worktree hold an admin ended, the notice to a claim's holder that its pull
-request merged, was set aside or left review, or that its ticket was closed in its tracker, the notice of a grant given,
-an escalation, and the notice that a member left. dibs writes them itself, in the project's name: `author` is
+request merged, was set aside or left review, or that its ticket was closed in its tracker, that it was released because
+nothing of its work showed, that areas of it were given back or handed on, the notice of a grant given, an escalation,
+and the notice that a member left. dibs writes them itself, in the project's name: `author` is
 `"dibs"`, `system` is `true` and `label` is `dibs`.
 
 **A claim's conversation.** Everything dibs writes to a claim's holder about that one claim goes into the claim's own

@@ -261,7 +261,7 @@ checkpointed.
 
 | Record | Kept |
 |---|---|
-| A conversation and its messages | 180 days after its last message; while it is about a work item that is still open (not done, not dropped), as long as the item is; while it carries an escalation no arbiter has settled, until one does |
+| A conversation and its messages | 180 days after its last message; while it is about a work item that is still open (not done, not dropped), as long as the item is; while it carries an escalation no arbiter has settled, until one does. The link from a claim to its conversation goes with its conversation |
 | An event of the log | 90 days |
 | A day's report of a member's machine | as long as the events of that day (90 days) |
 | What an integration last said of a pull request | 90 days after it last reported the pull request |
@@ -560,16 +560,16 @@ its item. The grants given in those areas end, an area another claim waits for m
 `areas_handed_on`, and dibs tells the holder in the claim's conversation. When the claim was last seen stays as it was.
 The claim completes as before when the tracker closes the item. Only the item's own tracker does this: the batch names
 its `source` and lists the item with its `source_status`, which is compared exactly as the importer sends it (an
-importer that reads a board sends the item's status there). An item that already sat in a listed state, a blocker row, a listing
-without a state and an item the same batch closes hand nothing on, so a claim taken while its item sat in such a state
-keeps its areas, and repeating a batch does nothing more. `free_areas_at` is a top-level setting, a list of states of 1
-to 40 characters, each named once (a state named twice is `invalid_settings`); it is empty by default, so nothing
-changes until the settings name a state.
+importer that reads a board sends the item's status there). An item that already sat in a listed state, a blocker row,
+a listing without a state and an item the same batch closes hand nothing on, so a claim taken while its item sat in
+such a state keeps its areas, and repeating a batch does nothing more. `free_areas_at` is a top-level setting, a list
+of states of 1 to 40 characters, each named once (a state named twice is `invalid_settings`); it is empty by default,
+so nothing changes until the settings name a state.
 
 Clients older than 0.1.11 cannot read `release_after`, `idle_area_after` or `free_areas_at`, so the server serves them
-the settings without them (as `GET /v1/me` leaves out what an older client cannot parse; see [client versions](#client-versions)):
-setting them is safe before every member has updated. A server rolled back to a build without them cannot read
-settings that name them: remove them from the settings before rolling back.
+the settings without them (as `GET /v1/me` leaves out what an older client cannot parse; see
+[client versions](#client-versions)): setting them is safe before every member has updated. A server rolled back to a
+build without them cannot read settings that name them: remove them from the settings before rolling back.
 
 ## Sessions woken while they wait
 
@@ -612,6 +612,16 @@ reads, page by page, so reading them holds up no heartbeat or edit check.
   never a path, a command line or a work item; the sessions counted stay on the machine. A part of `report.json` this
   dibs cannot read — a kind or a shape a newer one wrote — is kept and written back; a file that is not JSON at all is
   moved aside as `report.json.unread`.
+- **The edits let through without asking.** The guard answers most edits from its cache, and never asks about a path
+  no area governs, so the server rarely sees an edit check during steady work. A hook therefore records each edit it
+  let through without asking in the project's state on the machine (`cache/<scope>/edits.spool/`): one empty file for
+  each area an edit was let through in, named by the repository and the area, and one named `outside` once an edit
+  was made in a path no area governs; never a path, a command line or a work item. A hook makes the file with no lock
+  and without syncing it to the disk, and leaves it alone when it is there, so the spool never holds more files than
+  the project has areas, and one. The next heartbeat carries what the spool held (at most 200 areas, the others stay
+  for the next one), and the files it read are deleted once the server accepted that heartbeat; a heartbeat that
+  failed leaves them. The server attributes each reported edit to a claim by the rule of an edit check, and that is
+  what keeps the claim live: a heartbeat without this record refreshes no claim.
 - **How long hooks take** is the machine's own timing record (`hooks/timings.json` in the state directory, which
   `dibs doctor` reads too), one histogram per hook adapter that ran (`neutral`, or the host's adapter) and hook event,
   measured from the start of the hook's process to its last step. A run switched off is left out of it. A hook that
@@ -766,8 +776,43 @@ the radar built on them (footprints and overlaps); the log and the conversations
 from what a newer client sends: a checkout token, a named branch, a pull request's head, a pool worktree's branch. An
 older client's heartbeats and edit checks still answer as before, but the `repo` and `branch` they send without a
 checkout token are ignored, so its claims record no branch and see no overlap until it is upgraded. Upgrade the
-server, then publish the 0.1.11 client binaries and set `DIBS_LATEST_CLIENT` to 0.1.11 soon after, so the radar comes
+server, then publish the 0.1.11 client binaries and set `DIBS_LATEST_CLIENT` to 0.1.11 straight away, so the radar comes
 back as members update.
+
+**0.1.11, one conversation per claim, and the server ends what is over.** Two migrations: 15 adds a table that links
+each claim to its conversation (it goes with its conversation, and conversations that exist stay as they are), and 16
+adds a clock to each area a claim holds, started at the upgrade for every area held then, so the first areas can go
+back 7 days after the upgrade at the earliest. Three things change with the release:
+
+- **A heartbeat no longer keeps a claim alive.** A claim lives by its own work: it goes stale `stale_after` after its
+  last edit made under it, push of its branch or renewal, or while its pull requests wait, and the server's sweep
+  releases it `release_after` after that. The same sweep gives idle areas back (`idle_area_after`). Edits the guard
+  let through without asking the server reach it with the next heartbeat (see [a pilot's figures](#a-pilots-figures),
+  *The edits let through without asking*).
+- **dibs writes everything about a claim into one conversation** for its holder, and people's messages are counted
+  apart from dibs's own.
+- **A project that wants a tracker state to free a claim's areas names it in `free_areas_at`** (the team's importer
+  sends the board's Status as `source_status`). That makes a per-person job that does the same unnecessary.
+
+What the client version changes, so set `DIBS_LATEST_CLIENT` to 0.1.11 at the upgrade:
+
+- **Every member updates (`dibs self-update`).** A heartbeat from a client released before 0.1.11 refreshes no claim,
+  and its hooks report no edits, so such a member's claims stay live only by the edit checks that reach the server (the
+  first edit after a lull), by pushes and by renewals, and can go stale in the middle of work. Consider setting
+  `DIBS_MIN_CLIENT` to 0.1.11 once the team has updated.
+- **A person's message reaches a session between tool calls at any importance** only once members run the new client:
+  an older client filters the delivery list the server offers down to raised messages and acknowledgement requests, so
+  it drops a person's normal message.
+- **The heartbeat answer keeps `refreshed`**, so older clients keep decoding it.
+- **A new client against an older server** shows every unread conversation as from people, since that server leaves out
+  the fields that split the unread messages.
+- **The new settings may be set before members update.** The server serves a client older than 0.1.11 the settings
+  without `release_after`, `idle_area_after` and `free_areas_at`.
+
+`release_after` defaults to 7 days, or to one day more than `stale_after` when that is 7 days or longer, so no stored
+settings stop parsing at the upgrade. The settings document refuses fields it does not know: once a project's settings
+name `release_after`, `idle_area_after` or `free_areas_at`, rolling the server back to an earlier release makes those
+settings unreadable, so remove the fields before a rollback.
 
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated. To go back, restore the

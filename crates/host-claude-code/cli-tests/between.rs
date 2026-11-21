@@ -1,5 +1,5 @@
 //! `dibs hook claude-code` on what reaches an agent while it works: a `Bash` command checked
-//! against the slots, and a teammate's pressing message or a slot offered to the member, claimed
+//! against the slots, and a message a teammate wrote or a slot offered to the member, claimed
 //! once per member by the background sync and shown between tool calls or with a prompt, on the
 //! main thread only and once.
 

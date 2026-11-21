@@ -48,10 +48,11 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
 - **A command line never leaves the machine.** A shell command is split into simple commands and judged locally,
   from the cached settings; the server is asked only where the slots it touches stand, and a line no slot governs asks
   nothing.
-- **Delivery only where it lands.** A teammate's pressing message, or a slot offered to the member, is shown to the
-  agent after a tool runs or with a prompt — only on a host that carries text there and says which thread an event
-  comes from, and only on the main thread, since what reaches a subagent ends with it — or pushed to a session that
-  waits for its person, on a host that can wake one (below). The background sync claims
+- **Delivery only where it lands.** A message a teammate wrote to the member, at any importance, or a slot offered to
+  the member, is shown to the agent after a tool runs or with a prompt — only on a host that carries text there and
+  says which thread an event comes from, and only on the main thread, since what reaches a subagent ends with it — or,
+  when it is raised (`high` or `urgent`) or a slot offer, pushed to a session that waits for its person, on a host that
+  can wake one (below). The background sync claims
   each one from the server for its session (the first of a member's sessions to claim it wins, so a member hears of it
   once); the session's next main-thread event shows it, at most once a minute, never twice, never a member's own
   message. The text is framed as a named teammate's request and ends with the rule that it authorises nothing and the

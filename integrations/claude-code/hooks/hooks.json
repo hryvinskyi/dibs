@@ -1,5 +1,5 @@
 {
-  "description": "dibs: the brief at the start of a session, a check before each file edit and each shell command, heartbeats after tools run, a teammate's pressing message or a slot offered to you between tool calls and with your prompt, a note of when a turn ends, so that a message pushed while the session waits is not pushed while it works, and the worktrees your sessions and subagents ask for, lent from your machine's pool and let go of when a subagent or the session ends.",
+  "description": "dibs: the brief at the start of a session, a check before each file edit and each shell command, heartbeats after tools run, a message a teammate wrote to you or a slot offered to you between tool calls and with your prompt, a note of when a turn ends, so that a message pushed while the session waits is not pushed while it works, and the worktrees your sessions and subagents ask for, lent from your machine's pool and let go of when a subagent or the session ends.",
   "hooks": {
     "PostToolUse": [
       {

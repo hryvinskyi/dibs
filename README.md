@@ -206,7 +206,12 @@ revokes their tokens and releases everything they held at once. With the Claude 
 - **Messages from dibs.** What dibs writes itself — a wide claim's announcements, a request to hand an area over to a
   feature and the notice that it was handed over, the notice that a claim or a slot hold
   was taken over, ended, expired or that an offer lapsed, an escalation, a member leaving — is authored by the project,
-  shown as *from dibs* everywhere and never counted toward anyone's limit on raised messages.
+  shown as *from dibs* everywhere and never counted toward anyone's limit on raised messages. Everything dibs has to
+  say about one claim (an overlap, a moved base, a hand-over, a grant, a take-over, a release) goes into one
+  conversation for its holder, filed under the claim's item, and people's unread messages are counted apart from
+  dibs's own, so nothing a person wrote sits under notices. dibs also ends what is over: a ticket its tracker closed
+  completes its claim, a claim nobody worked on for a week is released, and an area the work never touched is given
+  back (the delays are project settings, a week by default).
 - **Arbiters and escalation.** The members a project names (`arbiters` in its settings) to settle what agents do not
   agree on. `dibs escalate` sends an urgent message, from dibs, to the arbiters and to whoever holds and whoever asked for
   the item, slot or conversation in question; the web pages' Now screen shows it until an arbiter acknowledges it.
@@ -506,7 +511,7 @@ a host.
 
 | Host | Status | What its guard sees |
 |---|---|---|
-| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, each `Bash` command before it runs, every tool after it ran, each prompt; edits another member holds and commands that need a slot another member holds are refused, a teammate's pressing message or a slot offered to you arrives between tool calls (or, opted in, wakes a session that waits for you), and subagents are told apart; the worktree a session or subagent asks for is lent from the machine's [pool](#worktree-pools) and let go of when it ends |
+| Claude Code | supported, through the `dibs` plugin | session start, each file edit before it is written, each `Bash` command before it runs, every tool after it ran, each prompt; edits another member holds and commands that need a slot another member holds are refused, a message a teammate wrote to you (at any importance) or a slot offered to you arrives between tool calls (or, when it is raised and the session opted in, wakes a session that waits for you), and subagents are told apart; the worktree a session or subagent asks for is lent from the machine's [pool](#worktree-pools) and let go of when it ends |
 | Codex CLI | planned | its command hooks |
 | OpenCode | planned | its in-process plugins, through a shim over `dibs hook neutral` |
 
@@ -519,7 +524,7 @@ project's admins ([docs/operations.md](docs/operations.md#a-pilots-figures)).
 
 The plugin gives Claude Code the brief at the start of a session, a check before every `Edit`, `Write`,
 `MultiEdit` and `NotebookEdit`, a check of every `Bash` command against the project's slots, heartbeats after tools
-run, a teammate's `high` or `urgent` message (or one that asks for an acknowledgement) and a slot offered to you between
+run, a message a teammate wrote to you, whatever its importance, and a slot offered to you between
 tool calls and with your prompt, the `dibs_*` tools of `dibs mcp`, and a skill with the workflow. It needs the `dibs` command on the `PATH` and a `dibs login` for the project; without them its hooks say
 so and let everything through.
 
