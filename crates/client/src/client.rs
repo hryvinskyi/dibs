@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use dibs_domain::edit::ReportedEdits;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{EventId, GrantId, ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey};
@@ -145,6 +146,7 @@ struct HeartbeatBody<'a> {
     machine: Option<&'a MachineId>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     reports: &'a [DayReport],
+    edits: &'a ReportedEdits,
 }
 
 #[derive(Serialize)]
@@ -273,7 +275,9 @@ impl Client {
 
     /// `POST /v1/heartbeat`: a session's sign of life from the checkout `checkout` names, on a
     /// branch when `on` names one, carrying what the machine `machine` counted on the days of
-    /// `reports`. A heartbeat that names no checkout records no branch.
+    /// `reports` and the edits its hooks let through without asking since the last heartbeat that
+    /// reported them, `edits`, which refresh the claims they were made under. A heartbeat that
+    /// names no checkout records no branch.
     ///
     /// # Errors
     /// [`ClientError`].
@@ -284,6 +288,7 @@ impl Client {
         on: Option<&OnBranch>,
         machine: Option<&MachineId>,
         reports: &[DayReport],
+        edits: &ReportedEdits,
     ) -> Result<Heartbeat, ClientError> {
         let body = HeartbeatBody {
             session_id: session,
@@ -291,6 +296,7 @@ impl Client {
             on,
             machine,
             reports,
+            edits,
         };
         self.send(self.request(Method::POST, "/v1/heartbeat").json(&body))
             .await

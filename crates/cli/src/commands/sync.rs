@@ -11,6 +11,11 @@
 //! counts as unreachable, as that is how a client the server no longer serves learns what to
 //! update to.
 //!
+//! Every heartbeat carries the edits the hooks of this machine let through without asking the
+//! server since the last heartbeat the server accepted ([`edits`]), so the claims they were made
+//! under stay live; once the server accepts it, what it carried is removed, and a heartbeat that
+//! failed leaves it for the next. As one sync runs at a time, no record is sent twice.
+//!
 //! Before a heartbeat it folds what the hooks spooled into the project's report; the heartbeat
 //! carries the days of the report that are due
 //! ([`report::pending`]), with the machine's hook timings and the id of the machine; a day the
@@ -66,6 +71,7 @@ use crate::context::{AGENT, Context};
 use crate::failure::{Failure, Kind};
 use crate::guard::cache::StateCache;
 use crate::guard::checkout_key::checkout_key;
+use crate::guard::edits;
 use crate::guard::machine::machine_id;
 use crate::guard::remote::{Remote, RemoteError};
 use crate::guard::report;
@@ -91,6 +97,8 @@ struct Synced {
     worktree_beats: usize,
     /// How many days of the project's report the heartbeat carried.
     reported: usize,
+    /// Whether the heartbeat carried edits the hooks let through without asking.
+    edits: bool,
     /// How many deliveries it claimed for the session, and how many of them it won.
     claimed: usize,
     won: usize,
@@ -337,9 +345,19 @@ async fn run(
         report::fold(&remote.state, now);
         let reports = report::pending(&remote.state, checked.timings, now);
         let carried = checked.machine.map_or(&[][..], |_| &reports[..]);
+        let recorded = edits::recorded(&remote.state);
         let answer = client
-            .heartbeat(id, checked.token, checked.on, checked.machine, carried)
+            .heartbeat(
+                id,
+                checked.token,
+                checked.on,
+                checked.machine,
+                carried,
+                &recorded.edits,
+            )
             .await?;
+        edits::sent(&recorded);
+        synced.edits = !recorded.edits.is_empty();
         let accepted: Vec<DayReport> = reports
             .into_iter()
             .filter(|report| answer.reports_accepted.contains(&report.day))

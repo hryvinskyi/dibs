@@ -18,7 +18,7 @@
 //! - `cache/<scope>/held.json` — areas edit checks found the member holding, each with when;
 //! - `cache/<scope>/heartbeats.json` — when each agent session last sent a heartbeat from this
 //!   machine, by the digest of its host and its id; a session's moment is forgotten when it ends,
-//!   and every moment once it is older than the project lets a claim live without a heartbeat;
+//!   and every moment once it is older than the project's `stale_after`;
 //! - `cache/<scope>/warned`, `sync-started` — when the person was last warned about an unreachable
 //!   server, when a background sync that does everything due, the machine's work included, was
 //!   last started;

@@ -13,6 +13,8 @@ mod check;
 #[cfg(test)]
 mod checkouts;
 #[cfg(test)]
+mod edits;
+#[cfg(test)]
 mod failures;
 #[cfg(test)]
 mod hook;

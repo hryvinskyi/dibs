@@ -106,6 +106,7 @@ async fn a_report_the_server_cannot_read_is_left_out_and_the_heartbeat_still_kee
     };
     let mixed = beat(json!({
         "session_id": session,
+        "edits": {"outside": true},
         "machine": MACHINE,
         "reports": [
             {"counts": {"held_by": 1}},
@@ -127,7 +128,7 @@ async fn a_report_the_server_cannot_read_is_left_out_and_the_heartbeat_still_kee
     assert_eq!(
         mixed.body["refreshed"],
         json!([item]),
-        "the session was kept alive"
+        "the heartbeat did its work"
     );
     assert_eq!(mixed.body["reports_accepted"], json!(["2026-03-02"]));
     let events = world.get(&alice, "/v1/events").await;
@@ -145,11 +146,12 @@ async fn a_report_the_server_cannot_read_is_left_out_and_the_heartbeat_still_kee
         "what of the report could be read is kept"
     );
 
-    for body in [
+    for mut body in [
         json!({"session_id": session, "reports": [report("2026-03-02", json!({"held_by": 7}))]}),
         json!({"session_id": session, "machine": "laptop", "reports": [report("2026-03-02", json!({}))]}),
         json!({"session_id": session, "machine": MACHINE, "reports": {"2026-03-02": {}}}),
     ] {
+        body["edits"] = json!({"outside": true});
         let answer = beat(body).await;
         assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
         assert_eq!(answer.body["refreshed"], json!([item]));

@@ -4,6 +4,7 @@
 
 pub mod cache;
 pub mod checkout_key;
+pub mod edits;
 pub mod gateway;
 pub mod ledger;
 pub mod machine;

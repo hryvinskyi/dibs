@@ -143,11 +143,12 @@ pub struct RegisterSession {
     pub push: bool,
 }
 
-/// `POST /v1/heartbeat`'s answer: the claims the heartbeat kept alive, the days whose report it
-/// carried changed what the server kept, and the days it accepted.
+/// `POST /v1/heartbeat`'s answer: the claims the edits the heartbeat reported refreshed, the days
+/// whose report it carried changed what the server kept, and the days it accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Heartbeat {
-    /// Their items.
+    /// The items of the claims refreshed; empty when the server leaves it out.
+    #[serde(default)]
     pub refreshed: Vec<ItemId>,
     /// The days.
     #[serde(default)]
@@ -1824,6 +1825,14 @@ mod tests {
                 holds_live_claim: true,
             }]
         );
+    }
+
+    #[test]
+    fn a_heartbeat_answer_that_leaves_out_the_refreshed_claims_names_none() {
+        let answer: Heartbeat =
+            serde_json::from_value(json!({"reports_accepted": ["2026-03-02"]})).unwrap();
+        assert!(answer.refreshed.is_empty());
+        assert_eq!(answer.reports_accepted.len(), 1);
     }
 
     #[test]

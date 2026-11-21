@@ -14,6 +14,11 @@
 //!   only where the slots it touches stand.
 //! - **What is delivered between tool calls** reaches the main thread only, of a host that carries
 //!   it, at most once a minute, never twice and never a member's own message.
+//! - **An edit let through without asking is recorded for the next heartbeat.** Its area when
+//!   what this machine knows of the member's holds answered it, or that it lay outside every area
+//!   when no area governs its path; never the path. The heartbeat carries the record, so the claims
+//!   the edits were made under stay live. An edit the server checked is not recorded, as the check
+//!   counted it, and a record that cannot be written changes no answer.
 //! - **A server that failed is left alone for a minute**, and the person is warned at most once a
 //!   minute meanwhile.
 //! - **A checkout that governs no repository of the project** (its `repo` missing, unknown, or not
@@ -396,6 +401,13 @@ impl Run<'_> {
             }));
         }
         self.leave_beats(cwd, call, agent);
+        if let Ok(Judged {
+            unchecked: Some(unchecked),
+            ..
+        }) = &judged
+        {
+            unchecked.record(self.workspace);
+        }
         judged
     }
 
@@ -405,6 +417,7 @@ impl Run<'_> {
         let Judged {
             outcome,
             mut refused,
+            ..
         } = judged;
         refused.sort_unstable();
         refused.dedup();
@@ -444,25 +457,26 @@ impl Run<'_> {
             .workspace
             .repo(settings)
             .map_err(|error| Problem::Repository(error.to_string()))?;
-        let governed: Vec<RelPath> = inside
-            .into_iter()
-            .filter(|path| {
+        let (governed, ungoverned): (Vec<RelPath>, Vec<RelPath>) =
+            inside.into_iter().partition(|path| {
                 settings.is_governed(&RepoPath {
                     repo: repo.clone(),
                     path: path.clone(),
                 })
-            })
-            .collect();
-        if governed.is_empty() {
-            return Ok(Judged::plain(GuardOutcome::silent()));
-        }
+            });
         let held = self.held_by_me(&known.value);
-        let ask: Vec<RelPath> = governed
+        let (answered, ask): (Vec<RelPath>, Vec<RelPath>) = governed
             .into_iter()
-            .filter(|path| !answered_by_hold(settings, &repo, path, &held))
-            .collect();
+            .partition(|path| answered_by_hold(settings, &repo, path, &held));
+        let unchecked = Unchecked {
+            areas: answered
+                .iter()
+                .filter_map(|path| area_of(settings, &repo, path))
+                .collect(),
+            outside: !ungoverned.is_empty(),
+        };
         if ask.is_empty() {
-            return Ok(Judged::plain(GuardOutcome::silent()));
+            return Ok(Judged::plain(GuardOutcome::silent()).letting(unchecked));
         }
         let branch = self.workspace.branch();
         let answers =
@@ -474,7 +488,9 @@ impl Run<'_> {
             ));
         }
         let wide = self.wide_named_by_me(&known.value);
-        Ok(self.verdicts(settings, &repo, &ask, &answers, &wide))
+        Ok(self
+            .verdicts(settings, &repo, &ask, &answers, &wide)
+            .letting(unchecked))
     }
 
     /// The command check: the line is split and judged on this machine, against the cached
@@ -685,6 +701,7 @@ impl Run<'_> {
                     reason: Text::new(refusals.join("\n")),
                 },
                 refused,
+                unchecked: None,
             };
         }
         if notes.is_empty() {
@@ -859,18 +876,29 @@ fn shown<'a>(hold: &'a SlotHold, known: &'a KnownBoard) -> wording::HoldShown<'a
     }
 }
 
-/// An outcome and the kinds of refusal it carries, each counted once.
+/// An outcome, the kinds of refusal it carries, each counted once, and the edits it lets through
+/// without asking the server, recorded once the tool call is let through.
 struct Judged {
     outcome: GuardOutcome,
     refused: Vec<Tally>,
+    unchecked: Option<Unchecked>,
 }
 
 impl Judged {
-    /// An outcome that refuses nothing.
+    /// An outcome that refuses nothing and lets no edit through unasked.
     fn plain(outcome: GuardOutcome) -> Self {
         Self {
             outcome,
             refused: Vec::new(),
+            unchecked: None,
+        }
+    }
+
+    /// The same, letting these edits through unasked.
+    fn letting(self, unchecked: Unchecked) -> Self {
+        Self {
+            unchecked: Some(unchecked),
+            ..self
         }
     }
 }
@@ -890,6 +918,7 @@ fn command_judged(verdict: &CommandVerdict, known: &KnownBoard) -> Judged {
     Judged {
         outcome: command_outcome(verdict, known),
         refused: command_tally(verdict).into_iter().collect(),
+        unchecked: None,
     }
 }
 
@@ -973,6 +1002,25 @@ fn with_notice(outcome: GuardOutcome, notice: String) -> GuardOutcome {
             notice: Some(Text::new(notice)),
         },
         other => other,
+    }
+}
+
+/// The edits of one tool call the guard let through without asking the server: the areas of
+/// paths answered from what this machine knew the member holds, and whether a path no area
+/// governs was among them.
+struct Unchecked {
+    areas: BTreeSet<QualifiedArea>,
+    outside: bool,
+}
+
+impl Unchecked {
+    /// Records them for the next heartbeat, when there is anything to record.
+    fn record(&self, workspace: &dyn Workspace) {
+        if self.areas.is_empty() && !self.outside {
+            return;
+        }
+        let areas: Vec<QualifiedArea> = self.areas.iter().cloned().collect();
+        workspace.unchecked_edits().record(&areas, self.outside);
     }
 }
 

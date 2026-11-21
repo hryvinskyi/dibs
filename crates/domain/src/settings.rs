@@ -610,7 +610,8 @@ impl ProjectSettings {
         &self.arbiters
     }
 
-    /// How long a claim stays live without a heartbeat.
+    /// How long a claim stays live after the last sign of its own work: an edit made under it, a
+    /// push of its branch, claiming it again.
     pub fn stale_after(&self) -> Duration {
         self.stale_after
     }

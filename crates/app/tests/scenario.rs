@@ -16,8 +16,9 @@ mod scenario {
         RegisterSessionInput, StartThreadInput, TakeOverInput, UseCases,
     };
     use dibs_app::{Actor, AppError};
+    use dibs_domain::area::QualifiedArea;
     use dibs_domain::claim::ClaimOutcome;
-    use dibs_domain::edit::Verdict;
+    use dibs_domain::edit::{ReportedEdits, Verdict};
     use dibs_domain::event::EventKind;
     use dibs_domain::handle::Handle;
     use dibs_domain::ids::{ItemId, SessionId};
@@ -382,11 +383,14 @@ mod scenario {
             1
         );
 
-        // Alice goes quiet for a day; Bob's heartbeats keep his own claim live.
+        // Alice goes quiet for a day; Bob's edits in search, which his hooks report with his
+        // heartbeat, keep his own claim live.
         team.fakes.clock.advance(Duration::hours(12));
+        let search = QualifiedArea::parse("default:search").unwrap();
+        let edits = ReportedEdits::new([search].into(), false).unwrap();
         let beat = app
             .heartbeat
-            .execute(&team.bob, team.bob_session, None)
+            .execute_reporting(&team.bob, team.bob_session, None, None, Some(&edits))
             .await
             .unwrap();
         assert_eq!(beat.refreshed, [ranking]);

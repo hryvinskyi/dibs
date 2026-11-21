@@ -802,6 +802,10 @@ pub trait Workspace {
     /// What this machine counts for the project's reports.
     fn tallies(&self) -> &dyn Tallies;
 
+    /// The edits this machine's hooks let through without asking the server, for the next
+    /// heartbeat.
+    fn unchecked_edits(&self) -> &dyn UncheckedEdits;
+
     /// The pool of worktrees the checkout lends, or, when it is one of a pool's worktrees, the
     /// pool it belongs to; `None` when it has none.
     fn worktree_pool(&self) -> Option<&dyn WorktreePool>;
@@ -830,6 +834,16 @@ pub trait Tallies {
     /// Counts `session` as one that ran with the guard switched off, on `day`, unless it was
     /// counted before: a session is counted once, on the day it was first seen switched off.
     fn switched_off(&self, day: ReportDay, session: &SessionRef);
+}
+
+/// The edits this machine's hooks let through without asking the server, kept until a heartbeat
+/// the server accepted carries them, so the claims they were made under stay live: the areas of
+/// edits answered from what this machine knew the member holds, and whether an edit was made in a
+/// path no area governs. Nothing else of an edit is kept. Recording waits for no lock, and a record
+/// that cannot be written is skipped, which is not the caller's concern.
+pub trait UncheckedEdits {
+    /// Records edits let through in `areas`, and an edit outside every area when `outside`.
+    fn record(&self, areas: &[QualifiedArea], outside: bool);
 }
 
 /// What this machine remembers about the project between hook runs. Reading never touches the

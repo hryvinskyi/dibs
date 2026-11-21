@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use dibs_domain::edit::{ReportedEdits, claims_shown_by};
 use dibs_domain::event::{EventKind, HookReported};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId};
@@ -17,10 +18,11 @@ use crate::use_cases::common::own_session;
 use crate::use_cases::radar::{FromCheckout, Radar, fed_by_checkout, report_checkout};
 use crate::work::Work;
 
-/// What a heartbeat kept alive.
+/// What a heartbeat did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeartbeatOutcome {
-    /// The claims whose `last_seen` moved to now.
+    /// The claims whose `last_seen` moved to now, because the edits the heartbeat reported were
+    /// made under them.
     pub refreshed: Vec<ItemId>,
     /// The days whose report changed what was kept for the session's member and machine.
     pub reported: Vec<ReportDay>,
@@ -29,15 +31,23 @@ pub struct HeartbeatOutcome {
     pub accepted: Vec<ReportDay>,
 }
 
-/// Refreshes the session and the caller's live claims taken from a session on the same machine. A
-/// claim taken on another machine is kept alive by that machine's heartbeat, or by an edit check
-/// here; a claim that already went stale is renewed only by claiming it again. The caller's places
-/// in slot queues, and the slot holds their heartbeats keep, are seen now too, from any machine.
+/// Keeps the session seen, and refreshes only the caller's claims the edits it reports show work
+/// under: a heartbeat itself keeps no claim alive. Its machine's hooks let edits through without
+/// asking the server when the member is known to hold the edit's area, or when no area governs the
+/// path, and the heartbeat reports them: every live claim of the caller that holds a reported area
+/// is seen now, and an edit outside every area makes the caller's target claim (the live claim
+/// most recently claimed or renewed) seen now ([`claims_shown_by`]), wherever those claims were
+/// taken. A report of no edit refreshes no claim, and so does a heartbeat that carries no report
+/// at all, as a client that does not report its edits sends: its member's claims stay live by the
+/// edit checks that reach the server, the pushes of their branches and their renewals. A claim
+/// that already went stale is renewed only by claiming it again. The caller's places in slot
+/// queues, and the slot holds their heartbeats keep, are seen now too, from any machine.
 ///
 /// A heartbeat that names its checkout stores that its session reported working there now,
 /// whether or not the checkout is on a branch. When the checkout is on a branch of a repository the
-/// project lists, that branch, learned from the checkout, is recorded on one claim at most: the
-/// one live claim its session took or last renewed and works on, and only while the session
+/// project lists, that branch, learned from the checkout, is recorded on one claim at most: of the
+/// caller's live claims taken from a session on the same machine, the one its session took or last
+/// renewed and works on, and only while the session
 /// reported no other checkout and no other session of the member reported this one, within the
 /// last hour ([`SHARED_FOR`](dibs_domain::radar::SHARED_FOR)). A branch the claim learned from a
 /// stronger source that still holds is kept. A `BranchRecorded`
@@ -71,7 +81,8 @@ impl Heartbeat {
         }
     }
 
-    /// Records a heartbeat that reports nothing.
+    /// Records a heartbeat that reports nothing and carries no report of edits, as a client that
+    /// does not report its edits sends: it refreshes no claim.
     ///
     /// # Errors
     /// As [`Heartbeat::execute_reporting`].
@@ -81,10 +92,12 @@ impl Heartbeat {
         session: SessionId,
         from: Option<&FromCheckout>,
     ) -> Result<HeartbeatOutcome, AppError> {
-        self.execute_reporting(actor, session, from, None).await
+        self.execute_reporting(actor, session, from, None, None)
+            .await
     }
 
-    /// Records the heartbeat and keeps the reports it carries.
+    /// Records the heartbeat, refreshes the claims the edits it reports show work under, and keeps
+    /// the reports it carries. `edits` is `None` for a heartbeat that carries no report of edits.
     ///
     /// # Errors
     /// [`AppError::Forbidden`] for an integration; [`AppError::NotFound`] when the session is not the caller's; [`AppError::Store`] when the
@@ -95,6 +108,7 @@ impl Heartbeat {
         session: SessionId,
         from: Option<&FromCheckout>,
         reports: Option<&HeartbeatReports>,
+        edits: Option<&ReportedEdits>,
     ) -> Result<HeartbeatOutcome, AppError> {
         actor.require_person()?;
         let now = self.clock.now();
@@ -104,12 +118,20 @@ impl Heartbeat {
         let stale_after = settings.stale_after();
         session.last_seen = now;
         work.save_session(actor.project, &session).await?;
+        let claims = work.claims(actor.project).await?;
+        let shown = edits
+            .map(|edits| claims_shown_by(edits, actor.member, &claims, now, stale_after))
+            .unwrap_or_default();
+        let mut refreshed = Vec::new();
         let mut kept = Vec::new();
-        for mut claim in work.claims(actor.project).await? {
-            let ours = claim.member == actor.member && claim.host == session.host;
-            if ours && claim.is_live(now, stale_after) {
+        for mut claim in claims {
+            if shown.contains(&claim.item) {
                 claim.last_seen = now;
                 work.save_claim(actor.project, &claim).await?;
+                refreshed.push(claim.item);
+            }
+            let ours = claim.member == actor.member && claim.host == session.host;
+            if ours && claim.is_live(now, stale_after) {
                 kept.push(claim);
             }
         }
@@ -184,7 +206,7 @@ impl Heartbeat {
         }
         work.commit(&*self.notifier).await?;
         Ok(HeartbeatOutcome {
-            refreshed: kept.iter().map(|claim| claim.item).collect(),
+            refreshed,
             reported,
             accepted,
         })
@@ -203,6 +225,10 @@ mod tests {
     use crate::use_cases::{ClaimItem, ClaimItemInput, OnBranch};
 
     async fn claim(env: &Env, item: ItemId, session: SessionId) {
+        claim_with(env, item, session, &[]).await;
+    }
+
+    async fn claim_with(env: &Env, item: ItemId, session: SessionId, areas: &[&str]) {
         ClaimItem::new(&env.deps)
             .execute(
                 &env.bob.actor,
@@ -211,7 +237,7 @@ mod tests {
                     wide: None,
                     item,
                     session,
-                    areas: Vec::new(),
+                    areas: areas.iter().map(|area| (*area).to_owned()).collect(),
                     kind: None,
                 },
             )
@@ -219,32 +245,155 @@ mod tests {
             .unwrap();
     }
 
+    fn edits(areas: &[&str], outside: bool) -> ReportedEdits {
+        let areas = areas
+            .iter()
+            .map(|text| dibs_domain::area::QualifiedArea::parse(text).unwrap())
+            .collect();
+        ReportedEdits::new(areas, outside).unwrap()
+    }
+
+    /// Bob's heartbeat from `session`, reporting `edits` when it carries a report of them.
+    async fn beat_reporting(
+        env: &Env,
+        session: SessionId,
+        edits: Option<&ReportedEdits>,
+    ) -> HeartbeatOutcome {
+        Heartbeat::new(&env.deps)
+            .execute_reporting(&env.bob.actor, session, None, None, edits)
+            .await
+            .unwrap()
+    }
+
+    async fn last_seen(env: &Env, item: ItemId) -> time::OffsetDateTime {
+        let mut tx = env.deps.store.begin().await.unwrap();
+        tx.claim(env.project, item)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_seen
+    }
+
+    async fn stale(env: &Env) -> Vec<ItemId> {
+        use crate::use_cases::Status;
+
+        Status::new(&env.deps)
+            .execute(&env.bob.actor)
+            .await
+            .unwrap()
+            .stale
+            .iter()
+            .map(|line| line.item.item.id)
+            .collect()
+    }
+
     #[tokio::test]
-    async fn a_heartbeat_refreshes_the_live_claims_of_its_machine_only() {
+    async fn heartbeats_that_report_no_edit_leave_a_claim_to_go_stale() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim_with(&env, item, env.bob.session, &["billing"]).await;
+        let empty = ReportedEdits::default();
+        for _ in 0..25 * 60 {
+            env.advance(Duration::minutes(1));
+            let outcome = beat_reporting(&env, env.bob.session, Some(&empty)).await;
+            assert!(outcome.refreshed.is_empty());
+        }
+        assert_eq!(last_seen(&env, item).await, START);
+        assert_eq!(stale(&env).await, [item]);
+    }
+
+    #[tokio::test]
+    async fn a_reported_edit_in_an_area_refreshes_every_live_claim_of_the_caller_holding_it() {
         let env = Env::new().await;
         let here = env.item("gh:acme/widgets#1").await;
         let elsewhere = env.item("gh:acme/widgets#2").await;
-        let gone_stale = env.item("gh:acme/widgets#3").await;
+        let other = env.item("gh:acme/widgets#3").await;
+        let gone_stale = env.item("gh:acme/widgets#4").await;
         let other_machine = session(&env.deps, &env.bob.actor, "laptop-2", "laptop-2/aa").await;
-        claim(&env, gone_stale, env.bob.session).await;
+        claim_with(&env, gone_stale, env.bob.session, &["billing"]).await;
         env.advance(Duration::hours(25));
-        claim(&env, here, env.bob.session).await;
-        claim(&env, elsewhere, other_machine).await;
+        claim_with(&env, here, env.bob.session, &["billing"]).await;
+        claim_with(&env, elsewhere, other_machine, &["billing"]).await;
+        claim_with(&env, other, env.bob.session, &["search"]).await;
         let events = env.events().await.len();
         env.advance(Duration::minutes(10));
-        let outcome = Heartbeat::new(&env.deps)
-            .execute(&env.bob.actor, env.bob.session, None)
-            .await
-            .unwrap();
-        assert_eq!(outcome.refreshed, [here]);
-        let mut tx = env.deps.store.begin().await.unwrap();
-        let now = env.fakes.clock.as_ref();
-        let refreshed = tx.claim(env.project, here).await.unwrap().unwrap();
-        assert_eq!(refreshed.last_seen, crate::ports::Clock::now(now));
-        let untouched = tx.claim(env.project, elsewhere).await.unwrap().unwrap();
-        assert!(untouched.last_seen < refreshed.last_seen);
-        drop(tx);
+        let outcome = beat_reporting(
+            &env,
+            env.bob.session,
+            Some(&edits(&["default:billing"], false)),
+        )
+        .await;
+        assert_eq!(
+            outcome.refreshed,
+            [here, elsewhere],
+            "wherever the claim was taken"
+        );
+        assert_eq!(last_seen(&env, here).await, env.now());
+        assert_eq!(last_seen(&env, elsewhere).await, env.now());
+        assert!(last_seen(&env, other).await < env.now());
+        assert!(
+            stale(&env).await.contains(&gone_stale),
+            "a stale claim stays"
+        );
         assert_eq!(env.events().await.len(), events);
+    }
+
+    #[tokio::test]
+    async fn a_reported_edit_outside_every_area_refreshes_the_target_claim_only() {
+        let env = Env::new().await;
+        let older = env.item("gh:acme/widgets#1").await;
+        let newer = env.item("gh:acme/widgets#2").await;
+        claim_with(&env, older, env.bob.session, &["billing"]).await;
+        env.advance(Duration::minutes(5));
+        claim(&env, newer, env.bob.session).await;
+        env.advance(Duration::minutes(10));
+        let outcome = beat_reporting(&env, env.bob.session, Some(&edits(&[], true))).await;
+        assert_eq!(outcome.refreshed, [newer]);
+        assert_eq!(last_seen(&env, newer).await, env.now());
+        assert!(last_seen(&env, older).await < env.now());
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_without_a_report_of_edits_keeps_the_session_seen_and_no_claim() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim_with(&env, item, env.bob.session, &["billing"]).await;
+        env.advance(Duration::minutes(10));
+        let outcome = beat_reporting(&env, env.bob.session, None).await;
+        assert!(outcome.refreshed.is_empty());
+        assert_eq!(last_seen(&env, item).await, START);
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let seen = tx.session(env.project, env.bob.session).await.unwrap();
+        assert_eq!(seen.unwrap().last_seen, env.now());
+    }
+
+    #[tokio::test]
+    async fn a_renewal_refreshes_a_claim() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim(&env, item, env.bob.session).await;
+        env.advance(Duration::hours(23));
+        claim(&env, item, env.bob.session).await;
+        env.advance(Duration::hours(2));
+        assert_eq!(last_seen(&env, item).await, START + Duration::hours(23));
+        assert!(stale(&env).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_claim_in_review_stays_live_with_no_sign_at_all() {
+        use dibs_domain::review::{ClaimState, PrRef, Review};
+
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        claim(&env, item, env.bob.session).await;
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let mut stored = tx.claim(env.project, item).await.unwrap().unwrap();
+        let prs = [PrRef::parse("acme/widgets#7").unwrap()].into();
+        stored.state = ClaimState::InReview(Review::new(prs, START, false).unwrap());
+        tx.save_claim(env.project, &stored).await.unwrap();
+        tx.commit().await.unwrap();
+        env.advance(Duration::days(30));
+        assert!(stale(&env).await.is_empty());
     }
 
     async fn beat(env: &Env, session: SessionId, from: Option<FromCheckout>) {
@@ -542,7 +691,7 @@ mod tests {
             let env = &env;
             async move {
                 Heartbeat::new(&env.deps)
-                    .execute_reporting(&env.bob.actor, session, None, Some(&reports))
+                    .execute_reporting(&env.bob.actor, session, None, Some(&reports), None)
                     .await
                     .unwrap()
             }

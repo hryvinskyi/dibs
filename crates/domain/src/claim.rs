@@ -22,7 +22,10 @@ mod areas;
 pub use areas::{AreaOrigin, ClaimAreas, GainedNotHeld};
 
 /// A member holding a work item. The claim is the member's: `session` and `host` record where it
-/// was taken and which machine's heartbeat keeps it alive, and any session of the member acts on it.
+/// was taken, and any session of the member acts on it. It stays live while its own work shows (an
+/// edit made under it, whether the server checked it or the hooks reported it with the next
+/// heartbeat; a push of its branch; claiming it again; a pull request it waits for) and goes stale
+/// `stale_after` after the last of those.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Claim {
     /// The item held. A claim has no id of its own; the item keys it.
@@ -42,7 +45,8 @@ pub struct Claim {
     pub claimed_at: OffsetDateTime,
     /// When the member last claimed it again; equal to `claimed_at` until then.
     pub renewed_at: OffsetDateTime,
-    /// The last sign of life: a heartbeat, an edit, a renewal.
+    /// The last sign of its own work: an edit made under it, whether the server checked it or the
+    /// hooks reported it with a heartbeat; a push of its branch; claiming it again.
     pub last_seen: OffsetDateTime,
     /// Whether its holder works on it or its work waits in pull requests.
     pub state: ClaimState,

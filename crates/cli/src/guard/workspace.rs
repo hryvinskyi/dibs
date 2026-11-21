@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
 use dibs_agent_host::ports::{
-    CoordinationGateway, DeliveryLedger, Git as HostGit, LocalCache, PortError, Tallies, Upkeep,
-    Workspace, Workspaces, WorktreePool,
+    CoordinationGateway, DeliveryLedger, Git as HostGit, LocalCache, PortError, Tallies,
+    UncheckedEdits, Upkeep, Workspace, Workspaces, WorktreePool,
 };
 use dibs_agent_host::upkeep::is_fresh;
 use dibs_client::branch::{current_branch, head};
@@ -28,6 +28,7 @@ use dibs_domain::settings::ProjectSettings;
 use crate::failure::sentence;
 use crate::git::Git;
 use crate::guard::cache::StateCache;
+use crate::guard::edits::StateEdits;
 use crate::guard::gateway::HookGateway;
 use crate::guard::ledger::SessionLedgers;
 use crate::guard::remote::{Remote, RemoteError, checkout_of};
@@ -94,6 +95,7 @@ pub struct ClientWorkspace {
     upkeep: DetachedSync,
     ledger: SessionLedgers,
     tallies: StateTallies,
+    edits: StateEdits,
     remote: Remote,
     state_base: PathBuf,
     pool: OnceCell<Result<ClientWorktreePool, Option<String>>>,
@@ -116,6 +118,7 @@ impl ClientWorkspace {
             upkeep: DetachedSync::new(state.clone(), checkout.root()),
             ledger: SessionLedgers::new(state.clone()),
             tallies: StateTallies::new(state.clone()),
+            edits: StateEdits::new(state.clone()),
             gateway,
             checkout,
             git_dir,
@@ -214,6 +217,10 @@ impl Workspace for ClientWorkspace {
 
     fn tallies(&self) -> &dyn Tallies {
         &self.tallies
+    }
+
+    fn unchecked_edits(&self) -> &dyn UncheckedEdits {
+        &self.edits
     }
 
     fn worktree_pool(&self) -> Option<&dyn WorktreePool> {

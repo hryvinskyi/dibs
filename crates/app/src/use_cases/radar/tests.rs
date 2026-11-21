@@ -326,6 +326,57 @@ async fn a_footprint_is_stored_for_the_live_claims_branch_only_and_a_repeat_chan
     assert_eq!(elsewhere.code(), "not_found");
 }
 
+/// A heartbeat of `who` reporting an edit outside every area, which keeps their target claim live.
+async fn edited_outside_every_area(env: &Env, who: &Person) {
+    let edits = dibs_domain::edit::ReportedEdits::new(BTreeSet::new(), true).unwrap();
+    let outcome = Heartbeat::new(&env.deps)
+        .execute_reporting(&who.actor, who.session, None, None, Some(&edits))
+        .await
+        .unwrap();
+    assert_eq!(outcome.refreshed.len(), 1);
+}
+
+async fn last_seen(env: &Env, item: ItemId) -> time::OffsetDateTime {
+    let mut tx = env.deps.store.begin().await.unwrap();
+    tx.claim(env.project, item)
+        .await
+        .unwrap()
+        .unwrap()
+        .last_seen
+}
+
+#[tokio::test]
+async fn a_footprint_that_changed_refreshes_its_claim_and_an_unchanged_one_does_not() {
+    let env = Env::with_settings(SETTINGS).await;
+    let item = env.item("gh:acme/widgets#1").await;
+    claim_on(&env, &env.bob, item, "bob/1-x").await;
+    env.advance(time::Duration::hours(10));
+    report(&env, footprint(item, "bob/1-x", "abcd", &["a.rs"])).await;
+    let pushed = env.now();
+    assert_eq!(last_seen(&env, item).await, pushed, "a push of its branch");
+    env.advance(time::Duration::hours(10));
+    assert_eq!(
+        report(&env, footprint(item, "bob/1-x", "abcd", &["a.rs"])).await,
+        FootprintRecorded::Stored { changed: false }
+    );
+    assert_eq!(last_seen(&env, item).await, pushed, "nothing was pushed");
+    report(&env, footprint(item, "bob/1-x", "abcd", &["a.rs", "b.rs"])).await;
+    assert_eq!(last_seen(&env, item).await, env.now());
+}
+
+#[tokio::test]
+async fn a_push_of_a_stale_claims_branch_does_not_bring_it_back() {
+    let env = Env::with_settings(SETTINGS).await;
+    let item = env.item("gh:acme/widgets#1").await;
+    claim_on(&env, &env.bob, item, "bob/1-x").await;
+    env.advance(time::Duration::hours(25));
+    assert_eq!(
+        report(&env, footprint(item, "bob/1-x", "abcd", &["a.rs"])).await,
+        FootprintRecorded::NotStored(NotStored::NoLiveClaim)
+    );
+    assert_eq!(last_seen(&env, item).await, START);
+}
+
 #[tokio::test]
 async fn two_members_changing_one_file_are_both_told_once_and_again_only_after_it_ended() {
     let env = Env::with_settings(SETTINGS).await;
@@ -1043,10 +1094,7 @@ async fn going_stale_ends_no_overlap_and_coming_back_announces_none_again() {
     report(&env, footprint(bobs, "bob/2", "abcd", &["config/app.yaml"])).await;
     assert_eq!(told(&env, &env.alice).await.len(), 1);
     env.advance(time::Duration::hours(20));
-    Heartbeat::new(&env.deps)
-        .execute(&env.alice.actor, env.alice.session, None)
-        .await
-        .unwrap();
+    edited_outside_every_area(&env, &env.alice).await;
     env.advance(time::Duration::hours(5));
     report(
         &env,
@@ -1095,10 +1143,7 @@ async fn a_takeover_clears_the_previous_holders_footprints_and_overlaps() {
     .await;
     report(&env, footprint(bobs, "bob/2", "abcd", &["config/app.yaml"])).await;
     env.advance(time::Duration::hours(20));
-    Heartbeat::new(&env.deps)
-        .execute(&env.alice.actor, env.alice.session, None)
-        .await
-        .unwrap();
+    edited_outside_every_area(&env, &env.alice).await;
     env.advance(time::Duration::hours(5));
     TakeOver::new(&env.deps)
         .execute(

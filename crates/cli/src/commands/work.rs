@@ -380,7 +380,7 @@ async fn start_review(args: ReviewArgs, ctx: &Context) -> Result<(), Failure> {
             "the merge of its last pull request completes it"
         };
         format!(
-            "Your claim on {} is in review on {}: it keeps its areas and needs no heartbeat while the pull request is open, and {ends}.",
+            "Your claim on {} is in review on {}: it keeps its areas and never goes stale while the pull request is open, and {ends}.",
             item_label(Some(&reviewed.item), item),
             prs.join(", ")
         )

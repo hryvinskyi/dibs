@@ -177,6 +177,7 @@ mod tests {
                     today,
                     &[(Tally::HeldBy, 2), (Tally::SwitchedOff, 1)],
                 )),
+                None,
             )
             .await
             .unwrap();

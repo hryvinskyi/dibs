@@ -15,7 +15,8 @@ use super::EditPolicy;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsDocument {
-    /// How long a claim stays live without a heartbeat (`24h`; 1 hour to 30 days; default 24 hours).
+    /// How long a claim stays live after the last sign of its own work: an edit made under it, a
+    /// push of its branch, claiming it again (`24h`; 1 hour to 30 days; default 24 hours).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_after: Option<String>,
     /// How often a session sends a heartbeat (`1m`; 1 to 15 minutes; default 1 minute).

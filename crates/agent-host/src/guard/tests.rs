@@ -100,6 +100,10 @@ struct State {
     unreachable_counted: Vec<String>,
     switched_off_sessions: Vec<(String, String)>,
     tallies_unwritable: bool,
+    /// The edits recorded as let through without the server: their areas, and whether one lay
+    /// outside every area.
+    unchecked: Vec<(Vec<String>, bool)>,
+    unchecked_unwritable: bool,
     /// Whether the checkout lends a pool of worktrees, all under `/pool/`.
     pool: bool,
     /// Why the pool the checkout declares cannot be used, when it cannot.
@@ -189,6 +193,8 @@ impl State {
             unreachable_counted: Vec::new(),
             switched_off_sessions: Vec::new(),
             tallies_unwritable: false,
+            unchecked: Vec::new(),
+            unchecked_unwritable: false,
             pool: true,
             pool_refused: None,
             config_advice: None,
@@ -427,6 +433,10 @@ impl Workspace for World {
         self
     }
 
+    fn unchecked_edits(&self) -> &dyn crate::ports::UncheckedEdits {
+        self
+    }
+
     fn worktree_pool(&self) -> Option<&dyn WorktreePool> {
         if self.0.borrow().pool {
             Some(self)
@@ -467,6 +477,17 @@ impl crate::ports::Tallies for World {
             day.to_string(),
             format!("{} {}", session.host.as_str(), session.key.as_str()),
         ));
+    }
+}
+
+impl crate::ports::UncheckedEdits for World {
+    fn record(&self, areas: &[QualifiedArea], outside: bool) {
+        let mut state = self.0.borrow_mut();
+        if state.unchecked_unwritable {
+            return;
+        }
+        let areas = areas.iter().map(ToString::to_string).collect();
+        state.unchecked.push((areas, outside));
     }
 }
 
@@ -1190,6 +1211,120 @@ fn an_allowed_area_is_remembered_and_answers_the_next_edit_without_the_server() 
         &edit(&["src/billing/b.rs"]),
     );
     assert_eq!(world.calls().len(), 2, "a remembered hold stands 30 s");
+}
+
+/// A status read 10 s ago in which bob holds `api:billing`.
+fn bob_holds_billing(state: &mut State) {
+    state.status = Some(Cached {
+        value: StatusView {
+            holds: vec![HoldLine {
+                area: area("api:billing"),
+                holder: handle("bob"),
+                item: ItemId(3),
+            }],
+            ..StatusView::default()
+        },
+        at: at(-10),
+    });
+}
+
+fn unchecked(world: &World) -> Vec<(Vec<String>, bool)> {
+    world.0.borrow().unchecked.clone()
+}
+
+#[test]
+fn an_edit_answered_from_what_this_machine_knows_records_its_area() {
+    let world = World::new().with(bob_holds_billing);
+    for _ in 0..2 {
+        let answer = run(
+            &world,
+            "neutral",
+            "before-tool",
+            &edit(&["src/billing/a.rs", "src/billing/b.rs"]),
+        );
+        assert_eq!(no_objection(&answer)["notice"], Value::Null);
+    }
+    assert!(world.calls().is_empty());
+    assert_eq!(
+        unchecked(&world),
+        [
+            (vec!["api:billing".to_owned()], false),
+            (vec!["api:billing".to_owned()], false)
+        ]
+    );
+}
+
+#[test]
+fn an_edit_no_area_governs_records_one_outside_every_area() {
+    let world = World::new();
+    run(&world, "neutral", "before-tool", &edit(&["README.md"]));
+    assert_eq!(unchecked(&world), [(Vec::new(), true)]);
+    run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["/elsewhere/src/billing/a.rs"]),
+    );
+    assert_eq!(
+        unchecked(&world).len(),
+        1,
+        "a path outside the checkout is no edit of it"
+    );
+}
+
+#[test]
+fn an_edit_the_server_checked_records_nothing_of_itself() {
+    let world = World::new().with(|state| state.answers = Ok(vec![PathAnswer::Allowed]));
+    run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["src/billing/a.rs"]),
+    );
+    assert_eq!(world.calls().len(), 1);
+    assert!(unchecked(&world).is_empty());
+    world.set(|state| state.now = at(40));
+    run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["README.md", "src/billing/a.rs"]),
+    );
+    assert_eq!(world.calls().len(), 2);
+    assert_eq!(
+        unchecked(&world),
+        [(Vec::new(), true)],
+        "only what the server was not asked about"
+    );
+}
+
+#[test]
+fn a_tool_call_refused_records_none_of_its_edits() {
+    let world = World::new().with(|state| state.answers = Ok(vec![held_by_alice()]));
+    let answer = run(
+        &world,
+        "neutral",
+        "before-tool",
+        &edit(&["README.md", "src/billing/a.rs"]),
+    );
+    assert_eq!(reply(&answer)["decision"], "deny");
+    assert!(unchecked(&world).is_empty());
+}
+
+#[test]
+fn a_record_that_cannot_be_written_changes_no_answer() {
+    let writable = World::new().with(bob_holds_billing);
+    let unwritable = World::new().with(|state| {
+        bob_holds_billing(state);
+        state.unchecked_unwritable = true;
+    });
+    let input = edit(&["src/billing/a.rs", "README.md"]);
+    let written = run(&writable, "neutral", "before-tool", &input);
+    let skipped = run(&unwritable, "neutral", "before-tool", &input);
+    assert_eq!(unchecked(&writable).len(), 1);
+    assert!(unchecked(&unwritable).is_empty());
+    assert_eq!(skipped, written);
+    assert!(unwritable.calls().is_empty());
 }
 
 fn my_wide_claim_over_billing() -> StatusView {

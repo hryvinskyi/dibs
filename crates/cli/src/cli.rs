@@ -308,7 +308,7 @@ pub struct ClaimArgs {
 #[derive(Debug, Subcommand)]
 pub enum ClaimAction {
     /// Record a pull request of your claim: the claim waits in review, keeps its areas so nobody
-    /// edits the files under review, and needs no heartbeat while the pull request is open. Its
+    /// edits the files under review, and never goes stale while the pull request is open. Its
     /// merge completes the claim, unless `--more` says more pull requests of the item follow.
     Review(ReviewArgs),
     /// Give areas of your claim up. An area another member's feature claim waits for moves to it

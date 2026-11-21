@@ -81,7 +81,10 @@ pub enum FootprintRecorded {
 /// Stores what an integration reports a claim's branch changes against its base, and derives the
 /// overlaps it makes. A report for an item no live claim holds, or for another branch than the one
 /// the claim records, is not stored; one that says what is stored changes nothing and appends
-/// nothing, so an integration may send every report again safely. A footprint measured from a base
+/// nothing, so an integration may send every report again safely. A report that replaced what was
+/// stored shows a push of the claim's work, so the claim is seen now; an unchanged one moves
+/// nothing, and since a stale claim's report is not stored, a push never brings a stale claim
+/// back. A footprint measured from a base
 /// no older than a merge that moved the claim's base has caught up with it: that moved base ends.
 pub struct RecordFootprint {
     store: Arc<dyn Store>,
@@ -157,6 +160,10 @@ impl RecordFootprint {
         };
         work.save_footprint(project, &footprint, &report.paths)
             .await?;
+        if let Some(mut pushed) = claim {
+            pushed.last_seen = now;
+            work.save_claim(project, &pushed).await?;
+        }
         work.record(
             now,
             EventKind::FootprintChanged(event::FootprintChanged {

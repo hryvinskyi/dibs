@@ -475,7 +475,7 @@ mod tests {
         )
         .unwrap();
         Heartbeat::new(&env.deps)
-            .execute_reporting(&env.bob.actor, env.bob.session, None, Some(&reports))
+            .execute_reporting(&env.bob.actor, env.bob.session, None, Some(&reports), None)
             .await
             .unwrap();
         let pr = PrRef::parse("acme/widgets#3").unwrap();

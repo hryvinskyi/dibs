@@ -116,7 +116,7 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/me` | any | The caller, their project and its settings. |
 | `GET /v1/members` | any | The project's members. |
 | `POST /v1/sessions` | people | Register a session, or update the one of the same label. |
-| `POST /v1/heartbeat` | people | A session's sign of life, the checkout it works in and its branch, and what its machine counted. |
+| `POST /v1/heartbeat` | people | A session's sign of life, the checkout it works in and its branch, the edits its machine let through unchecked, and what it counted. |
 | `POST /v1/sessions/{id}/end` | people | A session of yours ended: the worktree holds it and its agents have end. |
 | `GET /v1/items` | any | List work items. |
 | `POST /v1/items` | any | Create a work item, or return the one a reference names. |
@@ -282,10 +282,27 @@ session. A label registers once per member; registering it again updates the ses
 session's sign of life: a session that can be woken registers again every minute while it runs.
 
 `POST /v1/heartbeat`, body
-`{ "session_id": 7, "checkout": "3f0c9a4e1b7d2c8a5e6f0b1a2c3d4e5f", "repo": "api", "branch": "bob/42-refunds" }`,
-answers `{ "refreshed": [12] }`: the items whose claims the heartbeat kept alive. A claim is *live* while its holder was
-seen within the project's `stale_after`; a heartbeat, an edit check that reserves, or a renewal counts as seen. The
-command line keeps a heartbeat clock for each session: every session whose hooks run sends a heartbeat at most once per
+`{ "session_id": 7, "checkout": "3f0c9a4e1b7d2c8a5e6f0b1a2c3d4e5f", "repo": "api", "branch": "bob/42-refunds",
+"edits": { "areas": ["api:billing"], "outside": false } }`, keeps the session seen and answers `{ "refreshed": [12] }`:
+the items of the claims the edits it reports refreshed. A heartbeat by itself keeps no claim alive. A claim stays live
+while its own work shows — an edit made under it, whether the server checked it or the hooks reported it with the next
+heartbeat; a push of its branch (a footprint report that changed what was stored); claiming it again; a pull request it
+waits for — and goes stale `stale_after` after the last of those.
+
+The guard answers most edits from what its machine knows (an area the member is known to hold, from a status or an
+edit check under 30 seconds old) and never asks about a path no area governs, so the hooks record each edit they let
+through that way and the next heartbeat reports it in `edits`: `areas`, at most 200, each `repo:area`, the areas of
+edits answered from that knowledge since the last heartbeat that carried them, and `outside`, whether an edit was made
+in a path no area governs. Edits are attributed as an edit check attributes them: every live claim of the caller that
+holds a reported area, declared or gained, is seen now, wherever it was taken, and an edit outside every area makes the
+caller's target claim — of the live claims they work on, the one most recently claimed or renewed, else of those in
+review — seen now. A report of no edit refreshes no claim, and a heartbeat without `edits`, as a client released before
+this field sends, keeps its session seen and refreshes no claim either: its member's claims stay live only by the edit
+checks that reach the server, pushes and renewals until they update their client. More than 200 areas, or one that is
+not `repo:area`, is `invalid_request` naming `edits.areas`. The client sends what it recorded with each heartbeat and
+removes it once the server accepted the heartbeat; a heartbeat that failed leaves it for the next.
+
+The command line keeps a heartbeat clock for each session: every session whose hooks run sends a heartbeat at most once per
 `heartbeat_every`, and one session's heartbeat never holds back another's, so every active session reports its
 checkout each interval. Another session's sync does not hold a session's heartbeat back: when one runs, or started
 less than fifteen seconds ago, a hook whose session's heartbeat is due starts a sync of that heartbeat alone
@@ -657,8 +674,8 @@ request on the caller's live
 claim of the item. A pull request is written `<owner>/<name>#<number>` and compared in one form (lowercased, no leading
 zeros); in a project that lists repositories it must belong to one of them, matched by the path of its `remote`. The
 claim is **in review**: it keeps its areas, so nobody else edits the files under review (their edits answer `held_by`
-with `reason: "in_review"` and the pull requests); it never goes stale while it is in review, so it needs no heartbeat
-and cannot be taken over; and its holder may go on editing its branch for review comments. A claim may record several
+with `reason: "in_review"` and the pull requests); it never goes stale while it is in review, so it needs no sign of
+work and cannot be taken over; and its holder may go on editing its branch for review comments. A claim may record several
 pull requests — an API change and its client in two repositories, or a series — and `more: true` says more pull
 requests of the item follow the ones recorded: the latest request decides it. Recording one the claim has changes at most
 `more`. `head` (optional; `bob/42-refunds` or `refs/heads/bob/42-refunds`) is the pull request's head branch: it is
@@ -808,10 +825,11 @@ base's tip — and `base_at` that commit's committer time (RFC 3339); with GitHu
 are `merge_base_commit.sha` and `merge_base_commit.commit.committer.date`. `paths` holds at most 3000 paths relative to
 the repository's root, and `truncated: true` says the forge gave fewer than the branch changes. The body may be up to
 2 MiB. It replaces the claim's footprint of that repository and answers `{ "stored": true, "changed": true }` with
-`footprint_changed`; a report that repeats the stored footprint answers `"changed": false` and appends nothing. A report
-for an item no live claim holds, or for another branch than the one the claim records there, is not stored and answers
+`footprint_changed`, and, as a push of the claim's work, makes the claim seen now; a report that repeats the stored
+footprint answers `"changed": false`, appends nothing and moves nothing. A report for an item no live claim holds, or
+for another branch than the one the claim records there, is not stored and answers
 `{ "stored": false, "reason": "no_live_claim" | "other_branch" }`: the integration reads the branches between two of its
-passes, and a claim may have ended or moved since. A footprint is visible to the project like its claim, and goes when
+passes, and a claim may have ended or moved since. So a push never brings a stale claim back; claiming it again does. A footprint is visible to the project like its claim, and goes when
 the claim ends, when its branch changes, when it is the branch of a delivering merge, or when the settings stop listing
 its repository. Refusals: `not_found` (`404`) for a repository the project does not list, `invalid_request` for a
 missing or malformed field or more than 3000 paths, `forbidden` for anyone but an integration or an admin.
@@ -1397,7 +1415,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 
 | Setting | Meaning |
 |---|---|
-| `stale_after` | How long a claim stays live without a sign of life: `24h`; 1 hour to 30 days; default 24 hours. |
+| `stale_after` | How long a claim stays live after the last sign of its own work (an edit made under it, a push of its branch, claiming it again): `24h`; 1 hour to 30 days; default 24 hours. |
 | `heartbeat_every` | How often a session sends a heartbeat: `1m`; 1 to 15 minutes; default 1 minute. |
 | `yield_escalates_after` | How long a request to hand an area over from debt work to a feature claim waits before it is escalated to the arbiters: `30m`; 5 minutes to 24 hours; default 30 minutes. A top-level setting in either layout. |
 | `edit_policy` | `require-claim` (default): a governed path needs a live claim. `advise`: it does not. |

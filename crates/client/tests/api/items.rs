@@ -10,6 +10,7 @@ use dibs_client::api::{
     TakeOverRequest, Verdict,
 };
 use dibs_client::verdicts::edit_verdicts;
+use dibs_domain::edit::ReportedEdits;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus};
 use dibs_domain::member::Role;
@@ -449,14 +450,25 @@ fn a_stale_claim_is_taken_over_released_and_done() {
         )
         .await
         .unwrap();
+        let edited = ReportedEdits::new(Default::default(), true).unwrap();
+        let heartbeat = bob
+            .heartbeat(bob_session, None, None, None, &[], &edited)
+            .await
+            .unwrap();
+        assert_eq!(heartbeat.refreshed, [item], "an edit outside every area");
         bob.done(item).await.unwrap();
         assert_eq!(bob.item(item).await.unwrap().item.status, ItemStatus::Done);
         let heartbeat = bob
-            .heartbeat(bob_session, None, None, None, &[])
+            .heartbeat(bob_session, None, None, None, &[], &edited)
             .await
             .unwrap();
-        assert!(heartbeat.refreshed.is_empty());
+        assert!(heartbeat.refreshed.is_empty(), "the claim is done");
     });
+    let log = world.server.request_log().join("\n");
+    assert!(
+        log.contains(r#""edits":{"areas":[],"outside":true}"#),
+        "{log}"
+    );
 }
 
 #[test]
@@ -899,12 +911,20 @@ fn a_heartbeat_carries_the_days_reports_and_feedback_is_kept_as_the_server_answe
                 None,
                 Some(&machine),
                 std::slice::from_ref(&report),
+                &ReportedEdits::default(),
             )
             .await
             .unwrap();
         assert_eq!(first.reported, [day]);
         let again = bob
-            .heartbeat(bob_session, None, None, Some(&machine), &[report])
+            .heartbeat(
+                bob_session,
+                None,
+                None,
+                Some(&machine),
+                &[report],
+                &ReportedEdits::default(),
+            )
             .await
             .unwrap();
         assert_eq!(again.reports_accepted, [day]);
@@ -987,7 +1007,7 @@ fn a_heartbeat_and_a_reserving_check_that_name_their_checkout_record_its_branch(
             repo: api.clone(),
             branch: BranchName::parse("bob/8-refunds").unwrap(),
         };
-        bob.heartbeat(desk, None, Some(&on), None, &[])
+        bob.heartbeat(desk, None, Some(&on), None, &[], &ReportedEdits::default())
             .await
             .unwrap();
         assert_eq!(
@@ -996,9 +1016,16 @@ fn a_heartbeat_and_a_reserving_check_that_name_their_checkout_record_its_branch(
             "no checkout named"
         );
         let checkout = CheckoutToken::parse("0123456789abcdef0123456789abcdef").unwrap();
-        bob.heartbeat(desk, Some(&checkout), Some(&on), None, &[])
-            .await
-            .unwrap();
+        bob.heartbeat(
+            desk,
+            Some(&checkout),
+            Some(&on),
+            None,
+            &[],
+            &ReportedEdits::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             branch_of(&bob.status().await.unwrap()).as_deref(),
             Some("bob/8-refunds")

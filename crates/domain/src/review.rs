@@ -146,7 +146,9 @@ impl Review {
 /// Where a claim's work stands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ClaimState {
-    /// Its holder works on it, and heartbeats keep it live.
+    /// Its holder works on it. It stays live while its own work shows (an edit made under it,
+    /// whether the server checked it or the hooks reported it with the next heartbeat; a push of
+    /// its branch; claiming it again) and goes stale `stale_after` after the last of those.
     #[default]
     Working,
     /// Its work waits in pull requests; it is live while they are open.

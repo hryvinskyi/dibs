@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use thiserror::Error;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use crate::area::QualifiedArea;
 use crate::claim::{AreaOrigin, Claim, Holder, held_by_other, target_claim};
@@ -15,6 +15,10 @@ use crate::repo::RepoId;
 use crate::reservation::{AddArea, ReservationPlan, SharedPath};
 use crate::review::PrRef;
 use crate::settings::{EditPolicy, ProjectSettings};
+
+mod reported;
+
+pub use reported::{ReportedEdits, ReportedEditsError, claims_shown_by};
 
 /// The answer for one path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,8 +118,10 @@ pub struct EditCheck {
     pub verdicts: Vec<PathVerdict>,
     /// What the caller may record so later checks and other members see these edits.
     pub plan: ReservationPlan,
-    /// The member's claims the edits were attributed to. An edit is a sign of life, so the caller
-    /// refreshes their `last_seen`, wherever the claim was taken.
+    /// The member's claims the edits were attributed to. An edit is a sign of the claim's own
+    /// work, so the caller refreshes their `last_seen`, wherever the claim was taken. Edits the
+    /// hooks let through without a check, reported with a heartbeat, refresh claims by the same
+    /// attribution ([`claims_shown_by`]).
     pub touch: BTreeSet<ItemId>,
     /// Of `touch`, the claims an edit was attributed to by its area: the claim declared the area,
     /// names it wide, or was granted edits in it. A claim an edit reached only as the member's
@@ -250,11 +256,7 @@ pub(crate) struct EditWorld<'a> {
 impl<'a> EditWorld<'a> {
     fn new(input: &'a EditCheckInput<'a>) -> Self {
         let stale_after = input.settings.stale_after();
-        let mine = input
-            .claims
-            .iter()
-            .filter(|claim| claim.member == input.me && claim.is_live(input.now, stale_after))
-            .collect();
+        let mine = live_claims_of(input.me, input.claims, input.now, stale_after);
         Self { input, mine }
     }
 
@@ -424,8 +426,7 @@ impl<'a> EditWorld<'a> {
     /// The claim new reservations go to: the target among my claims I am working on, else among
     /// my claims in review.
     fn target(&self) -> Option<&'a Claim> {
-        target_claim(self.mine.iter().copied().filter(|claim| claim.is_working()))
-            .or_else(|| target_claim(self.mine.iter().copied()))
+        work_target(&self.mine)
     }
 
     /// The claim an area an edit meets goes to: [`EditWorld::target`] among my claims that do not
@@ -454,6 +455,27 @@ impl<'a> EditWorld<'a> {
             .collect();
         holders.into_iter().collect()
     }
+}
+
+/// The member's live claims among `claims`, from any session or host.
+fn live_claims_of(
+    me: MemberId,
+    claims: &[Claim],
+    now: OffsetDateTime,
+    stale_after: Duration,
+) -> Vec<&Claim> {
+    claims
+        .iter()
+        .filter(|claim| claim.member == me && claim.is_live(now, stale_after))
+        .collect()
+}
+
+/// The member's target claim among `mine`, their live claims: of those they work on, the one most
+/// recently claimed or renewed, the lowest item on a tie; with none, of those in review by the
+/// same rule.
+fn work_target<'a>(mine: &[&'a Claim]) -> Option<&'a Claim> {
+    target_claim(mine.iter().copied().filter(|claim| claim.is_working()))
+        .or_else(|| target_claim(mine.iter().copied()))
 }
 
 #[cfg(test)]

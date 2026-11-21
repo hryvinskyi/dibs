@@ -151,7 +151,7 @@ async fn a_session_with_a_bad_field_is_refused_naming_it() {
 }
 
 #[tokio::test]
-async fn a_heartbeat_keeps_the_claims_of_its_machine_alive() {
+async fn a_heartbeat_refreshes_only_the_claims_its_reported_edits_show() {
     let world = World::new().await;
     let alice = world.project("acme", "alice").await;
     let session = world.session(&alice, "laptop").await;
@@ -165,16 +165,105 @@ async fn a_heartbeat_keeps_the_claims_of_its_machine_alive() {
         .await;
     assert_eq!(claimed.status, StatusCode::OK);
     world.fakes.clock.advance(Duration::minutes(5));
-    let beat = world
+    let older_client = world
         .post(&alice, "/v1/heartbeat", json!({"session_id": session}))
         .await;
-    assert_eq!(beat.status, StatusCode::OK);
+    assert_eq!(older_client.status, StatusCode::OK);
     assert_eq!(
-        beat.body,
-        json!({"refreshed": [item], "reported": [], "reports_accepted": []})
+        older_client.body,
+        json!({"refreshed": [], "reported": [], "reports_accepted": []}),
+        "a heartbeat that reports no edits refreshes no claim"
     );
     let shown = world.get(&alice, &format!("/v1/items/{item}")).await;
-    assert_eq!(shown.body["claim"]["last_seen"], "2026-03-02T09:05:00Z");
+    assert_eq!(shown.body["claim"]["last_seen"], "2026-03-02T09:00:00Z");
+    world.fakes.clock.advance(Duration::minutes(5));
+    let edited = world
+        .post(
+            &alice,
+            "/v1/heartbeat",
+            json!({"session_id": session, "edits": {"areas": [], "outside": true}}),
+        )
+        .await;
+    assert_eq!(edited.status, StatusCode::OK, "{}", edited.body);
+    assert_eq!(edited.body["refreshed"], json!([item]));
+    let shown = world.get(&alice, &format!("/v1/items/{item}")).await;
+    assert_eq!(shown.body["claim"]["last_seen"], "2026-03-02T09:10:00Z");
+}
+
+#[tokio::test]
+async fn a_claim_whose_edits_heartbeats_report_stays_out_of_the_stale_list() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    world.settings(&alice, two_repositories()).await;
+    let session = world.session(&alice, "laptop").await;
+    let reported = world.item(&alice, None, "Fix the invoice total").await;
+    let quiet = world.item(&alice, None, "Tune the search").await;
+    for (item, area) in [(reported, "api:billing"), (quiet, "api:search")] {
+        let claimed = world
+            .post(
+                &alice,
+                &format!("/v1/items/{item}/claim"),
+                json!({"session_id": session, "areas": [area]}),
+            )
+            .await;
+        assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    }
+    for _ in 0..8 {
+        world.fakes.clock.advance(Duration::minutes(10));
+        for edits in [json!({"areas": ["api:billing"]}), json!({"areas": []})] {
+            let beat = world
+                .post(
+                    &alice,
+                    "/v1/heartbeat",
+                    json!({"session_id": session, "edits": edits}),
+                )
+                .await;
+            assert_eq!(beat.status, StatusCode::OK, "{}", beat.body);
+        }
+    }
+    let status = world.get(&alice, "/v1/status").await;
+    let ids = |list: &str| -> Vec<u64> {
+        status.body[list]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line["item"]["id"].as_u64().unwrap())
+            .collect()
+    };
+    assert_eq!(ids("live"), [reported], "an hour and twenty minutes later");
+    assert_eq!(ids("stale"), [quiet]);
+}
+
+#[tokio::test]
+async fn reported_edits_name_at_most_two_hundred_areas_each_qualified() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let session = world.session(&alice, "laptop").await;
+    let areas =
+        |count: usize| -> Vec<String> { (0..count).map(|n| format!("api:area-{n}")).collect() };
+    let most = world
+        .post(
+            &alice,
+            "/v1/heartbeat",
+            json!({"session_id": session, "edits": {"areas": areas(200)}}),
+        )
+        .await;
+    assert_eq!(most.status, StatusCode::OK, "{}", most.body);
+    for areas in [json!(areas(201)), json!(["billing"]), json!(["api:"])] {
+        let refused = world
+            .post(
+                &alice,
+                "/v1/heartbeat",
+                json!({"session_id": session, "edits": {"areas": areas}}),
+            )
+            .await;
+        assert_error(
+            &refused,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+        );
+        assert_eq!(refused.body["error"]["details"]["field"], "edits.areas");
+    }
 }
 
 #[tokio::test]

@@ -218,7 +218,7 @@ impl Tools {
     }
 
     #[tool(
-        description = "Record the pull request of your claim once you opened it (pr as owner/repo#number, such as acme/api#12). The claim then waits in review: it keeps its areas, so nobody edits the files under review, and needs no heartbeat while the pull request is open. You may still push review fixes to its branch. When it is merged the claim is completed for you; give more: true when more pull requests of the same item follow, and the merge returns the claim to you instead. A pull request closed unmerged returns the claim to you as well. With drop: true, the pull request is removed from your claim instead, when you recorded it by mistake. Give head, the pull request's head branch, and it becomes your claim's branch in that repository."
+        description = "Record the pull request of your claim once you opened it (pr as owner/repo#number, such as acme/api#12). The claim then waits in review: it keeps its areas, so nobody edits the files under review, and never goes stale while the pull request is open. You may still push review fixes to its branch. When it is merged the claim is completed for you; give more: true when more pull requests of the same item follow, and the merge returns the claim to you instead. A pull request closed unmerged returns the claim to you as well. With drop: true, the pull request is removed from your claim instead, when you recorded it by mistake. Give head, the pull request's head branch, and it becomes your claim's branch in that repository."
     )]
     async fn dibs_review(&self, Parameters(input): Parameters<ReviewInput>) -> CallToolResult {
         self.perform(|link| async move { link.review(input).await })

@@ -140,8 +140,10 @@ revokes their tokens and releases everything they held at once. With the Claude 
   other member holds an area they will probably touch. Soonest first; every other open item comes with why it waits.
 - **Area.** A named set of paths in a repository (`billing`: `packages/billing/**`), written `repo:area` when a project
   has several repositories. Areas, not individual files, are what members hold.
-- **Claim.** A member's hold on a work item and on the areas they will change. A claim is *live* while its session is
-  seen (a heartbeat, an edit, a renewal) within the project's `stale_after`, 24 hours by default, and *stale* after that.
+- **Claim.** A member's hold on a work item and on the areas they will change. A claim is *live* while its own work
+  shows — an edit made under it, whether the server checked it or the hooks reported it with the next heartbeat; a push
+  of its branch; claiming it again; a pull request it waits for — and *stale* the project's `stale_after` (24 hours by
+  default) after the last of those.
   Only one member holds an area at a time. A stale claim can be taken over, with a reason that is sent to its holder.
 - **Feature and debt work.** A claim is a feature (the default) or debt work (`--debt`: refactoring, clean-up), and
   keeps that kind. A feature claim that declares an area other members hold only for debt work is not refused: the area
@@ -219,8 +221,8 @@ revokes their tokens and releases everything they held at once. With the Claude 
   meanwhile waits behind them. Slots of one group exclude each other. A hold is kept by the member's heartbeats, by the
   30-second heartbeats of `dibs slot run` (and shown *stalled*, not freed, when they stop), or until a forge workflow
   run finishes. A held slot can freeze branches nobody else may push meanwhile.
-- **Session.** One running client of a member: a terminal, an agent. Claims are kept alive by their session's
-  heartbeats.
+- **Session.** One running client of a member: a terminal, an agent. Its heartbeats keep the session seen and carry
+  the edits its machine's hooks let through without asking, which keep the claims they were made under live.
 - **Event.** Everything above appends to the project's log, which the web pages and clients follow live.
 - **Retention.** A conversation is kept 180 days after its last message (as long as its work item is open, if it is
   about one), an event 90 days, a snapshot 30 days; see [operations](docs/operations.md#how-long-records-are-kept).
@@ -266,7 +268,7 @@ another clone then governs nothing.
 with one repository declares its areas and rules at the top level:
 
 ```toml
-stale_after = "24h"             # how long a claim stays live without a sign of life (1h to 30d)
+stale_after = "24h"             # how long a claim stays live after the last sign of its work (1h to 30d)
 heartbeat_every = "1m"          # how often a session sends one (1m to 15m)
 edit_policy = "require-claim"   # or "advise"
 

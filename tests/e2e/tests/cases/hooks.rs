@@ -85,3 +85,64 @@ fn a_hook_denies_the_holders_area_until_the_holder_grants_it() {
     let other = bob.before_edit(&work, "bob-session", &["packages/search/rank.rs"]);
     assert_eq!(decision(&other), "deny", "{other}");
 }
+
+/// The `last_seen` of the first live claim `dibs status` shows, as `who` in `cwd`.
+fn claim_last_seen(who: &crate::harness::Person, cwd: &std::path::Path) -> String {
+    let (code, status) = who.json(cwd, &["status"]);
+    assert_eq!(code, Some(0), "{status}");
+    status["live"][0]["claim"]["last_seen"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn edits_the_hook_answers_from_its_cache_keep_the_claim_live_through_the_next_sync() {
+    let team = Team::start(SETTINGS);
+    let work = team.checkout("work", None, REMOTE);
+    let alice = &team.alice;
+    alice.ok(
+        &work,
+        &["new", "gh:acme/widgets#42", "--title", "Refund rounding"],
+    );
+    alice.ok(&work, &["claim", "gh:acme/widgets#42", "--area", "billing"]);
+
+    // The server checks the first edit, and this machine learns alice holds billing.
+    let first = alice.before_edit(&work, "alice-session", &["packages/billing/round.rs"]);
+    assert_eq!(decision(&first), "no_objection", "{first}");
+    let checked = claim_last_seen(alice, &work);
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    for path in ["packages/billing/a.rs", "packages/billing/b.rs"] {
+        let cached = alice.before_edit(&work, "alice-session", &[path]);
+        assert_eq!(decision(&cached), "no_objection", "{cached}");
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (code, synced) = alice.json(
+            &work,
+            &[
+                "sync",
+                "--force",
+                "--host",
+                "neutral",
+                "--session",
+                "alice-session",
+            ],
+        );
+        assert_eq!(code, Some(0), "{synced}");
+        if synced["heartbeat"] == true {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no heartbeat: {synced}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let after = claim_last_seen(alice, &work);
+    assert!(
+        after > checked,
+        "the edits the cache answered moved the claim: {checked} then {after}"
+    );
+}

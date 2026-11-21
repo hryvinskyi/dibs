@@ -1,6 +1,8 @@
 //! `POST /v1/sessions`, `POST /v1/heartbeat` and `POST /v1/sessions/{id}/end`: a session
 //! announcing itself, staying alive, and saying it ended.
 
+use std::collections::BTreeSet;
+
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
@@ -10,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use dibs_app::use_cases::{FromCheckout, OnBranch, RegisterSessionInput};
+use dibs_domain::area::QualifiedArea;
+use dibs_domain::edit::{ReportedEdits, ReportedEditsError};
 use dibs_domain::ids::ItemId;
 use dibs_domain::message::SessionLabel;
 use dibs_domain::radar::BranchName;
@@ -67,6 +71,37 @@ pub struct HeartbeatBody {
     branch: Option<String>,
     machine: Option<Value>,
     reports: Option<Value>,
+    edits: Option<EditsBody>,
+}
+
+/// The edits a heartbeat reports.
+#[derive(Deserialize)]
+pub struct EditsBody {
+    areas: Option<Vec<String>>,
+    outside: Option<bool>,
+}
+
+impl EditsBody {
+    /// The edits, each area qualified by its repository.
+    ///
+    /// # Errors
+    /// `invalid_request` naming `edits.areas` for more areas than a heartbeat may report or an
+    /// area that is not `repo:area`.
+    fn parse(self) -> Result<ReportedEdits, ApiError> {
+        let written = self.areas.unwrap_or_default();
+        let too_many = ReportedEditsError::TooManyAreas {
+            max: ReportedEdits::MAX_AREAS,
+        };
+        if written.len() > ReportedEdits::MAX_AREAS {
+            return Err(ApiError::invalid_field("edits.areas", &too_many));
+        }
+        let areas = written
+            .iter()
+            .map(|text| parse("edits.areas", text, QualifiedArea::parse))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        ReportedEdits::new(areas, self.outside.unwrap_or(false))
+            .map_err(|reason| ApiError::invalid_field("edits.areas", &reason))
+    }
 }
 
 #[derive(Serialize)]
@@ -76,7 +111,15 @@ struct HeartbeatAnswer {
     reports_accepted: Vec<ReportDay>,
 }
 
-/// Records a session's sign of life and answers the claims it kept alive. `checkout` names the
+/// Records a session's sign of life and answers the claims the edits it reports refreshed. A
+/// heartbeat keeps the session seen and no claim by itself. `edits` reports what the session's
+/// machine let through without asking since the last heartbeat that reported it: `areas`, at most
+/// 200, each `repo:area`, the areas of edits made where the member was known to hold the area, and
+/// `outside`, whether an edit was made in a path no area governs. Every live claim of the caller
+/// that holds a reported area is seen now, and an edit outside every area makes the caller's target
+/// claim (the live claim most recently claimed or renewed) seen now; `refreshed` names those claims.
+/// A heartbeat without `edits` comes from a client that does not report its edits: it refreshes no
+/// claim, and `refreshed` is empty. `checkout` names the
 /// checkout the session works in, by the 32 lowercase hexadecimal characters its client makes of
 /// it, and `repo` and `branch` the repository it is of and the branch it is on; a checkout on a
 /// detached head sends no branch, and a branch needs its repository. A heartbeat that names its
@@ -91,8 +134,9 @@ struct HeartbeatAnswer {
 ///
 /// # Errors
 /// `forbidden` for an integration;
-/// `invalid_request` without a session, for a malformed checkout, repository or branch, or a
-/// branch without its repository; the answer for the use case's failure.
+/// `invalid_request` without a session, for a malformed checkout, repository or branch, a branch
+/// without its repository, or reported edits naming more than 200 areas or a malformed one; the
+/// answer for the use case's failure.
 pub async fn heartbeat(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -119,11 +163,18 @@ pub async fn heartbeat(
         .map(|text| parse("checkout", text, CheckoutToken::parse))
         .transpose()?
         .map(|token| FromCheckout { token, branch });
+    let edits = body.edits.map(EditsBody::parse).transpose()?;
     let reports = heartbeat_reports(actor.member, body.machine.as_ref(), body.reports.as_ref());
     let outcome = state
         .app
         .heartbeat
-        .execute_reporting(&actor, session, from.as_ref(), reports.as_ref())
+        .execute_reporting(
+            &actor,
+            session,
+            from.as_ref(),
+            reports.as_ref(),
+            edits.as_ref(),
+        )
         .await?;
     let answer = HeartbeatAnswer {
         refreshed: outcome.refreshed,

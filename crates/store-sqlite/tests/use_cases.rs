@@ -1963,7 +1963,7 @@ mod use_cases {
                 world
                     .app
                     .heartbeat
-                    .execute_reporting(&alice, session, None, Some(&reports))
+                    .execute_reporting(&alice, session, None, Some(&reports), None)
                     .await
                     .unwrap()
                     .reported

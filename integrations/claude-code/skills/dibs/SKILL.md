@@ -175,7 +175,7 @@ serve many teams:
 - Once the pull request is open, record it on your claim with its head branch: `dibs_review` with the item, `pr`
   (`owner/repo#number`) and `head`, or `dibs claim review <item> --pr <owner>/<repo>#<number> --head <branch>`. The
   head becomes your claim's branch in that repository. Your claim is then in review: it keeps its areas, so nobody
-  edits the files under review, and it needs no heartbeat while the pull request is open. You may go on pushing review
+  edits the files under review, and it never goes stale while the pull request is open. You may go on pushing review
   fixes to its branch. Recorded the wrong one? Remove it: `dibs_review` with `drop: true`, or
   `dibs claim review <item> --drop-pr <owner>/<repo>#<number>`.
 - The merge into a protected branch completes your claim; dibs tells you. A ticket closed in its tracker completes your
@@ -248,8 +248,10 @@ other.
   only ever seen as another tracker's blocker, keeps your claim. A done item whose tracker still has it open can be
   claimed again, and the claim brings it back; one the tracker closed, or a local item, stays done.
 
-A claim stays live while your sessions send heartbeats; dibs sends them in the background. One that goes without a
-heartbeat for the project's `stale_after` becomes stale; a claim in review never does.
+A claim stays live while its own work shows: an edit made under it (the server checks it, or the hooks report it with
+the next heartbeat they send in the background), a push of its branch, claiming it again, or a pull request it waits
+for. It goes stale the project's `stale_after` after the last of those; a heartbeat alone keeps no claim alive. Claim
+the item again to keep a claim you have not touched for a while; a claim in review never goes stale.
 
 ## Taking over
 
