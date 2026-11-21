@@ -272,11 +272,11 @@ async fn the_last_recorded_pull_request_merged_completes_the_claim_and_tells_its
     );
     assert_eq!(
         subjects(&env, &env.bob).await,
-        ["Done by merge: Work on gh:acme/widgets#42"]
+        ["Your claim on gh:acme/widgets#42 \"Work on gh:acme/widgets#42\""]
     );
     assert_told(
         &the_notice(&env, &env.bob).await,
-        "Pull request acme/widgets#7 merged; the claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" is done. Its areas are free and the item is done.",
+        "Done by merge: pull request acme/widgets#7 merged; the claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" is done. Its areas are free and the item is done.",
     );
     let threads = ListThreads::new(&env.deps)
         .execute(&env.bob.actor, None)
@@ -385,11 +385,11 @@ async fn a_pull_request_closed_unmerged_returns_the_claim_to_work_and_says_so() 
     assert_eq!(claim.last_seen, env.now());
     assert_eq!(
         subjects(&env, &env.bob).await,
-        ["Back from review: Work on gh:acme/widgets#42"]
+        ["Your claim on gh:acme/widgets#42 \"Work on gh:acme/widgets#42\""]
     );
     assert_told(
         &the_notice(&env, &env.bob).await,
-        "Pull request acme/widgets#7 was closed without being merged, so your claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" is no longer in review. You still hold it and its areas; work on it again, record the pull request that brings the work in, or release it.",
+        "Back from review: pull request acme/widgets#7 was closed without being merged, so your claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" is no longer in review. You still hold it and its areas; work on it again, record the pull request that brings the work in, or release it.",
     );
 }
 
@@ -578,11 +578,11 @@ async fn a_pull_request_closed_while_another_waits_is_told_and_the_other_merge_n
     assert_eq!(review.prs(), &[pr("acme/api#7")].into());
     assert_eq!(
         subjects(&env, &env.bob).await,
-        ["Set aside in review: Work on gh:acme/widgets#42"]
+        ["Your claim on gh:acme/widgets#42 \"Work on gh:acme/widgets#42\""]
     );
     assert_told(
         &the_notice(&env, &env.bob).await,
-        "Pull request acme/web#3 was closed without being merged. Your claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" stays in review on acme/api#7, but their merges no longer complete it: record the pull request that brings this work in (dibs claim review gh:acme/widgets#42 --pr <owner>/<repo>#<number>), or mark the item done yourself once it is in.",
+        "Set aside in review: pull request acme/web#3 was closed without being merged. Your claim on work item gh:acme/widgets#42 \"Work on gh:acme/widgets#42\" stays in review on acme/api#7, but their merges no longer complete it: record the pull request that brings this work in (dibs claim review gh:acme/widgets#42 --pr <owner>/<repo>#<number>), or mark the item done yourself once it is in.",
     );
     assert_eq!(
         report(&env, "acme/api#7", merged()).await,

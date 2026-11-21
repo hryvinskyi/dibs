@@ -129,6 +129,31 @@ impl Claim {
             item: self.item,
         }
     }
+
+    /// Which claim this is among every claim ever made on its item: its item, its member and when
+    /// that member took it. A renewal keeps it; a take-over, or a new claim after this one ended,
+    /// is another.
+    pub fn instance(&self) -> ClaimInstance {
+        ClaimInstance {
+            item: self.item,
+            member: self.member,
+            claimed_at: self.claimed_at,
+        }
+    }
+}
+
+/// One claim as a member took it, told apart from every other claim on the same item, before or
+/// after it: the item, the member, and when the member first claimed it. Renewing the claim keeps
+/// all three; taking it over changes the member and the time, and claiming the item again after
+/// the claim ended changes the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClaimInstance {
+    /// The item claimed.
+    pub item: ItemId,
+    /// The member who took the claim.
+    pub member: MemberId,
+    /// When they took it.
+    pub claimed_at: OffsetDateTime,
 }
 
 /// Who holds something: a member, through their claim on an item.
@@ -1222,6 +1247,54 @@ mod tests {
             areas(&["api:billing", "api:search", "web:checkout"])
         );
         assert_eq!(taken.claim.areas.gained(), &areas(&["api:search"]));
+    }
+
+    #[test]
+    fn a_renewal_keeps_the_claim_instance_and_a_takeover_or_a_new_claim_gives_another() {
+        let settings = two_repo_settings();
+        let first = decide_claim(None, &[], &request(1, BOB, &[]), at(0), &settings).unwrap();
+        let instance = first.claim().instance();
+        assert_eq!(
+            instance,
+            ClaimInstance {
+                item: ItemId(1),
+                member: BOB,
+                claimed_at: at(0),
+            }
+        );
+        let late = at(0) + settings.stale_after() + Duration::hours(1);
+        let renewed = decide_claim(
+            Some(first.claim()),
+            &[],
+            &request(1, BOB, &["api:billing"]),
+            late,
+            &settings,
+        )
+        .unwrap();
+        assert_eq!(
+            renewed.claim().instance(),
+            instance,
+            "a renewal, even of a stale claim with new areas, is the same claim"
+        );
+        let taken = decide_takeover(
+            Some(first.claim()),
+            &[],
+            &request(1, ALICE, &[]),
+            late,
+            &settings,
+        )
+        .unwrap();
+        assert_ne!(taken.claim.instance(), instance, "another member's claim");
+        assert_eq!(taken.previous.instance(), instance);
+        let again = decide_claim(None, &[], &request(1, BOB, &[]), late, &settings).unwrap();
+        assert_ne!(
+            again.claim().instance(),
+            instance,
+            "the same member claiming the item at another time"
+        );
+        let mut elsewhere = first.claim().clone();
+        elsewhere.item = ItemId(2);
+        assert_ne!(elsewhere.instance(), instance, "a claim on another item");
     }
 
     #[test]

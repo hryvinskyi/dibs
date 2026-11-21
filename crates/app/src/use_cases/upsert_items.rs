@@ -212,10 +212,10 @@ impl UpsertItems {
             &*self.ids,
             &self.ref_schemes,
             claim,
-            "Done in the tracker: ",
+            "Done in the tracker",
             |item, title| {
                 format!(
-                    "Work item {item} \"{title}\" was closed in its tracker; the claim on it is done. Its areas are free and the item is done."
+                    "work item {item} \"{title}\" was closed in its tracker; the claim on it is done. Its areas are free and the item is done."
                 )
             },
             handovers.now,
@@ -729,12 +729,15 @@ mod tests {
         let new = messages(&env, &env.bob).await.split_off(told);
         assert_eq!(new.len(), 1, "one message to the holder: {new:?}");
         let (subject, message) = &new[0];
-        assert_eq!(subject, "Done in the tracker: Work on gh:acme/web#1");
+        assert_eq!(
+            subject,
+            "Your claim on gh:acme/web#1 \"Work on gh:acme/web#1\""
+        );
         assert_eq!(message.author, Author::System);
         assert_eq!(
             message.body.as_str(),
             format!(
-                "Work item gh:acme/web#1 \"Work on gh:acme/web#1\" was closed in its tracker; the claim on it is done. Its areas are free and the item is done.\n{TITLE_NOTE}"
+                "Done in the tracker: work item gh:acme/web#1 \"Work on gh:acme/web#1\" was closed in its tracker; the claim on it is done. Its areas are free and the item is done.\n{TITLE_NOTE}"
             )
         );
         assert_eq!(message.importance, Importance::Normal);
@@ -770,7 +773,7 @@ mod tests {
         assert_completed(&env, "gh:acme/web#2", env.bob.actor.member, &kinds).await;
         assert_eq!(
             messages(&env, &env.bob).await.last().unwrap().0,
-            "Done in the tracker: Work on gh:acme/web#2"
+            "Your claim on gh:acme/web#2 \"Work on gh:acme/web#2\""
         );
     }
 
@@ -911,7 +914,10 @@ mod tests {
         );
         let new = messages(&env, &env.bob).await.split_off(told);
         assert_eq!(new.len(), 1, "one message to the holder: {new:?}");
-        assert_eq!(new[0].0, "Done in the tracker: Work on gh:acme/widgets#40");
+        assert_eq!(
+            new[0].0,
+            "Your claim on gh:acme/widgets#40 \"Work on gh:acme/widgets#40\""
+        );
     }
 
     #[tokio::test]
@@ -1088,7 +1094,10 @@ mod tests {
         );
         let new = messages(&env, &env.bob).await.split_off(told);
         assert_eq!(new.len(), 1, "one message to the holder: {new:?}");
-        assert_eq!(new[0].0, "Done in the tracker: Work on gh:acme/web#5");
+        assert_eq!(
+            new[0].0,
+            "Your claim on gh:acme/web#5 \"Work on gh:acme/web#5\""
+        );
         let events = env.events().await.len();
         let wakes = env.fakes.notifier.calls().len();
         import(&env, view).await;

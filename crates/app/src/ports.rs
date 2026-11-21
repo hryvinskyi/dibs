@@ -4,10 +4,10 @@
 mod store;
 
 pub use store::{
-    AckRows, AskedGrantRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows,
-    GrantRows, ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
-    SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
-    UiSessionRows, WideAskRows, WorktreeRows,
+    AckRows, AskedGrantRows, ClaimRows, ClaimThreadRows, DeliveryRows, DependencyRows,
+    EscalationRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows,
+    ReportRows, SessionRows, SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows,
+    TokenRows, Tx, UiSessionRows, WideAskRows, WorktreeRows,
 };
 
 use time::OffsetDateTime;

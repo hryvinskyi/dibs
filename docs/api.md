@@ -218,14 +218,28 @@ them to acknowledge it; `acks` is in a thread read only, for a message that asks
 
 **What dibs writes.** Some messages no member typed: a wide claim's announcements, the request to hand an area over to a
 feature claim and the notice that it was handed over, the notice to a member whose stale
-claim was taken over, whose slot hold an admin ended or another member took over, whose slot hold expired or whose offer
-lapsed, whose worktree hold an admin ended, the notice to a claim's holder that its pull request merged, was set aside
-or left review, or that its ticket was closed in its tracker, an escalation, and the notice that a member left. dibs
-writes them itself, in the project's name: `author` is
-`"dibs"`, `system` is `true` and `label` is `dibs`. When a member's action caused one, that member starts its thread
-(`thread.author` is their handle, `thread.system` is `false`) and the message speaks for them: it reaches the thread's
-other readers, never them, and asks them nothing. When nobody acted (an expiry, a lapse, the operator's command), dibs
-starts the thread too. What dibs writes is never counted toward anyone's limit on raised messages. A message written
+claim was taken over, whose claim an admin ended, whose slot hold an admin ended or another member took over, whose slot
+hold expired or whose offer lapsed, whose worktree hold an admin ended, the notice to a claim's holder that its pull
+request merged, was set aside or left review, or that its ticket was closed in its tracker, the notice of a grant given,
+an escalation, and the notice that a member left. dibs writes them itself, in the project's name: `author` is
+`"dibs"`, `system` is `true` and `label` is `dibs`.
+
+**A claim's conversation.** Everything dibs writes to a claim's holder about that one claim goes into the claim's own
+conversation: done by merge, done in the tracker, set aside in review, back from review, an area handed over to the
+claim, a grant given for it, taken over (told to the previous holder, in the previous claim's conversation) and ended by
+an admin. dibs starts that conversation at the first such message: `thread.author` is `"dibs"`, it is addressed to the
+holder alone and filed under the claim's item, and its subject is `Your claim on gh:acme/widgets#42 "Refund rounding"`
+(the item's reference, or `#` and its id, and its title). Each message opens with what happened (`Done by merge: pull
+request …`). A claim is the one a member took: a renewal keeps its conversation, while a take-over or a new claim after
+one ended has a conversation of its own. A conversation deleted by an admin or pruned is started again at the next
+message. Since that conversation reaches the holder alone, a message about another member's action names them and how
+to write to them (`dibs send alice`). Conversations started before keep their subject.
+
+The other messages keep conversations of their own: a request to hand an area over (one per pair of claims), a grant
+request, a wide claim's announcement, an escalation, the notices about slots and worktrees, and a member leaving. When a
+member's action caused one, that member starts its thread (`thread.author` is their handle, `thread.system` is `false`)
+and the message speaks for them: it reaches the thread's other readers, never them, and asks them nothing. When nobody
+acted (an expiry, a lapse, the operator's command), dibs starts the thread too. What dibs writes is never counted toward anyone's limit on raised messages. A message written
 before the server knew a system author keeps the author it was stored with. A summary's `importance` is the highest
 among its messages and `awaiting_ack` how many of them ask the caller for an acknowledgement not given yet.
 
@@ -389,8 +403,8 @@ edges are left as they are; a closed blocker is marked closed, and completes the
   already — or on an item of that source a complete batch leaves out, whether it closes it now or it was closed
   already, is **completed**, whatever its state (working, in review, stale): its areas are free, the grants on it end,
   what other claims waited for it to hand over moves to them, the item is `done`, an event `completed_by_close` is
-  appended, and its holder is sent one message from dibs, "Work item … was closed in its tracker; the claim on it is
-  done". The items, closures and edges are written first, all in the batch's transaction. A claim on an item the batch
+  appended, and its holder is told in the claim's conversation, "Done in the tracker: work item … was closed in its
+  tracker; the claim on it is done". The items, closures and edges are written first, all in the batch's transaction. A claim on an item the batch
   reports open, or that a partial batch does not mention, is left as it is. A closed blocker of another source or of
   none, or an item reported closed by a batch with no `source`, is only marked closed: that is not its own tracker's
   word, so its claim stands. Nothing in a batch claims or releases anything. The answer does not list the completed
@@ -514,7 +528,8 @@ An area is **handed over** only once no live claim of another member holds it an
 whatever lets the last one go: a debt claim narrows it away (`POST /v1/items/{id}/claim/narrow`), completes, is
 released, force-released or taken over, its member is removed, a merge completes it, or it goes stale (the server's
 sweep, every 30 seconds, applies that). The area then moves to the feature claim's `areas`, the debt claim drops it,
-`area_handed_over` is appended, and the feature claim's holder is told in a `high` message from dibs. When the debt
+`area_handed_over` is appended, and the feature claim's holder is told in a `high` message from dibs, in that claim's
+conversation. When the debt
 claim the wait was on lets go and another debt claim still holds the area, the wait turns to that claim and asks it
 afresh. A wait also ends without a handover, appending `wait_withdrawn` with its `reason`, and the debt holder asked is
 told in the request's conversation, in a `normal` message, that "The request for default:billing no longer stands":
@@ -576,8 +591,9 @@ named), `invalid_request` for a missing or invalid `wide.reason` or a missing `w
 
 `POST /v1/items/{id}/takeover`, body `{ "session_id": 7, "reason": "…", "areas": [], "kind": "feature" }` (`kind`
 optional: without it the new claim keeps the previous claim's kind), takes over another member's
-stale claim and tells them the reason in a conversation about the item: a `high` message from dibs, asking for no
-acknowledgement, that names the new holder and quotes the reason. Answers
+stale claim and tells them the reason in the previous claim's conversation: a `high` message from dibs, asking for no
+acknowledgement, that names the new holder, how to write to them (`dibs send <handle>`), and quotes the reason;
+`thread_id` is that conversation. Answers
 `{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31, "item": item ref, "announced": [] }`. Refusals: `not_stale` (the claim is
 live), `own_claim`, `nothing_to_take`, `area_held`, `wide_overlap`.
 
@@ -674,21 +690,22 @@ any other base — a stacked pull
 request merged into the branch of the one below it — delivers nothing yet, and is treated as a close (below).
 After a merge that delivers, with other pull requests recorded, the claim stays in review (`in_review`). With none left,
 it **completes** (`completed`, event `completed_by_merge`: areas free, grants on it ended, the item done, counted in the
-day's completions) and its holder is sent one message from dibs, "Pull request … merged; the claim on … is done"; or,
+day's completions) and its holder is told in the claim's conversation, "Done by merge: pull request … merged; the claim
+on … is done"; or,
 when `more` was set, it is worked on again with its areas, seen now (`working`, `review_ended`).
 
 A claim also completes when the tracker closes its item, whatever its state, in review with more pull requests to come
 included: the next `PUT /v1/items` of its own source that reports the item closed (listed, or carried as a blocker), or
 a complete one that leaves it out, completes it (event `completed_by_close`, with the same consequences and counted in
-the day's completions too), and its holder is sent one message from dibs, "Work item … was closed in its tracker; the
-claim on it is done". See [Items](#items).
+the day's completions too), and its holder is told in the claim's conversation, "Done in the tracker: work item … was
+closed in its tracker; the claim on it is done". See [Items](#items).
 
 `POST /v1/prs/closed`, body `{ "pr": "acme/api#12" }`: the pull request was closed without being merged and leaves its
 claim (`pr_closed`). Its work is not in, so the claim's other pull requests can no longer complete it: with others left
-the claim stays in review with `more` set (`set_aside`), and its holder is told in a message from dibs to record the pull
-request that brings the work in, or to mark the item done once it is in. With none left the claim is worked on again,
-seen now — a claim that sat in review for days is not stale on arrival — and its holder is told (`working`,
-`review_ended`).
+the claim stays in review with `more` set (`set_aside`), and its holder is told in the claim's conversation ("Set aside
+in review: …") to record the pull request that brings the work in, or to mark the item done once it is in. With none
+left the claim is worked on again, seen now — a claim that sat in review for days is not stale on arrival — and its
+holder is told there ("Back from review: …"; `working`, `review_ended`).
 
 `GET /v1/review-claims` answers the claims in review, by item:
 `{ "claims": [{ "item": item ref, "holder": "bob", "prs": ["acme/api#12"], "since": "…", "more": false,
@@ -893,9 +910,9 @@ field or a path that is not a relative path, `not_found` for a session that is n
 
 `POST /v1/grants`, body `{ "item": 14, "area": "default:billing", "to": "bob" }`: the caller, who holds the area, lets
 `to` edit in it, for `to`'s live claim on `item`. Answers `201 { "grant": grant, "created": true, "item": item ref }`,
-or `200` with `"created": false` when the same grant exists. A grant given tells the grantee: dibs starts a conversation
-in the grantor's name, addressed to the grantee and about `item`, whose `high` message says what was granted; a grant
-that exists tells nobody. Refusals: `not_holder` (`403`), `self_grant`, `grantee_has_no_claim`,
+or `200` with `"created": false` when the same grant exists. A grant given tells the grantee in a `high` message from dibs
+that says what was granted, who granted it and how to write to them (`dibs send <handle>`), in the conversation of the
+grantee's claim on `item`; a grant that exists tells nobody. Refusals: `not_holder` (`403`), `self_grant`, `grantee_has_no_claim`,
 `unknown_area`, `not_found`. A grant ends when it is revoked, when its grantor no longer holds the area, or when the
 grantee's claim ends.
 
@@ -1513,7 +1530,9 @@ without the marker), and answers `{ "token": { "prefix", "member", "created_at",
 token changes nothing.
 
 `POST /v1/admin/items/{id}/force-release` ends any member's claim on the item and answers
-`{ "claim": claim, "item": item ref }` (`no_claim`, `409`, when nobody holds it).
+`{ "claim": claim, "item": item ref }` (`no_claim`, `409`, when nobody holds it). The item is open again, and its holder
+is told in the claim's conversation, in a `high` message from dibs, who ended it and to claim the item again if they
+still work on it.
 
 ### Pilot figures
 

@@ -9,7 +9,7 @@ use dibs_domain::event::{EventKind, TakenOver};
 use dibs_domain::handover::{AreaMove, ClaimKind, WithdrawReason, Withdrawal};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId, ThreadId};
-use dibs_domain::message::{Author, Body, Importance, Recipients};
+use dibs_domain::message::{Body, Importance};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -17,14 +17,13 @@ use crate::error::AppError;
 use crate::named::{ItemName, Names, refuse};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::claim_item::widened;
+use crate::use_cases::claim_notice::ClaimNotice;
 use crate::use_cases::common::{existing_item, own_session, remove_claim, resolve_areas};
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::use_cases::handover::{Handovers, save_taken_over};
 use crate::use_cases::wide_asks::{Announced, Announcer};
-use crate::use_cases::writing::{Posted, SystemPost, titled_body};
+use crate::use_cases::writing::titled_body;
 use crate::work::Work;
-
-const SUBJECT_PREFIX: &str = "Taken over: ";
 
 /// The takeover to make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +45,7 @@ pub struct TakeOverInput {
 pub struct TakenOverClaim {
     /// The ended claim and the new one.
     pub takeover: Takeover,
-    /// The thread that told the previous holder.
+    /// The conversation of the previous claim, in which its holder was told.
     pub thread: ThreadId,
     /// The handle of the new claim's member, the caller.
     pub holder: dibs_domain::handle::Handle,
@@ -61,10 +60,12 @@ pub struct TakenOverClaim {
 
 /// Takes over another member's stale claim on an item. In the same transaction the previous claim
 /// ends, with the paths recorded under it and the grants resting on it, and the previous holder is
-/// sent the reason in a thread about the item, as a `high` message that asks for no
-/// acknowledgement, so it reaches them while they work. A live claim is never taken over. A wide
-/// scope the new claim carries on is announced to the holders of its areas in the new member's
-/// name, since what they acknowledged before granted the previous member, and those grants end.
+/// told, with the reason, in the previous claim's conversation, as a `high` message that asks for
+/// no acknowledgement, so it reaches them while they work; the message names the new holder and how
+/// to write to them, since that conversation reaches the previous holder alone. A live claim is
+/// never taken over. A wide scope the new claim carries on is announced to the holders of its
+/// areas in the new member's name, since what they acknowledged before granted the previous
+/// member, and those grants end.
 /// An area another claim waited for the previous claim to hand over is not carried on: it moves
 /// to the claim waiting for it. The areas a previous feature claim waited for carry on with it,
 /// unless the new claim is debt work, which waits for nothing: those waits end.
@@ -176,29 +177,21 @@ impl TakeOver {
         let names = Names::load(&mut work).await?;
         let holder = names.handle(actor.member)?;
         let named = ItemName::of(&item, &self.ref_schemes);
-        let thread = SystemPost {
-            ids: Posted::next(&*self.ids),
-            subject: format!("{SUBJECT_PREFIX}{}", item.title),
-            item: Some(item.id),
-            on_behalf_of: Author::Member(actor.member),
-            to: Recipients::Members([takeover.previous.member].into()),
+        let thread = ClaimNotice {
+            claim: &takeover.previous,
+            item: &named,
             body: titled_body(
                 &format!(
-                    "{holder} took over your stale claim on work item {} \"{}\". Your claim has ended; the item is theirs now.",
-                    named
-                        .external_ref
-                        .as_ref()
-                        .map_or_else(|| format!("#{}", item.id), ToString::to_string),
+                    "{holder} took over your stale claim on work item {} \"{}\". Your claim has ended; the item is theirs now. To write to {holder}: dibs send {holder}.",
+                    named.label(),
                     item.title
                 ),
                 Some(("Their reason", input.reason.as_str())),
             )?,
             importance: Importance::High,
-            ack_required: false,
         }
-        .send(&mut work, now)
-        .await?
-        .thread;
+        .send(&mut work, &*self.ids, now)
+        .await?;
         if let Some(widened) = widened(None, &takeover.claim) {
             work.record(now, widened).await?;
         }
@@ -238,7 +231,7 @@ mod tests {
     use dibs_domain::claim::TakeoverRefused;
     use dibs_domain::event::{GrantEnd, GrantRevoked, ThreadStarted};
     use dibs_domain::handle::Handle;
-    use dibs_domain::message::may_read;
+    use dibs_domain::message::{Author, Recipients, may_read};
 
     use super::*;
     use crate::named::Refusal;
@@ -306,16 +299,22 @@ mod tests {
             kinds[1],
             EventKind::ThreadStarted(ThreadStarted {
                 thread: taken.thread,
-                author: Some(env.alice.actor.member),
+                author: None,
                 item: Some(item),
-            })
+            }),
+            "dibs starts the previous claim's conversation in nobody's name"
         );
         assert!(matches!(kinds[2], EventKind::MessagePosted(_)));
         let mut tx = env.deps.store.begin().await.unwrap();
         let thread = tx.thread(env.project, taken.thread).await.unwrap().unwrap();
         assert_eq!(
             thread.subject.as_str(),
-            "Taken over: Work on gh:acme/widgets#1"
+            "Your claim on gh:acme/widgets#1 \"Work on gh:acme/widgets#1\""
+        );
+        assert_eq!(
+            thread.recipients,
+            Recipients::Members([env.bob.actor.member].into()),
+            "the previous holder alone"
         );
         assert!(may_read(
             thread.author,
@@ -324,16 +323,16 @@ mod tests {
             env.bob.actor.role
         ));
         let messages = tx.messages(env.project, taken.thread).await.unwrap();
-        assert_eq!(
-            messages[0].author,
-            Author::System,
-            "dibs tells them, for alice"
-        );
+        assert_eq!(messages[0].author, Author::System, "dibs tells them");
         assert_eq!(messages[0].label.as_str(), "dibs");
         let text = messages[0].body.as_str();
         assert!(
             text.starts_with("alice took over your stale claim on work item gh:acme/widgets#1"),
             "{text}"
+        );
+        assert!(
+            text.contains("To write to alice: dibs send alice."),
+            "the taker is named with how to write to them: {text}"
         );
         assert!(
             text.ends_with(&format!("Their reason: {}", reason().as_str())),

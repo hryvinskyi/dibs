@@ -94,6 +94,14 @@ impl ItemName {
         }
     }
 
+    /// How the item reads in what dibs writes: its reference when it has one, else `#` and its
+    /// local id.
+    pub(crate) fn label(&self) -> String {
+        self.external_ref
+            .as_ref()
+            .map_or_else(|| format!("#{}", self.id), ToString::to_string)
+    }
+
     /// How a command names the item: by its reference when it has one, else by its local id.
     pub(crate) fn key(&self) -> String {
         self.external_ref

@@ -11,7 +11,7 @@ use async_lock::{Mutex, MutexGuardArc};
 use async_trait::async_trait;
 use time::OffsetDateTime;
 
-use dibs_domain::claim::Claim;
+use dibs_domain::claim::{Claim, ClaimInstance};
 use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
 use dibs_domain::escalation::settled_by;
@@ -36,14 +36,14 @@ use dibs_domain::wide::WideAsk;
 use dibs_domain::worktree::{PoolKey, WorktreePool};
 
 use crate::ports::{
-    AckRows, AskedGrantRows, ClaimRows, DeliveryRows, DependencyRows, EscalationRows, EventRows,
-    GrantRows, ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows, ReportRows, SessionRows,
-    SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows, TokenRows, Tx,
-    UiSessionRows, WideAskRows, WorktreeRows,
+    AckRows, AskedGrantRows, ClaimRows, ClaimThreadRows, DeliveryRows, DependencyRows,
+    EscalationRows, EventRows, GrantRows, ItemRows, MemberRows, ProjectRows, RadarRows, RaisedRows,
+    ReportRows, SessionRows, SettingsRows, SlotRows, Store, StoreError, StoreResult, ThreadRows,
+    TokenRows, Tx, UiSessionRows, WideAskRows, WorktreeRows,
 };
 use crate::records::{
-    CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
-    MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
+    ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter,
+    ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
     ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
 };
 use crate::token::{TokenHash, TokenPrefix};
@@ -66,6 +66,7 @@ struct State {
     grants: BTreeMap<(ProjectId, GrantId), GrantRecord>,
     threads: BTreeMap<(ProjectId, ThreadId), ThreadRecord>,
     messages: BTreeMap<(ProjectId, MessageId), MessageRecord>,
+    claim_threads: BTreeMap<(ProjectId, ThreadId), ClaimThread>,
     reads: BTreeMap<(ProjectId, MemberId, MessageId), OffsetDateTime>,
     acks: BTreeMap<(ProjectId, MessageId, MemberId), Ack>,
     wide_asks: BTreeMap<(ProjectId, MessageId), WideAsk>,
@@ -153,7 +154,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 29] = [
+        let checks: [(&'static str, bool); 30] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -224,6 +225,12 @@ impl State {
                 self.threads.iter().all(|((p, _), t)| match &t.recipients {
                     Recipients::Project => true,
                     Recipients::Members(members) => members.iter().all(|m| member(*p, *m)),
+                }),
+            ),
+            (
+                "a claim's conversation",
+                self.claim_threads.iter().all(|((p, t), link)| {
+                    thread(*p, *t) && item(*p, link.claim.item) && member(*p, link.claim.member)
                 }),
             ),
             (
@@ -1183,6 +1190,7 @@ impl ThreadRows for MemoryTx {
         work.deliveries.retain(|(p, _, subject), _| {
             !(*p == project && matches!(subject, DeliverySubject::Message(id) if gone.contains(id)))
         });
+        work.claim_threads.remove(&(project, thread));
         work.threads.remove(&(project, thread));
         Ok(u64::try_from(gone.len()).unwrap_or(u64::MAX))
     }
@@ -1219,6 +1227,51 @@ impl ThreadRows for MemoryTx {
             }
         }
         Ok(newly)
+    }
+}
+
+#[async_trait]
+impl ClaimThreadRows for MemoryTx {
+    async fn claim_thread(
+        &mut self,
+        project: ProjectId,
+        claim: &ClaimInstance,
+    ) -> StoreResult<Option<ClaimThread>> {
+        Ok(self
+            .work
+            .claim_threads
+            .iter()
+            .find(|((p, _), link)| *p == project && link.claim == *claim)
+            .map(|(_, link)| *link))
+    }
+
+    async fn insert_claim_thread(
+        &mut self,
+        project: ProjectId,
+        link: &ClaimThread,
+    ) -> StoreResult<()> {
+        let taken = self.work.claim_threads.iter().any(|((p, t), known)| {
+            *p == project && (*t == link.thread || known.claim == link.claim)
+        });
+        if taken {
+            return Err(StoreError::Duplicate);
+        }
+        self.work
+            .claim_threads
+            .insert((project, link.thread), *link);
+        Ok(())
+    }
+
+    async fn set_base_moved_told_at(
+        &mut self,
+        project: ProjectId,
+        thread: ThreadId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        if let Some(link) = self.work.claim_threads.get_mut(&(project, thread)) {
+            link.base_moved_told_at = Some(at);
+        }
+        Ok(())
     }
 }
 

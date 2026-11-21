@@ -6,16 +6,17 @@ use dibs_domain::claim::Claim;
 use dibs_domain::event::EventKind;
 use dibs_domain::handover::{AreaMove, WithdrawReason, Withdrawal};
 use dibs_domain::item::ItemStatus;
-use dibs_domain::message::{Author, Importance, Recipients};
+use dibs_domain::message::Importance;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use crate::error::AppError;
 use crate::named::{ItemName, Names};
 use crate::ports::IdGen;
+use crate::use_cases::claim_notice::ClaimNotice;
 use crate::use_cases::common::{existing_item, remove_claim};
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::use_cases::handover::Handovers;
-use crate::use_cases::writing::{Posted, SystemPost, titled_body};
+use crate::use_cases::writing::titled_body;
 use crate::work::Work;
 
 /// What ending a claim leaves behind: the item's new status and the event that records the end.
@@ -63,35 +64,28 @@ pub(crate) async fn end_claim(
     Ok(())
 }
 
-/// Tells the claim's holder, in a message from dibs filed under the claim's item, what became of
-/// their claim: the subject is `subject` followed by the item's title, and `text` writes the
-/// message from how the item is named (its reference, or `#` and its id) and its title. The
-/// message reaches the holder alone, at normal importance, and asks no acknowledgement.
+/// Tells the claim's holder what became of their claim, in the claim's conversation
+/// ([`ClaimNotice`]): the message opens with `opening` and a colon, so it says first what happened,
+/// and `text` writes the rest from how the item is named (its reference, or `#` and its id) and its
+/// title. It is of normal importance and asks no acknowledgement.
 pub(crate) async fn tell_holder(
     work: &mut Work,
     ids: &dyn IdGen,
     schemes: &RefSchemeRegistry,
     claim: &Claim,
-    subject: &str,
+    opening: &str,
     text: impl FnOnce(&str, &str) -> String,
     now: OffsetDateTime,
 ) -> Result<(), AppError> {
     let item = ItemName::of(&existing_item(work, claim.item).await?, schemes);
-    let named = item
-        .external_ref
-        .as_ref()
-        .map_or_else(|| format!("#{}", item.id), ToString::to_string);
-    SystemPost {
-        ids: Posted::next(ids),
-        subject: format!("{subject}{}", item.title),
-        item: Some(item.id),
-        on_behalf_of: Author::System,
-        to: Recipients::Members([claim.member].into()),
-        body: titled_body(&text(&named, item.title.as_str()), None)?,
+    let lead = format!("{opening}: {}", text(&item.label(), item.title.as_str()));
+    ClaimNotice {
+        claim,
+        item: &item,
+        body: titled_body(&lead, None)?,
         importance: Importance::Normal,
-        ack_required: false,
     }
-    .send(work, now)
+    .send(work, ids, now)
     .await?;
     Ok(())
 }

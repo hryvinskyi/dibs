@@ -13,13 +13,13 @@ mod contract {
     use dibs_app::fakes::MemoryStore;
     use dibs_app::ports::{Store, StoreError};
     use dibs_app::records::{
-        CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
-        MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
-        ThreadActivity, ThreadRecord, TokenRecord, UiSessionRecord,
+        ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter,
+        ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark,
+        SessionRecord, ThreadActivity, ThreadRecord, TokenRecord, UiSessionRecord,
     };
     use dibs_app::token::{TokenHash, TokenPrefix};
     use dibs_domain::area::QualifiedArea;
-    use dibs_domain::claim::Claim;
+    use dibs_domain::claim::{Claim, ClaimInstance};
     use dibs_domain::delivery::{Delivery, DeliverySubject};
     use dibs_domain::dependency::{Dependency, DependencySource};
     use dibs_domain::event::{
@@ -159,6 +159,10 @@ mod contract {
         what_dibs_writes_has_no_member_author_and_speaks_for_the_threads_starter,
         a_removed_member_is_kept_with_the_first_time_they_were_removed,
         a_deleted_thread_takes_everything_that_refers_to_its_messages,
+        a_claims_conversation_keeps_its_claim_and_when_a_moved_base_was_last_told,
+        a_claim_has_one_conversation_and_a_conversation_one_claim,
+        a_claims_conversation_goes_with_its_thread,
+        a_claims_conversation_outlives_the_claim_it_names,
         quiet_threads_are_found_by_their_last_activity,
         open_escalations_are_one_per_message_newest_first_until_an_arbiter_acks,
         old_events_go_and_the_newest_gone_is_remembered,
@@ -3391,6 +3395,158 @@ mod contract {
         assert_eq!(tx.messages(A, ThreadId(82)).await.unwrap().len(), 1);
         assert_eq!(tx.acks(A, MessageId(93)).await.unwrap().len(), 1);
         assert!(tx.delivery(A, BOB, &kept).await.unwrap().is_some());
+    }
+
+    /// The conversation dibs keeps with bob about his claim on the first item, taken at `claimed`.
+    fn claim_thread(thread: ThreadId, claimed: i64) -> ClaimThread {
+        ClaimThread {
+            thread,
+            claim: ClaimInstance {
+                item: FIRST,
+                member: BOB,
+                claimed_at: at(claimed),
+            },
+            base_moved_told_at: None,
+        }
+    }
+
+    /// A conversation dibs started with bob about the first item, with one message.
+    async fn dibs_thread_to_bob(tx: &mut Box<dyn dibs_app::ports::Tx>, id: u64) -> ThreadId {
+        let thread = ThreadRecord {
+            author: Author::System,
+            recipients: Recipients::members([BOB].into()).unwrap(),
+            ..thread(ThreadId(id), ALICE, Some(FIRST), 60)
+        };
+        tx.insert_thread(A, &thread).await.unwrap();
+        tx.insert_message(A, &system_message(id + 100, thread.id, 61))
+            .await
+            .unwrap();
+        thread.id
+    }
+
+    async fn a_claims_conversation_keeps_its_claim_and_when_a_moved_base_was_last_told(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let thread = dibs_thread_to_bob(&mut tx, 81).await;
+        let other = dibs_thread_to_bob(&mut tx, 82).await;
+        tx.insert_claim_thread(A, &claim_thread(thread, 10))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let link = claim_thread(thread, 10);
+        assert_eq!(tx.claim_thread(A, &link.claim).await.unwrap(), Some(link));
+        assert_eq!(
+            tx.claim_thread(A, &claim_thread(thread, 11).claim)
+                .await
+                .unwrap(),
+            None,
+            "another time is another claim"
+        );
+        assert_eq!(
+            tx.claim_thread(B, &link.claim).await.unwrap(),
+            None,
+            "another project's claim is not reached"
+        );
+        tx.set_base_moved_told_at(A, thread, at(70)).await.unwrap();
+        tx.set_base_moved_told_at(A, thread, at(90)).await.unwrap();
+        tx.set_base_moved_told_at(A, other, at(95)).await.unwrap();
+        tx.set_base_moved_told_at(B, thread, at(99)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim_thread(A, &link.claim).await.unwrap(),
+            Some(ClaimThread {
+                base_moved_told_at: Some(at(90)),
+                ..link
+            }),
+            "the last time told replaces the one before, and a conversation of no claim or of \
+             another project changes nothing"
+        );
+    }
+
+    async fn a_claim_has_one_conversation_and_a_conversation_one_claim(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let thread = dibs_thread_to_bob(&mut tx, 81).await;
+        let other = dibs_thread_to_bob(&mut tx, 82).await;
+        tx.insert_claim_thread(A, &claim_thread(thread, 10))
+            .await
+            .unwrap();
+        assert!(is_duplicate(
+            tx.insert_claim_thread(A, &claim_thread(other, 10)).await
+        ));
+        assert!(is_duplicate(
+            tx.insert_claim_thread(A, &claim_thread(thread, 11)).await
+        ));
+        tx.insert_claim_thread(A, &claim_thread(other, 11))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim_thread(A, &claim_thread(other, 11).claim)
+                .await
+                .unwrap()
+                .map(|link| link.thread),
+            Some(other)
+        );
+    }
+
+    async fn a_claims_conversation_goes_with_its_thread(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let thread = dibs_thread_to_bob(&mut tx, 81).await;
+        tx.insert_claim_thread(A, &claim_thread(thread, 10))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.delete_thread(A, thread).await.unwrap(), 1);
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.thread(A, thread).await.unwrap(), None);
+        assert_eq!(
+            tx.claim_thread(A, &claim_thread(thread, 10).claim)
+                .await
+                .unwrap(),
+            None
+        );
+        let again = dibs_thread_to_bob(&mut tx, 83).await;
+        tx.insert_claim_thread(A, &claim_thread(again, 10))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    async fn a_claims_conversation_outlives_the_claim_it_names(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let held = claim(FIRST, BOB, BOB_LAPTOP, &[]);
+        tx.save_claim(A, &held).await.unwrap();
+        let thread = dibs_thread_to_bob(&mut tx, 81).await;
+        let link = ClaimThread {
+            thread,
+            claim: held.instance(),
+            base_moved_told_at: None,
+        };
+        tx.insert_claim_thread(A, &link).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        tx.delete_claim(A, FIRST).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.claim(A, FIRST).await.unwrap(), None);
+        assert_eq!(
+            tx.claim_thread(A, &held.instance()).await.unwrap(),
+            Some(link)
+        );
     }
 
     async fn quiet_threads_are_found_by_their_last_activity(store: Arc<dyn Store>) {

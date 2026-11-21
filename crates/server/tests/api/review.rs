@@ -148,7 +148,10 @@ async fn the_last_recorded_pull_request_merged_completes_the_claim_once() {
         .iter()
         .filter_map(|thread| thread["thread"]["subject"].as_str())
         .collect();
-    assert_eq!(subjects, ["Done by merge: Rounding in invoices"]);
+    assert_eq!(
+        subjects,
+        ["Your claim on gh:acme/api#42 \"Rounding in invoices\""]
+    );
     let again = team.merged("acme/api#7").await;
     assert_eq!(again.status, StatusCode::OK);
     assert_eq!(again.body, json!({"matched": false}));
@@ -194,6 +197,55 @@ async fn a_merge_with_more_to_follow_and_a_close_return_the_claim_to_work() {
         )
         .await;
     assert_eq!(unrecorded.body, json!({"matched": false}));
+}
+
+#[tokio::test]
+async fn every_notice_about_one_claim_lands_in_its_one_conversation_in_the_holders_inbox() {
+    let team = Team::new().await;
+    team.review(&team.bob, "acme/api#7", false).await;
+    let closed = team
+        .world
+        .post(&team.worker, "/v1/prs/closed", json!({"pr": "acme/api#7"}))
+        .await;
+    assert_eq!(closed.body["claim"], "working", "{}", closed.body);
+    team.review(&team.bob, "acme/api#8", false).await;
+    let merged = team.merged("acme/api#8").await;
+    assert_eq!(merged.body["claim"], "completed", "{}", merged.body);
+
+    let inbox = team.world.get(&team.bob, "/v1/inbox").await;
+    assert_eq!(inbox.status, StatusCode::OK, "{}", inbox.body);
+    let threads = inbox.body["threads"].as_array().unwrap();
+    assert_eq!(threads.len(), 1, "one conversation: {}", inbox.body);
+    let thread = &threads[0]["thread"];
+    assert_eq!(
+        thread["subject"],
+        "Your claim on gh:acme/api#42 \"Rounding in invoices\""
+    );
+    assert_eq!(thread["author"], "dibs");
+    assert_eq!(thread["to"], json!(["bob"]));
+    assert_eq!(thread["item"], team.item);
+    assert_eq!(threads[0]["messages"], 2);
+    assert_eq!(threads[0]["unread"], 2);
+    let read = team
+        .world
+        .get(
+            &team.bob,
+            &format!("/v1/threads/{}", thread["id"].as_u64().unwrap()),
+        )
+        .await;
+    let openings: Vec<&str> = read.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|message| message["body"].as_str())
+        .filter_map(|body| body.split(':').next())
+        .collect();
+    assert_eq!(
+        openings,
+        ["Back from review", "Done by merge"],
+        "{}",
+        read.body
+    );
 }
 
 #[tokio::test]
@@ -434,17 +486,34 @@ async fn a_close_or_a_stacked_merge_beside_another_pull_request_sets_it_aside() 
         .await;
     assert_eq!(closed.body["claim"], "set_aside", "{}", closed.body);
     let threads = team.world.get(&team.bob, "/v1/threads").await;
-    let told = threads.body["threads"]
+    let listed = threads.body["threads"].as_array().unwrap();
+    assert_eq!(
+        listed.len(),
+        1,
+        "the claim's conversation: {}",
+        threads.body
+    );
+    let thread = team
+        .world
+        .get(
+            &team.bob,
+            &format!(
+                "/v1/threads/{}",
+                listed[0]["thread"]["id"].as_u64().unwrap()
+            ),
+        )
+        .await;
+    let told = thread.body["messages"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|thread| {
-            thread["thread"]["subject"]
+        .filter(|message| {
+            message["body"]
                 .as_str()
-                .is_some_and(|subject| subject.starts_with("Set aside in review: "))
+                .is_some_and(|body| body.starts_with("Set aside in review: "))
         })
         .count();
-    assert_eq!(told, 2, "the holder is told each time");
+    assert_eq!(told, 2, "the holder is told each time: {}", thread.body);
 }
 
 #[tokio::test]

@@ -7,8 +7,10 @@ use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use dibs_domain::claim::decide_force_release;
 use dibs_domain::event::{self, EventKind};
+use dibs_domain::handle::Handle;
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ItemStatus;
+use dibs_domain::message::Importance;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -16,12 +18,16 @@ use crate::error::AppError;
 use crate::named::{EndedClaim, ItemName, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
+use crate::use_cases::claim_notice::ClaimNotice;
 use crate::use_cases::common::existing_item;
 use crate::use_cases::handover::Handovers;
+use crate::use_cases::writing::titled_body;
 use crate::work::Work;
 
 /// Ends any member's claim on an item at an admin's word; the item is open again. In the same
-/// transaction every area another claim waited for it to hand over moves to that claim.
+/// transaction every area another claim waited for it to hand over moves to that claim, and the
+/// holder is told in the claim's conversation, as a `high` message, who ended it and that they
+/// may claim the item again.
 pub struct ForceRelease {
     ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
@@ -58,13 +64,14 @@ impl ForceRelease {
         let item = existing_item(&mut work, item).await?;
         let current = work.claim(actor.project, item.id).await?;
         let forced = decide_force_release(current.as_ref(), actor.role)?;
+        let released = event::ForceReleased {
+            item: item.id,
+            member: forced.claim.member,
+            by: Some(actor.member),
+        };
         let ending = Ending {
             status: ItemStatus::Open,
-            event: EventKind::ForceReleased(event::ForceReleased {
-                item: item.id,
-                member: forced.claim.member,
-                by: Some(actor.member),
-            }),
+            event: EventKind::ForceReleased(released.clone()),
         };
         let settings = work.project_settings(&self.hot_rules).await?;
         let handovers = Handovers {
@@ -74,17 +81,46 @@ impl ForceRelease {
             now,
         };
         end_claim(&mut work, &forced.claim, ending, &handovers).await?;
+        let names = Names::load(&mut work).await?;
+        let named = ItemName::of(&item, &self.ref_schemes);
+        let by = released.by.map(|admin| names.handle(admin)).transpose()?;
+        ClaimNotice {
+            claim: &forced.claim,
+            item: &named,
+            body: titled_body(&force_released(by.as_ref(), &named), None)?,
+            importance: Importance::High,
+        }
+        .send(&mut work, &*self.ids, now)
+        .await?;
         let ended = EndedClaim {
-            claim: Names::load(&mut work).await?.claim(forced.claim)?,
-            item: ItemName::of(&item, &self.ref_schemes),
+            claim: names.claim(forced.claim)?,
+            item: named,
         };
         work.commit(&*self.notifier).await?;
         Ok(ended)
     }
 }
 
+/// What the holder of a claim an admin ended is told: who ended it — the admin by handle, or the
+/// server's operator when no admin is named — that the item is open again, and that they claim it
+/// again if they still work on it.
+fn force_released(by: Option<&Handle>, item: &ItemName) -> String {
+    let who = by.map_or_else(
+        || "the operator of this server".to_owned(),
+        |admin| format!("{admin}, an admin,"),
+    );
+    format!(
+        "Released: {who} ended your claim on work item {label} \"{title}\". The item is open again and its areas are free. If you still work on it, claim it again (dibs claim {key}).",
+        label = item.label(),
+        title = item.title,
+        key = item.key(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use dibs_domain::item::{ExternalRef, Title};
+
     use super::*;
     use crate::use_cases::testing::Env;
     use crate::use_cases::{ClaimItem, ClaimItemInput};
@@ -137,13 +173,22 @@ mod tests {
         }
         let before = env.events().await.len();
         force.execute(&env.alice.actor, item).await.unwrap();
+        let kinds = env.kinds_after(before).await;
         assert_eq!(
-            env.kinds_after(before).await,
-            [EventKind::ForceReleased(event::ForceReleased {
+            kinds[0],
+            EventKind::ForceReleased(event::ForceReleased {
                 item,
                 member: env.bob.actor.member,
                 by: Some(env.alice.actor.member),
-            })]
+            })
+        );
+        assert!(
+            matches!(
+                &kinds[1..],
+                [EventKind::ThreadStarted(started), EventKind::MessagePosted(_)]
+                    if started.item == Some(item) && started.author.is_none()
+            ),
+            "the holder is told: {kinds:?}"
         );
         assert_eq!(status(&env, item).await, ItemStatus::Open);
         assert_eq!(
@@ -154,5 +199,31 @@ mod tests {
                 .code(),
             "no_claim"
         );
+    }
+
+    fn named(reference: Option<&str>) -> ItemName {
+        ItemName {
+            id: ItemId(7),
+            external_ref: reference.map(|text| ExternalRef::parse(text).unwrap()),
+            title: Title::parse("Refund rounding").unwrap(),
+            link: None,
+        }
+    }
+
+    #[test]
+    fn the_holder_is_told_who_ended_the_claim_and_how_to_take_it_again() {
+        let alice = Handle::parse("alice").unwrap();
+        assert_eq!(
+            force_released(Some(&alice), &named(Some("gh:acme/widgets#42"))),
+            "Released: alice, an admin, ended your claim on work item gh:acme/widgets#42 \"Refund rounding\". The item is open again and its areas are free. If you still work on it, claim it again (dibs claim gh:acme/widgets#42)."
+        );
+        let by_operator = force_released(None, &named(None));
+        assert!(
+            by_operator.starts_with(
+                "Released: the operator of this server ended your claim on work item #7 \"Refund rounding\"."
+            ),
+            "{by_operator}"
+        );
+        assert!(by_operator.ends_with("(dibs claim 7)."), "{by_operator}");
     }
 }

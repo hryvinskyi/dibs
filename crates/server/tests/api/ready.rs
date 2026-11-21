@@ -236,7 +236,10 @@ async fn a_batch_reporting_a_claimed_item_closed_completes_the_claim_and_tells_i
     );
     let inbox = board.world.get(&board.bob, "/v1/inbox").await;
     let thread = &inbox.body["threads"][0]["thread"];
-    assert_eq!(thread["subject"], "Done in the tracker: Search is slow");
+    assert_eq!(
+        thread["subject"],
+        "Your claim on gh:acme/web#2 \"Search is slow\""
+    );
     let read = board
         .world
         .get(
@@ -249,7 +252,7 @@ async fn a_batch_reporting_a_claimed_item_closed_completes_the_claim_and_tells_i
             .as_str()
             .unwrap()
             .starts_with(
-                "Work item gh:acme/web#2 \"Search is slow\" was closed in its tracker; the claim on it is done."
+                "Done in the tracker: work item gh:acme/web#2 \"Search is slow\" was closed in its tracker; the claim on it is done."
             ),
         "{}",
         read.body
@@ -344,7 +347,7 @@ async fn a_closed_blocker_of_the_batchs_own_source_completes_the_claim_on_it() {
     let inbox = board.world.get(&board.bob, "/v1/inbox").await;
     assert_eq!(
         inbox.body["threads"][0]["thread"]["subject"],
-        "Done in the tracker: Rate table"
+        "Your claim on gh:acme/api#7 \"Rate table\""
     );
 }
 

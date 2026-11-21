@@ -338,7 +338,7 @@ impl ReportPr {
                     .unwrap_or_default();
                 let text = |item: &str, title: &str| {
                     format!(
-                        "Pull request {pr} {how}. Your claim on work item {item} \"{title}\" stays in review on {waiting}, but their merges no longer complete it: record the pull request that brings this work in (dibs claim review {item} --pr <owner>/<repo>#<number>), or mark the item done yourself once it is in."
+                        "pull request {pr} {how}. Your claim on work item {item} \"{title}\" stays in review on {waiting}, but their merges no longer complete it: record the pull request that brings this work in (dibs claim review {item} --pr <owner>/<repo>#<number>), or mark the item done yourself once it is in."
                     )
                 };
                 tell_holder(
@@ -346,7 +346,7 @@ impl ReportPr {
                     &*self.ids,
                     &self.ref_schemes,
                     &claim,
-                    "Set aside in review: ",
+                    "Set aside in review",
                     text,
                     now,
                 )
@@ -366,7 +366,7 @@ impl ReportPr {
                 if !end.delivers() {
                     let text = |item: &str, title: &str| {
                         format!(
-                            "Pull request {pr} {how}, so your claim on work item {item} \"{title}\" is no longer in review. You still hold it and its areas; work on it again, record the pull request that brings the work in, or release it."
+                            "pull request {pr} {how}, so your claim on work item {item} \"{title}\" is no longer in review. You still hold it and its areas; work on it again, record the pull request that brings the work in, or release it."
                         )
                     };
                     tell_holder(
@@ -374,7 +374,7 @@ impl ReportPr {
                         &*self.ids,
                         &self.ref_schemes,
                         &claim,
-                        "Back from review: ",
+                        "Back from review",
                         text,
                         now,
                     )
@@ -412,7 +412,7 @@ impl ReportPr {
                 .await?;
                 let text = |item: &str, title: &str| {
                     format!(
-                        "Pull request {pr} merged; the claim on work item {item} \"{title}\" is done. Its areas are free and the item is done."
+                        "pull request {pr} merged; the claim on work item {item} \"{title}\" is done. Its areas are free and the item is done."
                     )
                 };
                 tell_holder(
@@ -420,7 +420,7 @@ impl ReportPr {
                     &*self.ids,
                     &self.ref_schemes,
                     &claim,
-                    "Done by merge: ",
+                    "Done by merge",
                     text,
                     now,
                 )

@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use dibs_domain::claim::Claim;
+use dibs_domain::claim::{Claim, ClaimInstance};
 use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
 use dibs_domain::event::{Event, EventKind};
@@ -44,8 +44,8 @@ use dibs_domain::wide::WideAsk;
 use dibs_domain::worktree::{PoolKey, WorktreePool};
 
 use crate::records::{
-    CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter, ItemRecord,
-    MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
+    ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter,
+    ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
     ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
 };
 use crate::token::{TokenHash, TokenPrefix};
@@ -102,6 +102,7 @@ pub trait Tx:
     + DependencyRows
     + GrantRows
     + ThreadRows
+    + ClaimThreadRows
     + AckRows
     + WideAskRows
     + AskedGrantRows
@@ -460,10 +461,11 @@ pub trait ThreadRows: Send {
         project: ProjectId,
         before: OffsetDateTime,
     ) -> StoreResult<Vec<ThreadActivity>>;
-    /// Removes a thread with its recipients and its messages, and with each message what refers to
-    /// it: read marks, acknowledgements, a wide claim's announcement, a request for a grant, the
-    /// record that it counted toward its author's limit, its deliveries and its escalation.
-    /// Answers how many messages went; a thread that does not exist removes nothing.
+    /// Removes a thread with its recipients, its messages and the claim it is the conversation of
+    /// ([`ClaimThreadRows`]), and with each message what refers to it: read marks,
+    /// acknowledgements, a wide claim's announcement, a request for a grant, the record that it
+    /// counted toward its author's limit, its deliveries and its escalation. Answers how many
+    /// messages went; a thread that does not exist removes nothing.
     async fn delete_thread(&mut self, project: ProjectId, thread: ThreadId) -> StoreResult<u64>;
     /// Records every message of the thread that does not speak for `reader` as read by them;
     /// answers how many were not before. A member's own messages, and what dibs wrote on their
@@ -475,6 +477,35 @@ pub trait ThreadRows: Send {
         thread: ThreadId,
         at: OffsetDateTime,
     ) -> StoreResult<u64>;
+}
+
+/// Which conversation dibs keeps with each claim's holder about that claim. The link names the
+/// claim by its item, member and start, so it outlives the claim it names (an ending or a take-over
+/// removes the claim first), and it goes with its conversation ([`ThreadRows::delete_thread`]).
+#[async_trait]
+pub trait ClaimThreadRows: Send {
+    /// The conversation of the claim, with when a moved base was last told in it, if dibs started
+    /// one and it still exists.
+    async fn claim_thread(
+        &mut self,
+        project: ProjectId,
+        claim: &ClaimInstance,
+    ) -> StoreResult<Option<ClaimThread>>;
+    /// Stores a link. A second link for the same claim, or for the same conversation, fails with
+    /// [`StoreError::Duplicate`].
+    async fn insert_claim_thread(
+        &mut self,
+        project: ProjectId,
+        link: &ClaimThread,
+    ) -> StoreResult<()>;
+    /// Records that a moved base was told in the conversation at `at`, in place of any earlier
+    /// time; a conversation no claim is linked to is left alone.
+    async fn set_base_moved_told_at(
+        &mut self,
+        project: ProjectId,
+        thread: ThreadId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
 }
 
 /// The acknowledgements recipients recorded for messages, and when each member read them.

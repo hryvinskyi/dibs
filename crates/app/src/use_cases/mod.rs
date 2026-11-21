@@ -8,6 +8,7 @@ mod ask_grant;
 mod authenticate;
 mod claim_ending;
 mod claim_item;
+mod claim_notice;
 mod close_ui_session;
 mod common;
 mod complete;

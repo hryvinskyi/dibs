@@ -1508,4 +1508,62 @@ mod migrations {
             Err(StoreError::Corrupt { what }) if what.starts_with("claims.gained_areas")
         ));
     }
+
+    #[tokio::test]
+    async fn claim_threads_start_empty_keep_every_thread_of_before_and_refuse_a_dangling_row() {
+        use dibs_app::records::ClaimThread;
+        use dibs_domain::claim::ClaimInstance;
+
+        let (_dir, path) = database_at(14, &rows_at_deliveries()).await;
+        let store = open(&path).await.unwrap();
+        let project = ProjectId(1);
+        let mut tx = store.begin().await.unwrap();
+        let instance = ClaimInstance {
+            item: ItemId(51),
+            member: MemberId(12),
+            claimed_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+        assert_eq!(tx.claim_thread(project, &instance).await.unwrap(), None);
+        assert!(
+            tx.thread(project, ThreadId(81)).await.unwrap().is_some(),
+            "a conversation of before stays, linked to no claim"
+        );
+        let link = ClaimThread {
+            thread: ThreadId(81),
+            claim: instance,
+            base_moved_told_at: None,
+        };
+        tx.insert_claim_thread(project, &link).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.claim_thread(project, &instance).await.unwrap(),
+            Some(link)
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for update in [
+            "UPDATE claim_threads SET thread_id = 99",
+            "UPDATE claim_threads SET item_id = 99",
+            "UPDATE claim_threads SET member_id = 99",
+            "UPDATE claim_threads SET claimed_at = 'soon'",
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(update))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{update}"
+            );
+        }
+    }
 }

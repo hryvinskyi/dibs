@@ -35,6 +35,7 @@ use dibs_domain::settings::{ProjectSettings, format_duration};
 use crate::error::AppError;
 use crate::named::{ItemName, Names, refuse};
 use crate::ports::{IdGen, StoreError};
+use crate::use_cases::claim_notice::ClaimNotice;
 use crate::use_cases::common::existing_item;
 use crate::use_cases::escalate::{Case, item_about};
 use crate::use_cases::grant_endings::end_orphaned_grants;
@@ -169,10 +170,10 @@ impl Handovers<'_> {
             let text = format!(
                 "{feature}'s feature claim on {to} waits for {areas}, which {debt}'s debt claim on {from} holds. dibs asked {debt} to hand {them} over {after} ago, and {verb} not been handed over.",
                 feature = names.handle(waiting)?,
-                to = label(&to),
+                to = to.label(),
                 areas = area_list(&pair.areas),
                 debt = names.handle(holding)?,
-                from = label(&ItemName::of(&from, self.schemes)),
+                from = ItemName::of(&from, self.schemes).label(),
                 them = them(&pair.areas),
                 after = format_duration(self.settings.yield_escalates_after()),
                 verb = if pair.areas.len() == 1 {
@@ -259,10 +260,10 @@ impl Handovers<'_> {
             .collect();
         let lead = format!(
             "{feature} needs {areas} for work item {to_label} \"{title}\" (priority {priority}), and your debt claim on {from_label} holds {it}. Feature work takes an area from debt work. Tell your person now, and once they agree: commit what you have in {areas}, push your branch, give {it} up with dibs claim narrow {from_id} {flags} (MCP: dibs_narrow), and list in this conversation the files you hand over. From then on {feature}'s claim owns those files and yours drops them. If {it_is} not handed over within {after}, dibs takes it to the project's arbiters.",
-            to_label = label(&to),
+            to_label = to.label(),
             title = to.title,
             priority = to_item.priority,
-            from_label = label(&from),
+            from_label = from.label(),
             it = them(&pair.areas),
             from_id = from.id,
             flags = flags.join(" "),
@@ -290,7 +291,7 @@ impl Handovers<'_> {
         }
         let posted = SystemPost {
             ids: Posted::next(self.ids),
-            subject: yield_subject(&pair.areas, &label(&to), to_item.priority),
+            subject: yield_subject(&pair.areas, &to.label(), to_item.priority),
             item: Some(pair.from),
             on_behalf_of: Author::Member(waiting),
             to: Recipients::Members([holding].into()),
@@ -336,14 +337,14 @@ impl Handovers<'_> {
             None => "its holder".to_owned(),
         };
         let why = match withdrawal.reason {
-            WithdrawReason::Stale => format!("{waiter}'s claim on {} went stale", label(&to)),
+            WithdrawReason::Stale => format!("{waiter}'s claim on {} went stale", to.label()),
             WithdrawReason::Narrowed => {
-                format!("{waiter} gave it up on their claim on {}", label(&to))
+                format!("{waiter} gave it up on their claim on {}", to.label())
             }
             WithdrawReason::HolderChanged => {
                 "another member's claim that a feature does not take from holds it now".to_owned()
             }
-            WithdrawReason::Ended => format!("{waiter}'s claim on {} ended", label(&to)),
+            WithdrawReason::Ended => format!("{waiter}'s claim on {} ended", to.label()),
         };
         let lead = format!(
             "The request for {area} no longer stands: {why}. Nothing more is asked of you for it.",
@@ -360,7 +361,8 @@ impl Handovers<'_> {
         .await
     }
 
-    /// Tells the holder of the claim an area was handed over to that it is theirs now.
+    /// Tells the holder of the claim an area was handed over to, in that claim's conversation, that
+    /// it is theirs now.
     async fn tell_handed_over(&self, work: &mut Work, handed: &AreaMove) -> Result<(), AppError> {
         let project = work.project_id();
         let Some(receiving) = work.claim(project, handed.to).await? else {
@@ -371,21 +373,17 @@ impl Handovers<'_> {
         let area = &handed.area;
         let lead = format!(
             "{area} is yours now: no other member's claim holds it any more, so it moved from the debt claim on {from_label} to your claim on work item {to_label} \"{title}\". Rebase onto the base before you edit there, and read the conversation that asked for it for the files handed over.",
-            from_label = label(&from),
-            to_label = label(&to),
+            from_label = from.label(),
+            to_label = to.label(),
             title = to.title,
         );
-        SystemPost {
-            ids: Posted::next(self.ids),
-            subject: format!("Handed over: {area}"),
-            item: Some(handed.to),
-            on_behalf_of: Author::System,
-            to: Recipients::Members([receiving.member].into()),
+        ClaimNotice {
+            claim: &receiving,
+            item: &to,
             body: titled_body(&lead, None)?,
             importance: Importance::High,
-            ack_required: false,
         }
-        .send(work, self.now)
+        .send(work, self.ids, self.now)
         .await?;
         Ok(())
     }
@@ -503,13 +501,6 @@ fn area_list(areas: &BTreeSet<QualifiedArea>) -> String {
 /// `it` for one area, `them` for several.
 fn them(areas: &BTreeSet<QualifiedArea>) -> &'static str {
     if areas.len() == 1 { "it" } else { "them" }
-}
-
-/// How an item reads in what dibs writes: its reference, or `#<id>`.
-fn label(item: &ItemName) -> String {
-    item.external_ref
-        .as_ref()
-        .map_or_else(|| format!("#{}", item.id), ToString::to_string)
 }
 
 fn unwritable() -> AppError {

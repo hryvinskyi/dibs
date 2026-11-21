@@ -258,7 +258,19 @@ async fn narrowing_hands_the_area_over_in_the_same_transaction_and_tells_the_fea
         thread.recipients,
         Recipients::Members([env.bob.actor.member].into())
     );
-    assert_eq!(thread.subject.as_str(), "Handed over: default:billing");
+    assert_eq!(
+        thread.subject.as_str(),
+        "Your claim on gh:acme/widgets#42 \"Work on gh:acme/widgets#42\"",
+        "the receiving claim's conversation"
+    );
+    assert!(
+        messages[0]
+            .body
+            .as_str()
+            .starts_with("default:billing is yours now"),
+        "{}",
+        messages[0].body.as_str()
+    );
     assert_eq!(messages[0].importance, Importance::High);
     let again = env.events().await.len();
     let repeated = narrow(&env, &env.alice, debt, &["billing"]).await;

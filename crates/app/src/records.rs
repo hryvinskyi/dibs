@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::claim::ClaimInstance;
 use dibs_domain::escalation::EscalationSubject;
 use dibs_domain::grant::Grant;
 use dibs_domain::handle::Handle;
@@ -273,6 +274,19 @@ pub struct ThreadRecord {
     pub recipients: Recipients,
     /// When it started.
     pub created_at: OffsetDateTime,
+}
+
+/// The conversation dibs keeps with the holder of one claim about that claim: at most one per
+/// claim, and one claim per conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimThread {
+    /// The conversation.
+    pub thread: ThreadId,
+    /// The claim it is about.
+    pub claim: ClaimInstance,
+    /// When dibs last told the holder, in this conversation, that the base moved under the claim's
+    /// work; `None` while it never did.
+    pub base_moved_told_at: Option<OffsetDateTime>,
 }
 
 /// One message of a conversation. Messages never change once written.

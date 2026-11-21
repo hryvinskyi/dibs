@@ -813,11 +813,12 @@ async fn the_take_over_form_takes_a_silent_claim_and_a_refusal_shows_in_the_fram
     assert_eq!(item.body["claim"]["holder"], "bob", "{}", item.body);
     assert_eq!(item.body["claim"]["areas"], json!(["api:billing"]));
     let told = world.get(&alice, "/v1/inbox").await;
-    assert!(
-        told.body.to_string().contains("Taken over"),
-        "{}",
+    assert_eq!(
+        told.body["threads"][0]["thread"]["subject"], "Your claim on gh:acme/api#2 \"Stale item\"",
+        "the previous holder is told in their claim's conversation: {}",
         told.body
     );
+    assert_eq!(told.body["threads"][0]["importance"], "high");
 
     let again = browser
         .post(

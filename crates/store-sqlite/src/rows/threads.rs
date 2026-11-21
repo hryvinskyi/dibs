@@ -321,6 +321,12 @@ impl ThreadRows for SqliteTx {
             )
             .await?;
         self.run(
+            sqlx::query("DELETE FROM claim_threads WHERE project_id = ?1 AND thread_id = ?2")
+                .bind(project)
+                .bind(thread),
+        )
+        .await?;
+        self.run(
             sqlx::query("DELETE FROM thread_recipients WHERE project_id = ?1 AND thread_id = ?2")
                 .bind(project)
                 .bind(thread),

@@ -1,6 +1,7 @@
 //! The row traits of the store port, one module per kind of record, each a set of SQL statements
 //! run inside the transaction.
 
+mod claim_threads;
 mod claims;
 mod deliveries;
 mod dependencies;

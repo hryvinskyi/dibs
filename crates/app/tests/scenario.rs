@@ -290,7 +290,7 @@ mod scenario {
             [Verdict::Granted { .. }]
         ));
 
-        // dibs tells Bob about the grant; he reads it.
+        // dibs tells Bob about the grant in his claim's conversation; he reads it.
         let told = app
             .inbox
             .execute(&team.bob, unread_only(true))
@@ -304,7 +304,7 @@ mod scenario {
                 .record
                 .subject
                 .as_str()
-                .starts_with("Granted: default:billing for "),
+                .starts_with("Your claim on gh:acme/widgets#43 "),
             "{:?}",
             told[0].thread.record.subject
         );
@@ -452,7 +452,8 @@ mod scenario {
             .unwrap_err();
         assert!(matches!(closed, AppError::ItemClosed { .. }));
 
-        // The log tells the whole story, in order, and the last wake-up names its last entry.
+        // The log tells the whole story Bob may read, in order, and the last wake-up names its last
+        // entry. What dibs told Alice of the take-over is in her claim's conversation, hers alone.
         assert_eq!(
             team.event_names().await,
             [
@@ -468,8 +469,6 @@ mod scenario {
                 "message_posted",
                 "message_posted",
                 "taken_over",
-                "thread_started",
-                "message_posted",
                 "grant_revoked",
                 "completed",
             ]

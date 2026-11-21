@@ -101,7 +101,11 @@ fn a_claim_goes_through_review_and_the_integrations_merge_report_completes_it() 
         .iter()
         .filter_map(|thread| thread["thread"]["subject"].as_str())
         .collect();
-    assert_eq!(subjects, ["Done by merge: Refund rounding"], "{inbox}");
+    assert_eq!(
+        subjects,
+        ["Your claim on gh:acme/widgets#42 \"Refund rounding\""],
+        "{inbox}"
+    );
     let free = alice.before_edit(&work, "alice-session", &["packages/billing/refund.rs"]);
     let reason = free["reason"].as_str().unwrap_or_default();
     assert!(

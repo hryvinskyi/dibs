@@ -18,6 +18,7 @@ use crate::error::AppError;
 use crate::named::{ItemName, NamedGrant, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
 use crate::records::GrantRecord;
+use crate::use_cases::claim_notice::ClaimNotice;
 use crate::use_cases::common::{existing_item, member_by_handle};
 use crate::use_cases::writing::{Posted, SystemPost, titled_body};
 use crate::work::Work;
@@ -45,8 +46,10 @@ pub struct GrantResult {
 }
 
 /// Records the caller's consent that another member may edit inside an area the caller holds, for
-/// the grantee's live claim on an item, and tells the grantee in a conversation about that item,
-/// so that it reaches the session working under their claim whether they asked for it or not.
+/// the grantee's live claim on an item, and tells the grantee in that claim's conversation, so
+/// that it reaches the session working under their claim whether they asked for it or not. Should
+/// the grantee hold no claim on the item, they are told in a conversation of its own about it,
+/// started in the granter's name. Either message names the granter and how to write to them.
 /// Giving a grant that exists changes nothing and tells nobody.
 pub struct Grant {
     ref_schemes: Arc<RefSchemeRegistry>,
@@ -133,18 +136,36 @@ impl Grant {
                     item: &item,
                     area: &grant.record.grant.area,
                 };
-                SystemPost {
-                    ids: Posted::next(&*self.ids),
-                    subject: text.subject(),
-                    item: Some(item.id),
-                    on_behalf_of: Author::Member(actor.member),
-                    to: Recipients::members([grantee.id].into())?,
-                    body: titled_body(&text.lead(), None)?,
-                    importance: Importance::High,
-                    ack_required: false,
+                let body = titled_body(&text.lead(), None)?;
+                match claims
+                    .iter()
+                    .find(|claim| claim.item == item.id && claim.member == grantee.id)
+                {
+                    Some(claim) => {
+                        ClaimNotice {
+                            claim,
+                            item: &item,
+                            body,
+                            importance: Importance::High,
+                        }
+                        .send(&mut work, &*self.ids, now)
+                        .await?;
+                    }
+                    None => {
+                        SystemPost {
+                            ids: Posted::next(&*self.ids),
+                            subject: text.subject(),
+                            item: Some(item.id),
+                            on_behalf_of: Author::Member(actor.member),
+                            to: Recipients::members([grantee.id].into())?,
+                            body,
+                            importance: Importance::High,
+                            ack_required: false,
+                        }
+                        .send(&mut work, now)
+                        .await?;
+                    }
                 }
-                .send(&mut work, now)
-                .await?;
                 work.commit(&*self.notifier).await?;
                 Ok(GrantResult {
                     grant,
@@ -167,8 +188,8 @@ struct GrantedText<'a> {
 }
 
 impl GrantedText<'_> {
-    /// The conversation's subject: the area, and the grantee's item by its reference, else its
-    /// title.
+    /// The subject of a conversation of its own: the area, and the grantee's item by its reference,
+    /// else its title.
     fn subject(&self) -> String {
         let item = self
             .item
@@ -178,11 +199,11 @@ impl GrantedText<'_> {
         format!("Granted: {} for {item}", self.area)
     }
 
-    /// The message: who granted what, for which item, that the edit may go ahead now, and how
-    /// long the grant lasts.
+    /// The message: who granted what, for which item, that the edit may go ahead now, how long
+    /// the grant lasts, and how to write to the granter.
     fn lead(&self) -> String {
         format!(
-            "{granter} granted you {area} for your work item {key} (\"{title}\"). You may edit there now; dibs_check says granted. It lasts while both claims do, unless {granter} revokes it.",
+            "{granter} granted you {area} for your work item {key} (\"{title}\"). You may edit there now; dibs_check says granted. It lasts while both claims do, unless {granter} revokes it. To write to {granter}: dibs send {granter}.",
             granter = self.granter,
             area = self.area,
             key = self.item.key(),
@@ -251,9 +272,9 @@ mod tests {
             matches!(
                 &kinds[1..],
                 [EventKind::ThreadStarted(started), EventKind::MessagePosted(_)]
-                    if started.item == Some(bobs) && started.author == Some(env.alice.actor.member)
+                    if started.item == Some(bobs) && started.author.is_none()
             ),
-            "{kinds:?}"
+            "dibs starts the grantee's claim conversation: {kinds:?}"
         );
         let after = env.events().await.len();
         let again = grant
@@ -297,7 +318,8 @@ mod tests {
         assert_eq!(told[0].thread.record.item, Some(bobs));
         assert_eq!(
             told[0].thread.record.subject.as_str(),
-            "Granted: default:billing for gh:acme/widgets#2"
+            "Your claim on gh:acme/widgets#2 \"Work on gh:acme/widgets#2\"",
+            "the grantee's claim conversation"
         );
         let body = told[0].message.record.body.as_str();
         assert!(
@@ -307,6 +329,10 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("You may edit there now"), "{body}");
+        assert!(
+            body.contains("To write to alice: dibs send alice."),
+            "{body}"
+        );
         assert!(deliverable(&env, &env.alice.actor).await.is_empty());
     }
 
