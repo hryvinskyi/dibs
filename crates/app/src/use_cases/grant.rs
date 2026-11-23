@@ -20,7 +20,7 @@ use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{ItemName, NamedGrant, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
-use crate::records::GrantRecord;
+use crate::records::{AskedGrantRecord, GrantRecord};
 use crate::use_cases::claim_notice::ClaimNotice;
 use crate::use_cases::common::{existing_item, member_by_handle};
 use crate::use_cases::writing::{Posted, SystemPost, titled_body};
@@ -108,6 +108,7 @@ impl Grant {
         let giving = GiveGrant {
             request,
             decided: GrantDecision::Holder,
+            asked_at: None,
             item: &item,
             records: &records,
             claims: &claims,
@@ -134,6 +135,24 @@ impl Grant {
     }
 }
 
+/// When the oldest of `requests` that `grant` answers was asked: one its grantee put to its
+/// holder in its area for its item, as giving the grant settles them; `None` when none was.
+fn first_asked(
+    requests: &[(AskedGrantRecord, OffsetDateTime)],
+    grant: &grant::Grant,
+) -> Option<OffsetDateTime> {
+    let answered = GrantAsk {
+        asker: grant.to,
+        item: grant.item,
+        area: grant.area.clone(),
+    };
+    requests
+        .iter()
+        .filter(|(record, _)| record.asked.ask == answered && record.asked.holder == grant.from)
+        .map(|(_, asked_at)| *asked_at)
+        .min()
+}
+
 /// What giving a grant came to.
 #[derive(Debug)]
 pub(crate) enum Giving {
@@ -154,6 +173,9 @@ pub(crate) struct GiveGrant<'a> {
     pub(crate) request: grant::Grant,
     /// Who decided it.
     pub(crate) decided: GrantDecision,
+    /// When the request that prompted it was asked, if one did; `None` for a holder's own grant.
+    /// The grant records the oldest of this and the requests giving it settles.
+    pub(crate) asked_at: Option<OffsetDateTime>,
     /// The grantee's item, `request.item`, as the grantee's notice names it.
     pub(crate) item: &'a ItemName,
     /// The project's grants as the caller's transaction sees them.
@@ -170,13 +192,15 @@ pub(crate) struct GiveGrant<'a> {
 
 impl GiveGrant<'_> {
     /// Gives the grant inside the caller's transaction: stores it with who decided, records
-    /// `granted`, tells the grantee, and settles every request the grantee put to the holder in
-    /// the area for the grant's item that is not settled yet, so that dibs never decides a request
-    /// the grant answered, even once the grant is revoked. A request for another of the grantee's
-    /// items is not answered by it: it lapses while the grant is in force. Once the grant ends, it
-    /// is judged again with its wait timed from when it was asked: dibs grants it at the next sweep
-    /// if `grant_after` has passed since then, and once it has otherwise, unless it closes or a
-    /// revoke leaves it to the holder. Changes nothing when the grant exists or is refused.
+    /// `granted` with when the oldest request it answers was asked (the request that prompted it,
+    /// or one it settles, whoever decided), tells the grantee, and settles every request the
+    /// grantee put to the holder in the area for the grant's item that is not settled yet, so that
+    /// dibs never decides a request the grant answered, even once the grant is revoked. A request
+    /// for another of the grantee's items is not answered by it: it lapses while the grant is in
+    /// force. Once the grant ends, it is judged again with its wait timed from when it was asked:
+    /// dibs grants it at the next sweep if `grant_after` has passed since then, and once it has
+    /// otherwise, unless it closes or a revoke leaves it to the holder. Changes nothing when the
+    /// grant exists or is refused.
     pub(crate) async fn give(self, work: &mut Work) -> Result<Giving, AppError> {
         let project = work.project_id();
         let existing: Vec<grant::Grant> = self.records.iter().map(|r| r.grant.clone()).collect();
@@ -201,6 +225,12 @@ impl GiveGrant<'_> {
             }
             Ok(GrantOutcome::New(grant)) => grant,
         };
+        let requests = work.unsettled_asked_grants(project).await?;
+        let asked_at = self
+            .asked_at
+            .into_iter()
+            .chain(first_asked(&requests, &grant))
+            .min();
         let record = GrantRecord {
             id: GrantId(self.ids.next()),
             grant,
@@ -217,6 +247,7 @@ impl GiveGrant<'_> {
                 from: record.grant.from,
                 to: record.grant.to,
                 decided: self.decided,
+                asked_at,
             }),
         )
         .await?;
@@ -323,9 +354,16 @@ impl GrantedText<'_> {
 
 #[cfg(test)]
 mod tests {
+    use time::Duration;
+
+    use dibs_domain::member::Role;
+
     use super::*;
-    use crate::use_cases::testing::{Env, Person};
-    use crate::use_cases::{ClaimItem, ClaimItemInput, DeliverableMessage, Inbox, InboxQuery};
+    use crate::use_cases::testing::{Env, Person, new_member, session};
+    use crate::use_cases::{
+        AskGrant, AskGrantInput, Authenticate, ClaimItem, ClaimItemInput, CreateMember,
+        CreateMemberInput, DeliverableMessage, GrantAsked, Inbox, InboxQuery, Release,
+    };
 
     async fn claim(env: &Env, who: &Person, item: ItemId, areas: &[&str]) {
         ClaimItem::new(&env.deps)
@@ -376,6 +414,7 @@ mod tests {
                 from: env.alice.actor.member,
                 to: env.bob.actor.member,
                 decided: GrantDecision::Holder,
+                asked_at: None,
             })
         );
         assert!(
@@ -394,6 +433,156 @@ mod tests {
         assert!(!again.created);
         assert_eq!(again.grant, given.grant);
         assert_eq!(env.events().await.len(), after);
+    }
+
+    /// `who` asks the holder of `area` for edits there, for their claim on `item`; the request
+    /// waits for the holder.
+    async fn ask(env: &Env, who: &Person, item: ItemId, area: &str) {
+        let asked = AskGrant::new(&env.deps)
+            .execute(
+                &who.actor,
+                AskGrantInput {
+                    item,
+                    area: area.to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(asked.outcome, GrantAsked::Asked { .. }),
+            "{asked:?}"
+        );
+    }
+
+    /// When the request the one `granted` of the project's log answers was asked.
+    async fn granted_asked_at(env: &Env) -> Option<OffsetDateTime> {
+        let granted: Vec<Option<OffsetDateTime>> = env
+            .events()
+            .await
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::Granted(granted) => Some(granted.asked_at),
+                _ => None,
+            })
+            .collect();
+        let [asked_at] = granted[..] else {
+            panic!("one grant: {granted:?}");
+        };
+        asked_at
+    }
+
+    /// A member `handle` of the project, with a session of their own.
+    async fn person(env: &Env, handle: &str) -> Person {
+        let token = CreateMember::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                CreateMemberInput {
+                    member: new_member(handle),
+                    role: Role::Member,
+                },
+            )
+            .await
+            .unwrap()
+            .token;
+        let actor = Authenticate::new(&env.deps)
+            .execute(token.expose())
+            .await
+            .unwrap();
+        let session = session(&env.deps, &actor, "box", &format!("box/{handle}")).await;
+        Person { actor, session }
+    }
+
+    #[tokio::test]
+    async fn a_holders_grant_records_when_the_oldest_request_it_settles_was_asked() {
+        let env = Env::new().await;
+        let alices = env.item("gh:acme/widgets#1").await;
+        let bobs = env.item("gh:acme/widgets#2").await;
+        claim(&env, &env.alice, alices, &["billing"]).await;
+        claim(&env, &env.bob, bobs, &[]).await;
+        let first = env.now();
+        ask(&env, &env.bob, bobs, "billing").await;
+        env.advance(Duration::minutes(3));
+        ask(&env, &env.bob, bobs, "billing").await;
+        env.advance(Duration::minutes(2));
+
+        Grant::new(&env.deps)
+            .execute(&env.alice.actor, to_bob(bobs, "billing"))
+            .await
+            .unwrap();
+
+        assert_eq!(granted_asked_at(&env).await, Some(first));
+        let mut tx = env.deps.store.begin().await.unwrap();
+        assert!(
+            tx.unsettled_asked_grants(env.project)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the grant settles both"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_for_another_item_does_not_count_toward_the_grants_wait() {
+        let env = Env::new().await;
+        let alices = env.item("gh:acme/widgets#1").await;
+        let bobs = env.item("gh:acme/widgets#2").await;
+        let bobs_other = env.item("gh:acme/widgets#3").await;
+        claim(&env, &env.alice, alices, &["billing"]).await;
+        claim(&env, &env.bob, bobs, &[]).await;
+        let second_session = session(&env.deps, &env.bob.actor, "desktop", "desktop/other").await;
+        let bob_elsewhere = Person {
+            actor: env.bob.actor.clone(),
+            session: second_session,
+        };
+        claim(&env, &bob_elsewhere, bobs_other, &[]).await;
+        ask(&env, &bob_elsewhere, bobs_other, "billing").await;
+        env.advance(Duration::minutes(4));
+        let asked = env.now();
+        ask(&env, &env.bob, bobs, "billing").await;
+
+        Grant::new(&env.deps)
+            .execute(&env.alice.actor, to_bob(bobs, "billing"))
+            .await
+            .unwrap();
+
+        assert_eq!(granted_asked_at(&env).await, Some(asked));
+    }
+
+    #[tokio::test]
+    async fn a_request_put_to_another_holder_does_not_count_toward_the_grants_wait() {
+        let env = Env::new().await;
+        let carol = person(&env, "carol").await;
+        let alices = env.item("gh:acme/widgets#1").await;
+        let bobs = env.item("gh:acme/widgets#2").await;
+        let carols = env.item("gh:acme/widgets#3").await;
+        claim(&env, &env.alice, alices, &["billing"]).await;
+        claim(&env, &env.bob, bobs, &[]).await;
+        ask(&env, &env.bob, bobs, "billing").await;
+        Release::new(&env.deps)
+            .execute(&env.alice.actor, alices)
+            .await
+            .unwrap();
+        env.advance(Duration::minutes(4));
+        claim(&env, &carol, carols, &["billing"]).await;
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let waiting = tx.unsettled_asked_grants(env.project).await.unwrap();
+        drop(tx);
+        assert_eq!(
+            waiting.len(),
+            1,
+            "bob's request to alice stands: {waiting:?}"
+        );
+
+        Grant::new(&env.deps)
+            .execute(&carol.actor, to_bob(bobs, "billing"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            granted_asked_at(&env).await,
+            None,
+            "bob asked alice, who no longer holds billing"
+        );
     }
 
     async fn deliverable(env: &Env, actor: &crate::actor::Actor) -> Vec<DeliverableMessage> {

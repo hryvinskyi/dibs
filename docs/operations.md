@@ -430,7 +430,8 @@ describe_holder = false
 - **An integration closes the loop.** dibs speaks no forge API. A worker holding an `importer` token
   (`dibs admin member add worker --name "Integration" --role importer`) watches the forge and calls
   `GET /v1/review-claims`, `POST /v1/prs/merged`, `POST /v1/prs/closed` and `GET /v1/pr-status` (and reports a pull
-  request the forge says does not merge cleanly on `POST /v1/prs/state`, for the [pilot figures](#a-pilots-figures)),
+  request the forge says does not merge cleanly on `POST /v1/prs/state`, for the [pilot figures](#a-pilots-figures) and
+  so that dibs tells the holder of the claim that records it),
   then writes the status
   on each open pull request's head commit — only when its state or description changed since it last wrote one for that
   commit, since a forge keeps a bounded number of statuses per commit and counts each write against its limits. On
@@ -654,7 +655,9 @@ server. What it sees of such a session:
 ## A pilot's figures
 
 Before a whole team works with dibs, a few people try it for a while, and their admin reads `GET /v1/stats` (`docs/api.md`
-lists every field): claims, takeovers, stalled slot holds, escalations and slot waits from the log; the refusals,
+lists every field): claims, takeovers, stalled slot holds, escalations and slot waits from the log, and with them the
+grants by who decided and how long their requests waited, the orders dibs stored for colliding claims and ties, and
+how long pull requests' conflicts took to resolve, which tune `grant_after` and the other delays; the refusals,
 answers without the server and sessions run switched off that members' machines counted; how long each hook took on
 each person's machine; and what agents and the integration reported. The figures are read in a transaction that only
 reads, page by page, so reading them holds up no heartbeat or edit check.
@@ -845,7 +848,7 @@ links each claim to its conversation (it goes with its conversation, and convers
 back 7 days after the upgrade at the earliest, 17 marks when a session was ended, so an ended session no longer
 counts as at work (every session that exists stays open), and 18 records what dibs decides on a holder's behalf: who
 decided each grant (every grant stored before was its holder's), when a request was settled, the announcements dibs
-acknowledged, the revokes that stick and the order of each collision (none is stored before). Four things change with
+acknowledged, the revokes that stick and the order of each collision (none is stored before). Five things change with
 the release:
 
 - **A heartbeat no longer keeps a claim alive.** A claim lives by its own work: it goes stale `stale_after` after its
@@ -867,6 +870,10 @@ the release:
   holder by then holds the area through no claim is closed at that sweep, and never granted. At the same sweep every live collision gets its first
   order, and both holders get a `high` notice saying which claim lands first. A take-over's reason is optional from
   0.1.11 on.
+- **A pull request that does not merge cleanly is told to its claim's holder**, in the claim's conversation at `high`,
+  with what to do and the recipes of the repository's `regenerate` rules. A pull request already reported as not
+  merging cleanly before the upgrade is not told until it is reported merging cleanly and then conflicting again, or
+  until a claim records it anew.
 
 What the client version changes, so set `DIBS_LATEST_CLIENT` to 0.1.11 at the upgrade:
 
@@ -881,7 +888,8 @@ What the client version changes, so set `DIBS_LATEST_CLIENT` to 0.1.11 at the up
 - **A new client against an older server** shows every unread conversation as from people, since that server leaves out
   the fields that split the unread messages.
 - **The new settings may be set before members update.** The server serves a client older than 0.1.11 the settings
-  without `release_after`, `idle_area_after`, `free_areas_at` and `grant_after`.
+  without `release_after`, `idle_area_after`, `free_areas_at` and `grant_after`, and its hot-file rules without their
+  `recipe`, so such a client shows no recipe with a regenerated file's note.
 
 `release_after` defaults to 7 days, or to one day more than `stale_after` when that is 7 days or longer, so no stored
 settings stop parsing at the upgrade.

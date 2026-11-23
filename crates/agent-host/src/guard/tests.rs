@@ -1527,6 +1527,7 @@ fn a_fresh_status_answers_for_my_own_holds_but_not_for_hot_files() {
         state.answers = Ok(vec![PathAnswer::Noted {
             rule: "warn-shared".to_owned(),
             note: None,
+            recipe: None,
             touched_by: vec![TouchedBy {
                 holder: handle("alice"),
                 item: ItemId(4),

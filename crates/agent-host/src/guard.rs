@@ -687,8 +687,15 @@ impl Run<'_> {
                 PathAnswer::Noted {
                     rule,
                     note,
+                    recipe,
                     touched_by,
-                } => notes.push(wording::noted(path, rule, note.as_ref(), touched_by)),
+                } => notes.push(wording::noted(
+                    path,
+                    rule,
+                    note.as_ref(),
+                    recipe.as_ref(),
+                    touched_by,
+                )),
                 PathAnswer::NeedsClaim => {
                     refusals.push(wording::needs_claim(path, area.as_ref()));
                     refused.push(Tally::NeedsClaim);

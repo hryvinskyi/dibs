@@ -6,6 +6,7 @@ use std::io::Write as _;
 
 use serde::Serialize;
 
+use dibs_agent_host::wording::regenerate_with;
 use dibs_client::api::{
     Claim, ClaimKind, HeldReason, Item, ItemName, Message, OpenEscalation, OverlapInfo,
     PathVerdict, ThreadSummary, Unacked, UnreadConversations, Verdict,
@@ -214,6 +215,7 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
         Verdict::AllowedWithNote {
             rule,
             note,
+            recipe,
             touched_by,
         } => {
             let mut text = format!("allowed under the {} rule", rule.0);
@@ -226,6 +228,9 @@ pub fn verdict_line(verdict: &PathVerdict) -> String {
                     .map(|other| format!("{} on item {}", other.holder, other.item_label()))
                     .collect();
                 let _ = write!(text, " (also edited by {})", others.join(", "));
+            }
+            if let Some(recipe) = recipe {
+                let _ = write!(text, ". {}", regenerate_with(recipe));
             }
             text
         }
@@ -464,6 +469,28 @@ mod tests {
         let shown = secret_shown(true, "Added bob; hand it over", "dibs_secret");
         assert_eq!(shown.out, "Added bob; hand it over:\ndibs_secret");
         assert_eq!(shown.err, None);
+    }
+
+    #[test]
+    fn a_noted_verdict_line_ends_with_the_recipe_its_rule_names() {
+        let line = |more: serde_json::Value| {
+            let mut verdict = serde_json::json!({
+                "repo": "api", "path": "Cargo.lock", "verdict": "allowed_with_note",
+                "rule": "regenerate", "note": "never merge it", "touched_by": []
+            });
+            if let (Some(verdict), Some(more)) = (verdict.as_object_mut(), more.as_object()) {
+                verdict.extend(more.clone());
+            }
+            verdict_line(&serde_json::from_value(verdict).unwrap())
+        };
+        assert_eq!(
+            line(serde_json::json!({"recipe": "cargo generate-lockfile"})),
+            "Cargo.lock: allowed under the regenerate rule: never merge it. Regenerate it with `cargo generate-lockfile` rather than editing or merging it by hand."
+        );
+        assert_eq!(
+            line(serde_json::json!({})),
+            "Cargo.lock: allowed under the regenerate rule: never merge it"
+        );
     }
 
     #[test]

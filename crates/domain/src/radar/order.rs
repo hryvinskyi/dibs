@@ -85,8 +85,11 @@ impl OrderRule {
     }
 }
 
-/// The order of two colliding claims: which item lands first and why, or a tie.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// The order of two colliding claims: which item lands first and why, or a tie. Serialised as
+/// `{"first": <item or null>, "rule": "<code>"}`, `<code>` being [`OverlapOrder::code`]; reading
+/// it back refuses what [`OverlapOrder::from_parts`] refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "OrderParts", try_from = "OrderParts")]
 pub enum OverlapOrder {
     /// The claim on `item` lands first, and the other rebases onto it once it merges.
     First {
@@ -149,6 +152,32 @@ impl OverlapOrder {
             },
             Self::First { .. } => Landing::Unknown,
         }
+    }
+}
+
+/// An order as it is written: the item that lands first, `None` for a tie, and the code of the rule
+/// that decided, or `tied`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OrderParts {
+    #[serde(default)]
+    first: Option<ItemId>,
+    rule: String,
+}
+
+impl From<OverlapOrder> for OrderParts {
+    fn from(order: OverlapOrder) -> Self {
+        Self {
+            first: order.first(),
+            rule: order.code().to_owned(),
+        }
+    }
+}
+
+impl TryFrom<OrderParts> for OverlapOrder {
+    type Error = OrderError;
+
+    fn try_from(parts: OrderParts) -> Result<Self, OrderError> {
+        Self::from_parts(&parts.rule, parts.first)
     }
 }
 
@@ -353,6 +382,35 @@ mod tests {
         );
         let codes: BTreeSet<&str> = OrderRule::ALL.iter().map(|rule| rule.code()).collect();
         assert_eq!(codes, ["in_review", "older", "priority"].into());
+    }
+
+    #[test]
+    fn an_order_is_written_as_the_item_that_lands_first_and_the_rules_code() {
+        let decided = first(9, OrderRule::InReview);
+        assert_eq!(
+            serde_json::to_value(decided).unwrap(),
+            serde_json::json!({"first": 9, "rule": "in_review"})
+        );
+        assert_eq!(
+            serde_json::to_value(OverlapOrder::Tied).unwrap(),
+            serde_json::json!({"first": null, "rule": "tied"})
+        );
+        for order in [decided, first(2, OrderRule::Older), OverlapOrder::Tied] {
+            let back: OverlapOrder =
+                serde_json::from_value(serde_json::to_value(order).unwrap()).unwrap();
+            assert_eq!(back, order);
+        }
+        assert_eq!(
+            serde_json::from_value::<OverlapOrder>(serde_json::json!({"rule": "tied"})).unwrap(),
+            OverlapOrder::Tied
+        );
+        for refused in [
+            serde_json::json!({"first": 9, "rule": "tied"}),
+            serde_json::json!({"first": null, "rule": "priority"}),
+            serde_json::json!({"first": 9, "rule": "sooner"}),
+        ] {
+            assert!(serde_json::from_value::<OverlapOrder>(refused).is_err());
+        }
     }
 
     #[test]

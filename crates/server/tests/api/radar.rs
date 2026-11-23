@@ -554,6 +554,45 @@ async fn the_sweep_moves_the_order_when_a_claim_enters_review_and_tells_both_hol
 }
 
 #[tokio::test]
+async fn the_log_records_a_collisions_first_order_and_each_change_of_who_lands_first() {
+    let team = Team::new().await;
+    on_branches(&team).await;
+    share_a_file(&team).await;
+    let review = team
+        .world
+        .post(
+            &team.bob,
+            &format!("/v1/items/{}/review", team.bobs),
+            json!({"pr": "acme/api#9"}),
+        )
+        .await;
+    assert_eq!(review.status, StatusCode::OK, "{}", review.body);
+    let swept = team.world.app.tick_overlaps.execute().await.unwrap();
+    assert_eq!(swept.reordered, 1);
+
+    let events = team.world.get(&team.alice, "/v1/events").await;
+    assert_eq!(events.status, StatusCode::OK, "{}", events.body);
+    let ordered: Vec<&Value> = events.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "overlap_ordered")
+        .map(|event| &event["payload"])
+        .collect();
+    assert_eq!(
+        ordered,
+        [
+            &json!({"kind": "same_file", "items": [team.alices, team.bobs], "first": null,
+                    "rule": "tied", "changed": false}),
+            &json!({"kind": "same_file", "items": [team.alices, team.bobs],
+                    "first": team.bobs, "rule": "in_review", "changed": true}),
+        ],
+        "{}",
+        events.body
+    );
+}
+
+#[tokio::test]
 async fn a_footprint_is_not_stored_without_a_live_claim_on_its_branch_and_is_refused_when_malformed()
  {
     let team = Team::new().await;

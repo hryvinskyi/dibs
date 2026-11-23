@@ -345,10 +345,12 @@ pub fn answer(verdict: &Verdict) -> PathAnswer {
         Verdict::AllowedWithNote {
             rule,
             note,
+            recipe,
             touched_by,
         } => PathAnswer::Noted {
             rule: rule.0.clone(),
             note: note.clone(),
+            recipe: recipe.clone(),
             touched_by: touched_by
                 .iter()
                 .map(|other| TouchedBy {

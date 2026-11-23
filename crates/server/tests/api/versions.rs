@@ -286,3 +286,45 @@ async fn a_client_older_than_branch_patterns_or_the_claim_endings_is_served_the_
         );
     }
 }
+
+#[tokio::test]
+async fn a_client_older_than_recipes_is_served_the_hot_rules_without_them() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    world
+        .settings(
+            &alice,
+            serde_json::json!({
+                "hot": [
+                    {"paths": ["**/*.lock"], "kind": "regenerate", "note": "never merge it",
+                     "recipe": "cargo generate-lockfile"},
+                    {"paths": ["config/**"], "kind": "warn-shared"}
+                ]
+            }),
+        )
+        .await;
+    let rule = serde_json::json!({"paths": ["**/*.lock"], "kind": "regenerate",
+                                  "note": "never merge it"});
+    let mut with_recipe = rule.clone();
+    with_recipe["recipe"] = serde_json::Value::from("cargo generate-lockfile");
+    for (agent, expected) in [
+        (Some("dibs/0.1.10"), &rule),
+        (Some("dibs/0.1.2"), &rule),
+        (Some("dibs/0.1.11"), &with_recipe),
+        (Some("dibs/0.1.11-rc.1"), &with_recipe),
+        (Some("curl/8.0"), &with_recipe),
+        (None, &with_recipe),
+    ] {
+        let me = as_agent(&world, &alice, "/v1/me", agent).await;
+        assert_eq!(me.status, StatusCode::OK, "{agent:?}: {}", me.body);
+        assert_eq!(
+            &me.body["settings"]["hot"][0], expected,
+            "an older client refuses a hot rule with a field it does not know: {agent:?}"
+        );
+        assert_eq!(
+            me.body["settings"]["hot"][1],
+            serde_json::json!({"paths": ["config/**"], "kind": "warn-shared"}),
+            "{agent:?}"
+        );
+    }
+}

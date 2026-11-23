@@ -22,7 +22,8 @@ pub use slots::SlotError;
 use crate::area::{Area, AreaName, AreaNameError, QualifiedArea};
 use crate::handle::Handle;
 use crate::hot_rule::{
-    HotRuleConfig, HotRuleRefused, HotRuleRegistry, HotRuleSpec, Note, NoteError,
+    HotRuleConfig, HotRuleRefused, HotRuleRegistry, HotRuleSpec, Note, NoteError, Recipe,
+    RecipeError,
 };
 use crate::item::{SourceStatus, SourceStatusError};
 use crate::paths::{PathGlob, PathGlobError, RelPath, RepoPath};
@@ -97,6 +98,15 @@ impl RepoSpec {
     pub fn merged_by_hand(&self, path: &RelPath) -> bool {
         self.hot_rule_for(path)
             .is_none_or(HotRuleSpec::merged_by_hand)
+    }
+
+    /// The hot-file rules that name a recipe, in declaration order: each rule's globs with the
+    /// command that regenerates the files they match. Only a rule whose kind takes a recipe names
+    /// one.
+    pub fn recipes(&self) -> impl Iterator<Item = (&[PathGlob], &Recipe)> {
+        self.hot
+            .iter()
+            .filter_map(|rule| rule.recipe().map(|recipe| (rule.paths(), recipe)))
     }
 
     /// Whether an area or a hot-file rule matches the path.
@@ -343,6 +353,17 @@ pub enum SettingsError {
         /// What is wrong with the note.
         #[source]
         error: NoteError,
+    },
+    /// A hot-file rule's recipe is invalid.
+    #[error("hot rule {number} of repository '{repo}': {error}")]
+    HotRuleRecipe {
+        /// The repository.
+        repo: RepoId,
+        /// The rule's position, counting from 1.
+        number: usize,
+        /// What is wrong with the recipe.
+        #[source]
+        error: RecipeError,
     },
     /// A hot-file rule's kind is unknown or refuses its configuration.
     #[error("hot rule {number} of repository '{repo}': {error}")]
@@ -785,6 +806,20 @@ impl ProjectSettings {
         kept
     }
 
+    /// The same settings with every hot-file rule's recipe left out and the rules themselves
+    /// kept: what a reader that knows no recipe can parse.
+    #[must_use]
+    pub fn without_recipes(&self) -> Self {
+        let mut kept = self.clone();
+        for repo in &mut kept.repos {
+            repo.hot = std::mem::take(&mut repo.hot)
+                .into_iter()
+                .map(HotRuleSpec::without_recipe)
+                .collect();
+        }
+        kept
+    }
+
     /// The same settings with every branch pattern left out — each protected ref that covers
     /// branches by a prefix, and each frozen ref of a slot that does — and the branches named
     /// exactly, the tags and the slots themselves kept: what a reader that knows branches by their
@@ -952,6 +987,7 @@ impl ProjectSettings {
                     kind: rule.kind().to_string(),
                     area: rule.area().map(|area| area.name.to_string()),
                     note: rule.note().map(ToString::to_string),
+                    recipe: rule.recipe().map(ToString::to_string),
                 })
                 .collect()
         };
@@ -1189,6 +1225,17 @@ fn parse_hot_rule(
             })
         })
         .transpose()?;
+    let recipe = written
+        .recipe
+        .as_deref()
+        .map(|text| {
+            Recipe::parse(text).map_err(|error| SettingsError::HotRuleRecipe {
+                repo: repo.id.clone(),
+                number,
+                error,
+            })
+        })
+        .transpose()?;
     let rule = hot_rules
         .build(&HotRuleConfig {
             kind: &kind,
@@ -1196,7 +1243,10 @@ fn parse_hot_rule(
             note: note.as_ref(),
         })
         .map_err(rule_error)?;
-    Ok(HotRuleSpec::new(paths, kind, area, note, rule))
+    if recipe.is_some() && !rule.takes_recipe() {
+        return Err(rule_error(HotRuleRefused::RecipeNotAllowed { kind }));
+    }
+    Ok(HotRuleSpec::new(paths, kind, area, note, recipe, rule))
 }
 
 #[cfg(test)]
@@ -1756,6 +1806,216 @@ mod tests {
             Some(&QualifiedArea::parse("default:billing").unwrap())
         );
         assert_eq!(rule.note().map(Note::as_str), Some("ask the holder"));
+    }
+
+    #[test]
+    fn a_regenerate_rule_names_its_recipe_and_writes_it_back_unchanged() {
+        let json = r#"{"hot":[{"paths":["**/*.lock"],"kind":"regenerate","note":"never merge it",
+                        "recipe":"  cargo generate-lockfile  "},
+                       {"paths":["gen/**"],"kind":"regenerate"}]}"#;
+        let parsed = settings(json);
+        let hot = &parsed.repos()[0].hot;
+        assert_eq!(
+            hot[0].recipe().map(Recipe::as_str),
+            Some("cargo generate-lockfile")
+        );
+        assert_eq!(hot[0].note().map(Note::as_str), Some("never merge it"));
+        assert_eq!(hot[1].recipe(), None);
+        let document = parsed.to_document();
+        assert_eq!(
+            document.hot[0].recipe.as_deref(),
+            Some("cargo generate-lockfile")
+        );
+        assert_eq!(document.hot[1].recipe, None);
+        assert_eq!(
+            ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+            parsed
+        );
+        let other = settings(
+            r#"{"hot":[{"paths":["**/*.lock"],"kind":"regenerate","note":"never merge it",
+                        "recipe":"make lock"},
+                       {"paths":["gen/**"],"kind":"regenerate"}]}"#,
+        );
+        assert_ne!(
+            other, parsed,
+            "a changed recipe is a change of the settings"
+        );
+    }
+
+    #[test]
+    fn a_recipe_is_one_short_line_on_a_kind_that_takes_one() {
+        let areas = r#""areas":[{"name":"billing","paths":["packages/billing/**"]}]"#;
+        let with_hot = |hot: &str| format!("{{{areas},\"hot\":[{hot}]}}");
+        let long = "r".repeat(201);
+        for recipe in ["", "   ", "make\\nmake check", long.as_str()] {
+            let hot = format!(
+                r#"{{"paths":["x"],"kind":"free"}},{{"paths":["y"],"kind":"regenerate","recipe":"{recipe}"}}"#
+            );
+            assert_eq!(
+                refusal(&with_hot(&hot)),
+                SettingsError::HotRuleRecipe {
+                    repo: RepoId::implicit(),
+                    number: 2,
+                    error: RecipeError::Malformed,
+                },
+                "{recipe:?}"
+            );
+        }
+        for (name, area) in [
+            ("owner", r#","area":"billing""#),
+            ("warn-shared", ""),
+            ("free", ""),
+        ] {
+            let hot = format!(r#"{{"paths":["y"],"kind":"{name}"{area},"recipe":"make gen"}}"#);
+            let refused = refusal(&with_hot(&hot));
+            let kind = HotRuleRegistry::standard().kind(name).unwrap();
+            assert_eq!(
+                refused,
+                SettingsError::HotRule {
+                    repo: RepoId::implicit(),
+                    number: 1,
+                    error: HotRuleRefused::RecipeNotAllowed { kind },
+                },
+                "{name}"
+            );
+            assert_eq!(
+                refused.to_string(),
+                format!("hot rule 1 of repository 'default': a '{name}' rule takes no recipe")
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct Quiet;
+
+    impl crate::hot_rule::HotRule for Quiet {
+        fn decide(&self, _ctx: &crate::hot_rule::HotContext<'_>) -> crate::hot_rule::HotDecision {
+            crate::hot_rule::HotDecision::Decide(crate::edit::Verdict::Allowed)
+        }
+    }
+
+    #[test]
+    fn a_kind_registered_later_takes_no_recipe_unless_it_says_so() {
+        fn build(
+            _config: &HotRuleConfig<'_>,
+        ) -> Result<std::sync::Arc<dyn crate::hot_rule::HotRule>, HotRuleRefused> {
+            Ok(std::sync::Arc::new(Quiet))
+        }
+        let registry = HotRuleRegistry::standard().with("quiet", build);
+        let refused = ProjectSettings::parse(
+            &document(r#"{"hot":[{"paths":["y"],"kind":"quiet","recipe":"make gen"}]}"#),
+            &registry,
+        )
+        .unwrap_err();
+        assert_eq!(
+            refused,
+            SettingsError::HotRule {
+                repo: RepoId::implicit(),
+                number: 1,
+                error: HotRuleRefused::RecipeNotAllowed {
+                    kind: registry.kind("quiet").unwrap()
+                },
+            }
+        );
+        assert!(
+            ProjectSettings::parse(
+                &document(r#"{"hot":[{"paths":["y"],"kind":"quiet"}]}"#),
+                &registry
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn without_recipes_every_hot_rule_keeps_everything_but_its_recipe() {
+        let one = settings(
+            r#"{"areas":[{"name":"billing","paths":["packages/billing/**"]}],
+                "hot":[{"paths":["**/*.lock"],"kind":"regenerate","note":"never merge it","recipe":"make lock"},
+                       {"paths":["deploy/**"],"kind":"owner","area":"billing","note":"ask the holder"}],
+                "grant_after":"20m"}"#,
+        );
+        let many = settings(
+            r#"{"repos":[
+                {"id":"api","remote":"example.com/acme/api",
+                 "hot":[{"paths":["gen/**"],"kind":"regenerate","recipe":"make gen"}]},
+                {"id":"web","remote":"example.com/acme/web",
+                 "hot":[{"paths":["dist/**"],"kind":"regenerate","recipe":"npm run build"},
+                        {"paths":["config/**"],"kind":"warn-shared"}]}]}"#,
+        );
+        for written in [one, many] {
+            let older = written.without_recipes();
+            let mut expected = written.to_document();
+            let rules = expected.hot.iter_mut().chain(
+                expected
+                    .repos
+                    .iter_mut()
+                    .flat_map(|repo| repo.hot.iter_mut()),
+            );
+            let mut recipes = 0;
+            for rule in rules {
+                recipes += usize::from(rule.recipe.take().is_some());
+            }
+            assert!(recipes > 0, "the settings named recipes to leave out");
+            assert_eq!(older.to_document(), expected);
+            assert!(
+                older
+                    .repos()
+                    .iter()
+                    .flat_map(|repo| &repo.hot)
+                    .all(|rule| rule.recipe().is_none())
+            );
+            let path = |text: &str| crate::paths::RelPath::parse(text).unwrap();
+            for (repo, kept) in older.repos().iter().zip(written.repos()) {
+                for file in ["Cargo.lock", "gen/a.rs", "dist/app.js", "deploy/x.yaml"] {
+                    assert_eq!(
+                        repo.merged_by_hand(&path(file)),
+                        kept.merged_by_hand(&path(file)),
+                        "the rules themselves are kept: {file}"
+                    );
+                }
+            }
+        }
+        let plain = settings(r#"{"hot":[{"paths":["gen/**"],"kind":"regenerate"}]}"#);
+        assert_eq!(plain.without_recipes(), plain);
+    }
+
+    #[test]
+    fn a_repository_lists_the_recipes_of_its_own_rules_in_declaration_order() {
+        let parsed = settings(
+            r#"{"repos":[
+                {"id":"api","remote":"example.com/acme/api",
+                 "hot":[{"paths":["**/*.lock","lock/**"],"kind":"regenerate","recipe":"make lock"},
+                        {"paths":["config/**"],"kind":"warn-shared"},
+                        {"paths":["dist/**"],"kind":"regenerate"},
+                        {"paths":["gen/**"],"kind":"regenerate","recipe":"make gen"}]},
+                {"id":"web","remote":"example.com/acme/web",
+                 "hot":[{"paths":["build/**"],"kind":"regenerate","recipe":"npm run build"}]}]}"#,
+        );
+        let listed = |repo: &RepoSpec| -> Vec<(Vec<String>, String)> {
+            repo.recipes()
+                .map(|(paths, recipe)| {
+                    (
+                        paths.iter().map(ToString::to_string).collect(),
+                        recipe.to_string(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            listed(&parsed.repos()[0]),
+            [
+                (
+                    vec!["**/*.lock".to_owned(), "lock/**".to_owned()],
+                    "make lock".to_owned()
+                ),
+                (vec!["gen/**".to_owned()], "make gen".to_owned()),
+            ]
+        );
+        assert_eq!(
+            listed(&parsed.repos()[1]),
+            [(vec!["build/**".to_owned()], "npm run build".to_owned())]
+        );
+        assert!(listed(&settings("{}").repos()[0]).is_empty());
     }
 
     #[test]

@@ -8,8 +8,8 @@
 //!
 //! What a client older than a feature cannot read is left out of what it is served: the settings
 //! of `GET /v1/me` (protected tags, branch patterns, the settings by which the server ends claims,
-//! takes areas from them or grants edits in them on its own), and the frozen refs of the slots in the answers of `GET /v1/status` and of the
-//! slot routes.
+//! takes areas from them or grants edits in them on its own, the hot rules' recipes), and the
+//! frozen refs of the slots in the answers of `GET /v1/status` and of the slot routes.
 
 use std::borrow::Cow;
 use std::convert::Infallible;
@@ -47,6 +47,11 @@ pub const BRANCH_PATTERNS_SINCE: Version = Version::new(0, 1, 2);
 /// such a field, and then judges nothing.
 pub const CLAIM_ENDINGS_SINCE: Version = Version::new(0, 1, 11);
 
+/// The first client that reads a hot rule's recipe (`recipe`), the command that regenerates the
+/// files of a `regenerate` rule. An older one refuses settings that hold one, and then judges
+/// nothing.
+pub const RECIPES_SINCE: Version = Version::new(0, 1, 11);
+
 /// What the caller's client can read, from the `dibs/<semver>` of its `User-Agent`: everything for
 /// a current client and for any caller that names no `dibs` version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +59,7 @@ pub struct ClientReads {
     protected_tags: bool,
     branch_patterns: bool,
     claim_endings: bool,
+    recipes: bool,
 }
 
 impl ClientReads {
@@ -68,17 +74,21 @@ impl ClientReads {
             protected_tags: since(&PROTECTED_TAGS_SINCE),
             branch_patterns: since(&BRANCH_PATTERNS_SINCE),
             claim_endings: since(&CLAIM_ENDINGS_SINCE),
+            recipes: since(&RECIPES_SINCE),
         }
     }
 
     /// The settings as this client can read them: for a `dibs` client older than
-    /// [`CLAIM_ENDINGS_SINCE`], with the settings by which the server ends claims, takes areas
-    /// from them or grants edits in them on its own left at their defaults, so the document leaves
-    /// them out; older than [`BRANCH_PATTERNS_SINCE`] also without branch patterns, protected or
-    /// frozen, and older than [`PROTECTED_TAGS_SINCE`] also without protected tags; whole for any
-    /// other caller.
+    /// [`RECIPES_SINCE`], without the hot rules' recipes; older than [`CLAIM_ENDINGS_SINCE`], with
+    /// the settings by which the server ends claims, takes areas from them or grants edits in them
+    /// on its own left at their defaults, so the document leaves them out; older than
+    /// [`BRANCH_PATTERNS_SINCE`] also without branch patterns, protected or frozen, and older than
+    /// [`PROTECTED_TAGS_SINCE`] also without protected tags; whole for any other caller.
     pub fn settings(self, settings: &ProjectSettings) -> SettingsDocument {
         let mut readable = Cow::Borrowed(settings);
+        if !self.recipes {
+            readable = Cow::Owned(readable.without_recipes());
+        }
         if !self.claim_endings {
             readable = Cow::Owned(readable.without_claim_endings());
         }
@@ -287,14 +297,15 @@ mod tests {
                 reads.protected_tags,
                 reads.branch_patterns,
                 reads.claim_endings,
+                reads.recipes,
             )
         };
-        assert_eq!(reads(Some("dibs/0.1.0")), (false, false, false));
-        assert_eq!(reads(Some("dibs/0.1.1")), (true, false, false));
-        assert_eq!(reads(Some("dibs/0.1.1-rc.3")), (true, false, false));
-        assert_eq!(reads(Some("dibs/0.1.2-rc.1")), (true, true, false));
-        assert_eq!(reads(Some("dibs/0.1.10")), (true, true, false));
-        assert_eq!(reads(Some("dibs/0.1.11-rc.1")), (true, true, true));
+        assert_eq!(reads(Some("dibs/0.1.0")), (false, false, false, false));
+        assert_eq!(reads(Some("dibs/0.1.1")), (true, false, false, false));
+        assert_eq!(reads(Some("dibs/0.1.1-rc.3")), (true, false, false, false));
+        assert_eq!(reads(Some("dibs/0.1.2-rc.1")), (true, true, false, false));
+        assert_eq!(reads(Some("dibs/0.1.10")), (true, true, false, false));
+        assert_eq!(reads(Some("dibs/0.1.11-rc.1")), (true, true, true, true));
         for agent in [
             Some("dibs/0.1.11"),
             Some("dibs/0.2.0 (aarch64-apple-darwin)"),
@@ -302,12 +313,13 @@ mod tests {
             Some("dibs/"),
             None,
         ] {
-            assert_eq!(reads(agent), (true, true, true), "{agent:?}");
+            assert_eq!(reads(agent), (true, true, true, true), "{agent:?}");
         }
 
         let document: SettingsDocument = serde_json::from_str(
             r#"{"stale_after":"1d","release_after":"3d","idle_area_after":"2d",
-                "free_areas_at":["Ready for QA"],"grant_after":"20m"}"#,
+                "free_areas_at":["Ready for QA"],"grant_after":"20m",
+                "hot":[{"paths":["**/*.lock"],"kind":"regenerate","recipe":"make lock"}]}"#,
         )
         .unwrap();
         let settings = ProjectSettings::parse(
@@ -322,12 +334,13 @@ mod tests {
                 document.idle_area_after,
                 document.free_areas_at,
                 document.grant_after,
+                document.hot.first().and_then(|rule| rule.recipe.clone()),
             )
         };
         assert_eq!(
             endings(Some("dibs/0.1.10")),
-            (None, None, Vec::new(), None),
-            "a client older than the claim endings is served the settings without them"
+            (None, None, Vec::new(), None, None),
+            "a client older than the claim endings and the recipes is served the settings without them"
         );
         for agent in [
             Some("dibs/0.1.11"),
@@ -341,7 +354,8 @@ mod tests {
                     Some("3d".to_owned()),
                     Some("2d".to_owned()),
                     vec!["Ready for QA".to_owned()],
-                    Some("20m".to_owned())
+                    Some("20m".to_owned()),
+                    Some("make lock".to_owned())
                 ),
                 "{agent:?}"
             );

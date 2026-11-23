@@ -16,7 +16,7 @@ use crate::handover::WithdrawReason;
 use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
 use crate::item::{ExternalRef, SourceStatus, Title};
 use crate::paths::RepoPath;
-use crate::radar::{BranchName, BranchSourceKind, OverlapKind};
+use crate::radar::{BranchName, BranchSourceKind, Overlap, OverlapKind, OverlapOrder};
 use crate::repo::RepoId;
 use crate::report::{DayCounts, Feedback, FeedbackReason, ReportDay};
 use crate::retention::PruneCounts;
@@ -153,6 +153,9 @@ pub enum EventKind {
     /// The radar found an overlap it had not announced: its message went to the holders it
     /// concerns.
     OverlapFound(OverlapFound),
+    /// dibs stored an order for a collision: when it was found, or when which claim lands first
+    /// changed, or the order became or stopped being a tie.
+    OverlapOrdered(OverlapOrdered),
     /// A debt claim's holder was asked to hand an area over to the feature claim that waits for
     /// it.
     YieldRequested(AreaPassing),
@@ -233,6 +236,7 @@ impl EventKind {
             Self::BranchRecorded(_) => "branch_recorded",
             Self::FootprintChanged(_) => "footprint_changed",
             Self::OverlapFound(_) => "overlap_found",
+            Self::OverlapOrdered(_) => "overlap_ordered",
             Self::YieldRequested(_) => "yield_requested",
             Self::AreaHandedOver(_) => "area_handed_over",
             Self::ClaimNarrowed(_) => "claim_narrowed",
@@ -311,6 +315,7 @@ impl EventKind {
             Self::BranchRecorded(e) => vec![Some(e.member)],
             Self::FootprintChanged(e) => vec![Some(e.member)],
             Self::OverlapFound(_)
+            | Self::OverlapOrdered(_)
             | Self::YieldRequested(_)
             | Self::AreaHandedOver(_)
             | Self::WaitWithdrawn(_)
@@ -377,6 +382,7 @@ impl EventKind {
             | Self::BranchRecorded(_)
             | Self::FootprintChanged(_)
             | Self::OverlapFound(_)
+            | Self::OverlapOrdered(_)
             | Self::YieldRequested(_)
             | Self::AreaHandedOver(_)
             | Self::ClaimNarrowed(_)
@@ -448,6 +454,7 @@ impl EventKind {
             | Self::BranchRecorded(_)
             | Self::FootprintChanged(_)
             | Self::OverlapFound(_)
+            | Self::OverlapOrdered(_)
             | Self::YieldRequested(_)
             | Self::AreaHandedOver(_)
             | Self::ClaimNarrowed(_)
@@ -537,6 +544,7 @@ impl EventKind {
             | Self::BranchRecorded(_)
             | Self::FootprintChanged(_)
             | Self::OverlapFound(_)
+            | Self::OverlapOrdered(_)
             | Self::YieldRequested(_)
             | Self::AreaHandedOver(_)
             | Self::ClaimNarrowed(_)
@@ -712,6 +720,16 @@ pub struct Granted {
     /// holder's.
     #[serde(default)]
     pub decided: GrantDecision,
+    /// When the request the grant answers was asked, written in RFC 3339: the oldest of the request
+    /// that prompted it and those it settled, whoever decided. `None` for a
+    /// grant no request asked for, and for an event stored before the time was kept; left out of
+    /// the payload when `None`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub asked_at: Option<OffsetDateTime>,
 }
 
 /// Why a grant ended.
@@ -1065,6 +1083,35 @@ impl OverlapFound {
     pub const MAX_PATHS: usize = 100;
 }
 
+/// dibs stored an order for a collision. Serialised flat: `kind`, `items`, `first` (the item that
+/// lands first, `null` for a tie), `rule` (the code of the rule that decided, or `tied`) and
+/// `changed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlapOrdered {
+    /// The collision's kind: `same_file` or `contract`.
+    pub kind: OverlapKind,
+    /// Its two items, in the stored overlap's order.
+    pub items: BTreeSet<ItemId>,
+    /// Which item lands first and why, or a tie.
+    #[serde(flatten)]
+    pub order: OverlapOrder,
+    /// Whether it replaced an order stored before; `false` for the first order of a collision.
+    pub changed: bool,
+}
+
+impl OverlapOrdered {
+    /// The event for the order `overlap` carries; `None` for an overlap without one, which is a
+    /// moved base or a collision whose order was not worked out.
+    pub fn of(overlap: &Overlap, changed: bool) -> Option<Self> {
+        overlap.order().map(|order| Self {
+            kind: overlap.kind(),
+            items: overlap.items().clone(),
+            order: *order,
+            changed,
+        })
+    }
+}
+
 /// An area on its way from a debt claim to a feature claim. Carries the area and the two items;
 /// the claims are read for their holders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1223,6 +1270,7 @@ pub struct ThreadDeleted {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::radar::OrderRule;
     use crate::testing::{ALICE, BOB, area};
 
     fn every_kind() -> Vec<EventKind> {
@@ -1278,6 +1326,7 @@ mod tests {
                 from: ALICE,
                 to: BOB,
                 decided: GrantDecision::Holder,
+                asked_at: None,
             }),
             EventKind::GrantRevoked(GrantRevoked {
                 grant: GrantId(1),
@@ -2233,6 +2282,7 @@ mod tests {
                 from: ALICE,
                 to: BOB,
                 decided,
+                asked_at: None,
             })
         };
         for (decided, name) in [
@@ -2255,6 +2305,123 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(before, given(GrantDecision::Holder));
+    }
+
+    #[test]
+    fn a_grant_carries_when_its_request_was_asked_and_one_stored_without_it_was_asked_never() {
+        let asked_at =
+            OffsetDateTime::UNIX_EPOCH + time::Duration::days(20_000) + time::Duration::seconds(90);
+        let answered = EventKind::Granted(Granted {
+            grant: GrantId(3),
+            item: ItemId(4),
+            area: area("api:billing"),
+            from: ALICE,
+            to: BOB,
+            decided: GrantDecision::Waited,
+            asked_at: Some(asked_at),
+        });
+        let value = serde_json::to_value(&answered).unwrap();
+        assert_eq!(
+            value["payload"],
+            serde_json::json!({"grant": 3, "item": 4, "area": "api:billing", "from": 1, "to": 2,
+                               "decided": "waited", "asked_at": "2024-10-04T00:01:30Z"})
+        );
+        assert_eq!(
+            serde_json::from_value::<EventKind>(value).unwrap(),
+            answered
+        );
+        let before: EventKind = serde_json::from_value(serde_json::json!({
+            "kind": "granted",
+            "payload": {"grant": 3, "item": 4, "area": "api:billing", "from": 1, "to": 2,
+                        "decided": "waited"}
+        }))
+        .unwrap();
+        let EventKind::Granted(before) = before else {
+            panic!("{before:?}");
+        };
+        assert_eq!(before.asked_at, None);
+    }
+
+    #[test]
+    fn a_collisions_order_carries_its_kind_items_the_item_first_the_rule_and_whether_it_changed() {
+        let items = BTreeSet::from([ItemId(4), ItemId(5)]);
+        let ordered = |order, changed| {
+            EventKind::OverlapOrdered(OverlapOrdered {
+                kind: OverlapKind::Contract,
+                items: items.clone(),
+                order,
+                changed,
+            })
+        };
+        let decided = ordered(
+            OverlapOrder::First {
+                item: ItemId(5),
+                because: OrderRule::Priority,
+            },
+            true,
+        );
+        let tied = ordered(OverlapOrder::Tied, false);
+        for (kind, payload) in [
+            (
+                &decided,
+                serde_json::json!({"kind": "contract", "items": [4, 5], "first": 5,
+                                   "rule": "priority", "changed": true}),
+            ),
+            (
+                &tied,
+                serde_json::json!({"kind": "contract", "items": [4, 5], "first": null,
+                                   "rule": "tied", "changed": false}),
+            ),
+        ] {
+            let value = serde_json::to_value(kind).unwrap();
+            assert_eq!(value["kind"], "overlap_ordered");
+            assert_eq!(kind.name(), "overlap_ordered");
+            assert_eq!(value["payload"], payload);
+            assert_eq!(&serde_json::from_value::<EventKind>(value).unwrap(), kind);
+            assert!(
+                kind.members().is_empty(),
+                "an order names items, not members"
+            );
+            assert_eq!(
+                (
+                    kind.message(),
+                    kind.thread(),
+                    kind.slot(),
+                    kind.completion(),
+                    kind.private_to()
+                ),
+                (None, None, None, None, None)
+            );
+        }
+        let refused = serde_json::json!({
+            "kind": "overlap_ordered",
+            "payload": {"kind": "same_file", "items": [4, 5], "first": 4, "rule": "tied",
+                        "changed": false}
+        });
+        assert!(serde_json::from_value::<EventKind>(refused).is_err());
+    }
+
+    #[test]
+    fn an_order_is_recorded_for_an_overlap_that_carries_one_and_for_no_other() {
+        let paths = BTreeSet::from([RepoPath::parse("api:config/app.yaml").unwrap()]);
+        let items = BTreeSet::from([ItemId(4), ItemId(5)]);
+        let unordered =
+            Overlap::new(OverlapKind::SameFile, items.clone(), None, paths.clone()).unwrap();
+        assert_eq!(OverlapOrdered::of(&unordered, false), None);
+        let order = OverlapOrder::First {
+            item: ItemId(4),
+            because: OrderRule::Older,
+        };
+        let ordered = unordered.with_order(Some(order)).unwrap();
+        assert_eq!(
+            OverlapOrdered::of(&ordered, true),
+            Some(OverlapOrdered {
+                kind: OverlapKind::SameFile,
+                items,
+                order,
+                changed: true,
+            })
+        );
     }
 
     #[test]

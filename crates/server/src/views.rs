@@ -25,7 +25,7 @@ use dibs_domain::edit::{HeldReason, Verdict};
 use dibs_domain::event::EventKind;
 use dibs_domain::grant::GrantDecision;
 use dibs_domain::handle::Handle;
-use dibs_domain::hot_rule::{HotRuleKind, Note};
+use dibs_domain::hot_rule::{HotRuleKind, Note, Recipe};
 use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{
     ExternalRef, ItemRepository, ItemStatus, Priority, SourceId, SourceStatus, Title,
@@ -604,6 +604,9 @@ pub enum VerdictView {
         rule: HotRuleKind,
         /// The rule's note.
         note: Option<Note>,
+        /// The command that regenerates the file, for a rule that names one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        recipe: Option<Recipe>,
         /// Other members' live claims that edited the same file.
         touched_by: Vec<HolderView>,
     },
@@ -662,10 +665,12 @@ impl PathVerdictView {
             Verdict::AllowedWithNote {
                 rule,
                 note,
+                recipe,
                 touched_by,
             } => VerdictView::AllowedWithNote {
                 rule,
                 note,
+                recipe,
                 touched_by: touched_by
                     .into_iter()
                     .zip(named.touched_by)
@@ -1460,6 +1465,7 @@ mod tests {
                 verdict: Verdict::AllowedWithNote {
                     rule: kind,
                     note: None,
+                    recipe: None,
                     touched_by: vec![
                         Holder {
                             member: MemberId(1),

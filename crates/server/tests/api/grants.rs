@@ -235,6 +235,67 @@ async fn the_sweep_grants_a_request_once_the_grant_delay_has_passed() {
         .cloned()
         .unwrap();
     assert_eq!(granted["payload"]["decided"], "waited");
+    let request = team.messages(&team.bob, thread).await.remove(0);
+    assert_eq!(
+        granted["payload"]["asked_at"], request["created_at"],
+        "the wait is timed from the request, ten minutes before the grant: {granted}"
+    );
+    assert_ne!(granted["payload"]["asked_at"], granted["at"], "{granted}");
+}
+
+#[tokio::test]
+async fn a_grant_dibs_gives_at_the_ask_records_when_it_was_asked_and_a_holders_own_records_none() {
+    let team = Team::new().await;
+    team.review().await;
+
+    let asked = team.ask().await;
+    assert_eq!(asked.status, StatusCode::CREATED, "{}", asked.body);
+    assert_eq!(asked.body["outcome"], "granted");
+    let thread = asked.body["thread_id"].as_u64().unwrap();
+    let request = team.messages(&team.carol, thread).await.remove(0);
+
+    let alices_item = team.world.item(&team.alice, None, "Ledger").await;
+    let alice_session = team.world.session(&team.alice, "laptop").await;
+    let claimed = team
+        .world
+        .post(
+            &team.alice,
+            &format!("/v1/items/{alices_item}/claim"),
+            json!({"session_id": alice_session}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    let given = team
+        .world
+        .post(
+            &team.bob,
+            "/v1/grants",
+            json!({"item": alices_item, "area": "api:billing", "to": "alice"}),
+        )
+        .await;
+    assert_eq!(given.status, StatusCode::CREATED, "{}", given.body);
+
+    let events = team.world.get(&team.alice, "/v1/events").await;
+    let granted: Vec<&Value> = events.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "granted")
+        .map(|event| &event["payload"])
+        .collect();
+    assert_eq!(granted.len(), 2, "{}", events.body);
+    assert_eq!(granted[0]["decided"], "in_review");
+    assert_eq!(
+        granted[0]["asked_at"], request["created_at"],
+        "{}",
+        events.body
+    );
+    assert_eq!(granted[1]["decided"], "holder");
+    assert!(
+        granted[1].get("asked_at").is_none(),
+        "a grant nobody asked for carries no asked_at: {}",
+        granted[1]
+    );
 }
 
 #[tokio::test]
@@ -304,4 +365,45 @@ async fn a_request_a_revoke_stands_against_is_left_to_the_holder_and_the_sweep_w
         .len();
     assert_eq!(after, before, "the sweep writes nothing");
     assert_eq!(team.messages(&team.bob, thread).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_grant_dibs_gives_at_the_ask_records_when_an_earlier_request_it_settles_was_asked() {
+    let team = Team::new().await;
+    let waiting = team.ask().await;
+    assert_eq!(waiting.status, StatusCode::CREATED, "{}", waiting.body);
+    assert_eq!(waiting.body["outcome"], "asked");
+    let first_thread = waiting.body["thread_id"].as_u64().unwrap();
+    let first = team.messages(&team.carol, first_thread).await.remove(0);
+    team.world.fakes.clock.advance(Duration::minutes(8));
+    team.review().await;
+
+    let asked = team.ask().await;
+
+    assert_eq!(asked.status, StatusCode::CREATED, "{}", asked.body);
+    assert_eq!(asked.body["outcome"], "granted");
+    assert_eq!(asked.body["decided"], "in_review");
+    let thread = asked.body["thread_id"].as_u64().unwrap();
+    let second = team.messages(&team.carol, thread).await.remove(0);
+    assert_ne!(first["created_at"], second["created_at"]);
+    let events = team.world.get(&team.alice, "/v1/events").await;
+    let granted: Vec<&Value> = events.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "granted")
+        .map(|event| &event["payload"])
+        .collect();
+    assert_eq!(granted.len(), 1, "{}", events.body);
+    assert_eq!(
+        granted[0]["asked_at"], first["created_at"],
+        "carol waited from her first request, eight minutes before the grant: {}",
+        events.body
+    );
+    let swept = team.world.app.tick_grants.execute().await.unwrap();
+    assert_eq!(
+        (swept.granted, swept.settled),
+        (0, 0),
+        "the grant settled the earlier request too"
+    );
 }

@@ -15,6 +15,10 @@ use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::radar::Radar;
 use crate::work::Work;
 
+mod conflict;
+
+pub(crate) use conflict::ConflictNotice;
+
 /// What an integration reports about one pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrStateReport {
@@ -30,6 +34,12 @@ pub struct PrStateReport {
 /// `PrStateReported` event when a pull request is reported not to merge cleanly or merges cleanly
 /// again after that; the same report twice appends nothing, and a pull request first reported as
 /// merging cleanly is only remembered. The pull request need not be one a claim recorded.
+///
+/// A report that appends the event for a pull request that does not merge cleanly tells the holder
+/// of the claim that records it, in the claim's conversation and at high importance, once per
+/// conflict: what to do, and the recipe of every regenerate rule of the pull request's repository
+/// that names one, or none while the project's stored settings do not parse. A pull request that
+/// merges cleanly again, or that no claim records, tells nobody.
 ///
 /// A report that names the pull request's head records it on the claim in review that records the
 /// pull request, as the claim's branch in the pull request's repository learned from that pull
@@ -86,34 +96,51 @@ impl ReportPrState {
             )
             .await?;
         }
-        let settings = match &head {
-            None => None,
-            Some(_) => match work.project_settings(&self.hot_rules).await {
+        let conflict = told && !mergeable;
+        let claims = if head.is_some() || conflict {
+            work.claims(actor.project).await?
+        } else {
+            Vec::new()
+        };
+        let recording = claims.iter().find(|claim| claim.state.records(&pr));
+        let settings = if head.is_some() || (conflict && recording.is_some()) {
+            match work.project_settings(&self.hot_rules).await {
                 Ok(settings) => Some(settings),
                 Err(AppError::StoredSettings(_)) => None,
                 Err(error) => return Err(error),
-            },
-        };
-        if let (Some(head), Some(settings)) = (head, settings) {
-            let repo = settings.repo_of_pr(&pr).map(|repo| repo.id.clone());
-            let claims = work.claims(actor.project).await?;
-            let recording = claims.iter().find(|claim| claim.state.records(&pr));
-            if let (Some(repo), Some(claim)) = (repo, recording) {
-                Radar {
-                    ids: &*self.ids,
-                    schemes: &self.ref_schemes,
-                    settings: &settings,
-                    now,
-                }
-                .record_branch(
-                    &mut work,
-                    claim,
-                    &repo,
-                    &head,
-                    BranchSource::PullRequest(pr),
-                )
-                .await?;
             }
+        } else {
+            None
+        };
+        let repo = settings
+            .as_ref()
+            .and_then(|settings| settings.repo_of_pr(&pr));
+        if let (Some(head), Some(settings), Some(repo), Some(claim)) =
+            (&head, &settings, repo, recording)
+        {
+            Radar {
+                ids: &*self.ids,
+                schemes: &self.ref_schemes,
+                settings,
+                now,
+            }
+            .record_branch(
+                &mut work,
+                claim,
+                &repo.id,
+                head,
+                BranchSource::PullRequest(pr.clone()),
+            )
+            .await?;
+        }
+        if conflict && let Some(claim) = recording {
+            ConflictNotice {
+                ids: &*self.ids,
+                schemes: &self.ref_schemes,
+                now,
+            }
+            .tell(&mut work, claim, &pr, repo)
+            .await?;
         }
         work.commit(&*self.notifier).await?;
         Ok(told)
@@ -126,10 +153,20 @@ mod tests {
     use dibs_domain::radar::BranchSourceKind;
     use dibs_domain::repo::RepoId;
 
+    use dibs_domain::ids::ThreadId;
+    use dibs_domain::item::{ExternalRef, Title};
+    use dibs_domain::message::{Importance, Recipients};
+    use dibs_domain::settings::ProjectSettings;
+
+    use super::conflict::{LISTED_RECIPES, conflict_text};
     use super::*;
+    use crate::named::ItemName;
+    use crate::records::MessageRecord;
     use crate::use_cases::testing::{Env, Person, document};
+    use crate::use_cases::writing::titled_body;
     use crate::use_cases::{
-        ApplySettings, ClaimItem, ClaimItemInput, StartReview, StartReviewInput,
+        ApplySettings, ClaimItem, ClaimItemInput, ListThreads, ReadThread, StartReview,
+        StartReviewInput,
     };
 
     /// A report that `pr` merges cleanly or not, naming no head.
@@ -148,6 +185,70 @@ mod tests {
     fn branch(text: &str) -> BranchName {
         BranchName::parse(text).unwrap()
     }
+
+    /// Reports whether `text` merges cleanly, naming no head; answers whether it was told.
+    async fn report(env: &Env, text: &str, mergeable: bool) -> bool {
+        ReportPrState::new(&env.deps)
+            .execute(&env.importer, state(pr(text), mergeable))
+            .await
+            .unwrap()
+    }
+
+    /// The conversations addressed to `who` alone, oldest first, each with its messages.
+    async fn own(env: &Env, who: &Person) -> Vec<(ThreadId, Vec<MessageRecord>)> {
+        let alone = Recipients::Members([who.actor.member].into());
+        let mut threads: Vec<ThreadId> = ListThreads::new(&env.deps)
+            .execute(&who.actor, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|summary| summary.thread.record.recipients == alone)
+            .map(|summary| summary.thread.record.id)
+            .collect();
+        threads.sort();
+        let mut read = Vec::new();
+        for thread in threads {
+            let view = ReadThread::new(&env.deps)
+                .execute(&who.actor, thread)
+                .await
+                .unwrap();
+            let messages = view
+                .messages
+                .into_iter()
+                .map(|message| message.record)
+                .collect();
+            read.push((thread, messages));
+        }
+        read
+    }
+
+    /// The texts of the messages `who` was written in conversations addressed to them alone.
+    async fn told_to(env: &Env, who: &Person) -> Vec<String> {
+        own(env, who)
+            .await
+            .into_iter()
+            .flat_map(|(_, messages)| messages)
+            .map(|message| message.body.as_str().to_owned())
+            .collect()
+    }
+
+    /// How many messages the log recorded after `before`.
+    async fn posted(env: &Env, before: usize) -> usize {
+        env.kinds_after(before)
+            .await
+            .into_iter()
+            .filter(|kind| matches!(kind, EventKind::MessagePosted(_)))
+            .count()
+    }
+
+    /// Two listed repositories, each with a regenerate rule that names a recipe.
+    const TWO_REPOS: &str = r#"{"repos": [
+        {"id": "api", "remote": "github.com/acme/api",
+         "hot": [{"paths": ["**/*.lock"], "kind": "regenerate", "recipe": "make lock"},
+                 {"paths": ["config/**"], "kind": "warn-shared"},
+                 {"paths": ["dist/**"], "kind": "regenerate"}]},
+        {"id": "web", "remote": "github.com/acme/web",
+         "hot": [{"paths": ["build/**"], "kind": "regenerate", "recipe": "npm run build"}]}]}"#;
 
     /// A report that `text` merges cleanly, with its head `head`.
     async fn report_head(env: &Env, text: &str, head: &str) -> bool {
@@ -420,5 +521,265 @@ mod tests {
         drop(tx);
         assert!(recordings(&env, before).await.is_empty());
         assert_eq!(recorded(&env, item, "default").await, None);
+    }
+
+    #[tokio::test]
+    async fn a_conflict_is_told_to_the_holder_alone_at_high_importance_with_its_repositorys_recipes()
+     {
+        let env = Env::with_settings(TWO_REPOS).await;
+        let item = env.item("gh:acme/api#1").await;
+        in_review(&env, &env.bob, item, &["acme/api#7"]).await;
+        assert!(
+            report(&env, "acme/api#7", false).await,
+            "a first report that does not merge cleanly is told"
+        );
+        let bobs = own(&env, &env.bob).await;
+        assert_eq!(bobs.len(), 1, "one conversation, the claim's");
+        let messages = &bobs[0].1;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].importance, Importance::High);
+        let text = messages[0].body.as_str();
+        assert!(
+            text.starts_with(
+                "Pull request acme/api#7, recorded on your claim on work item gh:acme/api#1 \"Work on gh:acme/api#1\", does not merge cleanly into its base."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("merge the base into the pull request's branch or rebase the branch onto the base, resolve the conflicts and push; or merge it by hand"),
+            "{text}"
+        );
+        assert!(text.contains("Until then it cannot be merged."), "{text}");
+        assert!(
+            text.contains(
+                "Files under a regenerate rule are not merged by hand: take them from the base and regenerate them.\n- **/*.lock: regenerate with `make lock`\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            !text.contains("npm run build"),
+            "another repository's recipe is not listed: {text}"
+        );
+        assert!(!text.contains("dist/**"), "a rule without a recipe: {text}");
+        assert!(told_to(&env, &env.alice).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_same_conflict_twice_and_a_clean_merge_again_tell_nobody_and_a_second_conflict_joins_the_conversation()
+     {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        in_review(&env, &env.bob, item, &["acme/widgets#7"]).await;
+        assert!(report(&env, "acme/widgets#7", false).await);
+        let before = env.events().await.len();
+        assert!(!report(&env, "acme/widgets#7", false).await);
+        assert!(report(&env, "acme/widgets#7", true).await);
+        assert_eq!(
+            posted(&env, before).await,
+            0,
+            "the same conflict again, and merging cleanly again, tell nobody"
+        );
+        assert!(
+            env.kinds_after(before).await.iter().any(
+                |kind| matches!(kind, EventKind::PrStateReported(reported) if reported.mergeable)
+            ),
+            "merging cleanly again is still recorded"
+        );
+        assert!(report(&env, "acme/widgets#7", false).await);
+        let bobs = own(&env, &env.bob).await;
+        assert_eq!(
+            bobs.len(),
+            1,
+            "a second conflict goes into the same conversation"
+        );
+        assert_eq!(bobs[0].1.len(), 2);
+        assert!(
+            bobs[0]
+                .1
+                .iter()
+                .all(|message| message.body.as_str().contains("acme/widgets#7"))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_conflict_no_claim_records_is_recorded_and_told_to_nobody() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        in_review(&env, &env.bob, item, &["acme/widgets#7"]).await;
+        let before = env.events().await.len();
+        assert!(report(&env, "acme/widgets#9", false).await);
+        let kinds = env.kinds_after(before).await;
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, EventKind::PrStateReported(_)))
+        );
+        assert_eq!(posted(&env, before).await, 0);
+        assert!(told_to(&env, &env.bob).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_claim_that_records_a_pull_request_reported_conflicting_is_told_once_when_it_records_it()
+     {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        assert!(report(&env, "acme/widgets#7", false).await);
+        assert!(!report(&env, "acme/widgets#8", true).await);
+        in_review(&env, &env.bob, item, &["acme/widgets#8"]).await;
+        assert!(
+            told_to(&env, &env.bob).await.is_empty(),
+            "a pull request that merges cleanly tells nothing"
+        );
+        in_review(&env, &env.bob, item, &["acme/widgets#7"]).await;
+        let told = told_to(&env, &env.bob).await;
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].starts_with(
+                "Pull request acme/widgets#7, recorded on your claim on work item gh:acme/widgets#1"
+            ),
+            "{}",
+            told[0]
+        );
+        assert!(
+            !told[0].contains("Files under a regenerate rule"),
+            "no rule of the default settings names a recipe"
+        );
+        in_review(&env, &env.bob, item, &["acme/widgets#7"]).await;
+        assert_eq!(
+            told_to(&env, &env.bob).await.len(),
+            1,
+            "recording it again tells nothing more"
+        );
+        assert!(
+            !report(&env, "acme/widgets#7", false).await,
+            "the stored conflict is not told again at the next report"
+        );
+        assert_eq!(told_to(&env, &env.bob).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn another_claim_that_records_a_conflict_told_before_is_told_in_its_own_conversation() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        in_review(&env, &env.bob, item, &["acme/widgets#7"]).await;
+        assert!(report(&env, "acme/widgets#7", false).await);
+        crate::use_cases::Release::new(&env.deps)
+            .execute(&env.bob.actor, item)
+            .await
+            .unwrap();
+        env.advance(time::Duration::hours(1));
+        in_review(&env, &env.bob, item, &["acme/widgets#7"]).await;
+        let bobs = own(&env, &env.bob).await;
+        assert_eq!(bobs.len(), 2, "one conversation per claim");
+        for (_, messages) in bobs {
+            assert_eq!(messages.len(), 1);
+            assert!(messages[0].body.as_str().contains("acme/widgets#7"));
+            assert_eq!(messages[0].importance, Importance::High);
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_that_do_not_parse_tell_the_conflict_without_recipes() {
+        let env = Env::with_settings(TWO_REPOS).await;
+        let item = env.item("gh:acme/api#1").await;
+        in_review(&env, &env.bob, item, &["acme/api#7"]).await;
+        let unknown = r#"{"hot": [{"paths": ["**/*.lock"], "kind": "rebuild-on-merge"}]}"#;
+        let mut tx = env.deps.store.begin().await.unwrap();
+        tx.put_settings(env.project, &document(unknown))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(report(&env, "acme/api#7", false).await);
+        let told = told_to(&env, &env.bob).await;
+        assert_eq!(told.len(), 1);
+        assert!(told[0].contains("does not merge cleanly"), "{}", told[0]);
+        assert!(!told[0].contains("make lock"), "{}", told[0]);
+        assert!(
+            !told[0].contains("Files under a regenerate rule"),
+            "{}",
+            told[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn more_recipes_than_are_listed_are_counted_and_the_report_succeeds() {
+        let rules: Vec<String> = (1..=LISTED_RECIPES + 5)
+            .map(|n| {
+                format!(
+                    r#"{{"paths": ["gen{n}/**"], "kind": "regenerate", "recipe": "make gen{n}"}}"#
+                )
+            })
+            .collect();
+        let env = Env::with_settings(&format!(r#"{{"hot": [{}]}}"#, rules.join(","))).await;
+        let item = env.item("gh:acme/widgets#1").await;
+        in_review(&env, &env.bob, item, &["acme/widgets#7"]).await;
+        assert!(report(&env, "acme/widgets#7", false).await);
+        let told = told_to(&env, &env.bob).await;
+        let text = &told[0];
+        assert!(
+            text.contains(&format!(
+                "\n- gen{LISTED_RECIPES}/**: regenerate with `make gen{LISTED_RECIPES}`"
+            )),
+            "{text}"
+        );
+        let first_left_out = LISTED_RECIPES + 1;
+        assert!(
+            !text.contains(&format!("make gen{first_left_out}`")),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n- and 5 more rules with a recipe"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn recipes_that_would_not_fit_one_message_are_counted_instead() {
+        let glob = |n: usize, g: usize| format!("{}{n}-{g}/**", "g".repeat(480));
+        let rules: Vec<String> = (1..=LISTED_RECIPES)
+            .map(|n| {
+                let paths: Vec<String> = (1..=7).map(|g| format!("\"{}\"", glob(n, g))).collect();
+                format!(
+                    r#"{{"paths": [{}], "kind": "regenerate", "recipe": "{}"}}"#,
+                    paths.join(","),
+                    "r".repeat(200)
+                )
+            })
+            .collect();
+        let settings = ProjectSettings::parse(
+            &document(&format!(r#"{{"hot": [{}]}}"#, rules.join(","))),
+            &HotRuleRegistry::standard(),
+        )
+        .unwrap();
+        let item = ItemName {
+            id: ItemId(1),
+            external_ref: Some(ExternalRef::parse("gh:acme/widgets#1").unwrap()),
+            title: Title::parse(&"t".repeat(200)).unwrap(),
+            link: None,
+        };
+        let text = conflict_text(&pr("acme/widgets#7"), &item, settings.repos().first());
+        let listed = text.matches("\n- g").count();
+        assert!(listed > 0 && listed < LISTED_RECIPES, "{listed}");
+        assert!(
+            text.ends_with(&format!(
+                "\n- and {} more rules with a recipe",
+                LISTED_RECIPES - listed
+            )),
+            "{}",
+            &text[text.len().saturating_sub(200)..]
+        );
+        assert!(
+            text.contains(&format!(
+                "{}, {} and 2 more: regenerate",
+                glob(1, 4),
+                glob(1, 5)
+            )),
+            "a rule lists five of its globs and counts the rest"
+        );
+        let body = titled_body(&text, None).unwrap();
+        assert!(
+            body.as_str().contains("more rules with a recipe"),
+            "nothing is cut: the count survives"
+        );
     }
 }

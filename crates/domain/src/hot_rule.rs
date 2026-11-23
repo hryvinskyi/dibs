@@ -70,6 +70,77 @@ impl Note {
 
 string_value!(Note, NoteError);
 
+/// The command that regenerates the files of a `regenerate` rule, shown with its verdict and never
+/// run by dibs: one line of 1 to 200 characters after trimming, with no control characters, no
+/// backtick and no character that breaks a line or that a reader is not shown (a line or paragraph
+/// separator, or any default-ignorable code point: a bidirectional control, a zero-width
+/// character, a variation selector).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Recipe(String);
+
+/// Why a text is not a recipe.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RecipeError {
+    /// The trimmed text is empty, longer than 200 characters, or has a character the type refuses:
+    /// a control character (a line break included), a backtick, which would end the code span dibs
+    /// shows it in, or one that breaks the line or hides or reorders what is shown.
+    #[error(
+        "a hot rule's recipe is one line of 1 to 200 characters with no control characters, backticks, line separators or invisible characters"
+    )]
+    Malformed,
+}
+
+impl Recipe {
+    /// The longest recipe, in characters.
+    pub const MAX_CHARS: usize = 200;
+
+    /// Parses a recipe, trimming whitespace at both ends.
+    ///
+    /// # Errors
+    /// [`RecipeError::Malformed`] when the trimmed text breaks the rules above.
+    pub fn parse(value: &str) -> Result<Self, RecipeError> {
+        let value = value.trim();
+        let refused = value
+            .chars()
+            .any(|c| c.is_control() || c == '`' || hides_or_breaks(c));
+        if value.is_empty() || value.chars().count() > Self::MAX_CHARS || refused {
+            return Err(RecipeError::Malformed);
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+string_value!(Recipe, RecipeError);
+
+/// Whether `c` breaks a line without being a control character, or is not shown to a reader at
+/// all: the line and paragraph separators, the interlinear annotation marks, and every code point
+/// Unicode makes default-ignorable (the bidirectional marks, embeddings, overrides and isolates,
+/// the zero-width and invisible formatting characters, the fillers, the variation selectors and
+/// the tag characters).
+const fn hides_or_breaks(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{034f}'
+            | '\u{061c}'
+            | '\u{115f}'..='\u{1160}'
+            | '\u{17b4}'..='\u{17b5}'
+            | '\u{180b}'..='\u{180f}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{feff}'
+            | '\u{ffa0}'
+            | '\u{fff0}'..='\u{fffb}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e0fff}'
+    )
+}
+
 /// What a hot-file rule decided for one path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotDecision {
@@ -87,6 +158,7 @@ pub struct HotContext<'a> {
     path: &'a RepoPath,
     kind: &'a HotRuleKind,
     note: Option<&'a Note>,
+    recipe: Option<&'a Recipe>,
     world: &'a EditWorld<'a>,
 }
 
@@ -96,6 +168,7 @@ impl<'a> HotContext<'a> {
             path,
             kind: &spec.kind,
             note: spec.note.as_ref(),
+            recipe: spec.recipe.as_ref(),
             world,
         }
     }
@@ -113,6 +186,11 @@ impl<'a> HotContext<'a> {
     /// The note of the rule that matched.
     pub fn note(&self) -> Option<&Note> {
         self.note
+    }
+
+    /// The recipe of the rule that matched: the command that regenerates the path.
+    pub fn recipe(&self) -> Option<&Recipe> {
+        self.recipe
     }
 
     /// Other members' live claims that recorded this same path as shared.
@@ -139,6 +217,13 @@ pub trait HotRule: Send + Sync + fmt::Debug {
     /// names none unless it says otherwise.
     fn as_area(&self) -> Option<&QualifiedArea> {
         None
+    }
+
+    /// Whether a rule of the kind may name a recipe: the command that regenerates its files. A
+    /// rule whose kind takes none is refused when it names one. A kind takes none unless it says
+    /// otherwise.
+    fn takes_recipe(&self) -> bool {
+        false
     }
 }
 
@@ -173,6 +258,12 @@ pub enum HotRuleRefused {
     /// The kind takes no area and the rule names one.
     #[error("a '{kind}' rule takes no area")]
     AreaNotAllowed {
+        /// The kind.
+        kind: HotRuleKind,
+    },
+    /// The kind takes no recipe and the rule names one.
+    #[error("a '{kind}' rule takes no recipe")]
+    RecipeNotAllowed {
         /// The kind.
         kind: HotRuleKind,
     },
@@ -249,13 +340,15 @@ impl HotRuleRegistry {
     }
 }
 
-/// A hot-file rule as declared in a repository's settings, with the rule its kind built.
+/// A hot-file rule as declared in a repository's settings, with the rule its kind built. The note
+/// and the recipe are kept here only, and reach the rule through its [`HotContext`].
 #[derive(Clone)]
 pub struct HotRuleSpec {
     paths: Vec<PathGlob>,
     kind: HotRuleKind,
     area: Option<QualifiedArea>,
     note: Option<Note>,
+    recipe: Option<Recipe>,
     rule: Arc<dyn HotRule>,
 }
 
@@ -265,6 +358,7 @@ impl HotRuleSpec {
         kind: HotRuleKind,
         area: Option<QualifiedArea>,
         note: Option<Note>,
+        recipe: Option<Recipe>,
         rule: Arc<dyn HotRule>,
     ) -> Self {
         Self {
@@ -272,7 +366,17 @@ impl HotRuleSpec {
             kind,
             area,
             note,
+            recipe,
             rule,
+        }
+    }
+
+    /// The same rule without its recipe.
+    #[must_use]
+    pub(crate) fn without_recipe(self) -> Self {
+        Self {
+            recipe: None,
+            ..self
         }
     }
 
@@ -294,6 +398,11 @@ impl HotRuleSpec {
     /// The rule's note.
     pub fn note(&self) -> Option<&Note> {
         self.note.as_ref()
+    }
+
+    /// The rule's recipe: the command that regenerates its files, for a kind that takes one.
+    pub fn recipe(&self) -> Option<&Recipe> {
+        self.recipe.as_ref()
     }
 
     /// Whether one of the rule's globs matches the path.
@@ -324,6 +433,7 @@ impl fmt::Debug for HotRuleSpec {
             .field("kind", &self.kind)
             .field("area", &self.area)
             .field("note", &self.note)
+            .field("recipe", &self.recipe)
             .finish_non_exhaustive()
     }
 }
@@ -334,6 +444,7 @@ impl PartialEq for HotRuleSpec {
             && self.kind == other.kind
             && self.area == other.area
             && self.note == other.note
+            && self.recipe == other.recipe
     }
 }
 
@@ -349,7 +460,7 @@ fn refuse_area(config: &HotRuleConfig<'_>) -> Result<(), HotRuleRefused> {
 }
 
 /// `regenerate`: a generated file anyone may change and nobody merges by hand. Always allowed, with
-/// the rule's note.
+/// the rule's note and the recipe that regenerates it.
 #[derive(Debug, Clone, Copy)]
 pub struct Regenerate;
 
@@ -365,6 +476,7 @@ impl HotRule for Regenerate {
         HotDecision::Decide(Verdict::AllowedWithNote {
             rule: ctx.kind().clone(),
             note: ctx.note().cloned(),
+            recipe: ctx.recipe().cloned(),
             touched_by: Vec::new(),
         })
     }
@@ -372,6 +484,11 @@ impl HotRule for Regenerate {
     /// No: the file is made again on the new base.
     fn merged_by_hand(&self) -> bool {
         false
+    }
+
+    /// Yes: the command that makes the file again.
+    fn takes_recipe(&self) -> bool {
+        true
     }
 }
 
@@ -422,6 +539,7 @@ impl HotRule for WarnShared {
         HotDecision::Share(Verdict::AllowedWithNote {
             rule: ctx.kind().clone(),
             note: ctx.note().cloned(),
+            recipe: None,
             touched_by: others,
         })
     }
@@ -460,6 +578,95 @@ mod tests {
         assert_eq!(Note::parse("tab\there"), Err(NoteError::Malformed));
         assert!(Note::parse(&"n".repeat(500)).is_ok());
         assert_eq!(Note::parse(&"n".repeat(501)), Err(NoteError::Malformed));
+    }
+
+    #[test]
+    fn recipe_table() {
+        assert_eq!(
+            Recipe::parse("  cargo xtask integrations  ")
+                .unwrap()
+                .as_str(),
+            "cargo xtask integrations"
+        );
+        assert_eq!(
+            Recipe::parse("make gen").unwrap().to_string(),
+            "make gen",
+            "it shows as written"
+        );
+        assert!(Recipe::parse(&"r".repeat(200)).is_ok());
+        for refused in [
+            String::new(),
+            "   ".to_owned(),
+            "r".repeat(201),
+            "make gen\nmake check".to_owned(),
+            "make gen\rmake check".to_owned(),
+            "tab\there".to_owned(),
+            "make `gen`".to_owned(),
+            "make gen\u{2028}rm -rf build".to_owned(),
+            "make gen\u{2029}x".to_owned(),
+            "make \u{202e}neg".to_owned(),
+            "make \u{2066}gen\u{2069}".to_owned(),
+            "make\u{200b}gen".to_owned(),
+            "\u{feff}make gen".to_owned(),
+            "make\u{180e}gen".to_owned(),
+            "make \u{206a}gen".to_owned(),
+            "make \u{fff9}gen\u{fffb}".to_owned(),
+            "make gen\u{e0041}".to_owned(),
+            "make\u{034f} gen".to_owned(),
+            "make gen\u{fe0f}".to_owned(),
+            "make\u{180b}gen".to_owned(),
+            "make\u{3164}gen".to_owned(),
+            "make\u{115f}gen".to_owned(),
+            "make\u{17b4}gen".to_owned(),
+            "make\u{ffa0}gen".to_owned(),
+            "make\u{fff0}gen".to_owned(),
+            "make\u{1bca0}gen".to_owned(),
+            "make\u{1d173}gen".to_owned(),
+            "make gen\u{e0100}".to_owned(),
+        ] {
+            assert_eq!(
+                Recipe::parse(&refused),
+                Err(RecipeError::Malformed),
+                "{refused:?}"
+            );
+        }
+        let error = RecipeError::Malformed.to_string();
+        assert!(error.contains("recipe"), "{error}");
+        assert!(error.contains("200"), "{error}");
+    }
+
+    #[test]
+    fn a_recipe_reads_and_writes_as_a_plain_string() {
+        let recipe: Recipe = serde_json::from_str(r#""npm run gen""#).unwrap();
+        assert_eq!(recipe.as_str(), "npm run gen");
+        assert_eq!(serde_json::to_string(&recipe).unwrap(), r#""npm run gen""#);
+        assert!(serde_json::from_str::<Recipe>(r#""one\ntwo""#).is_err());
+    }
+
+    #[test]
+    fn only_a_regenerate_rule_takes_a_recipe() {
+        let registry = HotRuleRegistry::standard();
+        let area = QualifiedArea::parse("api:billing").unwrap();
+        for (name, area, takes) in [
+            ("regenerate", None, true),
+            ("owner", Some(&area), false),
+            ("warn-shared", None, false),
+            ("free", None, false),
+        ] {
+            let kind = registry.kind(name).unwrap();
+            let rule = registry
+                .build(&HotRuleConfig {
+                    kind: &kind,
+                    area,
+                    note: None,
+                })
+                .unwrap();
+            assert_eq!(rule.takes_recipe(), takes, "{name}");
+        }
+        assert!(
+            !AlwaysNeedsClaim.takes_recipe(),
+            "a kind that does not say otherwise takes none"
+        );
     }
 
     #[test]

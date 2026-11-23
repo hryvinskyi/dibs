@@ -121,6 +121,15 @@ pub enum GrantDecisionError {
 }
 
 impl GrantDecision {
+    /// Every decision: the holder's, then dibs's reasons in the order they are declared.
+    pub const ALL: [Self; 5] = [
+        Self::Holder,
+        Self::Untouched,
+        Self::InReview,
+        Self::Idle,
+        Self::Waited,
+    ];
+
     /// The stable name.
     pub const fn code(self) -> &'static str {
         match self {
@@ -137,14 +146,10 @@ impl GrantDecision {
     /// # Errors
     /// [`GrantDecisionError::Unknown`] for any other text.
     pub fn parse(text: &str) -> Result<Self, GrantDecisionError> {
-        match text {
-            "holder" => Ok(Self::Holder),
-            "untouched" => Ok(Self::Untouched),
-            "in_review" => Ok(Self::InReview),
-            "idle" => Ok(Self::Idle),
-            "waited" => Ok(Self::Waited),
-            _ => Err(GrantDecisionError::Unknown),
-        }
+        Self::ALL
+            .into_iter()
+            .find(|decision| decision.code() == text)
+            .ok_or(GrantDecisionError::Unknown)
     }
 
     /// Whether dibs decided, rather than the holder.
@@ -597,6 +602,11 @@ mod tests {
             (GrantDecision::Idle, "idle"),
             (GrantDecision::Waited, "waited"),
         ];
+        assert_eq!(
+            GrantDecision::ALL.to_vec(),
+            every.map(|(decision, _)| decision).to_vec(),
+            "every decision is listed once"
+        );
         for (decision, code) in every {
             assert_eq!(decision.code(), code);
             assert_eq!(GrantDecision::parse(code), Ok(decision));

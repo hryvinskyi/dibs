@@ -12,7 +12,7 @@ use dibs_domain::escalation::{EscalationReason, EscalationSubject};
 use dibs_domain::event::EventKind;
 use dibs_domain::grant::GrantDecision;
 use dibs_domain::handle::Handle;
-use dibs_domain::hot_rule::{HotRuleRegistry, Note};
+use dibs_domain::hot_rule::{HotRuleRegistry, Note, Recipe};
 use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemStatus, Priority, SourceId, SourceStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
@@ -1133,6 +1133,10 @@ pub enum Verdict {
         rule: RuleKind,
         /// The rule's note.
         note: Option<Note>,
+        /// The command that regenerates the file, for a rule that names one; a server before
+        /// 0.1.11 names none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipe: Option<Recipe>,
         /// Other members' live claims that edited the same file.
         touched_by: Vec<Toucher>,
     },
@@ -1985,6 +1989,52 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_noted_verdict_reads_its_recipe_and_one_without_it() {
+        let noted = |more: serde_json::Value| -> Verdict {
+            let mut value = json!({
+                "verdict": "allowed_with_note", "rule": "regenerate", "note": "never merge it",
+                "touched_by": []
+            });
+            if let (Some(value), Some(more)) = (value.as_object_mut(), more.as_object()) {
+                value.extend(more.clone());
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let Verdict::AllowedWithNote { recipe, .. } = noted(json!({"recipe": "make gen"})) else {
+            panic!("not a noted verdict");
+        };
+        assert_eq!(recipe.as_ref().map(Recipe::as_str), Some("make gen"));
+        let Verdict::AllowedWithNote { recipe, note, .. } = noted(json!({})) else {
+            panic!("not a noted verdict");
+        };
+        assert_eq!(recipe, None, "a server before recipes names none");
+        assert_eq!(note.as_ref().map(Note::as_str), Some("never merge it"));
+    }
+
+    #[test]
+    fn a_verdict_with_a_field_this_client_does_not_know_still_reads() {
+        let verdict: PathVerdict = serde_json::from_value(json!({
+            "repo": "api", "path": "Cargo.lock", "verdict": "allowed_with_note",
+            "rule": "regenerate", "note": null, "recipe": "make lock",
+            "touched_by": [], "a_field_added_later": {"any": ["shape"]}
+        }))
+        .unwrap();
+        assert!(verdict.verdict.permits());
+        assert!(matches!(
+            verdict.verdict,
+            Verdict::AllowedWithNote {
+                recipe: Some(_),
+                ..
+            }
+        ));
+        let plain: Verdict = serde_json::from_value(json!({
+            "verdict": "allowed", "recipe": "make lock"
+        }))
+        .unwrap();
+        assert_eq!(plain, Verdict::Allowed);
     }
 
     #[test]

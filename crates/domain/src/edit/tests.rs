@@ -154,6 +154,7 @@ fn verdict_table() {
     let lock_note = || Verdict::AllowedWithNote {
         rule: kind("regenerate"),
         note: note("regenerate it; never merge by hand"),
+        recipe: None,
         touched_by: Vec::new(),
     };
     let cases = vec![
@@ -325,6 +326,7 @@ fn verdict_table() {
             verdict: Verdict::AllowedWithNote {
                 rule: kind("warn-shared"),
                 note: note("shared configuration"),
+                recipe: None,
                 touched_by: vec![Holder {
                     member: BOB,
                     item: ItemId(2),
@@ -1105,4 +1107,40 @@ fn my_wide_claim_naming_an_area_takes_the_edit_over_a_claim_that_only_gained_it(
         "the wide claim that names the area takes the edit, not the one that only gained it"
     );
     assert_eq!(edit.attribution(ItemId(12)), Some(Attribution::Area));
+}
+
+#[test]
+fn a_regenerated_file_comes_with_its_rules_recipe_and_a_shared_one_with_none() {
+    let settings = settings(
+        r#"{"hot":[{"paths":["**/*.lock"],"kind":"regenerate","note":"never merge it",
+                    "recipe":"cargo generate-lockfile"},
+                   {"paths":["config/**"],"kind":"warn-shared","note":"shared configuration"}]}"#,
+    );
+    let input = EditCheckInput {
+        me: ALICE,
+        claims: &[claim(1, ALICE, &[], 0), claim(2, BOB, &[], 0)],
+        grants: &[],
+        shared: &[shared(2, "default:config/app.yaml")],
+        settings: &settings,
+        now: at(1),
+    };
+    let check = edit_verdicts(
+        &[path("default:Cargo.lock"), path("default:config/app.yaml")],
+        &input,
+    )
+    .unwrap();
+    assert_eq!(
+        check.verdicts[0].verdict,
+        Verdict::AllowedWithNote {
+            rule: kind("regenerate"),
+            note: note("never merge it"),
+            recipe: Some(Recipe::parse("cargo generate-lockfile").unwrap()),
+            touched_by: Vec::new(),
+        }
+    );
+    let Verdict::AllowedWithNote { rule, recipe, .. } = &check.verdicts[1].verdict else {
+        panic!("{:?}", check.verdicts[1].verdict);
+    };
+    assert_eq!(rule, &kind("warn-shared"));
+    assert_eq!(recipe, &None);
 }

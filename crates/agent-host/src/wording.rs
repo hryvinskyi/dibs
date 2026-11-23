@@ -8,7 +8,7 @@ use time::{Duration, OffsetDateTime};
 
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
-use dibs_domain::hot_rule::Note;
+use dibs_domain::hot_rule::{Note, Recipe};
 use dibs_domain::ids::ItemId;
 use dibs_domain::item::ExternalRef;
 use dibs_domain::paths::RelPath;
@@ -270,8 +270,15 @@ pub fn refusal_named(id: &RefusalId) -> String {
     )
 }
 
-/// A hot-file rule's note on `path`.
-pub fn noted(path: &RelPath, rule: &str, note: Option<&Note>, touched_by: &[TouchedBy]) -> String {
+/// A hot-file rule's note on `path`, ending with the command that regenerates the file when the
+/// rule names one.
+pub fn noted(
+    path: &RelPath,
+    rule: &str,
+    note: Option<&Note>,
+    recipe: Option<&Recipe>,
+    touched_by: &[TouchedBy],
+) -> String {
     let mut text = format!("{path} falls under the {rule} rule");
     if let Some(note) = note {
         let _ = write!(text, ": {note}");
@@ -290,7 +297,16 @@ pub fn noted(path: &RelPath, rule: &str, note: Option<&Note>, touched_by: &[Touc
         let _ = write!(text, "; also edited by {}", others.join(", "));
     }
     text.push('.');
+    if let Some(recipe) = recipe {
+        text.push(' ');
+        text.push_str(&regenerate_with(recipe));
+    }
     text
+}
+
+/// The sentence that tells how to regenerate a file rather than edit or merge it by hand.
+pub fn regenerate_with(recipe: &Recipe) -> String {
+    format!("Regenerate it with `{recipe}` rather than editing or merging it by hand.")
 }
 
 /// The hold that stands in a command's way, as a refusal names it.
@@ -1990,6 +2006,7 @@ mod tests {
             &path,
             "warn-shared",
             None,
+            None,
             &[
                 TouchedBy {
                     holder: handle("alice"),
@@ -2006,6 +2023,25 @@ mod tests {
         assert_eq!(
             text,
             "Cargo.lock falls under the warn-shared rule; also edited by alice (item gh:acme/web#12), carol (item 4)."
+        );
+    }
+
+    #[test]
+    fn a_note_ends_with_the_recipe_its_rule_names() {
+        let path = RelPath::parse("Cargo.lock").unwrap();
+        let note = Note::parse("never merge it").unwrap();
+        let recipe = Recipe::parse("cargo generate-lockfile").unwrap();
+        assert_eq!(
+            noted(&path, "regenerate", Some(&note), Some(&recipe), &[]),
+            "Cargo.lock falls under the regenerate rule: never merge it. Regenerate it with `cargo generate-lockfile` rather than editing or merging it by hand."
+        );
+        assert_eq!(
+            noted(&path, "regenerate", None, Some(&recipe), &[]),
+            "Cargo.lock falls under the regenerate rule. Regenerate it with `cargo generate-lockfile` rather than editing or merging it by hand."
+        );
+        assert_eq!(
+            noted(&path, "regenerate", Some(&note), None, &[]),
+            "Cargo.lock falls under the regenerate rule: never merge it."
         );
     }
 

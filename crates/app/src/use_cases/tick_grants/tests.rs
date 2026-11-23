@@ -222,13 +222,15 @@ async fn held() -> (Env, ItemId, ItemId) {
     (env, alices, bobs)
 }
 
-/// Checks the one grant dibs gave on alice's behalf to bob for `bobs`, that both read why in the
-/// request's conversation, and that bob is told in his claim's.
+/// Checks the one grant dibs gave on alice's behalf to bob for `bobs`, recorded with `asked_at`,
+/// when bob asked for it; that both read why in the request's conversation, and that bob is told
+/// in his claim's.
 async fn granted_on_alices_behalf(
     env: &Env,
     bobs: ItemId,
     thread: ThreadId,
     because: GrantDecision,
+    asked_at: OffsetDateTime,
 ) -> GrantRecord {
     let stored = grants(env).await;
     let [grant] = &stored[..] else {
@@ -250,8 +252,9 @@ async fn granted_on_alices_behalf(
                 from: env.alice.actor.member,
                 to: env.bob.actor.member,
                 decided: because,
+                asked_at: Some(asked_at),
             })),
-        "granted records who decided"
+        "granted records who decided and when the request was asked"
     );
     let why = because.why().unwrap();
     for who in [&env.alice, &env.bob] {
@@ -308,7 +311,9 @@ async fn a_request_to_a_claim_in_review_is_granted_at_once() {
     let given = given_at_once(ask(&env, &env.bob, bobs).await);
 
     assert_eq!(given.decided, GrantDecision::InReview);
-    let grant = granted_on_alices_behalf(&env, bobs, given.thread, GrantDecision::InReview).await;
+    let grant =
+        granted_on_alices_behalf(&env, bobs, given.thread, GrantDecision::InReview, env.now())
+            .await;
     assert_eq!(given.grant, grant.id);
 }
 
@@ -325,7 +330,7 @@ async fn a_request_for_an_area_idle_on_the_holders_claim_is_granted_at_once() {
     let given = given_at_once(ask(&env, &env.bob, bobs).await);
 
     assert_eq!(given.decided, GrantDecision::Idle);
-    granted_on_alices_behalf(&env, bobs, given.thread, GrantDecision::Idle).await;
+    granted_on_alices_behalf(&env, bobs, given.thread, GrantDecision::Idle, env.now()).await;
 }
 
 #[tokio::test]
@@ -343,7 +348,14 @@ async fn a_request_for_an_area_the_holders_branch_does_not_touch_is_granted_at_o
     let given = given_at_once(ask(&env, &env.bob, bobs).await);
 
     assert_eq!(given.decided, GrantDecision::Untouched);
-    granted_on_alices_behalf(&env, bobs, given.thread, GrantDecision::Untouched).await;
+    granted_on_alices_behalf(
+        &env,
+        bobs,
+        given.thread,
+        GrantDecision::Untouched,
+        env.now(),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -358,6 +370,7 @@ async fn a_request_for_an_area_the_holders_branch_touches_waits_then_the_sweep_g
     )
     .await;
     let thread = waiting(ask(&env, &env.bob, bobs).await);
+    let asked_at = env.now();
     assert!(grants(&env).await.is_empty());
 
     env.advance(Duration::minutes(10) - Duration::seconds(1));
@@ -371,7 +384,7 @@ async fn a_request_for_an_area_the_holders_branch_touches_waits_then_the_sweep_g
     let swept = sweep(&env).await;
 
     assert_eq!((swept.granted, swept.settled), (1, 0));
-    granted_on_alices_behalf(&env, bobs, thread, GrantDecision::Waited).await;
+    granted_on_alices_behalf(&env, bobs, thread, GrantDecision::Waited, asked_at).await;
     let after = env.events().await.len();
     assert_eq!(sweep(&env).await.granted, 0);
     assert_eq!(env.events().await.len(), after);
@@ -381,10 +394,11 @@ async fn a_request_for_an_area_the_holders_branch_touches_waits_then_the_sweep_g
 async fn a_request_with_no_footprint_of_the_holders_claim_waits_for_the_delay() {
     let (env, _, bobs) = held().await;
     let thread = waiting(ask(&env, &env.bob, bobs).await);
+    let asked_at = env.now();
     env.advance(Duration::minutes(10));
 
     assert_eq!(sweep(&env).await.granted, 1);
-    granted_on_alices_behalf(&env, bobs, thread, GrantDecision::Waited).await;
+    granted_on_alices_behalf(&env, bobs, thread, GrantDecision::Waited, asked_at).await;
 }
 
 #[tokio::test]
@@ -404,6 +418,7 @@ async fn a_lapsed_request_is_not_granted() {
 async fn a_request_the_holder_answered_is_still_granted_once_the_delay_has_passed() {
     let (env, _, bobs) = held().await;
     let thread = waiting(ask(&env, &env.bob, bobs).await);
+    let asked_at = env.now();
     PostMessage::new(&env.deps)
         .execute(
             &env.alice.actor,
@@ -429,7 +444,7 @@ async fn a_request_the_holder_answered_is_still_granted_once_the_delay_has_passe
     env.advance(Duration::minutes(10));
 
     assert_eq!(sweep(&env).await.granted, 1);
-    granted_on_alices_behalf(&env, bobs, thread, GrantDecision::Waited).await;
+    granted_on_alices_behalf(&env, bobs, thread, GrantDecision::Waited, asked_at).await;
 }
 
 #[tokio::test]

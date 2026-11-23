@@ -26,8 +26,9 @@ members `alice` and `bob`.
   `GET /v1/me` serves it the settings
   without the protected refs and the frozen refs that are patterns (the branches named exactly stay), and the slots in
   the answers of `GET /v1/status` and the slot routes without the frozen refs that are patterns. A `dibs` client older
-  than 0.1.11 cannot read `release_after`, `idle_area_after`, `free_areas_at` or `grant_after`, so `GET /v1/me` serves
-  it the settings without them. Every other caller gets them whole.
+  than 0.1.11 cannot read `release_after`, `idle_area_after`, `free_areas_at`, `grant_after` or a hot-file rule's
+  `recipe`, so `GET /v1/me` serves it the settings without them (the hot-file rules stay, without their recipes). Every
+  other caller gets them whole.
 - **Retries.** The `dibs` command line, run by a person, gives each sending of a request 5 seconds to connect and 20
   seconds in all, so a request sent once more may take up to 40 seconds. It sends once more: a read (`GET`) whose connection timed out opening or was reset; and, only when its connection timed
 out opening so that nothing reached the server, registering a session, applying the settings, acknowledging a message,
@@ -1049,7 +1050,7 @@ branch. A malformed `worktree` is `invalid_request` naming it. Answers a verdict
 | `verdict` | Meaning | Extra fields |
 |---|---|---|
 | `allowed` | The caller may edit. | |
-| `allowed_with_note` | The caller may edit; a hot-file rule has something to say. | `rule`, `note`, `touched_by: [{ holder, item, item_ref }]` |
+| `allowed_with_note` | The caller may edit; a hot-file rule has something to say. | `rule`, `note`, `recipe` (for a `regenerate` rule that names one, the command that regenerates the file; absent otherwise), `touched_by: [{ holder, item, item_ref }]` |
 | `needs_claim` | The path is governed, the policy requires a claim, and the caller holds none that covers it. | |
 | `held_by` | Another member's live claim holds the path's area. | `holder`, `item`, `item_ref` (its reference, or `null`), `area`, `reason`, the first that applies: `in_review` (the holder's claim is in review; `prs` lists its pull requests, and the area is free when they merge), `awaiting_ack` (the caller's live wide claim names the area and the holder has not acknowledged its announcement yet), `awaiting_handover` (the caller's live claim waits for the holder's debt claim to hand the area over; `escalates_at` says when the request goes to the arbiters if the area is not handed over by then, absent before the holder was asked and once it was escalated), `ask_holder` with `waiting: { holder, item, item_ref }` (another member's claim already waits for the holder to hand the area over), `ask_handover` (the holder's claim is debt work and the caller's live feature claim did not declare the area: declaring it on the claim `claim` names, `dibs claim <claim> --area <area>`, asks for it), or `ask_holder` (ask them for a grant with `POST /v1/grant-requests`, or message them) |
 | `granted` | The holder granted the caller edits in the area, by a grant or by acknowledging the caller's wide claim's announcement. | `by`, `area` |
@@ -1524,7 +1525,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `areas_returned` | `item`, `member`, `areas` (what the live claim holds no more; the server's sweep gave them back after the project's `idle_area_after` with no sign of the claim's work in them) |
 | `areas_handed_on` | `item`, `member`, `areas` (what the claim held or waited for and gave up), `state` (the tracker state, one of the project's `free_areas_at`, an import moved the claim's item into; the claim keeps the item) |
 | `reserved` | `item`, `member`, `areas`, `paths` |
-| `granted` | `grant`, `item`, `area`, `from` (the holder whose grant it is), `to`, `decided` (`holder`, or why dibs gave it on the holder's behalf: `untouched`, `in_review`, `idle`, `waited`; absent from an event stored before, which was the holder's) |
+| `granted` | `grant`, `item`, `area`, `from` (the holder whose grant it is), `to`, `decided` (`holder`, or why dibs gave it on the holder's behalf: `untouched`, `in_review`, `idle`, `waited`; absent from an event stored before, which was the holder's), `asked_at` (RFC 3339: when the request the grant answers was asked; for a grant that settles several requests, whoever decided it, the oldest. Absent for a grant no request asked for, and from an event stored before) |
 | `grant_revoked` | `grant`, `item`, `area`, `from`, `to`, `cause` (`revoked`, `grantor_left`, `grantee_left`), `by` (the member who revoked it, the grantor or an admin; `null` unless the cause is `revoked`, and for a revoke stored before 0.1.11) |
 | `thread_started` | `thread`, `author` (`null` for dibs), `item` |
 | `message_posted` | `thread`, `message`, `author` (`null` for dibs) |
@@ -1546,6 +1547,7 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `branch_recorded` | `item`, `member`, `repo`, `branch` (the branch the claim's work is on there now), `source` (`pull_request`, `worktree`, `named` or `checkout`; `checkout` for an event stored before sources were kept) |
 | `footprint_changed` | `item`, `member`, `repo`, `branch`, `paths` (how many), `truncated` |
 | `overlap_found` | `kind` (`same_file`, `contract`, `main_moved`), `items`, `pr` (`main_moved`; else `null`), `paths` (the first 100) |
+| `overlap_ordered` | `kind` (`same_file`, `contract`), `items`, `first` (the item that lands first; `null` for a tie), `rule` (`in_review`, `priority`, `older`, `tied`), `changed` (`true` when it replaced an earlier order). Appended when a collision is found with its order, and when the sweep stores an order in which a different claim lands first, or the order became or stopped being a tie; a change of the reason alone appends none |
 | `yield_requested` | `area`, `from` (the debt claim's item), `to` (the item of the feature claim that waits for it) |
 | `area_handed_over` | `area`, `from` (the debt claim's item), `to` (the item of the feature claim that holds it now) |
 | `claim_narrowed` | `item`, `member`, `areas` (what the claim no longer holds or waits for) |
@@ -1626,12 +1628,16 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 
 A path glob is matched against a path relative to the repository root: `*` and `?` never cross a `/`, `**` as a whole
 segment crosses any number of them, `[…]` and `{a,b}` work as in shells, and matching is case-sensitive. The first area
-in declaration order that contains a path governs it. A hot-file rule has `paths`, a `kind` and optionally a `note` (1 to
-500 characters):
+in declaration order that contains a path governs it. A hot-file rule has `paths`, a `kind`, optionally a `note` (1 to
+500 characters) and, for a `regenerate` rule only, optionally a `recipe`: the command that regenerates its files
+(`cargo generate-lockfile`), one line of 1 to 200 characters, trimmed, with no control character, backtick, line separator or
+default-ignorable code point (a bidirectional control, a zero-width character, a variation selector). dibs never runs a
+recipe; it shows it with the note in the edit check's verdict. A rule of another kind that names a recipe is refused
+(`invalid_settings`).
 
 | `kind` | Effect on a matching path |
 |---|---|
-| `regenerate` | A generated file anyone may change and nobody merges by hand: always allowed, with the note. It never makes a `same_file` overlap or a moved base (`main_moved`). |
+| `regenerate` | A generated file anyone may change and nobody merges by hand: always allowed, with the note and the recipe. It never makes a `same_file` overlap or a moved base (`main_moved`). |
 | `owner` | Only the holder of the `area` it names (an area of the same repository) edits it. |
 | `warn-shared` | Anyone may edit; the verdict names the other members' live claims that edited the same file. |
 | `free` | Anyone may edit, with nothing said. |
@@ -1842,12 +1848,22 @@ review records, or one of a repository the project does not list, records nothin
 it appended `pr_state_reported`, whatever the head did. Refusals: `invalid_request` for a missing or malformed `pr`, a
 missing `mergeable` or a malformed `head`.
 
+A report that appends `pr_state_reported` for a pull request that does not merge cleanly tells the holder of the claim
+that records it, in the claim's conversation, at `high`: merge the base into the pull request's branch or rebase it
+onto the base, resolve the conflicts and push, or merge it by hand; until then it cannot be merged. The message lists
+the `recipe` of every `regenerate` rule of the pull request's repository that names one (the first 20, then how many
+more), since those files are taken from the base and regenerated rather than merged by hand; while the project's
+stored settings do not parse, it lists none. Since the event is appended only when the state changes, each report of a
+conflict is told once. A pull request that merges cleanly again, or that no claim records, tells nobody. A claim that records a
+pull request whose last report said it does not merge cleanly (`POST /v1/items/{id}/review`, a pull request new to the
+claim, again when it is recorded anew after being dropped) tells its holder the same at once.
+
 `GET /v1/stats?from=2026-03-02&to=2026-03-08` (admin): the figures of the days from `from` to `to`, both included, at
 most 92; `to` is today (UTC) when absent, `from` six days before `to`. Answers
 
 ```json
 { "from": "2026-03-02", "to": "2026-03-08", "truncated": false,
-  "claims": 14, "takeovers": 1, "stalls": 0, "escalations": 1,
+  "claims": 14, "takeovers": 1, "stalls": 0, "escalations": 1, "escalations_by_dibs": 1,
   "slot_waits": { "count": 3, "median_seconds": 240, "max_seconds": 900 },
   "reported": { "held_by": 4, "needs_claim": 1, "needs_slot": 2, "frozen": 0, "needs_permission": 0,
                 "unreachable": 0, "push_needs_permission": 1, "push_frozen": 0, "switched_off": 0 },
@@ -1859,7 +1875,17 @@ most 92; `to` is today (UTC) when absent, `from` six days before `to`. Answers
   "feedback": { "false_refusals": 1, "conflicts": 1,
                 "entries": [ { "at": "2026-03-03T10:00:00Z", "member": "bob", "kind": "false_refusal",
                                "refusal": "r-7f3a51", "tally": "held_by", "reason": "…" } ] },
-  "conflicting_prs": { "reports": 2, "prs": ["acme/widgets#7"] } }
+  "conflicting_prs": { "reports": 2, "prs": ["acme/widgets#7"] },
+  "conflicts_resolved": { "count": 1, "median_seconds": 5400, "max_seconds": 5400 },
+  "grants": { "by": { "holder": 3, "untouched": 1, "in_review": 2, "idle": 0, "waited": 1 },
+              "acknowledged": { "holder": 1, "untouched": 0, "in_review": 0, "idle": 1, "waited": 0 },
+              "revoked": 1,
+              "waits": { "holder": { "count": 2, "median_seconds": 420, "max_seconds": 600 },
+                         "untouched": { "count": 1, "median_seconds": 0, "max_seconds": 0 },
+                         "in_review": { "count": 2, "median_seconds": 0, "max_seconds": 0 },
+                         "idle": { "count": 0, "median_seconds": null, "max_seconds": null },
+                         "waited": { "count": 1, "median_seconds": 600, "max_seconds": 600 } } },
+  "orders": { "by": { "in_review": 2, "priority": 0, "older": 3, "tied": 1 }, "changed": 2 } }
 ```
 
 | Field | What it is |
@@ -1867,6 +1893,7 @@ most 92; `to` is today (UTC) when absent, `from` six days before `to`. Answers
 | `claims`, `takeovers` | `claimed` and `taken_over` events of the range |
 | `stalls` | `slot_stalled` events: holds whose run stopped sending heartbeats |
 | `escalations` | `escalated` events |
+| `escalations_by_dibs` | those of them dibs raised on its own, nobody having asked (`by_dibs`) |
 | `slot_waits` | from a member joining a slot's queue (`slot_queued`) to their taking it (`slot_taken`, or a takeover of a stalled hold), for waits that end in the range and began in it; a wait given up counts nothing; seconds, `null` with no wait |
 | `reported` | every kind of the table above, the reports of every member and machine of the range's days added up, `0` for a kind that did not happen |
 | `reported_days` | the same per member and day, every machine of theirs added up; only the kinds that happened |
@@ -1874,6 +1901,13 @@ most 92; `to` is today (UTC) when absent, `from` six days before `to`. Answers
 | `hook_durations_by_member` | the same per member |
 | `feedback` | `false_refusals` and `conflicts` counted, and the entries, newest first, at most 500 |
 | `conflicting_prs` | how often an integration reported a pull request as not merging cleanly, and which |
+| `conflicts_resolved` | from an integration's report that a pull request does not merge cleanly to its next report that it does (`pr_state_reported`), for conflicts that end in the range and began in it; a conflict still open at the range's end counts nothing; seconds, `null` with none |
+| `grants.by` | `granted` events by `decided`, every decision named, `0` for one that did not happen |
+| `grants.acknowledged` | wide claims' announcements acknowledged (`wide_granted_by_ack`), by `decided` likewise |
+| `grants.revoked` | `grant_revoked` events whose `cause` is `revoked`: by the grantor or an admin, not a grant that ended with a claim |
+| `grants.waits` | per decision, from the oldest request a grant answered (its `asked_at`) to the grant; a grant dibs gives at the ask waits 0 seconds unless it also settles an earlier request. Only grants whose oldest answered request was asked inside the range count, as for `slot_waits`, and only those recorded from 0.1.11 on, which record when they were asked; seconds, `null` with no wait |
+| `orders.by` | `overlap_ordered` events by the rule that decided which colliding claim lands first (`in_review`, `priority`, `older`), or `tied`, every one named; only orders stored from 0.1.11 on |
+| `orders.changed` | those of them that replaced an order stored before for the same collision |
 | `truncated` | `true` when the range held more than 100 000 of the events read, of which the first were |
 
 Refusals: `invalid_request` naming `from` or `to` for a day that is not `YYYY-MM-DD`, or `to` for a range that ends

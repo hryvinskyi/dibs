@@ -1,17 +1,21 @@
 //! The sweep of the overlaps' orders over the in-memory store: a claim entering review or a
-//! priority changing moves which claim lands first, and both holders are told; a change to a tie
-//! goes to the arbiters; an order that holds writes nothing; and an overlap stored before orders
-//! were is told its first order once.
+//! priority changing moves which claim lands first, both holders are told, and the new order is
+//! recorded as a change; a change to a tie goes to the arbiters; a change of the reason alone and
+//! an order that holds write nothing; and an overlap stored before orders were is told its first
+//! order once, recorded as a first order.
 
 use time::Duration;
 
 use dibs_domain::escalation::EscalationSubject;
+use dibs_domain::event::{EventKind, OverlapOrdered};
 use dibs_domain::ids::{ItemId, ThreadId};
 use dibs_domain::item::Priority;
 use dibs_domain::member::Role;
 use dibs_domain::message::Importance;
 use dibs_domain::paths::RelPath;
-use dibs_domain::radar::{BranchName, CommitSha, FootprintBase, OrderRule, Overlap, OverlapOrder};
+use dibs_domain::radar::{
+    BranchName, CommitSha, FootprintBase, OrderRule, Overlap, OverlapKind, OverlapOrder,
+};
 use dibs_domain::review::PrRef;
 
 use super::*;
@@ -150,6 +154,28 @@ async fn told(env: &Env, who: &Person) -> Vec<(String, Importance)> {
     told
 }
 
+/// Every order the project's log records, oldest first.
+async fn recorded_orders(env: &Env) -> Vec<OverlapOrdered> {
+    env.events()
+        .await
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::OverlapOrdered(ordered) => Some(ordered),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The order of the same-file collision between `alices` and `bobs`, as its record carries it.
+fn order_of(alices: ItemId, bobs: ItemId, order: OverlapOrder, changed: bool) -> OverlapOrdered {
+    OverlapOrdered {
+        kind: OverlapKind::SameFile,
+        items: [alices, bobs].into(),
+        order,
+        changed,
+    }
+}
+
 async fn tick(env: &Env) -> OverlapSweep {
     let swept = TickOverlaps::new(&env.deps).execute().await.unwrap();
     assert!(swept.failed.is_empty(), "{:?}", swept.failed);
@@ -203,6 +229,30 @@ async fn a_claim_entering_review_takes_the_lead_and_both_holders_are_told_the_or
         }),
         "the stored order follows the claims"
     );
+    assert_eq!(
+        recorded_orders(&env).await,
+        [
+            order_of(
+                alices,
+                bobs,
+                OverlapOrder::First {
+                    item: alices,
+                    because: OrderRule::Older
+                },
+                false
+            ),
+            order_of(
+                alices,
+                bobs,
+                OverlapOrder::First {
+                    item: bobs,
+                    because: OrderRule::InReview
+                },
+                true
+            ),
+        ],
+        "the first order when found, then the change of who lands first"
+    );
     let bobs = told(&env, &env.bob).await;
     assert_eq!(bobs.len(), 2, "{bobs:?}");
     assert_eq!(
@@ -243,6 +293,8 @@ async fn a_change_of_reason_alone_is_stored_and_told_to_nobody() {
     let alice_told = told(&env, &env.alice).await;
     let bob_told = told(&env, &env.bob).await;
     let events = env.events().await.len();
+    let orders = recorded_orders(&env).await;
+    assert_eq!(orders.len(), 1, "the order found: {orders:?}");
 
     let swept = tick(&env).await;
     assert_eq!(swept.reordered, 1, "the stored order changed");
@@ -265,6 +317,11 @@ async fn a_change_of_reason_alone_is_stored_and_told_to_nobody() {
         "bob still lands second"
     );
     assert_eq!(env.events().await.len(), events, "no message is posted");
+    assert_eq!(
+        recorded_orders(&env).await,
+        orders,
+        "a new reason alone is not recorded"
+    );
 }
 
 #[tokio::test]
@@ -300,8 +357,16 @@ async fn a_change_to_a_tie_goes_to_the_arbiters_once() {
         "The order changed: the order rule cannot decide whether yours or work item gh:acme/widgets#2 lands first: both are at work, their work items have the same priority and their claims were made at the same time. dibs asked the project's arbiters."
     );
 
+    assert_eq!(
+        recorded_orders(&env).await.pop(),
+        Some(order_of(alices, bobs, OverlapOrder::Tied, true)),
+        "a tie is recorded with no item first"
+    );
+
+    let orders = recorded_orders(&env).await.len();
     assert_eq!(tick(&env).await.reordered, 0, "a tie that holds is left");
     assert_eq!(standing_escalations(&env).await.len(), 1);
+    assert_eq!(recorded_orders(&env).await.len(), orders);
 }
 
 #[tokio::test]
@@ -331,6 +396,7 @@ async fn an_overlap_stored_without_an_order_is_told_its_first_order_once() {
         tx.commit().await.unwrap();
     }
     assert_eq!(overlaps(&env).await[0].order(), None);
+    let orders = recorded_orders(&env).await.len();
 
     assert_eq!(tick(&env).await.reordered, 1);
     assert_eq!(
@@ -358,6 +424,21 @@ async fn an_overlap_stored_without_an_order_is_told_its_first_order_once() {
         "{bob_told:?}"
     );
     assert!(!bob_told[1].0.contains("The order changed"), "{bob_told:?}");
+    let recorded = recorded_orders(&env).await;
+    assert_eq!(recorded.len(), orders + 1, "{recorded:?}");
+    assert_eq!(
+        recorded
+            .last()
+            .map(|ordered| (ordered.order, ordered.changed)),
+        Some((
+            OverlapOrder::First {
+                item: alices,
+                because: OrderRule::Older
+            },
+            false
+        )),
+        "recorded as a first order, not as a change"
+    );
 
     let events = env.events().await.len();
     assert_eq!(tick(&env).await.reordered, 0);

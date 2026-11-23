@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 
-use crate::event::{Event, EventKind, FeedbackGiven, PrStateReported};
+use crate::event::{Event, EventKind, FeedbackGiven, GrantEnd, Granted, PrStateReported};
+use crate::grant::GrantDecision;
 use crate::ids::MemberId;
 use crate::report::{DurationBuckets, Feedback, FeedbackReason, HookEventName, HookReport};
 use crate::report::{ReportDay, Tally};
@@ -86,14 +87,15 @@ impl StatsRange {
     }
 }
 
-/// How long members waited in slot queues: from joining a queue to taking the slot they asked for.
+/// How long something waited, over the waits that ended: how many, the median and the longest.
+/// The median of an even count is the mean of the two middle waits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SlotWaits {
-    /// How many waits ended with the slot taken.
+pub struct Waits {
+    /// How many waits ended.
     pub count: u64,
-    /// The median wait.
+    /// The median wait; `None` with no wait.
     pub median: Option<Duration>,
-    /// The longest wait.
+    /// The longest wait; `None` with no wait.
     pub max: Option<Duration>,
 }
 
@@ -158,8 +160,26 @@ pub struct PilotStats {
     pub stalls: u64,
     /// Disputes sent to the arbiters.
     pub escalations: u64,
-    /// Waits in slot queues.
-    pub slot_waits: SlotWaits,
+    /// The disputes among them that dibs raised on its own, nobody having asked.
+    pub escalations_by_dibs: u64,
+    /// Waits in slot queues: from joining a queue to taking the slot asked for.
+    pub slot_waits: Waits,
+    /// Grants given, by who decided; a decision that never happened is not a key.
+    pub grants: BTreeMap<GrantDecision, u64>,
+    /// Wide claims' announcements acknowledged, by who decided; a decision that never happened is
+    /// not a key.
+    pub acknowledgements: BTreeMap<GrantDecision, u64>,
+    /// Grants their grantor or an admin revoked; a grant that ended with a claim is not counted.
+    pub revoked: u64,
+    /// How long requests waited for the grant that answered them, from the request to the grant, by
+    /// who decided. Only a grant that records when it was asked, and whose oldest answered request
+    /// was asked inside the range, is counted; a decision with no such grant is not a key.
+    pub grant_waits: BTreeMap<GrantDecision, Waits>,
+    /// The orders stored for colliding claims, by the code of the rule that decided, or `tied`; a
+    /// code that never decided is not a key.
+    pub orders: BTreeMap<&'static str, u64>,
+    /// The orders among them that replaced one stored before for the same collision.
+    pub orders_changed: u64,
     /// The reported counts of every member and day added up.
     pub reported: BTreeMap<Tally, u64>,
     /// The reported counts per member and day, ordered by member and day.
@@ -178,6 +198,10 @@ pub struct PilotStats {
     pub conflicting_reports: u64,
     /// The pull requests reported so.
     pub conflicting_prs: BTreeSet<PrRef>,
+    /// How long conflicts of pull requests lasted: from a report that one does not merge cleanly to
+    /// the next report that it does. A conflict reported before the range, or not over by its end,
+    /// is not counted.
+    pub conflicts_resolved: Waits,
 }
 
 /// A slot wait under way: who waits for which slot.
@@ -188,7 +212,7 @@ impl PilotStats {
     pub const MAX_FEEDBACK: usize = 500;
 
     /// The names of the event kinds the figures read; the others change nothing.
-    pub const EVENT_NAMES: [&'static str; 12] = [
+    pub const EVENT_NAMES: [&'static str; 16] = [
         "claimed",
         "taken_over",
         "slot_stalled",
@@ -201,6 +225,10 @@ impl PilotStats {
         "feedback_given",
         "pr_state_reported",
         "slot_stall_taken_over",
+        "granted",
+        "wide_granted_by_ack",
+        "grant_revoked",
+        "overlap_ordered",
     ];
 
     /// The figures of `events` that fall in `range`, oldest first, and of the `reports` of its
@@ -213,14 +241,18 @@ impl PilotStats {
 }
 
 /// The figures of a range read a page of events at a time, oldest first, so a long range is never
-/// held whole: what stays between pages is the figures, the waits under way and the feedback kept.
-/// A wait counts when it ends in the range; one that began before it is not counted.
+/// held whole: what stays between pages is the figures, the waits and conflicts under way, the
+/// waits that ended and the feedback kept. A slot wait or a conflict counts when it ends in the
+/// range; one that began before it is not counted.
 #[derive(Debug)]
 pub struct StatsReading {
     range: StatsRange,
     stats: PilotStats,
     waiting: BTreeMap<WaitKey, OffsetDateTime>,
     waits: Vec<Duration>,
+    grant_waits: BTreeMap<GrantDecision, Vec<Duration>>,
+    conflicting: BTreeMap<PrRef, OffsetDateTime>,
+    resolved: Vec<Duration>,
     feedback: VecDeque<FeedbackEntry>,
 }
 
@@ -232,6 +264,9 @@ impl StatsReading {
             stats: PilotStats::default(),
             waiting: BTreeMap::new(),
             waits: Vec::new(),
+            grant_waits: BTreeMap::new(),
+            conflicting: BTreeMap::new(),
+            resolved: Vec::new(),
             feedback: VecDeque::new(),
         }
     }
@@ -246,7 +281,13 @@ impl StatsReading {
 
     /// The figures, with the `reports` of the range's days.
     pub fn finish(mut self, reports: &[HookReport]) -> PilotStats {
-        self.stats.slot_waits = slot_waits(self.waits);
+        self.stats.slot_waits = waits_of(self.waits);
+        self.stats.grant_waits = self
+            .grant_waits
+            .into_iter()
+            .map(|(decided, waits)| (decided, waits_of(waits)))
+            .collect();
+        self.stats.conflicts_resolved = waits_of(self.resolved);
         self.stats.feedback = self.feedback.into_iter().rev().collect();
         self.stats.read_reports(&self.range, reports);
         self.stats
@@ -260,7 +301,12 @@ impl StatsReading {
             EventKind::Claimed(_) => stats.claims += 1,
             EventKind::TakenOver(_) => stats.takeovers += 1,
             EventKind::SlotStalled(_) => stats.stalls += 1,
-            EventKind::Escalated(_) => stats.escalations += 1,
+            EventKind::Escalated(escalated) => {
+                stats.escalations += 1;
+                if escalated.by_dibs {
+                    stats.escalations_by_dibs += 1;
+                }
+            }
             EventKind::SlotQueued(queued) => {
                 waiting
                     .entry((queued.member, queued.slot.clone()))
@@ -282,8 +328,26 @@ impl StatsReading {
             EventKind::SlotForceReleased(forced) => {
                 waiting.remove(&(forced.member, forced.slot.clone()));
             }
+            EventKind::Granted(granted) => self.granted(event.at, granted),
+            EventKind::WideGrantedByAck(acknowledged) => {
+                *stats
+                    .acknowledgements
+                    .entry(acknowledged.decided)
+                    .or_default() += 1;
+            }
+            EventKind::GrantRevoked(ended) => {
+                if ended.cause == GrantEnd::Revoked {
+                    stats.revoked += 1;
+                }
+            }
+            EventKind::OverlapOrdered(ordered) => {
+                *stats.orders.entry(ordered.order.code()).or_default() += 1;
+                if ordered.changed {
+                    stats.orders_changed += 1;
+                }
+            }
             EventKind::FeedbackGiven(given) => self.feedback_given(event.at, given),
-            EventKind::PrStateReported(reported) => self.pr_reported(reported),
+            EventKind::PrStateReported(reported) => self.pr_reported(event.at, reported),
             _ => {}
         }
     }
@@ -304,11 +368,33 @@ impl StatsReading {
         }
     }
 
-    fn pr_reported(&mut self, reported: &PrStateReported) {
-        if !reported.mergeable {
-            self.stats.conflicting_reports += 1;
-            self.stats.conflicting_prs.insert(reported.pr.clone());
+    /// A grant counts under its decision; it is timed from the oldest request it answered only when
+    /// that request was asked inside the range, as a slot wait or a conflict is.
+    fn granted(&mut self, at: OffsetDateTime, granted: &Granted) {
+        *self.stats.grants.entry(granted.decided).or_default() += 1;
+        let began_in_range = granted
+            .asked_at
+            .filter(|asked_at| *asked_at >= self.range.starts_at());
+        if let Some(asked_at) = began_in_range {
+            self.grant_waits
+                .entry(granted.decided)
+                .or_default()
+                .push(at - asked_at);
         }
+    }
+
+    /// A report that a pull request does not merge cleanly starts its conflict, unless one is under
+    /// way already; the next report that it does ends it.
+    fn pr_reported(&mut self, at: OffsetDateTime, reported: &PrStateReported) {
+        if reported.mergeable {
+            if let Some(since) = self.conflicting.remove(&reported.pr) {
+                self.resolved.push(at - since);
+            }
+            return;
+        }
+        self.stats.conflicting_reports += 1;
+        self.stats.conflicting_prs.insert(reported.pr.clone());
+        self.conflicting.entry(reported.pr.clone()).or_insert(at);
     }
 }
 
@@ -371,7 +457,7 @@ fn add(total: &mut u64, more: u64) {
 }
 
 /// The count, median and longest of the waits.
-fn slot_waits(mut waits: Vec<Duration>) -> SlotWaits {
+fn waits_of(mut waits: Vec<Duration>) -> Waits {
     waits.sort();
     let count = u64::try_from(waits.len()).unwrap_or(u64::MAX);
     let median = match waits.len() {
@@ -382,9 +468,12 @@ fn slot_waits(mut waits: Vec<Duration>) -> SlotWaits {
             _ => None,
         },
     };
-    SlotWaits {
+    Waits {
         count,
         median,
         max: waits.last().copied(),
     }
 }
+
+#[cfg(test)]
+mod tests;

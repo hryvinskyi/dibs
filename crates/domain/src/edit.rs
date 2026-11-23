@@ -8,7 +8,7 @@ use time::{Duration, OffsetDateTime};
 use crate::area::QualifiedArea;
 use crate::claim::{AreaOrigin, Claim, Holder, held_by_other, target_claim};
 use crate::grant::Grant;
-use crate::hot_rule::{HotContext, HotDecision, HotRuleKind, Note};
+use crate::hot_rule::{HotContext, HotDecision, HotRuleKind, Note, Recipe};
 use crate::ids::{ItemId, MemberId};
 use crate::paths::RepoPath;
 use crate::repo::RepoId;
@@ -31,6 +31,8 @@ pub enum Verdict {
         rule: HotRuleKind,
         /// The rule's note.
         note: Option<Note>,
+        /// The command that regenerates the file, for a rule that names one.
+        recipe: Option<Recipe>,
         /// Other members' live claims that edited the same file, for rules that track it.
         touched_by: Vec<Holder>,
     },

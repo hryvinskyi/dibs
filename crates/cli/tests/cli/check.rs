@@ -270,3 +270,40 @@ fn a_configuration_copied_into_another_clone_is_refused() {
     assert_eq!(status(&out), 2);
     assert!(text(&out.stderr).contains("names no repo"));
 }
+
+#[test]
+fn a_regenerated_file_is_allowed_with_the_command_that_regenerates_it() {
+    let setup = Setup::new();
+    let mut settings = dibs_test_server::two_repositories();
+    settings["repos"][0]["hot"] = serde_json::json!([
+        {"paths": ["**/*.lock"], "kind": "regenerate", "note": "never merge it",
+         "recipe": "cargo generate-lockfile"}
+    ]);
+    setup.server.settings(&setup.alice, settings).unwrap();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    alice_holds_billing(&setup, &api);
+
+    let out = setup
+        .dibs(&setup.alice, &api)
+        .args(["check", "Cargo.lock", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&out), 0, "{}", text(&out.stderr));
+    let verdict = &json(&out)["verdicts"][0];
+    assert_eq!(verdict["verdict"], "allowed_with_note");
+    assert_eq!(verdict["recipe"], "cargo generate-lockfile");
+
+    let said = setup
+        .dibs(&setup.alice, &api)
+        .args(["check", "Cargo.lock"])
+        .output()
+        .unwrap();
+    assert_eq!(status(&said), 0, "{}", text(&said.stderr));
+    assert!(
+        text(&said.stdout).contains(
+            "Cargo.lock: allowed under the regenerate rule: never merge it. Regenerate it with `cargo generate-lockfile` rather than editing or merging it by hand."
+        ),
+        "{}",
+        text(&said.stdout)
+    );
+}

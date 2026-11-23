@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::delivery::DeliverySubject;
 use dibs_domain::handle::Handle;
-use dibs_domain::hot_rule::Note;
+use dibs_domain::hot_rule::{Note, Recipe};
 use dibs_domain::ids::{ItemId, MessageId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, Priority, Title};
 use dibs_domain::message::{Importance, Subject};
@@ -496,6 +496,8 @@ pub enum PathAnswer {
         rule: String,
         /// The rule's note.
         note: Option<Note>,
+        /// The command that regenerates the file, for a rule that names one.
+        recipe: Option<Recipe>,
         /// Other members who edited the same file under a live claim, with their items.
         touched_by: Vec<TouchedBy>,
     },

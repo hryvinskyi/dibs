@@ -238,7 +238,7 @@ impl AskGrant {
                 match decided {
                     OnBehalf::Grant { because, .. } => {
                         let given = behalf
-                            .grant(&mut work, &asked, because, thread.id, &records)
+                            .grant(&mut work, &asked, now, because, thread.id, &records)
                             .await?
                             .ok_or_else(|| {
                                 corrupt("the grant dibs decided to give at the ask was not given")
@@ -799,6 +799,55 @@ mod tests {
         );
         assert!(!body.contains("Until then"), "{body}");
         assert!(recorded(&env, &env.alice).await.is_empty(), "settled");
+    }
+
+    #[tokio::test]
+    async fn a_grant_at_the_ask_records_when_the_oldest_request_it_settles_was_asked() {
+        let (env, alices, bobs) = held().await;
+        let ask = AskGrant::new(&env.deps);
+        let first = env.now();
+        let waiting = ask.execute(&env.bob.actor, billing(bobs)).await.unwrap();
+        assert!(
+            matches!(waiting.outcome, GrantAsked::Asked { .. }),
+            "{waiting:?}"
+        );
+        env.advance(Duration::minutes(8));
+        crate::use_cases::StartReview::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                crate::use_cases::StartReviewInput {
+                    head: None,
+                    item: alices,
+                    pr: dibs_domain::review::PrRef::parse("acme/widgets#7").unwrap(),
+                    more: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        let again = ask.execute(&env.bob.actor, billing(bobs)).await.unwrap();
+
+        assert!(
+            matches!(
+                again.outcome,
+                GrantAsked::Granted {
+                    by_dibs: Some(_),
+                    ..
+                }
+            ),
+            "{again:?}"
+        );
+        let granted: Vec<Option<time::OffsetDateTime>> = env
+            .events()
+            .await
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                dibs_domain::event::EventKind::Granted(granted) => Some(granted.asked_at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(granted, [Some(first)], "the first request's wait counts");
+        assert!(recorded(&env, &env.alice).await.is_empty(), "both settled");
     }
 
     #[test]

@@ -34,10 +34,12 @@ pub struct StatsView {
     pub members: BTreeMap<MemberId, Handle>,
 }
 
-/// Reads the figures of a range of days: claims, takeovers, stalled slot holds, escalations and slot
-/// waits from the event log, refusals, failures and hook durations from the reports members'
-/// machines sent, the feedback agents gave and the pull requests integrations reported as not
-/// merging cleanly. It writes nothing, and reads in a transaction for reading, page by page, so it
+/// Reads the figures of a range of days: claims, takeovers, stalled slot holds, escalations, slot
+/// waits, grants by who decided and how long their requests waited, acknowledgements, revokes, the
+/// orders of colliding claims and how long pull requests' conflicts lasted from the event log,
+/// refusals, failures and hook durations from the reports members' machines sent, the feedback
+/// agents gave and the pull requests integrations reported as not merging cleanly. It writes
+/// nothing, and reads in a transaction for reading, page by page and in the log's order, so it
 /// never holds up a heartbeat or an edit check.
 pub struct ReadStats {
     store: Arc<dyn Store>,

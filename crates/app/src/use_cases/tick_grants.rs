@@ -190,7 +190,7 @@ impl TickGrants {
                         })?
                         .thread;
                     match behalf
-                        .grant(&mut work, &asked, because, thread, &records)
+                        .grant(&mut work, &asked, asked_at, because, thread, &records)
                         .await?
                     {
                         Some(given) => {

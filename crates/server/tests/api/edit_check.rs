@@ -504,3 +504,83 @@ async fn asking_for_a_grant_breaking_its_rules_is_refused() {
         .await;
     assert_error(&forbidden, StatusCode::FORBIDDEN, "forbidden");
 }
+
+#[tokio::test]
+async fn a_regenerated_file_is_answered_with_the_recipe_its_rule_names() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    let settings = json!({
+        "hot": [
+            {"paths": ["**/*.lock"], "kind": "regenerate", "note": "never merge it by hand",
+             "recipe": "  cargo generate-lockfile  "},
+            {"paths": ["gen/**"], "kind": "regenerate"}
+        ]
+    });
+    let applied = world.put(&alice, "/v1/admin/settings", settings).await;
+    assert_eq!(applied.status, StatusCode::OK, "{}", applied.body);
+    assert_eq!(
+        applied.body["settings"]["hot"],
+        json!([
+            {"paths": ["**/*.lock"], "kind": "regenerate", "note": "never merge it by hand",
+             "recipe": "cargo generate-lockfile"},
+            {"paths": ["gen/**"], "kind": "regenerate"}
+        ])
+    );
+    let session = world.session(&bob, "desk").await;
+    let item = world.item(&bob, None, "Search").await;
+    let claimed = world
+        .post(
+            &bob,
+            &format!("/v1/items/{item}/claim"),
+            json!({"session_id": session, "areas": []}),
+        )
+        .await;
+    assert_eq!(claimed.status, StatusCode::OK, "{}", claimed.body);
+    let answer = world
+        .post(
+            &bob,
+            "/v1/edit-check",
+            json!({"session_id": session, "repo": "default", "paths": ["Cargo.lock", "gen/api.rs"]}),
+        )
+        .await;
+    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+    assert_eq!(
+        answer.body["verdicts"],
+        json!([
+            {"repo": "default", "path": "Cargo.lock", "verdict": "allowed_with_note",
+             "rule": "regenerate", "note": "never merge it by hand",
+             "recipe": "cargo generate-lockfile", "touched_by": []},
+            {"repo": "default", "path": "gen/api.rs", "verdict": "allowed_with_note",
+             "rule": "regenerate", "note": null, "touched_by": []}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn a_recipe_on_a_rule_that_takes_none_or_over_one_line_is_refused_by_name() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    for (rule, said) in [
+        (
+            json!({"paths": ["config/**"], "kind": "warn-shared", "recipe": "make config"}),
+            "a 'warn-shared' rule takes no recipe",
+        ),
+        (
+            json!({"paths": ["gen/**"], "kind": "regenerate", "recipe": "make gen\nmake check"}),
+            "recipe is one line",
+        ),
+    ] {
+        let refused = world
+            .put(&alice, "/v1/admin/settings", json!({"hot": [rule]}))
+            .await;
+        assert_error(
+            &refused,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_settings",
+        );
+        let message = refused.body["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("Hot rule 1"), "{message}");
+        assert!(message.contains(said), "{message}");
+    }
+}

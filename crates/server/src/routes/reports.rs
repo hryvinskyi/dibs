@@ -13,12 +13,13 @@ use serde_json::Value;
 use time::OffsetDateTime;
 
 use dibs_app::use_cases::{FeedbackAbout, FeedbackInput, PrStateReport, StatsView};
+use dibs_domain::grant::GrantDecision;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::MemberId;
 use dibs_domain::paths::{RelPath, RepoPath};
-use dibs_domain::radar::BranchName;
+use dibs_domain::radar::{BranchName, OrderRule, OverlapOrder};
 use dibs_domain::repo::RepoId;
-use dibs_domain::report::stats::{DurationFigure, StatsRange};
+use dibs_domain::report::stats::{DurationFigure, StatsRange, Waits};
 use dibs_domain::report::{
     BUCKETS, DayCounts, DayReport, DurationBuckets, Feedback, FeedbackReason, HeartbeatReports,
     HookDurations, HookEventName, MachineId, RefusalId, ReportDay, Tally,
@@ -294,20 +295,51 @@ struct StatsAnswer<'a> {
     takeovers: u64,
     stalls: u64,
     escalations: u64,
-    slot_waits: SlotWaitsView,
+    escalations_by_dibs: u64,
+    slot_waits: WaitsView,
     reported: BTreeMap<&'static str, u64>,
     reported_days: Vec<MemberDayView<'a>>,
     hook_durations: Vec<DurationView<'a>>,
     hook_durations_by_member: Vec<DurationView<'a>>,
     feedback: FeedbackView<'a>,
     conflicting_prs: ConflictingView<'a>,
+    conflicts_resolved: WaitsView,
+    grants: GrantsView,
+    orders: OrdersView,
 }
 
-#[derive(Serialize)]
-struct SlotWaitsView {
+/// How many waits ended, and the median and longest in whole seconds, `null` with no wait.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct WaitsView {
     count: u64,
     median_seconds: Option<i64>,
     max_seconds: Option<i64>,
+}
+
+impl WaitsView {
+    fn of(waits: &Waits) -> Self {
+        Self {
+            count: waits.count,
+            median_seconds: waits.median.map(|wait| wait.whole_seconds()),
+            max_seconds: waits.max.map(|wait| wait.whole_seconds()),
+        }
+    }
+}
+
+/// Grants by who decided, with every decision named.
+#[derive(Serialize)]
+struct GrantsView {
+    by: BTreeMap<&'static str, u64>,
+    acknowledged: BTreeMap<&'static str, u64>,
+    revoked: u64,
+    waits: BTreeMap<&'static str, WaitsView>,
+}
+
+/// Orders of colliding claims by the rule that decided, with every rule and `tied` named.
+#[derive(Serialize)]
+struct OrdersView {
+    by: BTreeMap<&'static str, u64>,
+    changed: u64,
 }
 
 #[derive(Serialize)]
@@ -359,6 +391,37 @@ fn every_kind(counts: &BTreeMap<Tally, u64>) -> BTreeMap<&'static str, u64> {
         .collect()
 }
 
+/// Every decision with its count, those that did not happen as `0`.
+fn every_decision(counts: &BTreeMap<GrantDecision, u64>) -> BTreeMap<&'static str, u64> {
+    GrantDecision::ALL
+        .into_iter()
+        .map(|decided| (decided.code(), counts.get(&decided).copied().unwrap_or(0)))
+        .collect()
+}
+
+/// Every decision with its waits, those with none as a count of `0`.
+fn every_decisions_waits(
+    waits: &BTreeMap<GrantDecision, Waits>,
+) -> BTreeMap<&'static str, WaitsView> {
+    GrantDecision::ALL
+        .into_iter()
+        .map(|decided| {
+            let waited = waits.get(&decided).copied().unwrap_or_default();
+            (decided.code(), WaitsView::of(&waited))
+        })
+        .collect()
+}
+
+/// Every rule's code and `tied` with its count, those that never decided as `0`.
+fn every_order(counts: &BTreeMap<&'static str, u64>) -> BTreeMap<&'static str, u64> {
+    OrderRule::ALL
+        .into_iter()
+        .map(OrderRule::code)
+        .chain([OverlapOrder::TIED])
+        .map(|code| (code, counts.get(code).copied().unwrap_or(0)))
+        .collect()
+}
+
 impl<'a> StatsAnswer<'a> {
     fn of(view: &'a StatsView) -> Result<Self, ApiError> {
         let handle = |member: MemberId| {
@@ -388,11 +451,8 @@ impl<'a> StatsAnswer<'a> {
             takeovers: stats.takeovers,
             stalls: stats.stalls,
             escalations: stats.escalations,
-            slot_waits: SlotWaitsView {
-                count: stats.slot_waits.count,
-                median_seconds: stats.slot_waits.median.map(|wait| wait.whole_seconds()),
-                max_seconds: stats.slot_waits.max.map(|wait| wait.whole_seconds()),
-            },
+            escalations_by_dibs: stats.escalations_by_dibs,
+            slot_waits: WaitsView::of(&stats.slot_waits),
             reported: every_kind(&stats.reported),
             reported_days: stats
                 .member_days
@@ -439,6 +499,74 @@ impl<'a> StatsAnswer<'a> {
                 reports: stats.conflicting_reports,
                 prs: stats.conflicting_prs.iter().collect(),
             },
+            conflicts_resolved: WaitsView::of(&stats.conflicts_resolved),
+            grants: GrantsView {
+                by: every_decision(&stats.grants),
+                acknowledged: every_decision(&stats.acknowledgements),
+                revoked: stats.revoked,
+                waits: every_decisions_waits(&stats.grant_waits),
+            },
+            orders: OrdersView {
+                by: every_order(&stats.orders),
+                changed: stats.orders_changed,
+            },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use dibs_domain::report::stats::PilotStats;
+
+    use super::*;
+
+    #[test]
+    fn an_empty_range_names_every_decision_and_rule_at_zero_and_every_wait_as_null() {
+        let day = ReportDay::parse("2026-03-02").unwrap();
+        let view = StatsView {
+            range: StatsRange::week_to(day),
+            stats: PilotStats::default(),
+            truncated: false,
+            members: BTreeMap::new(),
+        };
+        let answer = serde_json::to_value(StatsAnswer::of(&view).unwrap()).unwrap();
+        let none = json!({"count": 0, "median_seconds": null, "max_seconds": null});
+        let zeros = json!({"holder": 0, "untouched": 0, "in_review": 0, "idle": 0, "waited": 0});
+        assert_eq!(
+            answer["grants"],
+            json!({
+                "by": zeros,
+                "acknowledged": zeros,
+                "revoked": 0,
+                "waits": {"holder": none, "untouched": none, "in_review": none, "idle": none,
+                          "waited": none}
+            })
+        );
+        assert_eq!(
+            answer["orders"],
+            json!({"by": {"in_review": 0, "priority": 0, "older": 0, "tied": 0}, "changed": 0})
+        );
+        assert_eq!(answer["escalations_by_dibs"], 0);
+        assert_eq!(answer["conflicts_resolved"], none);
+        assert_eq!(answer["slot_waits"], none);
+    }
+
+    #[test]
+    fn a_wait_is_written_in_whole_seconds() {
+        let waits = Waits {
+            count: 2,
+            median: Some(time::Duration::milliseconds(90_500)),
+            max: Some(time::Duration::minutes(3)),
+        };
+        assert_eq!(
+            WaitsView::of(&waits),
+            WaitsView {
+                count: 2,
+                median_seconds: Some(90),
+                max_seconds: Some(180),
+            }
+        );
     }
 }

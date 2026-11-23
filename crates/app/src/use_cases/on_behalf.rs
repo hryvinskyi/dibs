@@ -114,15 +114,17 @@ impl OnBehalfOf<'_> {
             == OnBehalf::Closed
     }
 
-    /// Grants `asked` on its holder's behalf because of `because`, as the holder's grant, given as
-    /// every grant is given (see [`GiveGrant`]); settles the request, granted or not, so that dibs
-    /// never decides it again; and, when the grant is new, says so and why in `thread`, the
-    /// request's conversation. Answers the grant given, or `None` when the same grant existed or the rules of
-    /// a grant refused it.
+    /// Grants `asked`, asked at `asked_at`, on its holder's behalf because of `because`, as the
+    /// holder's grant, given as every grant is given (see [`GiveGrant`]) and recorded with when the
+    /// oldest request it answers was asked, this one or an earlier one it settles; settles the
+    /// request, granted or not, so that dibs never decides it again; and, when the grant is new,
+    /// says so and why in `thread`, the request's conversation. Answers the grant given, or `None`
+    /// when the same grant existed or the rules of a grant refused it.
     pub(crate) async fn grant(
         &self,
         work: &mut Work,
         asked: &AskedGrant,
+        asked_at: OffsetDateTime,
         because: GrantDecision,
         thread: ThreadId,
         records: &[GrantRecord],
@@ -137,6 +139,7 @@ impl OnBehalfOf<'_> {
                 to: asked.ask.asker,
             },
             decided: because,
+            asked_at: Some(asked_at),
             item: &item,
             records,
             claims: self.claims,

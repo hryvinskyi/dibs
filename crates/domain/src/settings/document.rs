@@ -225,4 +225,8 @@ pub struct HotRuleDocument {
     /// A note shown with the verdict.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The command that regenerates the rule's files, for a kind that takes one; shown with the
+    /// verdict and never run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
 }

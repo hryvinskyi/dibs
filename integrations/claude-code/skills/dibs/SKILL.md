@@ -212,6 +212,11 @@ serve many teams:
   not deliver its work. dibs tells you: with others still open, their merges no longer complete the claim — record the
   pull request that brings the work in, or mark the item done once it is in; with none left, the claim is yours to work
   on again.
+- When your claim's conversation says your pull request does not merge cleanly into its base, it cannot be merged
+  until you fix it. Merge the base into its branch, or rebase the branch onto the base, resolve the conflicts and push;
+  or leave it to your person to merge by hand. A file the message lists under a recipe is not merged by hand: take it
+  from the base, run that recipe to regenerate it, and commit the result. dibs tells you when the conflict is
+  reported, and again when your claim records the pull request anew; nobody else is asked to fix it.
 - An edit refused with "their claim is in review" waits for that merge: pick other work, or message the holder if you
   cannot wait.
 - When you resolve a conflict by hand while rebasing, say so once the rebase is done: `dibs_feedback` with
@@ -402,7 +407,8 @@ nothing to do with the slots above.
 
 Some shared files follow a rule the project declares: regenerate them rather than merge them by hand, leave them to
 the holder of an area, or edit them knowing someone else did too. dibs tells you the rule when you edit such a
-file; follow it.
+file; follow it. When the rule names a recipe, the command that regenerates the file, run that command rather than
+editing or merging the file by hand. dibs never runs it for you.
 
 ## What dibs cannot see
 

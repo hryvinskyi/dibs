@@ -1820,6 +1820,86 @@ async fn with_equal_priority_the_older_claim_lands_first() {
     );
 }
 
+/// Every order the project's log records, oldest first.
+async fn recorded_orders(env: &Env) -> Vec<event::OverlapOrdered> {
+    env.events()
+        .await
+        .into_iter()
+        .filter_map(|recorded| match recorded.kind {
+            EventKind::OverlapOrdered(ordered) => Some(ordered),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_collision_found_records_its_order_once_as_a_first_order_with_the_rule_that_decided() {
+    let env = Env::with_settings(SETTINGS).await;
+    let (alices, bobs) = two_items(&env).await;
+    prioritize(&env, alices, 3).await;
+    prioritize(&env, bobs, 1).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    env.advance(time::Duration::minutes(5));
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    collide(&env, alices, bobs).await;
+
+    let ordered = event::OverlapOrdered {
+        kind: OverlapKind::SameFile,
+        items: [alices, bobs].into(),
+        order: OverlapOrder::First {
+            item: bobs,
+            because: OrderRule::Priority,
+        },
+        changed: false,
+    };
+    assert_eq!(recorded_orders(&env).await, std::slice::from_ref(&ordered));
+    let kinds = env.kinds_after(0).await;
+    let found_at = kinds
+        .iter()
+        .position(|kind| matches!(kind, EventKind::OverlapFound(_)));
+    let ordered_at = kinds
+        .iter()
+        .position(|kind| matches!(kind, EventKind::OverlapOrdered(_)));
+    assert!(
+        found_at < ordered_at,
+        "found, then ordered: {found_at:?}, {ordered_at:?}"
+    );
+
+    report(
+        &env,
+        footprint(bobs, "bob/2-y", "abcd", &["config/app.yaml", "a.rs"]),
+    )
+    .await;
+    assert_eq!(
+        recorded_orders(&env).await,
+        [ordered],
+        "the same collision on more paths keeps its order and records none"
+    );
+}
+
+#[tokio::test]
+async fn a_collision_found_tied_records_a_tie_with_no_item_first() {
+    let env = Env::with_settings(ARBITRATED).await;
+    person(&env, "carol").await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    collide(&env, alices, bobs).await;
+
+    let recorded = recorded_orders(&env).await;
+    assert_eq!(
+        recorded,
+        [event::OverlapOrdered {
+            kind: OverlapKind::SameFile,
+            items: [alices, bobs].into(),
+            order: OverlapOrder::Tied,
+            changed: false,
+        }]
+    );
+    assert_eq!(recorded[0].order.first(), None);
+    assert_eq!(recorded[0].order.code(), "tied");
+}
+
 #[tokio::test]
 async fn a_tie_goes_to_the_arbiters_and_both_holders_are_told_they_were_asked() {
     let env = Env::with_settings(ARBITRATED).await;

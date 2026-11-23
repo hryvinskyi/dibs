@@ -28,6 +28,7 @@ use crate::use_cases::claim_ending::{Ending, end_claim, tell_holder};
 use crate::use_cases::common::existing_item;
 use crate::use_cases::handover::Handovers;
 use crate::use_cases::radar::{MergedInto, Radar};
+use crate::use_cases::report_pr_state::ConflictNotice;
 use crate::use_cases::slots::Scene;
 use crate::use_cases::wide_asks::Announcer;
 use crate::work::Work;
@@ -65,6 +66,10 @@ pub struct ReviewedClaim {
 /// way, and a head of the same pull request, but not another pull request's head while the claim
 /// still records the pull request whose head it holds. A change of branch appends
 /// `BranchRecorded` and drops the claim's footprint of that repository.
+///
+/// A pull request new to the claim that an integration last reported as not merging cleanly into
+/// its base is told to the holder at once, in the claim's conversation, as a report of that
+/// conflict tells the holder of the claim that records the pull request.
 pub struct StartReview {
     store: Arc<dyn Store>,
     clock: Arc<dyn Clock>,
@@ -153,6 +158,20 @@ impl StartReview {
             }
             _ => started.claim.clone(),
         };
+        if started.added && work.pr_mergeable(actor.project, &request.pr).await? == Some(false) {
+            ConflictNotice {
+                ids: &*self.ids,
+                schemes: &self.ref_schemes,
+                now,
+            }
+            .tell(
+                &mut work,
+                &started.claim,
+                &request.pr,
+                settings.repo_of_pr(&request.pr),
+            )
+            .await?;
+        }
         Handovers {
             ids: &*self.ids,
             schemes: &self.ref_schemes,

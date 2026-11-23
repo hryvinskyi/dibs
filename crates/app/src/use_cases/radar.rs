@@ -446,9 +446,10 @@ impl Radar<'_> {
     }
 
     /// Stores what changed and announces each overlap found. A collision found is stored with its
-    /// order, worked out from its two claims and their items' priorities; dibs raises one the rule
-    /// ties with the arbiters before its holders are told, so that the notices say who decides. An
-    /// overlap stored again on other paths keeps the order it had.
+    /// order, worked out from its two claims and their items' priorities, and the order is recorded
+    /// as the first one of the collision; dibs raises one the rule ties with the arbiters before
+    /// its holders are told, so that the notices say who decides. An overlap stored again on other
+    /// paths keeps the order it had.
     async fn apply(
         &self,
         work: &mut Work,
@@ -476,17 +477,34 @@ impl Radar<'_> {
             let settling = self.settle(work, claims, &names, &items, &ordered).await?;
             self.announce(work, claims, &names, &items, &ordered, settling.as_ref())
                 .await?;
+            self.record_order(work, &ordered, false).await?;
+        }
+        Ok(())
+    }
+
+    /// Records the order `overlap` is stored with; `changed` says whether it replaced an earlier
+    /// one. An overlap stored without an order records nothing.
+    async fn record_order(
+        &self,
+        work: &mut Work,
+        overlap: &Overlap,
+        changed: bool,
+    ) -> Result<(), AppError> {
+        if let Some(ordered) = event::OverlapOrdered::of(overlap, changed) {
+            work.record(self.now, EventKind::OverlapOrdered(ordered))
+                .await?;
         }
         Ok(())
     }
 
     /// Works out again the order of every stored collision whose claims are all live, from those
     /// claims and their items' priorities as they are now, and answers how many changed. A changed
-    /// order is stored. Both holders are told in their claims' conversations only when which claim
-    /// lands first changed, or the order became or stopped being a tie, which dibs raises with the
-    /// arbiters first; a change of the reason alone is stored without a notice. A collision found
-    /// before orders were stored has none: the first order worked out for it is told as a first
-    /// notice, not as a change. A collision whose order did not change writes nothing.
+    /// order is stored. Both holders are told in their claims' conversations, and the new order is
+    /// recorded as a change, only when which claim lands first changed, or the order became or
+    /// stopped being a tie, which dibs raises with the arbiters first; a change of the reason alone
+    /// is stored without a notice or a record. A collision found before orders were stored has
+    /// none: the first order worked out for it is told as a first notice and recorded as a first
+    /// order, not as a change. A collision whose order did not change writes nothing.
     pub(crate) async fn reorder(&self, work: &mut Work) -> Result<usize, AppError> {
         let project = work.project_id();
         let claims = work.claims(project).await?;
@@ -543,6 +561,7 @@ impl Radar<'_> {
                 };
                 self.tell(work, reordered.kind(), reader, &text).await?;
             }
+            self.record_order(work, &reordered, !first_order).await?;
         }
         Ok(changed)
     }
