@@ -9,7 +9,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use dibs_client::ClientOptions;
 use dibs_domain::escalation::EscalationReason;
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{MessageId, ThreadId};
+use dibs_domain::ids::{GrantId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Importance, Subject};
@@ -79,7 +79,7 @@ pub enum Command {
     /// Claim a work item, or renew your claim, with the areas you will change; `dibs claim review`
     /// records the pull request of a claim you hold, and `dibs claim narrow` gives areas of it up.
     Claim(Box<ClaimArgs>),
-    /// Take over another member's stale claim, telling them why.
+    /// Take over another member's stale claim; dibs tells them why, in your words or its own.
     Takeover(TakeoverArgs),
     /// Release your claim; the item is open again.
     Release(KeyArgs),
@@ -91,6 +91,8 @@ pub enum Command {
     Grant(GrantArgs),
     /// Ask whoever holds an area for a grant there, for your claim on a work item.
     AskGrant(AskGrantArgs),
+    /// Revoke a grant: one you gave, one dibs gave on your behalf, or, as an admin, any grant.
+    RevokeGrant(RevokeGrantArgs),
     /// Start a conversation with members or with the whole project.
     Send(SendArgs),
     /// List the conversations waiting for you.
@@ -380,9 +382,10 @@ pub struct TakeoverArgs {
     /// The item: its local id or its reference.
     #[arg(value_parser = ItemKey::parse)]
     pub key: ItemKey,
-    /// Why, sent to the member who held it.
+    /// Why, sent to the member who held it. Leave it out, with a dibs server from 0.1.11 on, and
+    /// dibs tells them how long their claim showed no sign of work.
     #[arg(long)]
-    pub reason: String,
+    pub reason: Option<String>,
     /// An area you will change. Repeat it for several.
     #[arg(long = "area")]
     pub areas: Vec<String>,
@@ -449,6 +452,22 @@ pub struct AskGrantArgs {
     /// The area you need to edit in.
     #[arg(long)]
     pub area: String,
+}
+
+/// `dibs revoke-grant`.
+#[derive(Debug, Args)]
+pub struct RevokeGrantArgs {
+    /// The grant's id.
+    #[arg(value_parser = parse_grant)]
+    pub id: GrantId,
+}
+
+fn parse_grant(text: &str) -> Result<GrantId, String> {
+    text.parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0)
+        .map(GrantId)
+        .ok_or_else(|| format!("'{text}' is not a grant id; ids are whole numbers"))
 }
 
 /// `dibs send`.
@@ -977,6 +996,23 @@ mod tests {
         }
         assert!(reports(&["dibs", "check", "--push"], false));
         assert!(!reports(&["dibs", "check", "--push"], true));
+    }
+
+    #[test]
+    fn a_takeover_needs_no_reason() {
+        let reason = |line: &[&str]| {
+            let Invocation::Service(Command::Takeover(args)) =
+                Cli::try_parse_from(line).unwrap().command
+            else {
+                panic!("{line:?} is no takeover");
+            };
+            args.reason
+        };
+        assert_eq!(reason(&["dibs", "takeover", "12"]), None);
+        assert_eq!(
+            reason(&["dibs", "takeover", "12", "--reason", "alice is away"]).as_deref(),
+            Some("alice is away")
+        );
     }
 
     #[test]

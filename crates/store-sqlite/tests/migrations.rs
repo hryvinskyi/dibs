@@ -10,7 +10,7 @@ mod migrations {
     use tempfile::TempDir;
 
     use dibs_app::ports::Store;
-    use dibs_app::records::ItemFilter;
+    use dibs_app::records::{AskedGrantRecord, ItemFilter};
     use dibs_domain::area::QualifiedArea;
     use dibs_domain::claim::Claim;
     use dibs_domain::ids::{ItemId, MemberId, MessageId, ProjectId, ThreadId};
@@ -70,6 +70,21 @@ mod migrations {
 
     async fn open(path: &Path) -> Result<SqliteStore, OpenError> {
         SqliteStore::open(path).await
+    }
+
+    /// The requests put to `holder` that they have not answered, without whether dibs left each to
+    /// them.
+    async fn unanswered(
+        tx: &mut Box<dyn dibs_app::ports::Tx>,
+        project: ProjectId,
+        holder: MemberId,
+    ) -> Vec<dibs_domain::grant::AskedGrant> {
+        tx.unanswered_asked_grants(project, holder)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.asked)
+            .collect()
     }
 
     #[tokio::test]
@@ -296,6 +311,7 @@ mod migrations {
             from: MemberId(12),
             to: MemberId(11),
             areas: [QualifiedArea::parse("default:billing").unwrap()].into(),
+            acked_by_dibs: None,
         };
         tx.insert_wide_ask(ProjectId(1), &ask).await.unwrap();
         tx.commit().await.unwrap();
@@ -960,10 +976,7 @@ mod migrations {
         tx.insert_asked_grant(project, &asked).await.unwrap();
         tx.commit().await.unwrap();
         let mut tx = store.begin().await.unwrap();
-        assert_eq!(
-            tx.unanswered_asked_grants(project, alice).await.unwrap(),
-            [asked]
-        );
+        assert_eq!(unanswered(&mut tx, project, alice).await, [asked]);
         drop(tx);
         drop(store);
 
@@ -1036,7 +1049,7 @@ mod migrations {
             [DayCounts::new(BTreeMap::from([(Tally::Frozen, 1)]), Vec::new()).unwrap()]
         );
         assert_eq!(
-            tx.unanswered_asked_grants(project, alice).await.unwrap(),
+            unanswered(&mut tx, project, alice).await,
             [AskedGrant {
                 message: MessageId(93),
                 ask: GrantAsk {
@@ -1713,5 +1726,384 @@ mod migrations {
                 .is_err(),
             "the column keeps to times"
         );
+    }
+
+    #[tokio::test]
+    async fn server_decisions_read_every_row_of_before_as_decided_by_people_and_refuse_half_a_decision()
+     {
+        use dibs_app::ports::StoreError;
+        use dibs_domain::grant::{AskedGrant, GrantAsk, GrantBlock, GrantDecision};
+        use time::{Duration, OffsetDateTime};
+
+        let rows = format!(
+            "{}\n\
+             INSERT INTO grant_asks (project_id, message_id, asker_id, item_id, repo, area, \
+             holder_id) VALUES (1, 93, 12, 52, 'default', 'billing', 11);\n\
+             INSERT INTO overlaps (project_id, overlap_key, kind, pr, merged_at, paths) VALUES \
+             (1, 'same_file 51 52', 'same_file', NULL, NULL, '[\"default:config/app.yaml\"]'), \
+             (1, 'main_moved 51', 'main_moved', 'acme/widgets#7', 30, \
+             '[\"default:config/app.yaml\"]');\n\
+             INSERT INTO overlap_items (project_id, overlap_key, item_id) VALUES \
+             (1, 'same_file 51 52', 51), (1, 'same_file 51 52', 52), (1, 'main_moved 51', 51);",
+            rows_at_deliveries()
+        );
+        let (_dir, path) = database_at(17, &rows).await;
+        let store = open(&path).await.unwrap();
+        let project = ProjectId(1);
+        let (alice, bob) = (MemberId(11), MemberId(12));
+        let mut tx = store.begin().await.unwrap();
+        let grants = tx.grants(project).await.unwrap();
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            grants[0].decided,
+            GrantDecision::Holder,
+            "every grant of before was given by its holder"
+        );
+        let asked = AskedGrant {
+            message: MessageId(93),
+            ask: GrantAsk {
+                asker: bob,
+                item: ItemId(52),
+                area: QualifiedArea::parse("default:billing").unwrap(),
+            },
+            holder: alice,
+        };
+        let nanos = |n: i64| OffsetDateTime::UNIX_EPOCH + Duration::nanoseconds(n);
+        assert_eq!(
+            tx.unsettled_asked_grants(project).await.unwrap(),
+            [(
+                AskedGrantRecord {
+                    asked: asked.clone(),
+                    left_to_holder: false
+                },
+                nanos(25)
+            )],
+            "every request of before is unsettled, and dibs decides it"
+        );
+        assert_eq!(unanswered(&mut tx, project, alice).await, [asked]);
+        let ask = tx.wide_ask(project, MessageId(91)).await.unwrap().unwrap();
+        assert_eq!(ask.acked_by_dibs, None);
+        assert_eq!(tx.open_wide_asks(project).await.unwrap(), [ask]);
+        let overlaps = tx.overlaps(project).await.unwrap();
+        assert_eq!(overlaps.len(), 2);
+        assert!(
+            overlaps.iter().all(|overlap| overlap.order().is_none()),
+            "no overlap of before has an order"
+        );
+        assert!(tx.grant_blocks(project).await.unwrap().is_empty());
+        let block = GrantBlock {
+            asker: bob,
+            asker_item: ItemId(52),
+            asker_claimed_at: nanos(10),
+            holder: alice,
+            holder_item: ItemId(51),
+            holder_claimed_at: nanos(10),
+            area: QualifiedArea::parse("default:billing").unwrap(),
+            revoked_at: nanos(40),
+        };
+        tx.insert_grant_block(project, &block).await.unwrap();
+        tx.commit().await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.grant_blocks(project).await.unwrap(), [block]);
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        for (what, bad) in [
+            (
+                "a moved base with an order",
+                "UPDATE overlaps SET order_rule = 'older', order_first = 51 \
+                 WHERE kind = 'main_moved'",
+            ),
+            (
+                "a moved base with a tie",
+                "UPDATE overlaps SET order_rule = 'tied' WHERE kind = 'main_moved'",
+            ),
+            (
+                "a rule that tells the claims apart naming no item",
+                "UPDATE overlaps SET order_rule = 'older' WHERE kind = 'same_file'",
+            ),
+            (
+                "a tie naming an item",
+                "UPDATE overlaps SET order_rule = 'tied', order_first = 51 \
+                 WHERE kind = 'same_file'",
+            ),
+            (
+                "an item landing first without a rule",
+                "UPDATE overlaps SET order_first = 51 WHERE kind = 'same_file'",
+            ),
+            (
+                "a rule the order does not know",
+                "UPDATE overlaps SET order_rule = 'sooner', order_first = 51 \
+                 WHERE kind = 'same_file'",
+            ),
+            (
+                "an acknowledgement by dibs without its reason",
+                "UPDATE wide_asks SET dibs_acked_at = 40",
+            ),
+            (
+                "a reason of dibs without its acknowledgement",
+                "UPDATE wide_asks SET dibs_acked_because = 'idle'",
+            ),
+            (
+                "an acknowledgement by dibs for the holder's own reason",
+                "UPDATE wide_asks SET dibs_acked_at = 40, dibs_acked_because = 'holder'",
+            ),
+            (
+                "a grant decided by nobody the column knows",
+                "UPDATE grants SET decided = 'admin'",
+            ),
+            (
+                "a settlement that is no time",
+                "UPDATE grant_asks SET settled_at = 'soon'",
+            ),
+            (
+                "a block naming a missing member",
+                "UPDATE grant_blocks SET asker_id = 99",
+            ),
+            (
+                "a block naming a missing item",
+                "UPDATE grant_blocks SET holder_item = 99",
+            ),
+            (
+                "a block whose claim time is no time",
+                "UPDATE grant_blocks SET holder_claimed_at = 'soon'",
+            ),
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(bad))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{what}"
+            );
+        }
+        for good in [
+            "UPDATE overlaps SET order_rule = 'tied' WHERE kind = 'same_file'",
+            "UPDATE overlaps SET order_rule = 'priority', order_first = 52 \
+             WHERE kind = 'same_file'",
+            "UPDATE wide_asks SET dibs_acked_at = 40, dibs_acked_because = 'waited'",
+            "UPDATE grants SET decided = 'in_review'",
+            "UPDATE grant_asks SET settled_at = 41",
+        ] {
+            sqlx::query(sqlx::AssertSqlSafe(good))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool.close().await;
+
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let overlaps = tx.overlaps(project).await.unwrap();
+        assert_eq!(
+            overlaps[0].order().and_then(|order| order.first()),
+            Some(ItemId(52))
+        );
+        assert_eq!(
+            tx.wide_ask(project, MessageId(91))
+                .await
+                .unwrap()
+                .unwrap()
+                .acked_by_dibs,
+            Some(GrantDecision::Waited)
+        );
+        assert!(tx.open_wide_asks(project).await.unwrap().is_empty());
+        assert_eq!(
+            tx.grants(project).await.unwrap()[0].decided,
+            GrantDecision::InReview
+        );
+        assert!(tx.unsettled_asked_grants(project).await.unwrap().is_empty());
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE overlaps SET order_rule = 'older', order_first = 53 WHERE kind = 'same_file'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        assert!(
+            matches!(tx.overlaps(project).await, Err(StoreError::Corrupt { .. })),
+            "an item landing first that the overlap does not name is a corrupt row"
+        );
+    }
+
+    /// Requests and announcements of before, each answered in its conversation by its holder or
+    /// not: bob asks alice for billing by message 93 (nobody answers in its conversation) and by
+    /// message 94 (alice answers in its conversation); bob's wide claim announces itself to alice by
+    /// message 91 (alice wrote in its conversation), 96 (alice wrote only in another conversation)
+    /// and 97 (alice answers in its conversation).
+    fn answered_and_unanswered_rows() -> String {
+        format!(
+            "{}\n\
+             INSERT INTO threads (project_id, id, subject, item_id, author_id, to_project, created_at) \
+             VALUES (1, 83, 'Billing', 52, 12, 0, 30), (1, 84, 'Rename', 52, 12, 0, 31), \
+             (1, 85, 'Rename', 52, 12, 0, 32);\n\
+             INSERT INTO messages (project_id, id, thread_id, author_id, label, body, importance, \
+             ack_required, created_at) VALUES \
+             (1, 94, 83, 12, 'web', 'May I?', 'normal', 0, 33), \
+             (1, 95, 83, 11, 'web', 'Not yet.', 'normal', 0, 34), \
+             (1, 96, 84, 12, 'web', 'Renaming.', 'normal', 1, 35), \
+             (1, 97, 85, 12, 'web', 'Renaming.', 'normal', 1, 36), \
+             (1, 98, 85, 11, 'web', 'Wait for me.', 'normal', 0, 37), \
+             (1, 99, 82, NULL, 'dibs', 'Reminder.', 'normal', 0, 38);\n\
+             INSERT INTO grant_asks (project_id, message_id, asker_id, item_id, repo, area, \
+             holder_id) VALUES (1, 93, 12, 52, 'default', 'billing', 11), \
+             (1, 94, 12, 52, 'default', 'billing', 11);\n\
+             INSERT INTO wide_asks (project_id, message_id, item_id, from_id, to_id, areas) VALUES \
+             (1, 96, 52, 12, 11, '[\"default:billing\"]'), \
+             (1, 97, 52, 12, 11, '[\"default:billing\"]');",
+            rows_at_deliveries()
+        )
+    }
+
+    #[tokio::test]
+    async fn server_decisions_leave_to_the_holder_what_they_answered_before_and_decide_the_rest() {
+        use time::{Duration, OffsetDateTime};
+
+        let (_dir, path) = database_at(17, &answered_and_unanswered_rows()).await;
+        let store = open(&path).await.unwrap();
+        let project = ProjectId(1);
+        let alice = MemberId(11);
+        let nanos = |n: i64| OffsetDateTime::UNIX_EPOCH + Duration::nanoseconds(n);
+        let mut tx = store.begin().await.unwrap();
+        let unsettled = tx.unsettled_asked_grants(project).await.unwrap();
+        let decided: Vec<(MessageId, OffsetDateTime)> = unsettled
+            .iter()
+            .filter(|(record, _)| !record.left_to_holder)
+            .map(|(record, at)| (record.asked.message, *at))
+            .collect();
+        assert_eq!(
+            decided,
+            [(MessageId(93), nanos(25))],
+            "a request its holder answered is left to them; dibs' own message answers nothing"
+        );
+        let left: Vec<MessageId> = unsettled
+            .iter()
+            .filter(|(record, _)| record.left_to_holder)
+            .map(|(record, _)| record.asked.message)
+            .collect();
+        assert_eq!(
+            left,
+            [MessageId(94)],
+            "still unsettled, so that it is settled once it closes"
+        );
+        let listed: Vec<(MessageId, bool)> = tx
+            .unanswered_asked_grants(project, alice)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| (record.asked.message, record.left_to_holder))
+            .collect();
+        assert_eq!(listed, [(MessageId(93), false)]);
+        let still_open: Vec<MessageId> = tx
+            .open_wide_asks(project)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|ask| ask.message)
+            .collect();
+        assert_eq!(
+            still_open,
+            [MessageId(91), MessageId(96), MessageId(97)],
+            "every announcement of before stays open for its holder"
+        );
+        let unsettled = tx.open_wide_asks_with_time(project).await.unwrap();
+        let judged: Vec<(MessageId, OffsetDateTime)> = unsettled
+            .iter()
+            .filter(|(record, _)| !record.left_to_holder)
+            .map(|(record, at)| (record.ask.message, *at))
+            .collect();
+        assert_eq!(
+            judged,
+            [(MessageId(96), nanos(35))],
+            "dibs judges only the one its holder did not answer in its own conversation"
+        );
+        let left: Vec<MessageId> = unsettled
+            .iter()
+            .filter(|(record, _)| record.left_to_holder)
+            .map(|(record, _)| record.ask.message)
+            .collect();
+        assert_eq!(
+            left,
+            [MessageId(91), MessageId(97)],
+            "still unsettled, so that each is settled once it closes"
+        );
+        drop(tx);
+        drop(store);
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for (what, bad) in [
+            (
+                "a request neither left to its holder nor not",
+                "UPDATE grant_asks SET left_to_holder = 2",
+            ),
+            (
+                "a request with no answer to whether it is left to its holder",
+                "UPDATE grant_asks SET left_to_holder = NULL",
+            ),
+            (
+                "an announcement neither left to its holder nor not",
+                "UPDATE wide_asks SET left_to_holder = 2",
+            ),
+            (
+                "an announcement both settled and acknowledged by dibs",
+                "UPDATE wide_asks SET settled_at = 40, dibs_acked_at = 40, \
+                 dibs_acked_because = 'idle' WHERE message_id = 96",
+            ),
+            (
+                "a settlement that is no time",
+                "UPDATE wide_asks SET settled_at = 'soon'",
+            ),
+        ] {
+            assert!(
+                sqlx::query(sqlx::AssertSqlSafe(bad))
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{what}"
+            );
+        }
+        sqlx::query("UPDATE wide_asks SET settled_at = 40 WHERE message_id = 96")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let store = open(&path).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let unsettled: Vec<MessageId> = tx
+            .open_wide_asks_with_time(project)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(record, _)| record.ask.message)
+            .collect();
+        assert_eq!(
+            unsettled,
+            [MessageId(91), MessageId(97)],
+            "a settled announcement is not judged; those left to their holders still wait to close"
+        );
+        assert_eq!(tx.open_wide_asks(project).await.unwrap().len(), 3);
     }
 }

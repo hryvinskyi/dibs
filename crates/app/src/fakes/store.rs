@@ -11,12 +11,13 @@ use async_lock::{Mutex, MutexGuardArc};
 use async_trait::async_trait;
 use time::OffsetDateTime;
 
+use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::{Claim, ClaimInstance};
 use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
 use dibs_domain::escalation::settled_by;
 use dibs_domain::event::{Event, EventKind};
-use dibs_domain::grant::AskedGrant;
+use dibs_domain::grant::{AskedGrant, GrantAsk, GrantBlock, GrantDecision};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
@@ -42,12 +43,33 @@ use crate::ports::{
     TokenRows, Tx, UiSessionRows, WideAskRows, WorktreeRows,
 };
 use crate::records::{
-    ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter,
-    ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
-    ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord, WrittenBy,
+    AskedGrantRecord, ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject,
+    ItemFilter, ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark,
+    SessionRecord, ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
+    WideAskRecord, WrittenBy,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
+
+/// An announcement, with what dibs did with it on its holder's behalf.
+#[derive(Debug, Clone)]
+struct StoredWideAsk {
+    ask: WideAsk,
+    /// When dibs acknowledged it.
+    dibs_acked_at: Option<OffsetDateTime>,
+    /// When dibs stopped judging it because it closed.
+    settled_at: Option<OffsetDateTime>,
+    /// Whether dibs left it to its holder.
+    left_to_holder: bool,
+}
+
+/// A request, with when it was settled and whether dibs left it to its holder.
+#[derive(Debug, Clone)]
+struct StoredAskedGrant {
+    asked: AskedGrant,
+    settled_at: Option<OffsetDateTime>,
+    left_to_holder: bool,
+}
 
 /// Every record of every project.
 #[derive(Debug, Clone, Default)]
@@ -69,8 +91,9 @@ struct State {
     claim_threads: BTreeMap<(ProjectId, ThreadId), ClaimThread>,
     reads: BTreeMap<(ProjectId, MemberId, MessageId), OffsetDateTime>,
     acks: BTreeMap<(ProjectId, MessageId, MemberId), Ack>,
-    wide_asks: BTreeMap<(ProjectId, MessageId), WideAsk>,
-    asked_grants: BTreeMap<(ProjectId, MessageId), AskedGrant>,
+    wide_asks: BTreeMap<(ProjectId, MessageId), StoredWideAsk>,
+    asked_grants: BTreeMap<(ProjectId, MessageId), StoredAskedGrant>,
+    grant_blocks: BTreeMap<(ProjectId, BlockKey), GrantBlock>,
     escalations: BTreeMap<(ProjectId, MessageId), EscalationRecord>,
     slots: BTreeMap<ProjectId, SlotBoard>,
     worktrees: BTreeMap<(ProjectId, PoolKey), WorktreePool>,
@@ -86,17 +109,63 @@ struct State {
     ui_sessions: BTreeMap<TokenHash, InProject<UiSessionRecord>>,
 }
 
+/// What tells one revoke that sticks from another: the asker, their item and when they claimed it,
+/// the holder, their item and when they claimed it, and the area as `repo:area`, in the order the
+/// blocks are listed.
+type BlockKey = (
+    MemberId,
+    ItemId,
+    OffsetDateTime,
+    MemberId,
+    ItemId,
+    OffsetDateTime,
+    String,
+);
+
+fn block_key(block: &GrantBlock) -> BlockKey {
+    (
+        block.asker,
+        block.asker_item,
+        block.asker_claimed_at,
+        block.holder,
+        block.holder_item,
+        block.holder_claimed_at,
+        block.area.to_string(),
+    )
+}
+
 /// The in-memory store.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     state: Arc<Mutex<State>>,
     fail_next_commit: Arc<AtomicBool>,
     listings: Listings,
+    footprint_reads: FootprintReads,
+    footprint_listings: ProjectCounts,
+    escalation_listings: ProjectCounts,
+    escalation_writes: ProjectCounts,
 }
 
 /// How many times each thread's messages were listed, kept apart from the state so that a listing
 /// counts whether its transaction commits or not.
 type Listings = Arc<Mutex<BTreeMap<(ProjectId, ThreadId), u64>>>;
+
+/// How many times the paths of each item's footprints were read, in any repository, kept apart
+/// from the state so that a read counts whether its transaction commits or not.
+type FootprintReads = Arc<Mutex<BTreeMap<(ProjectId, ItemId), u64>>>;
+
+/// How many times something was done in each project — its footprints listed, its standing
+/// escalations listed, an escalation written — kept apart from the state so that it counts whether
+/// its transaction commits or not.
+type ProjectCounts = Arc<Mutex<BTreeMap<ProjectId, u64>>>;
+
+async fn count(counts: &ProjectCounts, project: ProjectId) {
+    *counts.lock().await.entry(project).or_default() += 1;
+}
+
+async fn counted(counts: &ProjectCounts, project: ProjectId) -> u64 {
+    counts.lock().await.get(&project).copied().unwrap_or(0)
+}
 
 impl MemoryStore {
     /// Makes the next commit fail as a store outage would, keeping nothing of that transaction.
@@ -118,6 +187,33 @@ impl MemoryStore {
             .copied()
             .unwrap_or(0)
     }
+
+    /// How many times a transaction read the paths of the footprints of the claim on this item, in
+    /// any repository, committed or not.
+    pub async fn footprint_reads_of(&self, project: ProjectId, item: ItemId) -> u64 {
+        self.footprint_reads
+            .lock()
+            .await
+            .get(&(project, item))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// How many times a transaction listed the project's footprints, committed or not.
+    pub async fn footprint_listings_of(&self, project: ProjectId) -> u64 {
+        counted(&self.footprint_listings, project).await
+    }
+
+    /// How many times a transaction listed the project's standing escalations, committed or not.
+    pub async fn escalation_listings_of(&self, project: ProjectId) -> u64 {
+        counted(&self.escalation_listings, project).await
+    }
+
+    /// How many times a transaction stored an escalation or changed a stored one, committed or
+    /// not.
+    pub async fn escalation_writes_of(&self, project: ProjectId) -> u64 {
+        counted(&self.escalation_writes, project).await
+    }
 }
 
 #[async_trait]
@@ -130,6 +226,10 @@ impl Store for MemoryStore {
             work,
             fail_commit: self.fail_next_commit.clone(),
             listings: self.listings.clone(),
+            footprint_reads: self.footprint_reads.clone(),
+            footprint_listings: self.footprint_listings.clone(),
+            escalation_listings: self.escalation_listings.clone(),
+            escalation_writes: self.escalation_writes.clone(),
         }))
     }
 
@@ -140,6 +240,10 @@ impl Store for MemoryStore {
             work,
             fail_commit: self.fail_next_commit.clone(),
             listings: self.listings.clone(),
+            footprint_reads: self.footprint_reads.clone(),
+            footprint_listings: self.footprint_listings.clone(),
+            escalation_listings: self.escalation_listings.clone(),
+            escalation_writes: self.escalation_writes.clone(),
         }))
     }
 }
@@ -151,6 +255,10 @@ struct MemoryTx {
     work: State,
     fail_commit: Arc<AtomicBool>,
     listings: Listings,
+    footprint_reads: FootprintReads,
+    footprint_listings: ProjectCounts,
+    escalation_listings: ProjectCounts,
+    escalation_writes: ProjectCounts,
 }
 
 fn outage() -> StoreError {
@@ -172,7 +280,7 @@ impl State {
         let member = |p: ProjectId, m: MemberId| self.members.contains_key(&(p, m));
         let item = |p: ProjectId, i: ItemId| self.items.contains_key(&(p, i));
         let thread = |p: ProjectId, t: ThreadId| self.threads.contains_key(&(p, t));
-        let checks: [(&'static str, bool); 30] = [
+        let checks: [(&'static str, bool); 31] = [
             ("a member", self.members.keys().all(|(p, _)| project(p))),
             (
                 "a token",
@@ -271,20 +379,29 @@ impl State {
             ),
             (
                 "a wide claim's announcement",
-                self.wide_asks.iter().all(|((p, message), ask)| {
+                self.wide_asks.iter().all(|((p, message), stored)| {
                     self.messages.contains_key(&(*p, *message))
-                        && item(*p, ask.item)
-                        && member(*p, ask.from)
-                        && member(*p, ask.to)
+                        && item(*p, stored.ask.item)
+                        && member(*p, stored.ask.from)
+                        && member(*p, stored.ask.to)
                 }),
             ),
             (
                 "a request for a grant",
-                self.asked_grants.iter().all(|((p, message), asked)| {
+                self.asked_grants.iter().all(|((p, message), stored)| {
                     self.messages.contains_key(&(*p, *message))
-                        && item(*p, asked.ask.item)
-                        && member(*p, asked.ask.asker)
-                        && member(*p, asked.holder)
+                        && item(*p, stored.asked.ask.item)
+                        && member(*p, stored.asked.ask.asker)
+                        && member(*p, stored.asked.holder)
+                }),
+            ),
+            (
+                "a revoke that sticks",
+                self.grant_blocks.iter().all(|((p, _), block)| {
+                    member(*p, block.asker)
+                        && item(*p, block.asker_item)
+                        && member(*p, block.holder)
+                        && item(*p, block.holder_item)
                 }),
             ),
             (
@@ -902,6 +1019,7 @@ impl ClaimRows for MemoryTx {
 #[async_trait]
 impl RadarRows for MemoryTx {
     async fn footprints(&mut self, project: ProjectId) -> StoreResult<Vec<Footprint>> {
+        count(&self.footprint_listings, project).await;
         Ok(self
             .work
             .footprints
@@ -917,6 +1035,12 @@ impl RadarRows for MemoryTx {
         item: ItemId,
         repo: &RepoId,
     ) -> StoreResult<Option<(Footprint, BTreeSet<RelPath>)>> {
+        *self
+            .footprint_reads
+            .lock()
+            .await
+            .entry((project, item))
+            .or_default() += 1;
         Ok(self
             .work
             .footprints
@@ -1054,6 +1178,28 @@ impl GrantRows for MemoryTx {
     async fn delete_grant(&mut self, project: ProjectId, id: GrantId) -> StoreResult<()> {
         self.work.grants.remove(&(project, id));
         Ok(())
+    }
+
+    async fn insert_grant_block(
+        &mut self,
+        project: ProjectId,
+        block: &GrantBlock,
+    ) -> StoreResult<()> {
+        self.work
+            .grant_blocks
+            .entry((project, block_key(block)))
+            .or_insert_with(|| block.clone());
+        Ok(())
+    }
+
+    async fn grant_blocks(&mut self, project: ProjectId) -> StoreResult<Vec<GrantBlock>> {
+        Ok(self
+            .work
+            .grant_blocks
+            .iter()
+            .filter(|((p, _), _)| *p == project)
+            .map(|(_, block)| block.clone())
+            .collect())
     }
 }
 
@@ -1459,7 +1605,18 @@ impl WideAskRows for MemoryTx {
         if self.work.wide_asks.contains_key(&key) {
             return Err(StoreError::Duplicate);
         }
-        self.work.wide_asks.insert(key, ask.clone());
+        if ask.acked_by_dibs.is_some() {
+            return Err(StoreError::Backend(Box::new(std::io::Error::other(
+                "a new announcement is not acknowledged by dibs yet",
+            ))));
+        }
+        let stored = StoredWideAsk {
+            ask: ask.clone(),
+            dibs_acked_at: None,
+            settled_at: None,
+            left_to_holder: false,
+        };
+        self.work.wide_asks.insert(key, stored);
         Ok(())
     }
 
@@ -1468,19 +1625,113 @@ impl WideAskRows for MemoryTx {
         project: ProjectId,
         message: MessageId,
     ) -> StoreResult<Option<WideAsk>> {
-        Ok(self.work.wide_asks.get(&(project, message)).cloned())
+        Ok(self
+            .work
+            .wide_asks
+            .get(&(project, message))
+            .map(|stored| stored.ask.clone()))
     }
 
     async fn open_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>> {
         Ok(self
-            .work
+            .open_wide_asks_of(project)
+            .map(|(_, stored)| stored.ask.clone())
+            .collect())
+    }
+
+    async fn waiting_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>> {
+        Ok(self
+            .open_wide_asks_of(project)
+            .filter(|(_, stored)| stored.settled_at.is_none())
+            .map(|(_, stored)| stored.ask.clone())
+            .collect())
+    }
+
+    async fn open_wide_asks_with_time(
+        &mut self,
+        project: ProjectId,
+    ) -> StoreResult<Vec<(WideAskRecord, OffsetDateTime)>> {
+        Ok(self
+            .open_wide_asks_of(project)
+            .filter(|(_, stored)| stored.settled_at.is_none())
+            .filter_map(|(message, stored)| {
+                let sent = self.work.messages.get(&(project, message))?;
+                let record = WideAskRecord {
+                    ask: stored.ask.clone(),
+                    left_to_holder: stored.left_to_holder,
+                };
+                Some((record, sent.created_at))
+            })
+            .collect())
+    }
+
+    async fn leave_wide_ask_to_holder(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<()> {
+        if let Some(stored) = self.work.wide_asks.get_mut(&(project, message)) {
+            stored.left_to_holder = true;
+        }
+        Ok(())
+    }
+
+    async fn settle_wide_ask(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        if let Some(stored) = self.work.wide_asks.get_mut(&(project, message))
+            && stored.dibs_acked_at.is_none()
+        {
+            stored.settled_at.get_or_insert(at);
+        }
+        Ok(())
+    }
+
+    async fn mark_wide_ask_acked_by_dibs(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+        at: OffsetDateTime,
+        because: GrantDecision,
+    ) -> StoreResult<()> {
+        if !because.is_by_dibs() {
+            return Err(StoreError::Backend(Box::new(std::io::Error::other(
+                "an acknowledgement by dibs names why dibs gave it",
+            ))));
+        }
+        if let Some(stored) = self.work.wide_asks.get_mut(&(project, message))
+            && stored.dibs_acked_at.is_none()
+            && stored.settled_at.is_none()
+        {
+            stored.ask.acked_by_dibs = Some(because);
+            stored.dibs_acked_at = Some(at);
+        }
+        Ok(())
+    }
+}
+
+impl MemoryTx {
+    /// The project's announcements that neither their holder nor dibs acknowledged, with the
+    /// message that carries each, ordered by message.
+    fn open_wide_asks_of(
+        &self,
+        project: ProjectId,
+    ) -> impl Iterator<Item = (MessageId, &StoredWideAsk)> {
+        self.work
             .wide_asks
             .iter()
-            .filter(|((p, message), ask)| {
-                *p == project && !self.work.acks.contains_key(&(project, *message, ask.to))
+            .filter(move |((p, message), stored)| {
+                *p == project
+                    && stored.dibs_acked_at.is_none()
+                    && !self
+                        .work
+                        .acks
+                        .contains_key(&(project, *message, stored.ask.to))
             })
-            .map(|(_, ask)| ask.clone())
-            .collect())
+            .map(|((_, message), stored)| (*message, stored))
     }
 }
 
@@ -1495,7 +1746,12 @@ impl AskedGrantRows for MemoryTx {
         if self.work.asked_grants.contains_key(&key) {
             return Err(StoreError::Duplicate);
         }
-        self.work.asked_grants.insert(key, asked.clone());
+        let stored = StoredAskedGrant {
+            asked: asked.clone(),
+            settled_at: None,
+            left_to_holder: false,
+        };
+        self.work.asked_grants.insert(key, stored);
         Ok(())
     }
 
@@ -1503,7 +1759,7 @@ impl AskedGrantRows for MemoryTx {
         &mut self,
         project: ProjectId,
         holder: MemberId,
-    ) -> StoreResult<Vec<AskedGrant>> {
+    ) -> StoreResult<Vec<AskedGrantRecord>> {
         let unanswered = |asked: &AskedGrant| {
             let Some(asking) = self.work.messages.get(&(project, asked.message)) else {
                 return false;
@@ -1516,9 +1772,95 @@ impl AskedGrantRows for MemoryTx {
             .work
             .asked_grants
             .iter()
-            .filter(|((p, _), asked)| *p == project && asked.holder == holder && unanswered(asked))
-            .map(|(_, asked)| asked.clone())
+            .filter(|((p, _), stored)| {
+                *p == project
+                    && stored.settled_at.is_none()
+                    && stored.asked.holder == holder
+                    && unanswered(&stored.asked)
+            })
+            .map(|(_, stored)| AskedGrantRecord {
+                asked: stored.asked.clone(),
+                left_to_holder: stored.left_to_holder,
+            })
             .collect())
+    }
+
+    async fn unsettled_asked_grants(
+        &mut self,
+        project: ProjectId,
+    ) -> StoreResult<Vec<(AskedGrantRecord, OffsetDateTime)>> {
+        Ok(self
+            .work
+            .asked_grants
+            .iter()
+            .filter(|((p, _), stored)| *p == project && stored.settled_at.is_none())
+            .filter_map(|((p, message), stored)| {
+                let asking = self.work.messages.get(&(*p, *message))?;
+                let record = AskedGrantRecord {
+                    asked: stored.asked.clone(),
+                    left_to_holder: stored.left_to_holder,
+                };
+                Some((record, asking.created_at))
+            })
+            .collect())
+    }
+
+    async fn leave_asked_grant_to_holder(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<()> {
+        if let Some(stored) = self.work.asked_grants.get_mut(&(project, message)) {
+            stored.left_to_holder = true;
+        }
+        Ok(())
+    }
+
+    async fn settle_asked_grant(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        if let Some(stored) = self.work.asked_grants.get_mut(&(project, message)) {
+            stored.settled_at.get_or_insert(at);
+        }
+        Ok(())
+    }
+
+    async fn settle_asked_grants_for_item(
+        &mut self,
+        project: ProjectId,
+        asked: &GrantAsk,
+        holder: MemberId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        for ((p, _), stored) in &mut self.work.asked_grants {
+            if *p == project && stored.asked.ask == *asked && stored.asked.holder == holder {
+                stored.settled_at.get_or_insert(at);
+            }
+        }
+        Ok(())
+    }
+
+    async fn settle_asked_grants_between(
+        &mut self,
+        project: ProjectId,
+        asker: MemberId,
+        holder: MemberId,
+        area: &QualifiedArea,
+        at: OffsetDateTime,
+    ) -> StoreResult<()> {
+        for ((p, _), stored) in &mut self.work.asked_grants {
+            if *p == project
+                && stored.asked.ask.asker == asker
+                && stored.asked.holder == holder
+                && stored.asked.ask.area == *area
+            {
+                stored.settled_at.get_or_insert(at);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1529,6 +1871,7 @@ impl EscalationRows for MemoryTx {
         project: ProjectId,
         escalation: &EscalationRecord,
     ) -> StoreResult<()> {
+        count(&self.escalation_writes, project).await;
         let key = (project, escalation.message);
         if self.work.escalations.contains_key(&key) {
             return Err(StoreError::Duplicate);
@@ -1538,6 +1881,7 @@ impl EscalationRows for MemoryTx {
     }
 
     async fn open_escalations(&mut self, project: ProjectId) -> StoreResult<Vec<EscalationRecord>> {
+        count(&self.escalation_listings, project).await;
         let mut found: Vec<EscalationRecord> = self
             .work
             .escalations
@@ -1556,6 +1900,19 @@ impl EscalationRows for MemoryTx {
             .collect();
         found.sort_by_key(|e| std::cmp::Reverse((e.created_at, e.message)));
         Ok(found)
+    }
+
+    async fn add_escalation_tie(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+        tie: [ItemId; 2],
+    ) -> StoreResult<()> {
+        count(&self.escalation_writes, project).await;
+        if let Some(escalation) = self.work.escalations.get_mut(&(project, message)) {
+            escalation.ties.insert(tie);
+        }
+        Ok(())
     }
 }
 

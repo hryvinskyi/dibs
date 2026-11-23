@@ -1,13 +1,13 @@
 //! Wide claims through the router: a claim over many areas that holds none of them, the
-//! announcement each holder is sent, the acknowledgement that grants, the verdicts in between, the
-//! status that shows them, and the refusals.
+//! announcement each holder is sent, the acknowledgement that grants — the holder's, or dibs's on
+//! the holder's behalf — the verdicts in between, the status that shows them, and the refusals.
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use dibs_domain::member::Role;
 
-use crate::support::{Answer, Person, World, assert_error, two_repositories};
+use crate::support::{Answer, Person, World, assert_error, checkout_of, two_repositories};
 
 /// alice holds `api:billing`; bob and carol have sessions and an item each, and claim nothing.
 struct Team {
@@ -292,4 +292,107 @@ async fn wide_claims_are_refused_with_the_rule_they_break() {
         )
         .await;
     assert_error(&unknown, StatusCode::UNPROCESSABLE_ENTITY, "unknown_area");
+}
+
+#[tokio::test]
+async fn a_wide_claim_over_an_area_the_holders_branch_does_not_touch_is_granted_at_once() {
+    let world = World::new().await;
+    let alice = world.project("acme", "alice").await;
+    let bob = world.member(&alice, "bob", Role::Member).await;
+    let worker = world.member(&alice, "worker", Role::Importer).await;
+    world.settings(&alice, two_repositories()).await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let alices = world.item(&alice, Some("gh:acme/api#1"), "Invoices").await;
+    let bobs = world
+        .item(&bob, Some("gh:acme/api#2"), "Upgrade the HTTP client")
+        .await;
+    let held = world
+        .post(
+            &alice,
+            &format!("/v1/items/{alices}/claim"),
+            json!({"session_id": alice_session, "areas": ["api:billing"]}),
+        )
+        .await;
+    assert_eq!(held.status, StatusCode::OK, "{}", held.body);
+    world
+        .post(
+            &alice,
+            "/v1/heartbeat",
+            json!({"session_id": alice_session, "checkout": checkout_of(alice_session),
+                   "repo": "api", "branch": "alice/1-invoices"}),
+        )
+        .await;
+    let footprint = world
+        .put(
+            &worker,
+            &format!("/v1/items/{alices}/footprint"),
+            json!({"repo": "api", "branch": "alice/1-invoices", "base": "main",
+                   "base_at": "2026-03-01T00:00:00Z", "base_sha": "abcd1234",
+                   "paths": ["src/search/index.rs"]}),
+        )
+        .await;
+    assert_eq!(
+        footprint.body,
+        json!({"stored": true, "changed": true}),
+        "{}",
+        footprint.body
+    );
+
+    let made = world
+        .post(
+            &bob,
+            &format!("/v1/items/{bobs}/claim"),
+            json!({"session_id": bob_session,
+                   "wide": {"areas": ["api:billing"], "reason": "Upgrade the HTTP client"}}),
+        )
+        .await;
+
+    assert_eq!(made.status, StatusCode::OK, "{}", made.body);
+    let announced = &made.body["announced"][0];
+    assert_eq!(announced["to"], "alice", "{}", made.body);
+    assert_eq!(announced["acked_by_dibs"], "untouched", "{}", made.body);
+    let events = world.get(&alice, "/v1/events").await;
+    let granted = events.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "wide_granted_by_ack")
+        .cloned()
+        .unwrap_or_else(|| panic!("no grant: {}", events.body));
+    assert_eq!(granted["payload"]["decided"], "untouched");
+    assert_eq!(granted["payload"]["area"], "api:billing");
+    assert!(granted["payload"]["grant"].is_u64(), "{granted}");
+    let check = world
+        .post(
+            &bob,
+            "/v1/edit-check",
+            json!({"session_id": bob_session, "repo": "api",
+                   "paths": ["src/billing/invoice.rs"], "reserve": true}),
+        )
+        .await;
+    assert_eq!(
+        check.body["verdicts"][0],
+        json!({"repo": "api", "path": "src/billing/invoice.rs", "verdict": "granted",
+               "by": "alice", "area": "api:billing"})
+    );
+    let inbox = world.get(&alice, "/v1/inbox?unacked=1").await;
+    assert_eq!(
+        inbox.body["unacked"],
+        json!([]),
+        "nothing waits for alice: {}",
+        inbox.body
+    );
+}
+
+#[tokio::test]
+async fn an_announcement_that_waits_for_its_holder_says_so() {
+    let team = Team::new().await;
+    let made = team.wide(json!(["api:billing"])).await;
+    assert_eq!(
+        made.body["announced"][0]["acked_by_dibs"],
+        Value::Null,
+        "alice's claim has no footprint: {}",
+        made.body
+    );
 }

@@ -39,12 +39,15 @@ struct StatusAnswer {
     overlaps: Vec<OverlapView>,
 }
 
-/// An escalation the caller may read that no arbiter has acknowledged yet.
+/// An escalation the caller may read that no arbiter has acknowledged yet. `by` is the member who
+/// escalated, or for one dibs raised on its own (`raised_by_dibs`), the member it is recorded for,
+/// who asked nothing; it is always a handle, as older clients require one.
 #[derive(Serialize)]
 struct EscalationView {
     subject: EscalationSubject,
     about: String,
     by: Handle,
+    raised_by_dibs: bool,
     arbiters: Vec<Handle>,
     thread_id: ThreadId,
     message_id: MessageId,
@@ -58,6 +61,7 @@ impl EscalationView {
             subject: open.subject,
             about: open.about,
             by: open.by,
+            raised_by_dibs: open.raised_by_dibs,
             arbiters: open.arbiters,
             thread_id: open.thread,
             message_id: open.message,

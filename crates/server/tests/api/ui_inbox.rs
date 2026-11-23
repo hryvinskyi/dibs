@@ -370,6 +370,51 @@ async fn opening_a_conversation_takes_it_off_the_rails_count_on_that_very_answer
 }
 
 #[tokio::test]
+async fn a_request_dibs_granted_leaves_the_grants_tab_while_one_it_has_not_stays() {
+    let seeded = Seeded::new().await;
+    let waiting = seeded.page("/ui/inbox?tab=grants").await;
+    assert!(
+        lists(&waiting, &format!("/ui/inbox/{}?tab=grants", seeded.grant)),
+        "{}",
+        list(&waiting)
+    );
+
+    assert!(
+        waiting
+            .text
+            .contains(r#"<a href="/ui/inbox?tab=grants" aria-current="true">Grants<span class="k">1</span></a>"#),
+        "{}",
+        waiting.text
+    );
+    let review = seeded
+        .world
+        .post(
+            &seeded.alice,
+            &format!("/v1/items/{}/review", seeded.billing),
+            json!({"pr": "acme/widgets#12"}),
+        )
+        .await;
+    assert_eq!(review.status, StatusCode::OK, "{}", review.body);
+    let swept = seeded.world.app.tick_grants.execute().await.unwrap();
+    assert_eq!(swept.granted, 1, "a claim in review gives its area at once");
+
+    let settled = seeded.page("/ui/inbox?tab=grants").await;
+    assert_eq!(settled.status, StatusCode::OK, "{}", settled.text);
+    assert!(
+        !lists(&settled, &format!("/ui/inbox/{}?tab=grants", seeded.grant)),
+        "{}",
+        list(&settled)
+    );
+    assert!(
+        settled
+            .text
+            .contains(r#"<a href="/ui/inbox?tab=grants" aria-current="true">Grants<span class="k">0</span></a>"#),
+        "{}",
+        settled.text
+    );
+}
+
+#[tokio::test]
 async fn grants_lists_a_waiting_request_with_both_tickets_and_opens_its_conversation() {
     let seeded = Seeded::new().await;
     let page = seeded.page("/ui/inbox?tab=grants").await;

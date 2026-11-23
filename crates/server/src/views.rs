@@ -23,6 +23,7 @@ use dibs_domain::area::QualifiedArea;
 use dibs_domain::delivery::Delivery;
 use dibs_domain::edit::{HeldReason, Verdict};
 use dibs_domain::event::EventKind;
+use dibs_domain::grant::GrantDecision;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::{HotRuleKind, Note};
 use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId, ThreadId};
@@ -32,7 +33,7 @@ use dibs_domain::item::{
 use dibs_domain::member::{DisplayName, ExternalLogin, Role};
 use dibs_domain::message::{Body, Importance, Recipients, SessionLabel, Subject};
 use dibs_domain::paths::RepoPath;
-use dibs_domain::radar::{BranchName, BranchSourceKind, OverlapKind};
+use dibs_domain::radar::{BranchName, BranchSourceKind, OrderRule, OverlapKind, OverlapOrder};
 use dibs_domain::repo::{RemoteUrl, RepoId};
 use dibs_domain::review::{PrRef, Review};
 use dibs_domain::session::{AgentLabel, HostName};
@@ -437,6 +438,41 @@ pub struct OverlapView {
     pub pr: Option<PrRef>,
     /// The paths it is on, `repo:path`, in order.
     pub paths: BTreeSet<RepoPath>,
+    /// Which of its two claims lands first: `{"first": <item id>, "because": "in_review" |
+    /// "priority" | "older"}`, or `{"tied": true}` when the order rule cannot decide; `null` for a
+    /// moved base and while the order is not worked out.
+    pub order: Option<OverlapOrderView>,
+}
+
+/// The order of a collision between two claims.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum OverlapOrderView {
+    /// The claim on `first` lands first.
+    First {
+        /// The item that lands first.
+        first: ItemId,
+        /// The step of the order rule that told the claims apart.
+        because: OrderRule,
+    },
+    /// The order rule cannot decide.
+    Tied {
+        /// Always `true`.
+        tied: bool,
+    },
+}
+
+impl OverlapOrderView {
+    /// The view of an order.
+    pub fn of(order: &OverlapOrder) -> Self {
+        match *order {
+            OverlapOrder::First { item, because } => Self::First {
+                first: item,
+                because,
+            },
+            OverlapOrder::Tied => Self::Tied { tied: true },
+        }
+    }
 }
 
 /// One item an overlap names.
@@ -456,6 +492,7 @@ impl OverlapView {
             kind: named.overlap.kind(),
             pr: named.overlap.pr().cloned(),
             paths: named.overlap.paths().clone(),
+            order: named.overlap.order().map(OverlapOrderView::of),
             items: named
                 .items
                 .into_iter()
@@ -512,6 +549,9 @@ pub struct GrantView {
     /// When.
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
     pub created_at: OffsetDateTime,
+    /// Who decided it: `holder`, or why dibs gave it on the holder's behalf (`untouched`,
+    /// `in_review`, `idle`, `waited`).
+    pub decided: GrantDecision,
 }
 
 impl GrantView {
@@ -524,6 +564,7 @@ impl GrantView {
             from: named.from,
             to: named.to,
             created_at: named.record.created_at,
+            decided: named.record.decided,
         }
     }
 }
@@ -926,6 +967,8 @@ pub struct GrantAskView {
     /// When it was asked.
     #[serde(serialize_with = "time::serde::rfc3339::serialize")]
     pub asked_at: OffsetDateTime,
+    /// Whether dibs left it to the caller for good and no longer decides it on their behalf.
+    pub left_to_holder: bool,
 }
 
 impl GrantAskView {
@@ -939,6 +982,7 @@ impl GrantAskView {
             area: ask.area,
             holder_item: ItemNameView::of(ask.holder_item),
             asked_at: ask.asked_at,
+            left_to_holder: ask.left_to_holder,
         }
     }
 }

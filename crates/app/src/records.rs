@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::ClaimInstance;
 use dibs_domain::escalation::EscalationSubject;
-use dibs_domain::grant::Grant;
+use dibs_domain::grant::{AskedGrant, Grant, GrantDecision};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
@@ -22,6 +22,7 @@ use dibs_domain::member::Role;
 use dibs_domain::message::{Author, Body, Importance, Recipients, SessionLabel, Subject};
 use dibs_domain::ready::Candidate;
 use dibs_domain::session::HostName;
+use dibs_domain::wide::WideAsk;
 
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::member::DisplayName;
@@ -279,6 +280,32 @@ pub struct GrantRecord {
     pub grant: Grant,
     /// When.
     pub created_at: OffsetDateTime,
+    /// Who decided it: the holder, or dibs on the holder's behalf and why.
+    pub decided: GrantDecision,
+}
+
+/// A stored request for a grant, with whether dibs left it to its holder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskedGrantRecord {
+    /// The request.
+    pub asked: AskedGrant,
+    /// Whether dibs left it to its holder for good and no longer decides it on their behalf: a
+    /// revoke between its asker and its holder in its area sticks, or its holder answered it before
+    /// dibs decided requests on holders' behalf. The holder still decides it, and it is settled
+    /// once it closes as any other.
+    pub left_to_holder: bool,
+}
+
+/// A stored announcement of a wide claim, with whether dibs left it to its holder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideAskRecord {
+    /// The announcement.
+    pub ask: WideAsk,
+    /// Whether dibs left it to its holder for good and never acknowledges it on their behalf: a
+    /// revoke between the wide claim's member and its holder in one of its areas sticks, or its
+    /// holder answered it before dibs acknowledged announcements on holders' behalf. The holder
+    /// may still acknowledge it, and it is settled once it closes as any other.
+    pub left_to_holder: bool,
 }
 
 /// A conversation.
@@ -422,8 +449,14 @@ pub struct EscalationRecord {
     pub thread: ThreadId,
     /// What it is about.
     pub subject: EscalationSubject,
-    /// The member who escalated.
+    /// The member who escalated; for one dibs raised on its own, the member it is recorded for,
+    /// one of its parties, who asked nothing.
     pub by: MemberId,
+    /// Whether dibs raised it on its own, nobody having asked.
+    pub raised_by_dibs: bool,
+    /// The pairs of colliding claims the order rule ties that dibs put to its arbiters, each by
+    /// its two work items, the lower first. A pair is put to one escalation once.
+    pub ties: BTreeSet<[ItemId; 2]>,
     /// The arbiters it reached; one of them acknowledging it settles it.
     pub arbiters: BTreeSet<MemberId>,
     /// When.

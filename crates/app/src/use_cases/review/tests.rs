@@ -394,7 +394,7 @@ async fn a_pull_request_closed_unmerged_returns_the_claim_to_work_and_says_so() 
 }
 
 #[tokio::test]
-async fn a_holder_in_review_is_asked_by_a_wide_claim_once_back_at_work() {
+async fn a_holder_in_review_is_announced_to_at_once_and_dibs_acknowledges_it_for_them() {
     let env = Env::with_settings(SETTINGS).await;
     let held = env.item("gh:acme/widgets#42").await;
     claim(&env, &env.bob, held, &["billing"]).await;
@@ -402,7 +402,7 @@ async fn a_holder_in_review_is_asked_by_a_wide_claim_once_back_at_work() {
         .await
         .unwrap();
     let wide = env.item("gh:acme/widgets#50").await;
-    ClaimItem::new(&env.deps)
+    let made = ClaimItem::new(&env.deps)
         .execute(
             &env.alice.actor,
             ClaimItemInput {
@@ -419,16 +419,28 @@ async fn a_holder_in_review_is_asked_by_a_wide_claim_once_back_at_work() {
         )
         .await
         .unwrap();
+    let [announced] = &made.announced[..] else {
+        panic!("one announcement: {:?}", made.announced);
+    };
+    assert_eq!(
+        announced.ask.acked_by_dibs,
+        Some(dibs_domain::grant::GrantDecision::InReview),
+        "dibs acknowledges it at once for a holder in review"
+    );
+    let bobs = subjects(&env, &env.bob).await;
+    assert_eq!(bobs.len(), 1, "{bobs:?}");
     assert!(
-        subjects(&env, &env.bob).await.is_empty(),
-        "no announcement while the holder is in review"
+        bobs[0].contains("billing"),
+        "the announcement reached them: {bobs:?}"
     );
     report(&env, "acme/widgets#7", ReportedEnd::Closed).await;
     let bobs = subjects(&env, &env.bob).await;
-    assert_eq!(bobs.len(), 2, "{bobs:?}");
-    assert!(
-        bobs.iter().any(|subject| subject.contains("billing")),
-        "the announcement reached them: {bobs:?}"
+    assert_eq!(
+        bobs.iter()
+            .filter(|subject| subject.contains("billing"))
+            .count(),
+        1,
+        "back at work, nothing is announced again: {bobs:?}"
     );
 }
 

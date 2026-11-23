@@ -14,7 +14,7 @@ use dibs_app::use_cases::{
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::ThreadId;
-use dibs_domain::radar::OverlapKind;
+use dibs_domain::radar::{OverlapKind, OverlapOrder};
 
 use crate::ui::claims::classify::{finished, held_over_a_week, other_ticket, silent};
 use crate::ui::claims::view::{ClaimView, OtherTicket, Scene};
@@ -27,10 +27,6 @@ use crate::ui::shell::Loaded;
 
 /// The most lines a card lists before it says how many more there are.
 const MOST_LINES: usize = 4;
-
-/// How long a grant request asked of the viewer waits before its card shows: a session of theirs
-/// would have decided it by then.
-const DECIDE_AFTER: Duration = Duration::minutes(10);
 
 /// What the cards are read from.
 pub(crate) struct Facts<'a> {
@@ -99,7 +95,8 @@ pub(crate) enum Card {
         /// Whether any conversation of the card, unread or not, waits for an acknowledgement.
         acknowledging: bool,
     },
-    /// Grant requests asked of the viewer that have waited too long for their agent.
+    /// Grant requests dibs leaves to the viewer, because a revoke of theirs stands for the member
+    /// and the area.
     Decide {
         /// How many.
         total: usize,
@@ -188,7 +185,7 @@ pub(crate) struct Talk {
     pub(crate) last: Moment,
 }
 
-/// A grant request waiting for the viewer's agent.
+/// A grant request dibs leaves to the viewer.
 #[derive(Debug, Clone)]
 pub(crate) struct Ask {
     /// Who asks.
@@ -206,8 +203,9 @@ pub(crate) struct Ask {
 /// An escalation waiting for an arbiter.
 #[derive(Debug, Clone)]
 pub(crate) struct Dispute {
-    /// Who escalated.
-    pub(crate) by: PersonView,
+    /// The member who escalated; `None` for an escalation dibs raised on its own, nobody having
+    /// asked.
+    pub(crate) by: Option<PersonView>,
     /// What it is about, leading to its conversation.
     pub(crate) about: ConversationView,
     /// When.
@@ -223,6 +221,39 @@ pub(crate) struct Pair {
     pub(crate) contract: bool,
     /// How many files they both change.
     pub(crate) files: usize,
+    /// Which of them lands first, once dibs has worked it out.
+    pub(crate) order: Option<PairOrder>,
+}
+
+/// Which of two colliding claims lands first, as dibs stored it.
+#[derive(Debug, Clone)]
+pub(crate) enum PairOrder {
+    /// One of the tickets lands first and the other rebases onto it.
+    First {
+        /// The ticket that lands first.
+        ticket: TicketView,
+        /// Why it does, as a clause that follows its name.
+        why: &'static str,
+    },
+    /// The rule found them equal: dibs asks the arbiters, or the holders agree when there is none.
+    Tied,
+}
+
+impl PairOrder {
+    /// The order of `named`; `None` before it is worked out, and when it names a ticket the pair
+    /// does not hold.
+    fn of(named: &NamedOverlap, links: &LinkContext) -> Option<Self> {
+        match named.overlap.order()? {
+            OverlapOrder::Tied => Some(Self::Tied),
+            OverlapOrder::First { item, because } => {
+                let (first, _) = named.items.iter().find(|(named, _)| named.id == *item)?;
+                Some(Self::First {
+                    ticket: TicketView::of(first.id, first.external_ref.as_ref(), links),
+                    why: because.why(),
+                })
+            }
+        }
+    }
 }
 
 /// A claim on a branch named after another ticket.
@@ -425,18 +456,18 @@ fn answer(facts: &Facts<'_>, links: &LinkContext) -> Card {
     }
 }
 
-/// The grant requests asked of the viewer more than [`DECIDE_AFTER`] ago, among every one waiting
-/// and not only those an agent is handed.
+/// The grant requests dibs leaves to the viewer, among every one waiting and not only those an
+/// agent is handed: the others wait for dibs, which grants them itself.
 fn decisions<'a>(facts: &Facts<'a>) -> Vec<&'a PendingGrantAsk> {
     facts
         .inbox
         .every_grant_ask
         .iter()
-        .filter(|ask| facts.now - ask.asked_at > DECIDE_AFTER)
+        .filter(|ask| ask.left_to_holder)
         .collect()
 }
 
-/// The card of the grant requests left waiting, the oldest first.
+/// The card of the grant requests left to the viewer, the oldest first.
 fn decide(facts: &Facts<'_>, links: &LinkContext) -> Card {
     let mut asks = decisions(facts);
     asks.sort_by_key(|ask| (ask.asked_at, ask.thread));
@@ -462,7 +493,7 @@ fn arbitrate(facts: &Facts<'_>, links: &LinkContext) -> Card {
     Card::Arbitrate {
         total: open.len(),
         lines: lines(open, |escalation| Dispute {
-            by: PersonView::of(&escalation.by),
+            by: (!escalation.raised_by_dibs).then(|| PersonView::of(&escalation.by)),
             about: ConversationView::of(escalation.thread, &escalation.about, links),
             at: moment(escalation.at, facts.now),
         }),
@@ -498,6 +529,7 @@ fn overlap(facts: &Facts<'_>, links: &LinkContext) -> Card {
                 .collect(),
             contract: named.overlap.kind() == OverlapKind::Contract,
             files: named.overlap.paths().len(),
+            order: PairOrder::of(named, links),
         }),
     }
 }
@@ -630,7 +662,9 @@ mod tests {
     use dibs_domain::item::{ExternalRef, ItemRepository, ItemStatus, Title};
     use dibs_domain::message::{Author, Importance, Recipients, Subject};
     use dibs_domain::paths::RepoPath;
-    use dibs_domain::radar::{BranchName, BranchSource, Overlap, RecordedBranch};
+    use dibs_domain::radar::{
+        BranchName, BranchSource, OrderRule, Overlap, OverlapOrder, RecordedBranch,
+    };
     use dibs_domain::ref_scheme::RefSchemeRegistry;
     use dibs_domain::repo::RepoId;
     use dibs_domain::review::{ClaimState, PrRef, Review};
@@ -861,6 +895,15 @@ mod tests {
             area: area("api:billing"),
             holder_item: name(1),
             asked_at: NOW - asked,
+            left_to_holder: false,
+        }
+    }
+
+    /// A grant request dibs leaves to the viewer, because a revoke of theirs stands.
+    fn left_ask(thread: u64, asked: Duration) -> PendingGrantAsk {
+        PendingGrantAsk {
+            left_to_holder: true,
+            ..ask(thread, asked)
         }
     }
 
@@ -869,6 +912,7 @@ mod tests {
             subject: EscalationSubject::Item(ItemId(thread)),
             about: format!("Rates of gh:acme/widgets#{thread}"),
             by: handle("bob"),
+            raised_by_dibs: false,
             arbiters: arbiters.iter().map(|name| handle(name)).collect(),
             thread: ThreadId(thread),
             message: MessageId(thread),
@@ -1002,52 +1046,80 @@ mod tests {
     }
 
     #[test]
-    fn decide_shows_grant_requests_waiting_more_than_ten_minutes_oldest_first() {
+    fn decide_shows_the_grant_requests_dibs_leaves_to_the_viewer_oldest_first() {
         let mut world = World::new();
-        world.inbox.every_grant_ask = vec![ask(7, DECIDE_AFTER)];
-        assert!(world.cards().is_empty(), "ten minutes exactly is not more");
         world.inbox.every_grant_ask = vec![
-            ask(7, DECIDE_AFTER + Duration::seconds(1)),
-            ask(8, Duration::hours(2)),
-            ask(9, Duration::minutes(3)),
+            left_ask(7, Duration::minutes(1)),
+            left_ask(8, Duration::hours(2)),
+            ask(9, Duration::days(3)),
         ];
         let Card::Decide { total, lines } = world.card() else {
             panic!("a decide card");
         };
-        assert_eq!(total, 2);
+        assert_eq!(total, 2, "an ordinary waiting request is dibs's to decide");
         let threads: Vec<&str> = lines.shown.iter().map(|line| line.href.as_str()).collect();
         assert_eq!(threads, ["/ui/inbox/8", "/ui/inbox/7"]);
         assert_eq!(lines.shown[0].area.full, "api:billing");
         assert_eq!(lines.shown[0].ticket.title, "gh:acme/widgets#108");
-        assert_eq!(
-            titles(&world.page()),
-            ["2 grant requests have waited for your agent for more than ten minutes"]
+        assert_eq!(titles(&world.page()), ["2 grant requests are left to you"]);
+        world.inbox.every_grant_ask.remove(0);
+        world.inbox.every_grant_ask.remove(0);
+        assert!(world.cards().is_empty(), "the ordinary one is no card");
+        world.inbox.every_grant_ask = vec![left_ask(7, Duration::minutes(1))];
+        assert_eq!(titles(&world.page()), ["1 grant request is left to you"]);
+    }
+
+    #[test]
+    fn an_ordinary_waiting_request_shows_no_decide_card_however_old() {
+        let mut world = World::new();
+        world.inbox.every_grant_ask = vec![
+            ask(7, Duration::minutes(11)),
+            ask(8, Duration::hours(2)),
+            ask(9, Duration::days(30)),
+        ];
+        assert!(world.cards().is_empty());
+        assert_eq!(count(&world.facts()), 0);
+        assert_eq!(world.page(), "");
+    }
+
+    #[test]
+    fn the_decide_card_says_why_the_request_is_the_viewers_and_what_they_may_do() {
+        let mut world = World::new();
+        world.inbox.every_grant_ask = vec![left_ask(7, Duration::minutes(1))];
+        let page = world.page();
+        assert!(
+            page.contains(
+                "dibs leaves a request to you when a revoke of yours stands for that member and area. You may grant it, or answer it in its conversation."
+            ),
+            "{page}"
         );
-        world.inbox.every_grant_ask.truncate(1);
-        assert_eq!(
-            titles(&world.page()),
-            ["1 grant request has waited for your agent for more than ten minutes"]
+        assert!(
+            page.contains("dibs does not grant these on your behalf."),
+            "{page}"
         );
+        for old in ["your agent", "ten minutes", "decided it yet", "upgrade"] {
+            assert!(!page.contains(old), "{old} in {page}");
+        }
     }
 
     /// Twelve grant requests, newest first, as the use case answers them: the agent's list holds
-    /// the newest ten; only the two oldest were asked more than ten minutes ago.
+    /// the newest ten; only the two oldest are left to the viewer, though every one waited an hour.
     fn twelve_asks(world: &mut World) {
         world.inbox.every_grant_ask = (1..=12)
             .map(|n| {
-                let asked = if n > 10 {
-                    Duration::hours(1) + Duration::minutes(i64::try_from(n).unwrap())
+                let asked = Duration::hours(1) + Duration::minutes(i64::try_from(n).unwrap());
+                if n > 10 {
+                    left_ask(20 + n, asked)
                 } else {
-                    Duration::minutes(i64::try_from(n).unwrap() / 2)
-                };
-                ask(20 + n, asked)
+                    ask(20 + n, asked)
+                }
             })
             .collect();
         world.inbox.grant_asks = world.inbox.every_grant_ask[..10].to_vec();
     }
 
     #[test]
-    fn decide_measures_from_every_waiting_request_and_not_only_the_agents_list() {
+    fn decide_reads_every_waiting_request_and_not_only_the_agents_list() {
         let mut world = World::new();
         twelve_asks(&mut world);
         let Card::Decide { total, lines } = world.card() else {
@@ -1223,6 +1295,41 @@ mod tests {
     }
 
     #[test]
+    fn arbitrate_shows_an_escalation_dibs_raised_as_raised_by_dibs_and_not_by_its_member() {
+        let mut world = World::new();
+        world.status.escalations = vec![
+            OpenEscalation {
+                raised_by_dibs: true,
+                ..escalation(3, &["alice"])
+            },
+            escalation(2, &["alice"]),
+        ];
+        let Card::Arbitrate { lines, .. } = world.card() else {
+            panic!("an arbitrate card");
+        };
+        assert_eq!(lines.shown[0].by, None, "bob asked nothing");
+        assert_eq!(
+            lines.shown[1]
+                .by
+                .as_ref()
+                .map(|person| person.handle.as_str()),
+            Some("bob")
+        );
+        let page = world.page();
+        assert_eq!(
+            page.matches(r#"<span class="tag">raised by dibs</span>"#)
+                .count(),
+            1,
+            "{page}"
+        );
+        assert_eq!(
+            page.matches(r#"href="/ui/claims?who=bob""#).count(),
+            1,
+            "only the escalation bob asked for names him: {page}"
+        );
+    }
+
+    #[test]
     fn overlap_counts_collisions_between_claims_and_not_a_moved_base() {
         let mut world = World::new();
         world.status.overlaps = vec![
@@ -1274,6 +1381,96 @@ mod tests {
             items: Vec::new(),
         }];
         assert!(moved.cards().is_empty());
+    }
+
+    /// `named` with the order `order` stored on its overlap.
+    fn ordered(named: NamedOverlap, order: OverlapOrder) -> NamedOverlap {
+        NamedOverlap {
+            overlap: named.overlap.with_order(Some(order)).unwrap(),
+            items: named.items,
+        }
+    }
+
+    /// The overlap card's one line, rendered, with its markup.
+    fn overlap_line(world: &World) -> (Pair, String) {
+        let Card::Overlap { lines, .. } = world.card() else {
+            panic!("an overlap card");
+        };
+        (lines.shown[0].clone(), world.page())
+    }
+
+    #[test]
+    fn an_overlap_with_an_order_names_the_claim_that_lands_first_and_why() {
+        let mut world = World::new();
+        world.status.overlaps = vec![ordered(
+            collision(OverlapKind::SameFile, [1, 2], &["api:src/a.rs"]),
+            OverlapOrder::First {
+                item: ItemId(2),
+                because: OrderRule::InReview,
+            },
+        )];
+        let (line, page) = overlap_line(&world);
+        let Some(PairOrder::First { ticket, why }) = &line.order else {
+            panic!("an order: {line:?}");
+        };
+        assert_eq!(
+            (ticket.label.as_str(), *why),
+            ("widgets#2", "it is in review")
+        );
+        assert!(
+            page.contains(" · <span class=\"ref\"><a href=\"")
+                && page.contains(">widgets#2</a>")
+                && page.contains(" lands first, because it is in review</span>"),
+            "{page}"
+        );
+        assert!(!page.contains("Tied"), "{page}");
+    }
+
+    #[test]
+    fn every_rule_gives_its_reason_to_the_line() {
+        for rule in OrderRule::ALL {
+            let mut world = World::new();
+            world.status.overlaps = vec![ordered(
+                collision(OverlapKind::Contract, [1, 2], &["api:src/a.rs"]),
+                OverlapOrder::First {
+                    item: ItemId(1),
+                    because: rule,
+                },
+            )];
+            let (_, page) = overlap_line(&world);
+            assert!(
+                page.contains(&format!(" lands first, because {}</span>", rule.why())),
+                "{page}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tied_overlap_says_the_order_rule_cannot_tell() {
+        let mut world = World::new();
+        world.status.overlaps = vec![ordered(
+            collision(OverlapKind::SameFile, [1, 2], &["api:src/a.rs"]),
+            OverlapOrder::Tied,
+        )];
+        let (line, page) = overlap_line(&world);
+        assert!(matches!(line.order, Some(PairOrder::Tied)), "{line:?}");
+        assert!(
+            page.contains(" · Tied: the order rule cannot tell them apart</span>"),
+            "{page}"
+        );
+        assert!(!page.contains("lands first"), "{page}");
+    }
+
+    #[test]
+    fn an_overlap_without_an_order_shows_neither_line() {
+        let mut world = World::new();
+        world.status.overlaps = vec![collision(OverlapKind::SameFile, [1, 2], &["api:src/a.rs"])];
+        let (line, page) = overlap_line(&world);
+        assert!(line.order.is_none(), "{line:?}");
+        assert!(
+            !page.contains("lands first") && !page.contains("Tied"),
+            "{page}"
+        );
     }
 
     #[test]
@@ -1493,7 +1690,7 @@ mod tests {
         world.status.overlaps = vec![collision(OverlapKind::SameFile, [1, 5], &["api:a.rs"])];
         world.status.integration_silent_since = Some(NOW - Duration::hours(1));
         world.inbox.threads = vec![talk(1, Some("bob"), 1, Duration::minutes(1))];
-        world.inbox.every_grant_ask = vec![ask(8, Duration::hours(1))];
+        world.inbox.every_grant_ask = vec![left_ask(8, Duration::hours(1))];
         let labels: Vec<&str> = world
             .cards()
             .iter()

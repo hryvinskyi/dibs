@@ -716,7 +716,7 @@ async fn a_takeover_of_a_claim_stale_for_ten_days_keeps_its_areas_through_the_ne
                 item,
                 session: env.alice.session,
                 areas: vec!["search".to_owned()],
-                reason: Body::parse("bob moved on").unwrap(),
+                reason: Some(Body::parse("bob moved on").unwrap()),
                 kind: None,
             },
         )

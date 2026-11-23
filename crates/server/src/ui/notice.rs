@@ -18,8 +18,6 @@ use crate::ui::shell::{self, Here, Screen, ShellView};
 pub enum Problem {
     /// The form's token is not the session's: an old page, or a form another site sent.
     FormExpired,
-    /// A take-over without a reason.
-    ReasonMissing,
     /// What was asked for does not exist, or the person may not see it.
     NotFound,
     /// The service refused, saying why in a sentence written for the person.
@@ -42,8 +40,6 @@ impl Problem {
 enum Shown {
     /// The form expired.
     FormExpired,
-    /// The take-over had no reason.
-    ReasonMissing,
     /// Nothing to show.
     NotFound,
     /// The service's sentence, its references linked.
@@ -75,7 +71,6 @@ pub async fn notice(
     };
     let problem = match problem {
         Problem::FormExpired => Shown::FormExpired,
-        Problem::ReasonMissing => Shown::ReasonMissing,
         Problem::NotFound => Shown::NotFound,
         Problem::Refused(sentence) => Shown::Refused(LinkedText::of(&sentence, None, &links)),
     };

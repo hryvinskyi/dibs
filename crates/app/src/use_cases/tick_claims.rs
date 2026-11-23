@@ -10,16 +10,14 @@ use std::sync::Arc;
 use time::{Duration, OffsetDateTime};
 
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::claim::{
-    Claim, FootprintPaths, IdleAreas, decide_return, due_for_release, idle_areas,
-};
+use dibs_domain::claim::{Claim, IdleAreas, decide_return, due_for_release, idle_areas};
 use dibs_domain::event::{AreasReturned, EventKind, ReleasedStale};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, ProjectId};
 use dibs_domain::item::ItemStatus;
 use dibs_domain::message::Importance;
+use dibs_domain::radar::Footprint;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
-use dibs_domain::repo::RepoId;
 use dibs_domain::settings::{ProjectSettings, format_duration};
 
 use crate::dependencies::Dependencies;
@@ -27,6 +25,7 @@ use crate::error::AppError;
 use crate::named::ItemName;
 use crate::ports::{Clock, EventNotifier, IdGen, Store};
 use crate::use_cases::claim_ending::{Ending, end_claim};
+use crate::use_cases::claim_footprints::ClaimFootprints;
 use crate::use_cases::claim_notice::ClaimNotice;
 use crate::use_cases::common::existing_item;
 use crate::use_cases::handover::{Handovers, give_areas_up};
@@ -221,11 +220,7 @@ impl TickClaims {
             let Some(mut claim) = work.claim(project, item).await? else {
                 continue;
             };
-            let repos = footprints
-                .iter()
-                .filter(|footprint| footprint.item == item)
-                .map(|footprint| &footprint.repo);
-            let found = idle_of(work, &claim, repos, settings, now).await?;
+            let found = idle_of(work, &claim, &footprints, settings, now).await?;
             found.restart_kept(&mut claim, now);
             if found.idle.is_empty() {
                 if !found.kept.is_empty() {
@@ -264,33 +259,19 @@ struct Swept {
 }
 
 /// What the idle rule finds in the claim at `now`: nothing without a candidate, else decided on
-/// its stored footprints, those of `repos`, read with their paths only then.
+/// its stored footprints, found in `listed` and read with their paths only then.
 async fn idle_of(
     work: &mut Work,
     claim: &Claim,
-    repos: impl Iterator<Item = &RepoId>,
+    listed: &[Footprint],
     settings: &ProjectSettings,
     now: OffsetDateTime,
 ) -> Result<IdleAreas, AppError> {
     if claim.idle_candidates(now, settings).is_empty() {
         return Ok(IdleAreas::default());
     }
-    let project = work.project_id();
-    let mut stored = Vec::new();
-    for repo in repos {
-        if let Some(footprint) = work.footprint(project, claim.item, repo).await? {
-            stored.push(footprint);
-        }
-    }
-    let footprints: Vec<FootprintPaths<'_>> = stored
-        .iter()
-        .map(|(footprint, paths)| FootprintPaths {
-            repo: &footprint.repo,
-            paths,
-            truncated: footprint.truncated,
-        })
-        .collect();
-    Ok(idle_areas(claim, &footprints, settings, now))
+    let stored = ClaimFootprints::read(work, claim.item, listed).await?;
+    Ok(idle_areas(claim, &stored.paths(), settings, now))
 }
 
 /// What the holder of a claim the sweep gave idle areas of back is told: which areas, why — no path

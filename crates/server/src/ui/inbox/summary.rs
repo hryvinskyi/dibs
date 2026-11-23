@@ -4,9 +4,9 @@
 //! conversations are messages from people.
 //!
 //! A conversation is from people when it holds a message a member wrote, the viewer included, or a
-//! message waiting for the viewer's acknowledgement, unless it is a grant request still waiting for
-//! the viewer's decision: the viewer's agent decides that one, so it never raises the count of what
-//! a person has to read. Who started the conversation, and in whose name, does not matter: what
+//! message waiting for the viewer's acknowledgement, unless it is a grant request still waiting:
+//! dibs or the viewer's agent decides that one, and one dibs leaves to the viewer shows on the Now
+//! page's Decide card, so it never raises the count of what a person has to read. Who started the conversation, and in whose name, does not matter: what
 //! dibs wrote in a member's name is a notice all the same.
 //!
 //! A conversation from people waits on the viewer while it holds any message they have not read,

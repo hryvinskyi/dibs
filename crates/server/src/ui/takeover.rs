@@ -1,6 +1,7 @@
 //! `POST /ui/items/{id}/takeover`: a person takes over another member's silent claim from its
-//! inspector, with the reason the previous holder is told. A refusal is shown in the frame of
-//! Claims.
+//! inspector, with the reason the previous holder is told. The reason is optional: an empty field
+//! has dibs write the standing one, which says how long the claim showed no sign of work. A refusal
+//! is shown in the frame of Claims.
 //!
 //! The browser is one of the person's sessions: the take-over is made from their session labelled
 //! `web` on the host `web`, registered on first use and reused afterwards.
@@ -22,7 +23,7 @@ use dibs_domain::message::{Body, SessionLabel};
 use dibs_domain::session::{AgentLabel, HostName};
 
 use crate::error::ApiError;
-use crate::fields::item_in_path;
+use crate::fields::{item_in_path, parse_unless_blank};
 use crate::http::AppState;
 use crate::ui::notice::{Problem, notice, refused};
 use crate::ui::render::see_other;
@@ -83,27 +84,15 @@ pub async fn take_over(
         )
         .await;
     }
-    let reason = form
-        .and_then(|form| form.reason)
-        .and_then(|text| Body::parse(&text).ok());
-    let Some(reason) = reason else {
-        return notice(
-            &state,
-            &session,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Problem::ReasonMissing,
-            Screen::Claims,
-            back,
-        )
-        .await;
-    };
-    let made = match path
-        .map_err(ApiError::from)
-        .and_then(|Path(id)| item_in_path(&id))
-    {
-        Ok(item) => take(&state, &session, item, reason).await,
-        Err(error) => Err(error),
-    };
+    let made = async {
+        let item = path
+            .map_err(ApiError::from)
+            .and_then(|Path(id)| item_in_path(&id))?;
+        let written = form.and_then(|form| form.reason);
+        let reason = parse_unless_blank("reason", written.as_deref(), Body::parse)?;
+        take(&state, &session, item, reason).await
+    }
+    .await;
     match made {
         Ok(()) => signed_page(&session, see_other(back)),
         Err(error) => refused(&state, &session, &error, Screen::Claims, back).await,
@@ -115,7 +104,7 @@ async fn take(
     state: &AppState,
     session: &UiSession,
     item: dibs_domain::ids::ItemId,
-    reason: Body,
+    reason: Option<Body>,
 ) -> Result<(), ApiError> {
     let actor = session.actor();
     let input = RegisterSessionInput {

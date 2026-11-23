@@ -25,8 +25,9 @@ members `alice` and `bob`.
   client older than 0.1.2 (a pre-release of 0.1.2 reads them) cannot read branch patterns (`refs/heads/<prefix>*`), so
   `GET /v1/me` serves it the settings
   without the protected refs and the frozen refs that are patterns (the branches named exactly stay), and the slots in
-  the answers of `GET /v1/status` and the slot routes without the frozen refs that are patterns. Every other caller
-  gets them whole.
+  the answers of `GET /v1/status` and the slot routes without the frozen refs that are patterns. A `dibs` client older
+  than 0.1.11 cannot read `release_after`, `idle_area_after`, `free_areas_at` or `grant_after`, so `GET /v1/me` serves
+  it the settings without them. Every other caller gets them whole.
 - **Retries.** The `dibs` command line, run by a person, gives each sending of a request 5 seconds to connect and 20
   seconds in all, so a request sent once more may take up to 40 seconds. It sends once more: a read (`GET`) whose connection timed out opening or was reset; and, only when its connection timed
 out opening so that nothing reached the server, registering a session, applying the settings, acknowledging a message,
@@ -142,8 +143,8 @@ cause of an internal failure and answers `internal`.
 | `GET /v1/status` | people | Live claims, stale claims, the areas held, the live wide claims, the caller's ready list, the slots, the caller's worktree pools, whether the integrations went silent, and the overlaps between live claims. |
 | `POST /v1/edit-check` | people | May I edit these paths? |
 | `POST /v1/grants` | people | Let another member edit in an area you hold. |
-| `DELETE /v1/grants/{id}` | people | Withdraw a grant you gave. |
-| `POST /v1/grant-requests` | people | Ask whoever holds an area for a grant, for your claim on an item; dibs starts the conversation that reaches them. |
+| `DELETE /v1/grants/{id}` | people | Withdraw a grant you gave, or, as an admin, any grant. |
+| `POST /v1/grant-requests` | people | Ask whoever holds an area for a grant, for your claim on an item; dibs starts the conversation that reaches them, and may grant it on their behalf. |
 | `POST /v1/threads` | people | Start a conversation. |
 | `GET /v1/threads` | people | List the conversations you may read. |
 | `GET /v1/threads/{id}` | people | A conversation with its messages. |
@@ -199,7 +200,8 @@ claim    { item, holder, session_id, host, areas: ["repo:area", …], wide: { ar
            branch_sources: { "<repo id>": "pull_request" | "worktree" | "named" | "checkout", … },
            kind: "feature" | "debt",
            pending: { "repo:area": { from, asked_at | null, escalated_at | null }, … } }
-grant    { id, item, area, from, to, created_at }
+grant    { id, item, area, from, to, created_at,
+           decided: "holder" | "untouched" | "in_review" | "idle" | "waited" }
 thread   { id, subject, item | null, author, system, to_project, to: [handle, …], created_at }
 message  { id, thread, author, system, label, body, importance: "normal" | "high" | "urgent", ack_required,
            created_at, acks?: [{ member, acked_at | null }, …] }
@@ -637,25 +639,52 @@ them, and nobody's claim refuses it; it may still hold areas of its own under `a
 area there, as for any claim), but never one it also names. One area is named by one live wide claim at a time. In the
 same transaction every member whose live claim holds one of the named areas is sent an **announcement**: a conversation
 about the wide claim's item, started by the wide claim's member and addressed to the holder alone, whose one message
-dibs writes (`author` `dibs`, `system`), `high` and asking to be acknowledged. Its text says dibs sent it for that member, why, and which of
-the recipient's areas it is about. `announced` in the answer lists them:
+dibs writes (`author` `dibs`, `system`), `high` and asking to be acknowledged; a holder whose claim is in review is sent
+one as well. Its text says dibs sent it for that member, why, which of the recipient's areas it is about, and when dibs
+acknowledges it on their behalf. `announced` in the answer lists them, each with `acked_by_dibs`: why dibs acknowledged
+it on its holder's behalf as it was sent (`untouched`, `idle`, `in_review`, `waited`), or `null` while it waits for the
+holder:
 
 ```json
 { "outcome": "new", "claim": { "item": 50, "holder": "bob", "areas": [],
     "wide": { "areas": ["default:billing", "default:search"], "reason": "Upgrade the HTTP client" }, "…": "…" },
-  "announced": [{ "to": "alice", "areas": ["default:billing"], "message_id": 91, "thread_id": 90 }],
+  "announced": [{ "to": "alice", "areas": ["default:billing"], "message_id": 91, "thread_id": 90,
+                  "acked_by_dibs": null }],
   "inside_wide": [], "…": "…" }
 ```
 
 **A holder's acknowledgement of the announcement is their grant**: for each area it asked about that they still hold
 through a live claim, the wide claim's member may edit there for the wide claim's item. The grant is like any other: in
-force while both claims are live, ended (`grant_revoked`) when either ends, revocable by the holder. Until a holder
-acknowledges, the wide claim's member's edits in their area answer `held_by` with `reason: "awaiting_ack"`; in a named
+force while both claims are live, ended (`grant_revoked`) when either ends, revocable by the holder or an admin.
+
+**dibs acknowledges an announcement on the holder's behalf** by the test it grants requests by (see
+[Asking for a grant](#asking-for-a-grant)), judged for every area of the holder the announcement names, against the
+holder's live claim that holds it: at once, as it is sent or at the next sweep, when every such area passes — the
+reason named is `in_review` when any of those claims is in review, else `idle` when any area is idle, else
+`untouched` — and otherwise once the project's `grant_after` has passed since it was sent (`waited`). The grants it
+makes are the holder's, carry that reason as their `decided`, and append `wide_granted_by_ack` with it; dibs says so in
+the announcement's conversation with the grants' ids and how to revoke them. An announcement dibs acknowledged is
+answered: it no longer waits for an acknowledgement (in `unacked`, `deliverable` or anywhere else), and the areas it
+named are not announced again to that holder for that wide claim. A revoke sticks as for a grant: dibs never
+acknowledges for that holder an announcement of that wide claim in an area where a grant from them to the wide claim's
+member was revoked while both claims last, and leaves it to the holder: dibs says so once in the announcement's
+conversation, never acknowledges it, and the holder may still acknowledge it. dibs settles it at the next sweep once no
+revoke recorded between the two members in its areas applies any more, so a holder who holds those areas through
+another claim is announced to anew. An area the holder no longer holds is left out of the test. An announcement is
+**closed** once no claim, live or stale, leaves an area to judge — its wide claim ended, or its holder holds none of its
+areas through any claim — and dibs settles it at the next sweep, left to the holder or not, and never judges it again;
+the holder may still acknowledge it. One that only stale claims keep is left as it is, and judged again if they are live again.
+
+Until a holder or dibs acknowledges, the wide claim's member's edits in their area answer `held_by` with
+`reason: "awaiting_ack"`; in a named
 area nobody holds they answer `allowed`, and nothing is added to the claim's `areas`. A member who comes to hold a named
 area later — by claiming it, by a takeover, or by an edit that adds it — is sent the same announcement in the same
 transaction, and the claim answer lists the area in `inside_wide`:
 `[{ "area": "default:billing", "holder": "bob", "item": item ref, "message_id": 93 }]` (`message_id` is the
-announcement waiting for them, or `null`). Nobody is asked twice about one area while an announcement to them waits.
+announcement waiting for them, or `null`). Nobody is asked twice about one area while an announcement to them waits for
+them or for dibs — one left to them included — nor while a grant dibs's acknowledgement made is in force, nor after a
+revoke of one. Once those grants ended with the holder's claim, or an announcement was settled because it closed, a
+holder who holds the area again is sent a new announcement, judged afresh.
 A renewal adds the requested areas to the scope and takes the new reason; without `wide` the claim keeps its scope. A
 takeover carries the scope on, minus areas another live wide claim names now, and announces it again in the new
 member's name. Refusals: `wide_overlap` (`409`: another live wide claim names an area; `details` name its member,
@@ -665,7 +694,12 @@ named), `invalid_request` for a missing or invalid `wide.reason` or a missing `w
 `POST /v1/items/{id}/takeover`, body `{ "session_id": 7, "reason": "…", "areas": [], "kind": "feature" }` (`kind`
 optional: without it the new claim keeps the previous claim's kind), takes over another member's
 stale claim and tells them the reason in the previous claim's conversation: a `high` message from dibs, asking for no
-acknowledgement, that names the new holder, how to write to them (`dibs send <handle>`), and quotes the reason;
+acknowledgement, that names the new holder, how to write to them (`dibs send <handle>`), and quotes the reason.
+`reason` is optional from server 0.1.11 on: when it is absent, empty or only whitespace, dibs writes the standing
+reason instead, which says that the new holder gave none, how long nothing of the claim's work showed (from its
+`last_seen`, in whole minutes), and that the new holder needs the item. A given reason holds at most 16384 bytes and no
+NUL; anything else is `invalid_request`. A server before 0.1.11 refuses a body without `reason` with `invalid_request`
+naming `reason`, and the client passes that refusal on as it is;
 `thread_id` is the previous holder's claim conversation, addressed to them alone: only they can read it, and the new
 holder is not told to look there (the field stays for older clients). Answers
 `{ "claim": …, "previous_holder": "bob", "dropped_areas": [], "thread_id": 31, "item": item ref, "announced": [] }`. Refusals: `not_stale` (the claim is
@@ -691,12 +725,14 @@ A claim carries `state`: `working` while its holder works on it, `in_review` whi
   "slots": [],
   "worktrees": [{ "machine": "…", "pool": "…", "holds": [own hold] }],
   "escalations": [{ "subject": { "item": 12 }, "about": "work item gh:acme/widgets#7 \"Refund rounding\"",
-                    "by": "bob", "arbiters": ["carol"], "thread_id": 40, "message_id": 41, "at": "…" }],
+                    "by": "bob", "raised_by_dibs": false, "arbiters": ["carol"], "thread_id": 40,
+                    "message_id": 41, "at": "…" }],
   "integration_silent_since": null,
   "overlaps": [{ "kind": "same_file",
                  "items": [{ "id": 12, "ref": "gh:acme/widgets#7", "title": "…", "link": "…", "holder": "alice" },
                            { "id": 14, "ref": "gh:acme/widgets#9", "title": "…", "link": "…", "holder": "bob" }],
-                 "pr": null, "paths": ["default:config/app.yaml"] }]
+                 "pr": null, "paths": ["default:config/app.yaml"],
+                 "order": { "first": 12, "because": "in_review" } }]
 }
 ```
 
@@ -706,15 +742,21 @@ or a repository's `pr_status` is enabled — and `null` otherwise, while one cal
 they are silent, merges complete no claims and pull request statuses go stale. A claim in review is always live.
 
 `overlaps` lists, by kind and then by items, the overlaps the radar found whose claims are all live (see
-[Branches and overlaps](#branches-and-overlaps)).
+[Branches and overlaps](#branches-and-overlaps)). `order` says which of a collision's two claims lands first:
+`{ "first": <item id>, "because": "in_review" | "priority" | "older" }`, or `{ "tied": true }` when the order rule
+cannot decide; it is `null` for a moved base (`main_moved`) and while the order is not worked out yet. A client reads
+`because` leniently, since later releases may add reasons.
 
 `worktrees` lists the caller's own worktree pools with a hold, each with the machine and pool its client named it by,
 as `GET /v1/worktrees` answers them (see [Worktrees](#worktrees)); silent holds end before it is read.
 
 `escalations` lists, newest first, the escalations the caller may read (it reached them, or they sent it) that no arbiter
-has acknowledged yet. `holds` never lists an area a wide claim names. `wide` lists the live wide claims by item, each area with where it
+has acknowledged yet. `by` is the member who escalated. `raised_by_dibs` is `true` for an escalation dibs raised on its
+own, nobody having asked, as it does for a tie; `by` is then the member it is recorded for, one of its parties, who
+asked nothing, and a client shows it as raised by dibs (`Escalated by dibs: …`). `by` is always a handle; a client
+reads a missing `raised_by_dibs` as `false`. `holds` never lists an area a wide claim names. `wide` lists the live wide claims by item, each area with where it
 stands for the wide claim's member: `free` (nobody else holds it), `granted` (its holder acknowledged the announcement,
-or granted the edits) or `waiting` (its holder has not). `ready` is the caller's ready list, as `GET /v1/ready` answers
+or granted the edits, or dibs did on their behalf) or `waiting` (neither has). `ready` is the caller's ready list, as `GET /v1/ready` answers
 it.
 
 ### Review
@@ -918,17 +960,39 @@ dibs to the holder of each claim it names (both of them; one for `main_moved`), 
 (see *A claim's conversation* under [Records](#records)), so neither holder reads the other's. A message opens with what happened (`Overlap: …`,
 `Base moved: …`) and describes the overlap from its reader's side: their branch, and the other claim with its item,
 title, holder and branch, or the merged pull request; the paths, the first 20 by name and then how many more. It is
-`high` for `same_file` and `contract` and `normal` for `main_moved`, and says to rebase onto the base now, for a
-contract to read the other change before going on, and for `same_file` and `contract` to write to the other holder
-(`dibs send bob`) to settle who changes what, since the holders no longer share a conversation. `overlap_found`
-records each overlap found once, whoever was told. The same overlap on more paths is not new.
+`high` for `same_file` and `contract` and `normal` for `main_moved`. For `same_file` and `contract` it says which claim
+lands first and why: the reader of the first goes on with the work, and the reader of the second, once the first
+merges, rebases onto the base and resolves the shared files (for a contract, reads the other change and builds on it),
+then says so in that conversation. A `main_moved` says to rebase onto the base when the claim is next worked on.
+`overlap_found` records each overlap found once, whoever was told. The same overlap on more paths is not new.
+
+**The order of a collision** (`same_file`, `contract`) is decided from what dibs stores: the claim in review lands
+before a claim at work; otherwise the claim whose item has the higher priority (the lower number); otherwise the older
+claim (`claimed_at`). When all three are equal, the rule ties. The order is stored on the overlap and shown as its
+`order`. The server's sweep (every 30 seconds) works it out again for every collision whose claims are all live, so a
+claim entering review or a priority that changed shows: a changed order is stored, and told to both holders in their
+claims' conversations (`The order changed: …`) when which claim lands first changed or the order became or stopped
+being a tie; a change of the reason alone is stored without a notice. A collision found before orders were stored gets
+its first order there, told as a first notice. dibs raises a tie with the project's arbiters itself, as an escalation
+of the lower item that dibs starts in nobody's name (`Escalated by dibs: …`) and that reaches both holders and the
+arbiters; it names both work items and where their changes meet, and asks nobody to stop work, since only the order is
+undecided. When an escalation of that item already stands, dibs adds the tie to its conversation instead, naming any
+holder of the tie who does not read it so that the arbiters write the answer to them too, and that holder's notice says
+so. A tie is not added to an escalation one of whose arbiters holds one of its claims, since that holder could settle
+their own claim's order alone: both holders' notices say that one of them is among the arbiters of the escalation that
+stands, and tell them to write to each other and agree on the order. A pair of claims is put to the arbiters at most
+once while an escalation stands: dibs records on the escalation each pair it raised it for or added to it, and a pair
+that is tied again, after an order in between, is not posted again; the notices say the arbiters were already asked
+about these two claims. The notices say the arbiters were asked; with no arbiter to receive it, they tell both holders
+to write to each other (`dibs send bob`) and agree on the order. While no order is worked out, the notice asks
+the holders to write to each other to agree which lands first.
 
 A moved base is **told at most once a day** for each claim. A `main_moved` found within 24 hours of the last one told in
 the same claim's conversation is stored, recorded with `overlap_found` and shown, but no message is written: every merge
 into a busy base can bring one, and one word to rebase is enough. A claim whose conversation is new, or was deleted or
 pruned, has been told nothing. A claim's moved bases are part of what it is: `GET /v1/status` lists them among
-`overlaps`, and the session brief and `dibs status` add them to the claim's own line ("the base moved under it:
-acme/widgets#7 (rebase onto the base)").
+`overlaps`, and the session brief adds them to the claim's own line ("the base moved under it: acme/widgets#7 (rebase
+onto the base when you next work on it)"); `dibs status` adds them as well.
 
 An overlap **ends** only when what it rests on changes: a footprint it rests on changes so that it no longer holds, a
 claim's branch changes, a merge delivers the branch it rests on, the settings change so that it no longer holds, or a
@@ -1002,11 +1066,28 @@ field or a path that is not a relative path, `not_found` for a session that is n
 `to` edit in it, for `to`'s live claim on `item`. Answers `201 { "grant": grant, "created": true, "item": item ref }`,
 or `200` with `"created": false` when the same grant exists. A grant given tells the grantee in a `high` message from dibs
 that says what was granted, who granted it and how to write to them (`dibs send <handle>`), in the conversation of the
-grantee's claim on `item`; a grant that exists tells nobody. Refusals: `not_holder` (`403`), `self_grant`, `grantee_has_no_claim`,
-`unknown_area`, `not_found`. A grant ends when it is revoked, when its grantor no longer holds the area, or when the
-grantee's claim ends.
+grantee's claim on `item`; a grant that exists tells nobody. A grant given settles every request `to` made of the caller
+for that area and `item` (see [Asking for a grant](#asking-for-a-grant)), so dibs never decides those requests. A
+request of theirs for another item is not answered by it: it lapses while the grant is in force. Once the grant ends,
+the request is judged again with its wait timed from when it was asked: dibs grants it at the next sweep if
+`grant_after` has passed since then, and once it has otherwise, unless it closes or a revoke leaves it to the caller.
+Refusals:
+`not_holder` (`403`), `self_grant`, `grantee_has_no_claim`, `unknown_area`, `not_found`. A grant ends when it is revoked,
+when its grantor no longer holds the area, or when the grantee's claim ends.
 
-`DELETE /v1/grants/{id}` answers `{ "grant": grant }`; only the grantor may (`not_grantor`, `403`).
+A grant's `decided` says who decided it: `holder` for the holder's own grant (and for an acknowledgement of a wide
+claim's announcement), or why dibs gave it on the holder's behalf — `in_review` (the holder's claim is in review),
+`idle` (the area is idle on the holder's claim, as the claim sweep judges idle areas), `untouched` (the branch of the
+holder's claim changes no path of the area) or `waited` (the request waited the project's `grant_after`, whatever the holder answered meanwhile).
+A grant dibs gave is still the holder's grant: `from` is the holder, it ends as the holder's grants end, and the holder
+may revoke it. A client reads `decided` leniently, since later releases may add reasons.
+
+`DELETE /v1/grants/{id}` answers `{ "grant": grant }`. The grantor may revoke a grant, and so may an admin of the project,
+any grant, one dibs gave on a holder's behalf included; anyone else is refused (`not_grantor`, `403`). The event `grant_revoked` names who revoked it (`by`). A revoke
+sticks: it settles every request the grantee made of the grantor for that area, and dibs never again grants that member
+that area on the grantor's behalf while both claims last (the grantee's claim on the grant's item and the grantor's
+claim that held the area, each as claimed then). The grantor may still grant it. The command line revokes with
+`dibs revoke-grant <id>`, and an agent with the tool `dibs_revoke_grant`.
 
 ### Asking for a grant
 
@@ -1016,30 +1097,74 @@ an edit check does and answers what it comes to:
 
 | `outcome` | When | What happens |
 |---|---|---|
-| `asked` (`201`) | Another member's live claim holds the area; the lowest item when, against the rules, several do. | dibs starts a conversation in the caller's name, about the holder's item and addressed to the holder alone. |
+| `asked` (`201`) | Another member's live claim holds the area; the lowest item when, against the rules, several do. | dibs starts a conversation in the caller's name, about the holder's item and addressed to the holder alone. The request waits, or is left to the holder (`left_to_holder`). |
+| `granted` (`201`) | As for `asked`, and dibs granted the request on the holder's behalf at once. | dibs starts the conversation, gives the holder's grant, and says so in the conversation. The edit is granted. |
 | `granted` (`200`) | The holder's grant to the caller in the area is already in force, for this item or another of the caller's. | Nothing; the edit is granted. |
 | `own` (`200`) | No other member's live claim holds the area, and one of the caller's does. | Nothing. |
 | `free` (`200`) | No live claim holds the area. A stale claim holds nothing an edit check or a claim respects, and its holder can no longer grant. | Nothing; there is nobody to ask. |
 
 The answer is `{ "outcome": "asked", "holder": "alice", "holder_item": item ref, "thread_id": 31, "item": item ref,
-"area": "api:billing" }`: `item` is the caller's item and `area` the area resolved; `holder` and `holder_item` (the item
-of the claim that holds the area) are `null` unless the outcome is `asked` or `granted`, and `thread_id` is `null`
-unless it is `asked`.
+"area": "api:billing", "grant_id": null, "decided": null, "left_to_holder": false }`: `item` is the caller's item and
+`area` the area resolved;
+`holder` and `holder_item` (the item of the claim that holds the area) are `null` unless the outcome is `asked` or
+`granted`. `thread_id` is the conversation that asks the holder: set for `asked` and for a grant dibs gave at once,
+`null` otherwise. `grant_id` (the grant dibs gave) and `decided` (why, as a grant's `decided` names it) are set only
+when dibs granted the request at once, and `null` for a grant the holder had given already. A client that predates
+these two fields reads `granted` as the holder's grant in force, which it is. `left_to_holder` is `true` only for
+`asked`, when a revoke of the holder's grant to the caller in the area stands (see below): dibs left the request to the
+holder for good. A client that predates it reads such a request as waiting, which it does, for the holder alone.
 
 The conversation is routed by its item: a message about an item is kept for the session of the recipient's live claim
 on it (see [Delivery to a running session](#delivery-to-a-running-session)), so it is about the holder's item, not the
-caller's, and reaches the session working under the claim that holds the area. Its subject is `A grant on <area> for <the caller's item>` (its reference, else its title), and its
-first message is `high`, asks for no acknowledgement, and is signed with the label of the session of the caller's claim.
-It names the caller, their item and the area, says which claim of the holder holds it, and gives the command that
-grants it, `dibs grant <the caller's item> --area <area> --to <caller>` (MCP: `dibs_grant`); answering in the
-conversation refuses or asks a question. The message counts toward the caller's `raised_per_hour` like any `high`
-message they write: past it, nothing is asked and the answer is `importance_limited` (`429`).
+caller's, and reaches the session working under the claim that holds the area. Its subject is `A grant on <area> for <the caller's item>` (its reference, else its title).
+dibs decides the request before it writes the first message, which is in the caller's name, asks for no
+acknowledgement, is signed with the label of the session of the caller's claim, names the caller, their item and the
+area, and says which claim of the holder holds it. What else it says follows the decision:
+
+- **dibs granted it at once**: the message is `normal` and says that dibs granted it on the holder's behalf; dibs's
+  reply in the same conversation says why and how to undo it. Nothing is left for the holder to do, so the message
+  counts toward no limit.
+- **The request waits**: the message is `high`, gives the command that grants it,
+  `dibs grant <the caller's item> --area <area> --to <caller>` (MCP: `dibs_grant`), and says when dibs grants it on the
+  holder's behalf, naming the project's `grant_after`. Answering in the conversation tells the caller what the holder's
+  work still changes there, or asks a question; it does not stop dibs from granting.
+- **Left to the holder** (`left_to_holder`): the message is `high`, gives the same command, and says that a revoke of
+  the holder's grant to the caller in the area stands, so dibs leaves the request to them to grant or answer. It
+  promises no grant after the wait.
+
+A `high` first message counts toward the caller's `raised_per_hour` like any `high` message they write: past it,
+nothing is asked and the answer is `importance_limited` (`429`).
 
 The request is recorded with its message, and the holder's `GET /v1/inbox` lists it under `grant_asks` while it waits
-for their decision: until the holder writes in its conversation (a refusal or a question answers it as a grant does),
+for their decision: until the holder writes in its conversation (an answer takes it out of the list, as a grant does),
 or until asking again would no longer ask them — a grant of theirs to the caller in the area is in force, the caller's
 claim on the item or the holder's claim on the area is no longer live, or the area is held by someone else. Deleting
 the conversation removes the request with it.
+
+**dibs decides a request on the holder's behalf**, from what it stores and never from a message's text: at once, in the
+same transaction as the ask, and then in the server's sweep (every 30 seconds) while the request is not settled. It
+looks at the holder's live claim that holds the area. The first of these that holds names the reason, and dibs grants:
+the claim is in review (`in_review`); the area is idle on the claim as the claim sweep judges idle areas (`idle`); the
+claim has a footprint in the area's repository, none truncated, and no path of it lies in the area (`untouched`). With
+none of these, the request waits until the project's `grant_after` (default `10m`) has passed since it was asked, and
+is granted then (`waited`); the holder's answer in the conversation does not stop that clock, it only takes the request
+out of their inbox. The grant is the holder's (`from` is the holder), given as any grant is: the grantee is told in their
+claim's conversation, and dibs writes in the request's conversation, which both members read, that it granted the
+request on the holder's behalf, why, that the order rule decides which change lands first where both meet in a file
+(see [Branches and overlaps](#branches-and-overlaps)), the grant's id, and how the holder or an admin revokes it.
+
+dibs decides a request once. A request is **settled**, and never judged again, when dibs grants it, when the holder
+gives the asker a grant in that area for the request's item, when a grant from the holder to the asker in that area is
+revoked (whatever its item), when the claim it was asked under has ended (the asker holds no claim on its item claimed
+at or before it was asked), or when its holder holds the area through no claim, live or stale (they released the claim,
+or narrowed the area away): a request is never granted to a later claim of either member, so an asker whose holder
+holds the area again asks again. While a request has lapsed for now (a claim went stale, a grant is in force, another
+member holds the area), dibs leaves it, and it may wait again. A request a revoke between the same two claims stands
+against is **left to the holder**, at the ask or at the next sweep: dibs never grants it, and the holder's inbox still
+lists it, with `left_to_holder: true`. It is settled as any other once its claim ends or its holder holds the area
+through no claim, and once no revoke recorded between the two members in the area applies any more (the holder holds
+the area through another claim than the one the revoke names), so a holder no longer sees it on a claim the revoke does
+not reach.
 
 Refusals: `grantee_has_no_claim` (`409`) when the caller holds no live claim on `item`, `unknown_area`, `invalid_area`,
 `ambiguous_area`, `not_found` for an unknown item, `importance_limited` (`429`), `invalid_request` for a missing field.
@@ -1114,11 +1239,13 @@ or unread and one of these: a message a member wrote in a conversation addressed
 other message — what dibs wrote, or a message to the whole project — when `high` or `urgent`. A client lists what it
 claims as the server lists it; clients released before this rule claim only `high` or `urgent` messages and those
 awaiting an acknowledgement, so a member's `normal` message reaches a session only through a client that follows it. A wide claim's announcement whose wide claim has
-ended is in neither `unacked` nor `deliverable`, and is not counted as awaiting an acknowledgement: it asks for nothing
-any more. Every inbox answer also carries `"grant_asks": [{ "thread_id": 31, "message_id": 41, "asker": "bob", "item":
-item ref, "area": "api:billing", "holder_item": item ref, "asked_at": "…" }, …]`, newest first, at most 10: the grants
-asked of the caller (see [Asking for a grant](#asking-for-a-grant)) that still wait for their decision. `item` is the
-asker's item, the one a grant is for, and `holder_item` the item of the caller's claim that holds the area.
+ended, or that dibs acknowledged on its holder's behalf, is in neither `unacked` nor `deliverable`, and is not counted as
+awaiting an acknowledgement: it asks for nothing any more. Every inbox answer also carries `"grant_asks": [{ "thread_id": 31, "message_id": 41, "asker": "bob", "item":
+item ref, "area": "api:billing", "holder_item": item ref, "asked_at": "…", "left_to_holder": false }, …]`, newest
+first, at most 10: the grants asked of the caller (see [Asking for a grant](#asking-for-a-grant)) that still wait for
+their decision. `item` is the asker's item, the one a grant is for, and `holder_item` the item of the caller's claim
+that holds the area. `left_to_holder` is `true` for a request dibs no longer decides on the caller's behalf, because a
+revoke of their grant to the asker in the area stands.
 
 `GET /v1/threads/{id}` answers `{ "thread": thread, "messages": [message, …] }`, oldest first; a message that asks to be
 acknowledged carries `acks`, each recipient ordered by handle with when they acknowledged it (`null` while they have
@@ -1174,7 +1301,8 @@ about that the caller still holds through a live claim: `granted` lists those gr
 `wide_granted_by_ack`. Acknowledging again is harmless, so a client may retry after a lost answer: it answers `200` with
 the first acknowledgement (its original `at`), `"created": false` and `"granted": []`, and records and appends nothing.
 An announcement whose wide claim has ended (released, completed or taken over) grants nothing when acknowledged; the
-answer then carries `"announcement_ended": true`. Refusals: `not_a_recipient` (`403`: the message did not
+answer then carries `"announcement_ended": true`. A holder may still acknowledge an announcement dibs acknowledged for
+them: that is their own grant, and it grants again any area of it whose grant was revoked. Refusals: `not_a_recipient` (`403`: the message did not
 reach the caller, or the caller wrote it), `ack_not_required` (`409`: the message asks for none), `not_found` for a
 message in a conversation the caller may not read.
 
@@ -1396,8 +1524,8 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `areas_returned` | `item`, `member`, `areas` (what the live claim holds no more; the server's sweep gave them back after the project's `idle_area_after` with no sign of the claim's work in them) |
 | `areas_handed_on` | `item`, `member`, `areas` (what the claim held or waited for and gave up), `state` (the tracker state, one of the project's `free_areas_at`, an import moved the claim's item into; the claim keeps the item) |
 | `reserved` | `item`, `member`, `areas`, `paths` |
-| `granted` | `grant`, `item`, `area`, `from`, `to` |
-| `grant_revoked` | `grant`, `item`, `area`, `from`, `to`, `cause` (`revoked`, `grantor_left`, `grantee_left`) |
+| `granted` | `grant`, `item`, `area`, `from` (the holder whose grant it is), `to`, `decided` (`holder`, or why dibs gave it on the holder's behalf: `untouched`, `in_review`, `idle`, `waited`; absent from an event stored before, which was the holder's) |
+| `grant_revoked` | `grant`, `item`, `area`, `from`, `to`, `cause` (`revoked`, `grantor_left`, `grantee_left`), `by` (the member who revoked it, the grantor or an admin; `null` unless the cause is `revoked`, and for a revoke stored before 0.1.11) |
 | `thread_started` | `thread`, `author` (`null` for dibs), `item` |
 | `message_posted` | `thread`, `message`, `author` (`null` for dibs) |
 | `settings_changed` | `by` |
@@ -1405,8 +1533,8 @@ payload to handles. An event carries ids and handles, never a subject or the tex
 | `dependency_added`, `dependency_removed` | `item`, `blocked_by`, `by` |
 | `acked` | `thread`, `message`, `by` |
 | `wide_claimed` | `item`, `member`, `areas` (every area the wide scope names now) |
-| `wide_granted_by_ack` | `grant`, `item`, `area`, `by` (the holder who acknowledged), `to` (the wide claim's member) |
-| `escalated` | `subject` (`{"item": id}`, `{"slot": name}` or `{"thread": id}`), `by` |
+| `wide_granted_by_ack` | `grant`, `item`, `area`, `by` (the holder who acknowledged, or on whose behalf dibs did), `to` (the wide claim's member), `decided` (`holder`, or why dibs acknowledged on the holder's behalf: `untouched`, `in_review`, `idle`, `waited`; absent from an event stored before, which was the holder's) |
+| `escalated` | `subject` (`{"item": id}`, `{"slot": name}` or `{"thread": id}`), `by` (the member who escalated; for one dibs raised on its own, the member it is recorded for), `by_dibs` (`true` when dibs raised it on its own, nobody having asked; absent from an event stored before, which was asked for) |
 | `member_removed` | `member`, `by` (the admin; `null` for the operator) |
 | `pruned` | `counts`: `{ threads, messages, events }` |
 | `thread_deleted` | `thread`, `by` (the admin; `null` for the operator) |
@@ -1480,6 +1608,7 @@ rule is `422 invalid_settings`, naming the setting at fault; a body that is no s
 | `stale_after` | How long a claim stays live after the last sign of its own work (an edit made under it, a push of its branch, claiming it again): `24h`; 1 hour to 30 days; default 24 hours. |
 | `release_after` | How long a working claim may go without a sign of its own work before the server releases it and its item is open again: `7d`; 1 to 90 days, and longer than `stale_after`; default 7 days, or one day more than `stale_after` when that is 7 days or longer. |
 | `idle_area_after` | How long an area of a live claim may go with no sign of the claim's work in it (no edit made there under the claim, no declaration of it, no path of the claim's branch in it) before the server gives the area back: `7d`; 1 to 90 days; default 7 days. |
+| `grant_after` | How long a request for a grant, or a wide claim's announcement, waits for its holder before dibs grants or acknowledges it on the holder's behalf when nothing lets it at once (see [Asking for a grant](#asking-for-a-grant)): `10m`; 1 minute to 1 day; default 10 minutes. |
 | `free_areas_at` | The tracker states, exactly as the import sends an item's `source_status`, at which a claim hands its work on: when an import moves a claimed item into one of them from a state not listed, the claim gives every area up and keeps the item (see [Items](#items)): `["Ready for QA"]`; each 1 to 40 characters with no control characters, trimmed, and named once; default none. |
 | `heartbeat_every` | How often a session sends a heartbeat: `1m`; 1 to 15 minutes; default 1 minute. |
 | `yield_escalates_after` | How long a request to hand an area over from debt work to a feature claim waits before it is escalated to the arbiters: `30m`; 5 minutes to 24 hours; default 30 minutes. A top-level setting in either layout. |
@@ -1826,7 +1955,7 @@ session's, is answered `403` with a page that says the form expired. The sign-in
 
 | Form | Fields besides `csrf` | Answers |
 |---|---|---|
-| Take over (Claims, on another member's silent claim) | `reason` (required), `back` | `303` to `back`, a path of this service, and to `/ui/claims` for anything else. |
+| Take over (Claims, on another member's silent claim) | `reason` (optional: empty, dibs writes the standing reason), `back` | `303` to `back`, a path of this service, and to `/ui/claims` for anything else. |
 | Reply (Inbox) | `body`, `require_ack` (`1` asks every recipient to acknowledge) | `303` to the message in its conversation (`/ui/inbox/{thread}#m-{message}`). A text the rules refuse, an empty one, one over 16 KiB or one holding a NUL, answers `422` with the conversation and the reply kept in its form. |
 | Acknowledge (Inbox, on a message that asks for it) | none | `303` to the message in its conversation; one given already changes nothing. |
 | Sign out (the rail) | none | `303` to `/ui/login`. |

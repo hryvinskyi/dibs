@@ -480,7 +480,7 @@ async fn a_silent_claim_offers_its_take_over_which_returns_to_the_claim() {
     let shown = inspector(&page);
     assert!(shown.contains("No sign of life for 9 d."), "{shown}");
     assert!(
-        shown.contains("A silent claim can be taken over with a reason, which carol is sent."),
+        shown.contains("A silent claim can be taken over. carol is sent the reason you write. The reason is optional: without one, dibs tells carol how long the claim showed no sign of work."),
         "{shown}"
     );
     assert!(
@@ -519,6 +519,41 @@ async fn a_silent_claim_offers_its_take_over_which_returns_to_the_claim() {
         .filter(|held| held["item"]["id"] == seeded.silent)
         .collect();
     assert_eq!(holders.len(), 1, "{}", status.body);
+}
+
+#[tokio::test]
+async fn the_take_over_form_needs_no_reason() {
+    let seeded = Seeded::new().await;
+    let address = format!("/ui/claims/{}?filter=silent", seeded.silent);
+    let page = seeded.page(&address).await;
+    let shown = inspector(&page);
+    assert!(
+        shown.contains(
+            r#"<label for="takeover-reason">Reason</label><textarea class="textarea" id="takeover-reason" name="reason"></textarea>"#
+        ),
+        "the field is optional and keeps its name: {shown}"
+    );
+    let taken = seeded
+        .browser
+        .post(
+            &seeded.world,
+            &format!("/ui/items/{}/takeover", seeded.silent),
+            &[
+                ("csrf", &seeded.browser.token),
+                ("reason", ""),
+                ("back", &address),
+            ],
+        )
+        .await;
+    assert_eq!(taken.status, StatusCode::SEE_OTHER, "{}", taken.text);
+    assert_eq!(taken.location(), address);
+    let after = seeded.page(&format!("/ui/claims/{}", seeded.silent)).await;
+    let shown = inspector(&after);
+    assert!(
+        shown.contains(r#"<span class="faint">you</span>"#),
+        "{shown}"
+    );
+    assert!(!shown.contains("No sign of life"), "{shown}");
 }
 
 #[tokio::test]
@@ -616,6 +651,55 @@ async fn a_wide_claim_shows_its_reason_and_where_each_of_its_areas_stands() {
     let after = browser.get(&world, &address).await;
     let shown = inspector(&after);
     assert!(shown.contains("<b>alice</b></a> agreed"), "{shown}");
+    assert!(!shown.contains("waits for"), "{shown}");
+    assert!(!shown.contains("acknowledged by dibs"), "{shown}");
+}
+
+#[tokio::test]
+async fn an_area_dibs_acknowledged_for_its_holder_says_so_and_why_and_is_not_agreed() {
+    let (world, alice, bob) = team().await;
+    let alice_session = world.session(&alice, "laptop").await;
+    let bob_session = world.session(&bob, "desk").await;
+    let alices = world.item(&alice, None, "Invoices").await;
+    let bobs = world.item(&bob, Some("gh:acme/api#9"), "Upgrade").await;
+    claim(
+        &world,
+        &alice,
+        alice_session,
+        alices,
+        json!(["api:billing"]),
+    )
+    .await;
+    let reviewed = world
+        .post(
+            &alice,
+            &format!("/v1/items/{alices}/review"),
+            json!({"pr": "acme/api#4", "more": false}),
+        )
+        .await;
+    assert_eq!(reviewed.status, StatusCode::OK, "{}", reviewed.body);
+    let made = world
+        .post(
+            &bob,
+            &format!("/v1/items/{bobs}/claim"),
+            json!({"session_id": bob_session,
+                   "wide": {"areas": ["api:billing", "api:search"],
+                            "reason": "Swap the HTTP client"}}),
+        )
+        .await;
+    assert_eq!(made.status, StatusCode::OK, "{}", made.body);
+
+    let page = sign_in(&world, &alice)
+        .await
+        .get(&world, &format!("/ui/claims/{bobs}"))
+        .await;
+    let shown = inspector(&page);
+    assert!(
+        shown.contains(r#"acknowledged by dibs for <a class="who" href="/ui/claims?who=alice">"#)
+            && shown.contains(", because the claim holding the area is in review</span>"),
+        "{shown}"
+    );
+    assert!(!shown.contains("</b></a> agreed"), "{shown}");
     assert!(!shown.contains("waits for"), "{shown}");
 }
 

@@ -1,32 +1,39 @@
 //! Sending, inside the caller's transaction, the announcements wide claims owe the holders of their
-//! areas, and turning a holder's acknowledgement of one into their grants.
+//! areas, and turning an acknowledgement of one — the holder's, or dibs's on the holder's behalf —
+//! into the holder's grants.
 //!
 //! An announcement is a thread about the wide claim's item, addressed to the one holder it asks,
 //! whose single message is `high` and asks to be acknowledged. dibs writes it, under the session
 //! label `dibs`, in a thread the wide claim's member starts: the member did not type it, its text
 //! says dibs sent it for them, and the holder's answer is to them.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::claim::{Claim, FootprintPaths};
 use dibs_domain::event::{EventKind, WideGrantedByAck};
-use dibs_domain::grant::Grant;
+use dibs_domain::grant::{Grant, GrantBlock, GrantDecision};
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{GrantId, MessageId, ThreadId};
+use dibs_domain::ids::{GrantId, ItemId, MessageId, ThreadId};
 use dibs_domain::message::{Author, Body, Importance, Recipients};
+use dibs_domain::radar::Footprint;
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::settings::ProjectSettings;
-use dibs_domain::wide::{AskDue, WideAsk, asks_due, grants_by_ack};
+use dibs_domain::wide::{
+    AckOnBehalf, AskDue, WideAckFacts, WideAsk, asks_due, decide_ack_on_holders_behalf,
+    grants_by_ack, judged_areas,
+};
 
 use crate::error::AppError;
 use crate::named::{ItemName, NamedGrant, Names};
 use crate::ports::{IdGen, StoreError};
 use crate::records::GrantRecord;
+use crate::use_cases::claim_footprints::ClaimFootprints;
 use crate::use_cases::common::existing_item;
-use crate::use_cases::writing::{Posted, SystemPost, TITLE_NOTE};
+use crate::use_cases::writing::{Posted, SystemPost, SystemReply, TITLE_NOTE, titled_body};
 use crate::work::Work;
 
 /// How many areas the text of an announcement lists by name before it counts the rest.
@@ -35,7 +42,8 @@ const LISTED_AREAS: usize = 20;
 /// An announcement sent, with the handle of the holder it asks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Announced {
-    /// The announcement.
+    /// The announcement. Its `acked_by_dibs` says why dibs acknowledged it on the holder's behalf
+    /// as it was sent, and is `None` while it waits for the holder.
     pub ask: WideAsk,
     /// The thread that carries it.
     pub thread: ThreadId,
@@ -53,7 +61,11 @@ pub(crate) struct Announcer<'a> {
 
 impl Announcer<'_> {
     /// Sends every announcement the project's claims, as they stand in the transaction now, owe:
-    /// one per holder of an area a live wide claim names that nothing asked them about yet. Run it
+    /// one per holder of an area a live wide claim names that no announcement still waiting for
+    /// dibs or the holder asked them about (see [`asks_due`]). One dibs settled because it closed
+    /// asks for nothing any more, so a holder who gave its areas up and holds them again is asked
+    /// anew. Each one sent is judged at once, in the same transaction, and acknowledged by
+    /// dibs on its holder's behalf when the test of [`decide_ack_on_holders_behalf`] says so. Run it
     /// after any change that can make a member hold an area or widen a wide claim.
     pub(crate) async fn announce_due(&self, work: &mut Work) -> Result<Vec<Announced>, AppError> {
         let project = work.project_id();
@@ -64,11 +76,13 @@ impl Announcer<'_> {
             .into_iter()
             .map(|record| record.grant)
             .collect();
-        let open = work.open_wide_asks(project).await?;
+        let asked = work.waiting_wide_asks(project).await?;
+        let blocks = work.grant_blocks(project).await?;
         let due = asks_due(
             &claims,
             &grants,
-            &open,
+            &asked,
+            &blocks,
             self.now,
             self.settings.stale_after(),
         );
@@ -85,6 +99,25 @@ impl Announcer<'_> {
                 .map(|scope| scope.reason().as_str().to_owned())
                 .unwrap_or_default();
             sent.push(self.send(work, &names, ask, &reason).await?);
+        }
+        let listed = work.footprints(project).await?;
+        let acks = DibsAcks {
+            ids: self.ids,
+            schemes: self.schemes,
+            settings: self.settings,
+            now: self.now,
+        };
+        let facts = AckFacts {
+            claims: &claims,
+            blocks: &blocks,
+            listed: &listed,
+        };
+        for announced in &mut sent {
+            if let AckOnBehalf::Ack { because } =
+                acks.judge(work, &announced.ask, self.now, &facts).await?
+            {
+                announced.ask.acked_by_dibs = Some(because);
+            }
         }
         Ok(sent)
     }
@@ -119,6 +152,7 @@ impl Announcer<'_> {
             from: due.from,
             to: due.to,
             areas: due.areas,
+            acked_by_dibs: None,
         };
         work.insert_wide_ask(project, &ask).await?;
         Ok(Announced {
@@ -127,6 +161,201 @@ impl Announcer<'_> {
             to,
         })
     }
+}
+
+/// What dibs reads, inside one transaction of one project, to judge announcements on their
+/// holders' behalf.
+pub(crate) struct AckFacts<'a> {
+    /// The project's claims.
+    pub(crate) claims: &'a [Claim],
+    /// The revokes that stick.
+    pub(crate) blocks: &'a [GrantBlock],
+    /// The project's footprints, listed without their paths.
+    pub(crate) listed: &'a [Footprint],
+}
+
+/// dibs acknowledging announcements on their holders' behalf, inside the caller's transaction, by
+/// the test it grants requests by.
+pub(crate) struct DibsAcks<'a> {
+    /// Where new ids come from.
+    pub(crate) ids: &'a dyn IdGen,
+    /// How items are named.
+    pub(crate) schemes: &'a RefSchemeRegistry,
+    /// The project's settings.
+    pub(crate) settings: &'a ProjectSettings,
+    /// When.
+    pub(crate) now: OffsetDateTime,
+}
+
+impl DibsAcks<'_> {
+    /// Judges `ask`, sent at `sent_at` (see [`decide_ack_on_holders_behalf`]), acts on the outcome,
+    /// and answers it. A revoke that sticks in any judged area is looked for first: when one
+    /// stands, no footprint is read. Otherwise the footprints of the holder's claims that hold the
+    /// judged areas are read, with their paths, only for a claim not in review, the one reason that
+    /// needs none.
+    ///
+    /// Acknowledging it grants the wide claim's member what the holder's acknowledgement would,
+    /// each grant recording dibs's reason, and marks it acknowledged by dibs, so that it is
+    /// answered everywhere and never judged again. No acknowledgement of the holder's is written:
+    /// the holder did not read it. dibs says so, why, and how to undo the grants in its
+    /// conversation, which the wide claim's member started and the holder was sent.
+    ///
+    /// One a revoke leaves to the holder is marked so, and dibs says so once in its conversation:
+    /// dibs never acknowledges it, and only settles it once it closes
+    /// ([`DibsAcks::settle_if_closed`]) or the revoke stops applying. One that closed is settled and never
+    /// judged again. The holder may still acknowledge either. One that waits or has lapsed is left
+    /// as it is.
+    pub(crate) async fn judge(
+        &self,
+        work: &mut Work,
+        ask: &WideAsk,
+        sent_at: OffsetDateTime,
+        facts: &AckFacts<'_>,
+    ) -> Result<AckOnBehalf, AppError> {
+        let judged = judged_areas(ask, facts.claims, self.now, self.settings.stale_after());
+        let revoked: BTreeSet<QualifiedArea> = judged
+            .iter()
+            .filter(|(area, _)| {
+                facts
+                    .blocks
+                    .iter()
+                    .any(|block| block.applies(ask.from, ask.to, area, facts.claims))
+            })
+            .map(|(area, _)| area.clone())
+            .collect();
+        let blocked = !revoked.is_empty();
+        let mut stored: BTreeMap<ItemId, ClaimFootprints> = BTreeMap::new();
+        for (_, holding) in judged.iter().filter(|_| !blocked) {
+            if !holding.state.is_in_review() && !stored.contains_key(&holding.item) {
+                let read = ClaimFootprints::read(work, holding.item, facts.listed).await?;
+                stored.insert(holding.item, read);
+            }
+        }
+        let footprints: BTreeMap<ItemId, Vec<FootprintPaths<'_>>> = stored
+            .iter()
+            .map(|(item, read)| (*item, read.paths()))
+            .collect();
+        let judged = WideAckFacts {
+            claims: facts.claims,
+            footprints: &footprints,
+            blocks: facts.blocks,
+        };
+        let outcome = decide_ack_on_holders_behalf(ask, sent_at, &judged, self.settings, self.now);
+        let project = work.project_id();
+        match outcome {
+            AckOnBehalf::Ack { because } => self.acknowledge(work, ask, because).await?,
+            AckOnBehalf::LeftToHolder => {
+                work.leave_wide_ask_to_holder(project, ask.message).await?;
+                self.say_left(work, ask, &revoked).await?;
+            }
+            AckOnBehalf::Closed => {
+                work.settle_wide_ask(project, ask.message, self.now).await?;
+            }
+            AckOnBehalf::Wait { .. } | AckOnBehalf::Lapsed => {}
+        }
+        Ok(outcome)
+    }
+
+    /// Settles `ask`, sent at `sent_at`, when it has closed (see [`decide_ack_on_holders_behalf`]):
+    /// its wide claim ended, or its holder holds none of its areas through any claim. Closing is
+    /// decided before anything else, a revoke that sticks included, so no footprint is read for it,
+    /// and nothing is acknowledged. It is all dibs judges of an announcement left to its holder.
+    /// Answers whether it closed.
+    pub(crate) async fn settle_if_closed(
+        &self,
+        work: &mut Work,
+        ask: &WideAsk,
+        sent_at: OffsetDateTime,
+        facts: &AckFacts<'_>,
+    ) -> Result<bool, AppError> {
+        let judged = WideAckFacts {
+            claims: facts.claims,
+            footprints: &BTreeMap::new(),
+            blocks: facts.blocks,
+        };
+        let closed = decide_ack_on_holders_behalf(ask, sent_at, &judged, self.settings, self.now)
+            == AckOnBehalf::Closed;
+        if closed {
+            let project = work.project_id();
+            work.settle_wide_ask(project, ask.message, self.now).await?;
+        }
+        Ok(closed)
+    }
+
+    /// Acknowledges `ask` on its holder's behalf because of `because`.
+    async fn acknowledge(
+        &self,
+        work: &mut Work,
+        ask: &WideAsk,
+        because: GrantDecision,
+    ) -> Result<(), AppError> {
+        let project = work.project_id();
+        let granted =
+            store_grants_by_ack(work, self.ids, ask, because, self.settings, self.now).await?;
+        work.mark_wide_ask_acked_by_dibs(project, ask.message, self.now, because)
+            .await?;
+        let Some(why) = because.why() else {
+            return Ok(());
+        };
+        let thread = announcement_thread(work, ask).await?;
+        let names = Names::load(work).await?;
+        let item = ItemName::of(&existing_item(work, ask.item).await?, self.schemes);
+        let text = AckedText {
+            from: &names.handle(ask.from)?,
+            holder: &names.handle(ask.to)?,
+            item: &item,
+            why,
+            granted: &granted,
+        };
+        SystemReply {
+            thread,
+            message: MessageId(self.ids.next()),
+            body: titled_body(&text.lead(), None)?,
+            importance: Importance::Normal,
+            ack_required: false,
+        }
+        .send(work, self.now)
+        .await?;
+        Ok(())
+    }
+
+    /// Says in `ask`'s conversation, which both members read, that dibs leaves it to the holder
+    /// because a revoke of theirs to the wide claim's member stands in `revoked`.
+    async fn say_left(
+        &self,
+        work: &mut Work,
+        ask: &WideAsk,
+        revoked: &BTreeSet<QualifiedArea>,
+    ) -> Result<(), AppError> {
+        let thread = announcement_thread(work, ask).await?;
+        let names = Names::load(work).await?;
+        let text = LeftText {
+            from: &names.handle(ask.from)?,
+            holder: &names.handle(ask.to)?,
+            revoked,
+        };
+        SystemReply {
+            thread,
+            message: MessageId(self.ids.next()),
+            body: titled_body(&text.lead(), None)?,
+            importance: Importance::Normal,
+            ack_required: false,
+        }
+        .send(work, self.now)
+        .await
+    }
+}
+
+/// The conversation that carries `ask`.
+async fn announcement_thread(work: &mut Work, ask: &WideAsk) -> Result<ThreadId, AppError> {
+    let project = work.project_id();
+    Ok(work
+        .message(project, ask.message)
+        .await?
+        .ok_or_else(|| StoreError::Corrupt {
+            what: "the message that carries an announcement is not stored".to_owned(),
+        })?
+        .thread)
 }
 
 /// The grants a holder's acknowledgement of a wide claim's announcement makes, stored with one
@@ -143,6 +372,20 @@ pub(crate) async fn grant_by_ack(
     let Some(ask) = work.wide_ask(project, message).await? else {
         return Ok(Vec::new());
     };
+    store_grants_by_ack(work, ids, &ask, GrantDecision::Holder, settings, now).await
+}
+
+/// The grants an acknowledgement of `ask` makes (see [`grants_by_ack`]), each stored as decided by
+/// `decided` with a `wide_granted_by_ack` event that names it, inside the caller's transaction.
+async fn store_grants_by_ack(
+    work: &mut Work,
+    ids: &dyn IdGen,
+    ask: &WideAsk,
+    decided: GrantDecision,
+    settings: &ProjectSettings,
+    now: OffsetDateTime,
+) -> Result<Vec<NamedGrant>, AppError> {
+    let project = work.project_id();
     let claims = work.claims(project).await?;
     let existing: Vec<Grant> = work
         .grants(project)
@@ -150,7 +393,7 @@ pub(crate) async fn grant_by_ack(
         .into_iter()
         .map(|record| record.grant)
         .collect();
-    let granted = grants_by_ack(&ask, &existing, &claims, now, settings);
+    let granted = grants_by_ack(ask, &existing, &claims, now, settings);
     if granted.is_empty() {
         return Ok(Vec::new());
     }
@@ -161,6 +404,7 @@ pub(crate) async fn grant_by_ack(
             id: GrantId(ids.next()),
             grant,
             created_at: now,
+            decided,
         };
         work.insert_grant(project, &record).await?;
         work.record(
@@ -171,6 +415,7 @@ pub(crate) async fn grant_by_ack(
                 area: record.grant.area.clone(),
                 by: record.grant.from,
                 to: record.grant.to,
+                decided,
             }),
         )
         .await?;
@@ -179,17 +424,94 @@ pub(crate) async fn grant_by_ack(
     Ok(named)
 }
 
+/// What dibs writes in an announcement's conversation when it acknowledges the announcement on
+/// the holder's behalf.
+struct AckedText<'a> {
+    /// The wide claim's member, who may now edit.
+    from: &'a Handle,
+    /// The holder whose acknowledgement and grants they are.
+    holder: &'a Handle,
+    /// The wide claim's item.
+    item: &'a ItemName,
+    /// Why dibs acknowledged it, as [`GrantDecision::why`] says it.
+    why: &'a str,
+    /// The grants the acknowledgement made.
+    granted: &'a [NamedGrant],
+}
+
+impl AckedText<'_> {
+    /// That dibs acknowledged it on the holder's behalf and why; the grants it made, by id and
+    /// area; that the order rule still decides which change lands first where both meet; and who
+    /// may undo a grant, and how.
+    fn lead(&self) -> String {
+        let mut text = format!(
+            "Acknowledged by dibs on {holder}'s behalf, because {why}.",
+            holder = self.holder,
+            why = self.why,
+        );
+        let Some(first) = self.granted.first() else {
+            let _ = write!(
+                text,
+                " It made no new grant: {from} may already edit there for work item {label} \"{title}\".",
+                from = self.from,
+                label = self.item.label(),
+                title = self.item.title,
+            );
+            return text;
+        };
+        let grants: Vec<String> = self
+            .granted
+            .iter()
+            .map(|grant| format!("{} in {}", grant.record.id, grant.record.grant.area))
+            .collect();
+        let _ = write!(
+            text,
+            " {from} may edit there for work item {label} \"{title}\": grant {grants}. Where both changes meet in a file, the order rule decides which lands first. To undo a grant, {holder} or an admin revokes it (dibs revoke-grant {id}, or DELETE /v1/grants/{id}).",
+            from = self.from,
+            label = self.item.label(),
+            title = self.item.title,
+            grants = grants.join(", grant "),
+            holder = self.holder,
+            id = first.record.id,
+        );
+        text
+    }
+}
+
+/// What dibs writes in an announcement's conversation when a revoke leaves it to the holder.
+struct LeftText<'a> {
+    /// The wide claim's member.
+    from: &'a Handle,
+    /// The holder whose revoke stands.
+    holder: &'a Handle,
+    /// The areas of the announcement where it stands.
+    revoked: &'a BTreeSet<QualifiedArea>,
+}
+
+impl LeftText<'_> {
+    /// That a revoke of the holder's stands for the wide claim's member in those areas, so dibs
+    /// leaves the announcement to the holder to acknowledge or answer.
+    fn lead(&self) -> String {
+        format!(
+            "Left to {holder} by dibs: a revoke of {holder}'s grant to {from} in {areas} stands while both claims last, so dibs leaves this announcement to {holder} to acknowledge or answer.",
+            holder = self.holder,
+            from = self.from,
+            areas = area_list(self.revoked),
+        )
+    }
+}
+
 /// The subject: who asks, for which areas, about which item.
 fn subject(from: &Handle, areas: &BTreeSet<QualifiedArea>, item: &ItemName) -> String {
     format!(
         "Wide change by {from} on {}: may they edit {}?",
-        item_label(item),
+        item.label(),
         area_list(areas)
     )
 }
 
 /// The message: that dibs sends it for the wide claim's member, why, which of the holder's areas
-/// it is about, and what acknowledging it does.
+/// it is about, what acknowledging it does, and when dibs acknowledges it on the holder's behalf.
 fn body(
     from: &Handle,
     areas: &BTreeSet<QualifiedArea>,
@@ -200,7 +522,7 @@ fn body(
     let listed = area_list(areas);
     let mut text = format!(
         "dibs sent this for {from}, who took a wide claim on work item {} \"{}\" for a change across several areas.",
-        item_label(item),
+        item.label(),
         item.title
     );
     if !reason.is_empty() {
@@ -210,17 +532,10 @@ fn body(
         text,
         "\nYou hold {listed}. A wide claim holds none of the areas it names, so {from}'s edits there wait for your answer.\
          \nAcknowledge this message (dibs_ack, or dibs ack {message}) to grant {from} edits in {listed} for that work item; the grant ends when either claim ends.\
-         \nIf the change should not happen there now, do not acknowledge it: reply in this thread instead.\
+         \ndibs acknowledges it on your behalf at once when your claim's branch changes nothing in those areas, the areas lie idle on your claim, or your claim is in review, and otherwise once the project's grant_after has passed. Until then you may acknowledge it, or reply in this thread with what your work still changes there.\
          \n{TITLE_NOTE}"
     );
     Body::parse(&text).map_err(|_| unwritable("the text of an announcement"))
-}
-
-/// How an item is named in an announcement: its reference, or `#<id>`.
-fn item_label(item: &ItemName) -> String {
-    item.external_ref
-        .as_ref()
-        .map_or_else(|| format!("#{}", item.id), ToString::to_string)
 }
 
 /// The areas by name, the first [`LISTED_AREAS`] of them, with a count of the rest.
@@ -467,6 +782,7 @@ mod tests {
                 area: area("default:billing"),
                 by: env.alice.actor.member,
                 to: env.bob.actor.member,
+                decided: GrantDecision::Holder,
             }))
         );
         assert_eq!(
@@ -486,7 +802,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status.wide.len(), 1);
-        let rows: Vec<(String, Option<&str>, bool)> = status.wide[0]
+        let rows: Vec<(String, Option<&str>, bool, Option<GrantDecision>)> = status.wide[0]
             .areas
             .iter()
             .map(|row| {
@@ -494,15 +810,22 @@ mod tests {
                     row.area.to_string(),
                     row.holder.as_ref().map(|(h, _)| h.as_str()),
                     row.granted,
+                    row.decided,
                 )
             })
             .collect();
         assert_eq!(
             rows,
             [
-                ("default:billing".to_owned(), Some("alice"), true),
-                ("default:search".to_owned(), None, false),
-            ]
+                (
+                    "default:billing".to_owned(),
+                    Some("alice"),
+                    true,
+                    Some(GrantDecision::Holder)
+                ),
+                ("default:search".to_owned(), None, false, None),
+            ],
+            "alice's own acknowledgement is the holder's decision"
         );
         assert!(
             status.holds.iter().all(|hold| hold.item != bobs),
@@ -536,6 +859,7 @@ mod tests {
                     from: env.alice.actor.member,
                     to: env.bob.actor.member,
                     cause: GrantEnd::GrantorLeft,
+                    by: None,
                 }))
         );
     }
@@ -637,7 +961,7 @@ mod tests {
                     item: bobs,
                     session: env.alice.session,
                     areas: Vec::new(),
-                    reason: Body::parse("Bob is away; I finish the upgrade.").unwrap(),
+                    reason: Some(Body::parse("Bob is away; I finish the upgrade.").unwrap()),
                     kind: None,
                 },
             )

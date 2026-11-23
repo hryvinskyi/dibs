@@ -156,7 +156,8 @@ async fn a_client_older_than_branch_patterns_or_the_claim_endings_is_served_the_
                            "freezes": ["refs/heads/release/*", "refs/heads/main"]}],
                 "release_after": "3d",
                 "idle_area_after": "2d",
-                "free_areas_at": ["Ready for QA"]
+                "free_areas_at": ["Ready for QA"],
+                "grant_after": "20m"
             }),
         )
         .await;
@@ -181,6 +182,7 @@ async fn a_client_older_than_branch_patterns_or_the_claim_endings_is_served_the_
     let released = serde_json::Value::from("3d");
     let idle = serde_json::Value::from("2d");
     let freeing = serde_json::json!(["Ready for QA"]);
+    let waiting = serde_json::Value::from("20m");
     let absent = serde_json::Value::Null;
     for (agent, expected_rules, expected_freezes, expected_release) in [
         (
@@ -251,6 +253,15 @@ async fn a_client_older_than_branch_patterns_or_the_claim_endings_is_served_the_
         assert_eq!(
             &me.body["settings"]["free_areas_at"], expected_freeing,
             "{agent:?}"
+        );
+        let expected_waiting = if expected_release.is_null() {
+            &absent
+        } else {
+            &waiting
+        };
+        assert_eq!(
+            &me.body["settings"]["grant_after"], expected_waiting,
+            "an older client refuses a settings document with a field it does not know: {agent:?}"
         );
         assert_eq!(
             frozen(&me.body["settings"]["slots"][0]),

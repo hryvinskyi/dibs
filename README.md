@@ -144,7 +144,8 @@ revokes their tokens and releases everything they held at once. With the Claude 
   shows — an edit made under it, whether the server checked it or the hooks reported it with the next heartbeat; a push
   of its branch; claiming it again; a pull request it waits for — and *stale* the project's `stale_after` (24 hours by
   default) after the last of those.
-  Only one member holds an area at a time. A stale claim can be taken over, with a reason that is sent to its holder.
+  Only one member holds an area at a time. A stale claim can be taken over by whoever needs its item; a reason is
+  optional, and without one dibs tells the holder how long their claim showed no sign of work.
 - **Feature and debt work.** A claim is a feature (the default) or debt work (`--debt`: refactoring, clean-up), and
   keeps that kind. A feature claim that declares an area other members hold only for debt work is not refused: the area
   waits on it, the debt holder is asked, urgently and in one conversation per pair of claims, to hand it over once their
@@ -174,9 +175,11 @@ revokes their tokens and releases everything they held at once. With the Claude 
   the hooks take learns its item from an edit made in it under a claim of its own session. An integration reports what each branch changes
   against its base (its *footprint*). When two members' branches change one file, when one changes a published
   contract (`contracts`) that the other's area depends on (`area_deps`), or when a merge into the base changes files a
-  branch still changes on its old base, dibs tells the holders once, in a message that says to rebase now — and, for a
-  contract, to read the other change first. Two claims of one member never collide; a moved base is told to anyone
-  whose branch is behind, the merge's own author included.
+  branch still changes on its old base, dibs tells the holders once. For two colliding claims it says which lands
+  first and why — the claim in review, then the higher priority, then the older claim — and the other rebases once the
+  first merges (for a contract, builds on the other change); a tie goes to the arbiters. A moved base is rebased onto
+  when the claim is next worked on. Two claims of one member never collide; a moved base is told to anyone whose branch
+  is behind, the merge's own author included.
 - **Protected branch.** A branch of a repository only the members a project lists may push to; everyone else's agent is
   refused a push there, with the pull request as the way on, and so is a push whose branches dibs cannot read. A push to
   a fork is not judged. The pre-push check judges protection from what the machine remembers, so it holds while the
@@ -192,20 +195,23 @@ revokes their tokens and releases everything they held at once. With the Claude 
   merges it by hand, so two branches that share only such files do not overlap, and a merge that changes only such files
   moves no claim's base), `owner` (only the holder of a named area), `warn-shared` (anyone, with the other editors named)
   and `free`.
-- **Grant.** A holder lets another member edit inside an area they hold, for that member's own live claim. The holder's
-  session that works under the claim holding the area decides a request itself, without asking its person: it gives
-  the grant when that claim's work will change no file there, neither what it has changed nor what it still has to do,
-  and otherwise answers what the area waits for; a claim in review keeps the files its pull request changes. A wide
-  claim's announcement is acknowledged only by a session that works under every claim of the member that holds the
-  areas it names.
+- **Grant.** A holder lets another member edit inside an area they hold, for that member's own live claim. dibs grants
+  a request on the holder's behalf from what it stores: at once when the holder's claim holding the area is in review,
+  the area is idle on it, or its branch changes no path there, and otherwise once the project's `grant_after` has passed
+  (10 minutes by default). Before that, the holder's session that works under that claim may give the grant, when its
+  work will change no file there, or answer what it still changes there and after which commit the area is free. A
+  grant dibs gave is still the holder's: the holder or an admin revokes it (`dibs revoke-grant`), and dibs then does not
+  give it again while both claims last. A wide claim's announcement is acknowledged the same way: by dibs, or earlier by
+  a session that works under every claim of the member that holds the areas it names.
 - **Wide claim.** A claim announced over many areas for a change that cuts across them (an upgrade, a rename). It holds
-  none of them, so it is in nobody's way. Each member holding one of its areas is sent an announcement that asks to be
-  acknowledged, and acknowledging it is their grant: until then the wide claim's edits in their area are refused. One
+  none of them, so it is in nobody's way. Each member holding one of its areas, worked on or in review, is sent an
+  announcement that asks to be acknowledged, and acknowledging it is their grant; dibs acknowledges it for them by the
+  rule it grants requests by. Until then the wide claim's edits in their area are refused. One
   area is in one live wide claim at a time, and whoever claims an area inside one later is asked too.
 - **Thread.** A conversation between members, or with the whole project, optionally about a work item. Agents and people
   use the same threads.
 - **Messages from dibs.** What dibs writes itself — a wide claim's announcements, a request to hand an area over to a
-  feature and the notice that it was handed over, the notice that a claim or a slot hold
+  feature and the notice that it was handed over, a grant it gave on a holder's behalf, the notice that a claim or a slot hold
   was taken over, ended, expired or that an offer lapsed, an escalation, a member leaving — is authored by the project,
   shown as *from dibs* everywhere and never counted toward anyone's limit on raised messages. Everything dibs has to
   say about one claim (an overlap, a moved base, a hand-over, a grant, a take-over, a release) goes into one
@@ -216,7 +222,8 @@ revokes their tokens and releases everything they held at once. With the Claude 
 - **Arbiters and escalation.** The members a project names (`arbiters` in its settings) to settle what agents do not
   agree on. `dibs escalate` sends an urgent message, from dibs, to the arbiters and to whoever holds and whoever asked for
   the item, slot or conversation in question; the web pages' Now screen shows it until an arbiter acknowledges it.
-  Agents do not settle priority between people: they escalate and pick other work meanwhile.
+  Where a rule of dibs settles a question — a grant, which of two overlapping changes lands first, a stale claim — agents
+  follow it; they escalate only what no rule settles, and pick other work meanwhile.
 - **Importance and acknowledgement.** A message is `normal`, `high` or `urgent`, and may ask each recipient to
   acknowledge it. An acknowledgement is the recipient's own record that they read it; the message never changes, and its
   author sees who has acknowledged and who has not. An acknowledgement says "I read this"; it authorises nothing, except
@@ -624,8 +631,8 @@ DIBS_PUSH_TO_IDLE=1 claude --dangerously-load-development-channels plugin:dibs@d
   The tool server never offers to relay Claude Code's permission prompts, so nothing a teammate writes can approve a
   tool call. A session woken by a message says you are away, answers only when a decision is needed, never agrees or
   commits to anything for you, and goes on only with work you already asked for; a permission prompt waits for you. A
-  grant asked of you is the exception: when the woken session works under the claim holding the area, it decides it at
-  once, as a session at work does, by what that claim's work will change.
+  grant asked of you is no exception: the woken session leaves the request, and dibs grants it after the wait,
+  except one a revoke of yours stands against, which waits for you.
 - **Nothing is lost.** When nothing shows a push was seen within five minutes — the agent did not read it, you did not
   type — the session's hooks show it at the next tool call or prompt. When `DIBS_PUSH_TO_IDLE` is set, the brief at the
   start of a session reminds you that pushes need the flag above.
@@ -662,7 +669,7 @@ dibs claim review gh:acme/widgets#42 --pr acme/widgets#7 [--more] [--head bob/42
 dibs claim review gh:acme/widgets#42 --drop-pr acme/widgets#8       # remove a pull request recorded by mistake
 dibs claim gh:acme/widgets#7 --area billing --debt    # debt work: a feature claim may take its areas
 dibs claim narrow gh:acme/widgets#7 --area billing    # give an area up; a feature claim waiting for it gets it
-dibs takeover 12 --reason "alice is out; I am picking this up" --area billing [--debt|--feature]
+dibs takeover 12 [--reason "alice is out; I am picking this up"] --area billing [--debt|--feature]   # without a reason, dibs writes one
 dibs release 12                                   # give the item back
 dibs done 12                                      # the item is finished
 dibs check packages/billing/a.rs                  # may I edit these paths?
@@ -670,6 +677,7 @@ dibs check --git-range origin/main..HEAD [--author me]   # warn about what a ran
 dibs check --push --remote "$1" --url "$2"       # git's pre-push hook: refuse a push to a protected branch or tag, or one a held slot freezes
 dibs grant 14 --area api:billing --to bob         # let bob edit in an area you hold, for his item 14
 dibs ask-grant 14 --area api:billing             # ask whoever holds api:billing for a grant, for your item 14
+dibs revoke-grant 61                              # undo grant 61: one you gave, one dibs gave for you, or as an admin any
 dibs send --to alice --subject "Rounding" "May I touch round.rs?"    # or --project; "-" reads stdin
 dibs send --project --subject "Freeze" --importance urgent --ack "No pushes to main until noon."
 dibs inbox [--unread] [--unacked]                 # conversations waiting for you; what awaits your acknowledgement
@@ -739,15 +747,15 @@ The server also serves pages for people at `/ui`, where you sign in with your to
 - **The list and the inspector**: the screen's list, and beside it, on four screens, an inspector for the object you
   select, with *Copy link*. A click on a row opens it in place; `Escape` closes it.
 - **Now** (`/ui/`): what waits for a person's look, as cards that show only while they have something: unread
-  conversations from people, grant requests your agent has left unanswered for ten minutes, disagreements waiting for
-  an arbiter, claims that touch the same code, claims whose ticket is already finished, claims gone silent, claims
+  conversations from people, grant requests dibs leaves to you because a revoke of yours stands, disagreements waiting
+  for an arbiter, claims that touch the same code, claims whose ticket is already finished, claims gone silent, claims
   held for more than a week, claims on a branch named after another ticket, and a silent integration. Below them,
   every claim by who holds it and for how long, and what happened today.
 - **Claims** (`/ui/claims`): the live and silent claims by holder, yours first, filtered by how they stand (working,
   in review, silent, held over a week, ticket finished, other ticket's branch), by holder and by words. The inspector
   shows the ticket, the holder, the pull request and the branch, the areas held and the tickets that will touch them,
   the overlaps with other claims, the conversations about it, and, for another member's silent claim, a form to take
-  it over with a reason its holder is sent.
+  it over, with an optional reason its holder is sent.
 - **Queue** (`/ui/queue`): the tickets that wait to be claimed, the ready ones by priority, then those that are not and
   why (a blocker, or an area someone holds). The inspector shows the areas a ticket will probably touch, who holds
   them, and the `dibs claim` command to copy, its words quoted for the shell wherever a reference holds anything a

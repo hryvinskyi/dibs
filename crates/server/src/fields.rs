@@ -45,6 +45,21 @@ pub fn parse_required<T, E: Display>(
     parse(field, required(field, text)?, parse_text)
 }
 
+/// The optional field's text parsed by `parse`; text that is empty or only whitespace counts as
+/// absent.
+///
+/// # Errors
+/// As [`parse`], for text that is not blank.
+pub fn parse_unless_blank<T, E: Display>(
+    field: &str,
+    text: Option<&str>,
+    parse_text: impl FnOnce(&str) -> Result<T, E>,
+) -> Result<Option<T>, ApiError> {
+    text.filter(|text| !text.trim().is_empty())
+        .map(|text| parse(field, text, parse_text))
+        .transpose()
+}
+
 /// A number that can be a record's id: ids lie in `1..=i64::MAX`, so anything else names no record.
 fn record_id(number: u64) -> Option<u64> {
     (1..=MAX_RECORD_ID).contains(&number).then_some(number)

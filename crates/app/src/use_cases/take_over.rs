@@ -6,10 +6,13 @@ use dibs_domain::ref_scheme::RefSchemeRegistry;
 
 use dibs_domain::claim::{ClaimRequest, Takeover, decide_takeover};
 use dibs_domain::event::{EventKind, TakenOver};
+use dibs_domain::handle::Handle;
 use dibs_domain::handover::{AreaMove, ClaimKind, WithdrawReason, Withdrawal};
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, SessionId, ThreadId};
 use dibs_domain::message::{Body, Importance};
+use dibs_domain::settings::format_duration;
+use time::{Duration, OffsetDateTime};
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -34,8 +37,9 @@ pub struct TakeOverInput {
     pub session: SessionId,
     /// The areas to declare, as a person names them.
     pub areas: Vec<String>,
-    /// Why, as told to the previous holder.
-    pub reason: Body,
+    /// Why, as told to the previous holder; `None` has dibs write the standing reason, which says
+    /// how long the claim showed no sign of work.
+    pub reason: Option<Body>,
     /// The kind of the new claim; `None` carries on the previous claim's kind.
     pub kind: Option<ClaimKind>,
 }
@@ -62,7 +66,9 @@ pub struct TakenOverClaim {
 /// ends, with the paths recorded under it and the grants resting on it, and the previous holder is
 /// told, with the reason, in the previous claim's conversation, as a `high` message that asks for
 /// no acknowledgement, so it reaches them while they work; the message names the new holder and how
-/// to write to them, since that conversation reaches the previous holder alone. A live claim is
+/// to write to them, since that conversation reaches the previous holder alone. Without a reason
+/// from the caller, dibs writes the standing one: how long the claim showed no sign of work, and
+/// that the new holder needs the item. A live claim is
 /// never taken over. A wide scope the new claim carries on is announced to the holders of its
 /// areas in the new member's name, since what they acknowledged before granted the previous
 /// member, and those grants end.
@@ -177,16 +183,26 @@ impl TakeOver {
         let names = Names::load(&mut work).await?;
         let holder = names.handle(actor.member)?;
         let named = ItemName::of(&item, &self.ref_schemes);
+        let standing = match &input.reason {
+            Some(_) => String::new(),
+            None => format!(
+                " {}",
+                standing_reason(&holder, takeover.previous.last_seen, now)
+            ),
+        };
         let thread = ClaimNotice {
             claim: &takeover.previous,
             item: &named,
             body: titled_body(
                 &format!(
-                    "{holder} took over your stale claim on work item {} \"{}\". Your claim has ended; the item is theirs now. To write to {holder}: dibs send {holder}.",
+                    "{holder} took over your stale claim on work item {} \"{}\". Your claim has ended; the item is theirs now.{standing} To write to {holder}: dibs send {holder}.",
                     named.label(),
                     item.title
                 ),
-                Some(("Their reason", input.reason.as_str())),
+                input
+                    .reason
+                    .as_ref()
+                    .map(|reason| ("Their reason", reason.as_str())),
             )?,
             importance: Importance::High,
         }
@@ -219,6 +235,17 @@ impl TakeOver {
             announced,
         })
     }
+}
+
+/// The reason dibs gives the previous holder when the member taking over gave none: how long
+/// nothing of the claim's work showed, from its last sign of work to `now` in whole minutes, and
+/// that the taker needs the item.
+fn standing_reason(taker: &Handle, last_seen: OffsetDateTime, now: OffsetDateTime) -> String {
+    let silent = Duration::minutes((now - last_seen).whole_minutes());
+    format!(
+        "{taker} gave no reason. Nothing of your claim's work showed for {silent}. {taker} needs the work item.",
+        silent = format_duration(silent),
+    )
 }
 
 #[cfg(test)]
@@ -264,7 +291,7 @@ mod tests {
             item,
             session: env.alice.session,
             areas: areas.iter().map(|a| (*a).to_owned()).collect(),
-            reason: reason(),
+            reason: Some(reason()),
             kind: None,
         }
     }
@@ -367,6 +394,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn without_a_reason_dibs_tells_the_previous_holder_how_long_the_claim_was_silent() {
+        let env = Env::new().await;
+        let item = env.item("gh:acme/widgets#1").await;
+        bob_claims(&env, item, &["billing"]).await;
+        env.advance(Duration::hours(25) + Duration::seconds(42));
+        let taken = TakeOver::new(&env.deps)
+            .execute(
+                &env.alice.actor,
+                TakeOverInput {
+                    reason: None,
+                    ..alice_takes(&env, item, &[])
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(taken.takeover.claim.member, env.alice.actor.member);
+        let mut tx = env.deps.store.begin().await.unwrap();
+        let messages = tx.messages(env.project, taken.thread).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        let text = messages[0].body.as_str();
+        assert!(
+            text.contains(
+                "Your claim has ended; the item is theirs now. alice gave no reason. Nothing of your claim's work showed for 1d1h. alice needs the work item. To write to alice: dibs send alice."
+            ),
+            "the standing reason names the silent time in whole minutes and the taker: {text}"
+        );
+        assert!(!text.contains("Their reason"), "{text}");
+        assert!(
+            text.ends_with(crate::use_cases::writing::TITLE_NOTE),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_standing_reason_counts_from_the_last_sign_of_work_in_whole_minutes() {
+        let seen = crate::use_cases::testing::START;
+        let alice = Handle::parse("alice").unwrap();
+        assert_eq!(
+            standing_reason(
+                &alice,
+                seen,
+                seen + Duration::minutes(90) + Duration::seconds(59)
+            ),
+            "alice gave no reason. Nothing of your claim's work showed for 1h30m. alice needs the work item."
+        );
+    }
+
+    #[tokio::test]
     async fn a_live_claim_is_never_taken_over() {
         let env = Env::new().await;
         let item = env.item("gh:acme/widgets#1").await;
@@ -465,6 +540,7 @@ mod tests {
                 from: env.bob.actor.member,
                 to: env.alice.actor.member,
                 cause: GrantEnd::GrantorLeft,
+                by: None,
             }))
         );
     }

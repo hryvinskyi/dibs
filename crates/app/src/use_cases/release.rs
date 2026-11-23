@@ -247,6 +247,7 @@ mod tests {
                 from: env.alice.actor.member,
                 to: env.bob.actor.member,
                 cause: GrantEnd::GranteeLeft,
+                by: None,
             })
         );
     }

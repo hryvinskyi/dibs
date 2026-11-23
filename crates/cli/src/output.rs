@@ -369,12 +369,17 @@ pub fn author_text(message: &Message) -> String {
 }
 
 /// One line for an escalation waiting for an arbiter:
-/// `Escalated by bob: work item gh:acme/api#7 "Invoices" — waiting for carol (conversation #31)`.
+/// `Escalated by bob: work item gh:acme/api#7 "Invoices" — waiting for carol (conversation #31)`,
+/// or `Escalated by dibs: …` for one dibs raised on its own.
 pub fn escalation_line(escalation: &OpenEscalation) -> String {
     let arbiters: Vec<&str> = escalation.arbiters.iter().map(Handle::as_str).collect();
+    let by = if escalation.raised_by_dibs {
+        "dibs"
+    } else {
+        escalation.by.as_str()
+    };
     format!(
-        "Escalated by {}: {} — waiting for {} (conversation #{})",
-        escalation.by,
+        "Escalated by {by}: {} — waiting for {} (conversation #{})",
         escalation.about,
         arbiters.join(", "),
         escalation.thread_id
@@ -382,7 +387,7 @@ pub fn escalation_line(escalation: &OpenEscalation) -> String {
 }
 
 /// What a claim line adds for the merges that moved the base under the claim's branch: `, the base
-/// moved under it: acme/widgets#7, acme/widgets#9 (rebase onto the base)`, or nothing when no
+/// moved under it: acme/widgets#7, acme/widgets#9 (rebase onto the base when you next work on it)`, or nothing when no
 /// merge did.
 pub fn base_moved_text(prs: &[PrRef]) -> String {
     if prs.is_empty() {
@@ -390,7 +395,7 @@ pub fn base_moved_text(prs: &[PrRef]) -> String {
     }
     let names: Vec<String> = prs.iter().map(ToString::to_string).collect();
     format!(
-        ", the base moved under it: {} (rebase onto the base)",
+        ", the base moved under it: {} (rebase onto the base when you next work on it)",
         names.join(", ")
     )
 }
@@ -469,9 +474,40 @@ mod tests {
         ];
         assert_eq!(
             base_moved_text(&prs),
-            ", the base moved under it: acme/widgets#7, acme/widgets#9 (rebase onto the base)"
+            ", the base moved under it: acme/widgets#7, acme/widgets#9 (rebase onto the base when you next work on it)"
         );
         assert_eq!(base_moved_text(&[]), "");
+    }
+
+    /// An escalation recorded for bob, as the status answers it, with `more` merged in.
+    fn escalation(more: serde_json::Value) -> OpenEscalation {
+        let mut escalation = serde_json::json!({
+            "subject": {"item": 7}, "about": "work item gh:acme/api#7 \"Invoices\"", "by": "bob",
+            "arbiters": ["carol", "dave"], "thread_id": 31, "message_id": 32,
+            "at": "2026-03-02T09:00:00Z"
+        });
+        if let (Some(escalation), Some(more)) = (escalation.as_object_mut(), more.as_object()) {
+            escalation.extend(more.clone());
+        }
+        serde_json::from_value(escalation).unwrap()
+    }
+
+    #[test]
+    fn an_escalation_line_names_who_asked_and_dibs_for_one_it_raised_on_its_own() {
+        let asked = "Escalated by bob: work item gh:acme/api#7 \"Invoices\" — waiting for carol, dave (conversation #31)";
+        assert_eq!(
+            escalation_line(&escalation(serde_json::json!({"raised_by_dibs": false}))),
+            asked
+        );
+        assert_eq!(
+            escalation_line(&escalation(serde_json::json!({}))),
+            asked,
+            "a server that does not say raised none"
+        );
+        assert_eq!(
+            escalation_line(&escalation(serde_json::json!({"raised_by_dibs": true}))),
+            "Escalated by dibs: work item gh:acme/api#7 \"Invoices\" — waiting for carol, dave (conversation #31)"
+        );
     }
 
     /// A conversation alice started, with `unread` unread messages and `split` merged in.

@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 
 use crate::area::QualifiedArea;
 use crate::escalation::EscalationSubject;
+use crate::grant::GrantDecision;
 use crate::handover::WithdrawReason;
 use crate::ids::{EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId};
 use crate::item::{ExternalRef, SourceStatus, Title};
@@ -93,8 +94,8 @@ pub enum EventKind {
     /// A claim became wide, or its wide scope grew: its member announces a change over these
     /// areas, holding none of them.
     WideClaimed(WideClaimed),
-    /// A holder acknowledged a wide claim's announcement, and that granted the wide claim's member
-    /// edits in one of their areas.
+    /// A holder, or dibs on the holder's behalf, acknowledged a wide claim's announcement, and that
+    /// granted the wide claim's member edits in one of the holder's areas.
     WideGrantedByAck(WideGrantedByAck),
     /// A member took a free slot, or one offered to them.
     SlotTaken(SlotTaken),
@@ -276,7 +277,7 @@ impl EventKind {
             Self::AreasHandedOn(e) => vec![Some(e.member)],
             Self::Reserved(e) => vec![Some(e.member)],
             Self::Granted(e) => vec![Some(e.from), Some(e.to)],
-            Self::GrantRevoked(e) => vec![Some(e.from), Some(e.to)],
+            Self::GrantRevoked(e) => vec![Some(e.from), Some(e.to), e.by],
             Self::ThreadStarted(e) => vec![e.author],
             Self::MessagePosted(e) => vec![e.author],
             Self::SettingsChanged(e) => vec![Some(e.by)],
@@ -694,7 +695,7 @@ pub struct Reserved {
     pub paths: BTreeSet<RepoPath>,
 }
 
-/// A holder granted another member edits in an area.
+/// A holder granted another member edits in an area, or dibs granted them on the holder's behalf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Granted {
     /// The stored grant.
@@ -703,10 +704,14 @@ pub struct Granted {
     pub item: ItemId,
     /// The area.
     pub area: QualifiedArea,
-    /// The holder who granted.
+    /// The holder whose grant it is.
     pub from: MemberId,
     /// The member who may edit.
     pub to: MemberId,
+    /// Who decided: the holder, or dibs with its reason. An event stored without one was the
+    /// holder's.
+    #[serde(default)]
+    pub decided: GrantDecision,
 }
 
 /// Why a grant ended.
@@ -736,6 +741,10 @@ pub struct GrantRevoked {
     pub to: MemberId,
     /// Why it ended.
     pub cause: GrantEnd,
+    /// The member who revoked it: its grantor or an admin. Set only when it was revoked; `None`
+    /// when it ended with a claim, and for a revoke stored before who revoked was recorded.
+    #[serde(default)]
+    pub by: Option<MemberId>,
 }
 
 /// A conversation started. Carries no subject.
@@ -809,7 +818,8 @@ pub struct WideClaimed {
     pub areas: BTreeSet<QualifiedArea>,
 }
 
-/// A holder's acknowledgement of a wide claim's announcement granted edits in one area.
+/// An acknowledgement of a wide claim's announcement, by its holder or by dibs on the holder's
+/// behalf, granted edits in one area.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WideGrantedByAck {
     /// The stored grant; it ends like any grant, with a `grant_revoked` naming it.
@@ -818,10 +828,14 @@ pub struct WideGrantedByAck {
     pub item: ItemId,
     /// The area.
     pub area: QualifiedArea,
-    /// The holder who acknowledged.
+    /// The holder asked, whose grant it is.
     pub by: MemberId,
     /// The wide claim's member, who may edit.
     pub to: MemberId,
+    /// Who acknowledged: the holder, or dibs with its reason. An event stored without one was the
+    /// holder's.
+    #[serde(default)]
+    pub decided: GrantDecision,
 }
 
 /// A recipient acknowledged a message. Carries the ids and the member only, like the message
@@ -917,14 +931,19 @@ pub struct SlotStallTakenOver {
     pub purpose: Purpose,
 }
 
-/// A member asked the project's arbiters to settle a dispute. Carries no reason; the conversation
-/// it started holds it.
+/// The project's arbiters were asked to settle something: by a member, by dibs for a member, or by
+/// dibs on its own. Carries no reason; the conversation it started holds it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Escalated {
     /// What it is about.
     pub subject: EscalationSubject,
-    /// The member who escalated.
+    /// The member who escalated; for one dibs raised on its own, the member it is recorded for, one
+    /// of its parties, who asked nothing.
     pub by: MemberId,
+    /// Whether dibs raised it on its own, nobody having asked. An event stored without it was asked
+    /// for.
+    #[serde(default)]
+    pub by_dibs: bool,
 }
 
 /// A member was removed from the project.
@@ -1258,6 +1277,7 @@ mod tests {
                 area: area("api:billing"),
                 from: ALICE,
                 to: BOB,
+                decided: GrantDecision::Holder,
             }),
             EventKind::GrantRevoked(GrantRevoked {
                 grant: GrantId(1),
@@ -1266,6 +1286,7 @@ mod tests {
                 from: ALICE,
                 to: BOB,
                 cause: GrantEnd::GranteeLeft,
+                by: None,
             }),
             EventKind::ThreadStarted(ThreadStarted {
                 thread: ThreadId(5),
@@ -1305,14 +1326,17 @@ mod tests {
                 area: area("api:billing"),
                 by: BOB,
                 to: ALICE,
+                decided: GrantDecision::Untouched,
             }),
             EventKind::Escalated(Escalated {
                 subject: EscalationSubject::Item(item),
                 by: BOB,
+                by_dibs: false,
             }),
             EventKind::Escalated(Escalated {
                 subject: EscalationSubject::Thread(ThreadId(5)),
                 by: ALICE,
+                by_dibs: true,
             }),
             EventKind::MemberRemoved(MemberRemoved {
                 member: BOB,
@@ -2076,7 +2100,7 @@ mod tests {
         for kind in every_kind() {
             let allowed: &[&str] = match kind {
                 EventKind::WideClaimed(_) => &["item", "member", "areas"],
-                EventKind::WideGrantedByAck(_) => &["grant", "item", "area", "by", "to"],
+                EventKind::WideGrantedByAck(_) => &["grant", "item", "area", "by", "to", "decided"],
                 _ => continue,
             };
             let value = serde_json::to_value(&kind).unwrap();
@@ -2164,11 +2188,142 @@ mod tests {
         let escalated = serde_json::to_value(&every_kind()[19]).unwrap();
         assert_eq!(
             escalated["payload"],
-            serde_json::json!({"subject": {"item": 4}, "by": 2})
+            serde_json::json!({"subject": {"item": 4}, "by": 2, "by_dibs": false})
         );
         let stored = r#"{"kind":"message_posted","payload":{"thread":1,"message":2,"author":7}}"#;
         let read: EventKind = serde_json::from_str(stored).unwrap();
         assert_eq!(read.members(), BTreeSet::from([MemberId(7)]));
+    }
+
+    #[test]
+    fn an_escalation_says_whether_dibs_raised_it_and_one_stored_before_was_asked_for() {
+        let raised = EventKind::Escalated(Escalated {
+            subject: EscalationSubject::Item(ItemId(4)),
+            by: ALICE,
+            by_dibs: true,
+        });
+        let value = serde_json::to_value(&raised).unwrap();
+        assert_eq!(
+            value["payload"],
+            serde_json::json!({"subject": {"item": 4}, "by": 1, "by_dibs": true})
+        );
+        assert_eq!(serde_json::from_value::<EventKind>(value).unwrap(), raised);
+        let before: EventKind = serde_json::from_value(serde_json::json!({
+            "kind": "escalated",
+            "payload": {"subject": {"item": 4}, "by": 1}
+        }))
+        .unwrap();
+        assert_eq!(
+            before,
+            EventKind::Escalated(Escalated {
+                subject: EscalationSubject::Item(ItemId(4)),
+                by: ALICE,
+                by_dibs: false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_grant_carries_who_decided_and_one_stored_before_was_the_holders() {
+        let given = |decided| {
+            EventKind::Granted(Granted {
+                grant: GrantId(3),
+                item: ItemId(4),
+                area: area("api:billing"),
+                from: ALICE,
+                to: BOB,
+                decided,
+            })
+        };
+        for (decided, name) in [
+            (GrantDecision::Holder, "holder"),
+            (GrantDecision::InReview, "in_review"),
+            (GrantDecision::Waited, "waited"),
+        ] {
+            let value = serde_json::to_value(given(decided)).unwrap();
+            assert_eq!(
+                value["payload"],
+                serde_json::json!({"grant": 3, "item": 4, "area": "api:billing",
+                                   "from": 1, "to": 2, "decided": name})
+            );
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(back, given(decided));
+        }
+        let before: EventKind = serde_json::from_value(serde_json::json!({
+            "kind": "granted",
+            "payload": {"grant": 3, "item": 4, "area": "api:billing", "from": 1, "to": 2}
+        }))
+        .unwrap();
+        assert_eq!(before, given(GrantDecision::Holder));
+    }
+
+    #[test]
+    fn a_wide_grant_by_ack_carries_who_acknowledged_and_one_stored_before_was_the_holders() {
+        let given = |decided| {
+            EventKind::WideGrantedByAck(WideGrantedByAck {
+                grant: GrantId(3),
+                item: ItemId(4),
+                area: area("api:billing"),
+                by: ALICE,
+                to: BOB,
+                decided,
+            })
+        };
+        for (decided, name) in [
+            (GrantDecision::Holder, "holder"),
+            (GrantDecision::Untouched, "untouched"),
+            (GrantDecision::Waited, "waited"),
+        ] {
+            let value = serde_json::to_value(given(decided)).unwrap();
+            assert_eq!(
+                value["payload"],
+                serde_json::json!({"grant": 3, "item": 4, "area": "api:billing",
+                                   "by": 1, "to": 2, "decided": name})
+            );
+            let back: EventKind = serde_json::from_value(value).unwrap();
+            assert_eq!(back, given(decided));
+        }
+        let before: EventKind = serde_json::from_value(serde_json::json!({
+            "kind": "wide_granted_by_ack",
+            "payload": {"grant": 3, "item": 4, "area": "api:billing", "by": 1, "to": 2}
+        }))
+        .unwrap();
+        assert_eq!(before, given(GrantDecision::Holder));
+    }
+
+    #[test]
+    fn a_revoke_names_who_revoked_and_one_stored_before_names_nobody() {
+        let ended = |cause, by| {
+            EventKind::GrantRevoked(GrantRevoked {
+                grant: GrantId(3),
+                item: ItemId(4),
+                area: area("api:billing"),
+                from: ALICE,
+                to: BOB,
+                cause,
+                by,
+            })
+        };
+        let revoked = ended(GrantEnd::Revoked, Some(MemberId(9)));
+        let value = serde_json::to_value(&revoked).unwrap();
+        assert_eq!(
+            value["payload"],
+            serde_json::json!({"grant": 3, "item": 4, "area": "api:billing",
+                               "from": 1, "to": 2, "cause": "revoked", "by": 9})
+        );
+        assert_eq!(serde_json::from_value::<EventKind>(value).unwrap(), revoked);
+        assert_eq!(revoked.members(), BTreeSet::from([ALICE, BOB, MemberId(9)]));
+        let before: EventKind = serde_json::from_value(serde_json::json!({
+            "kind": "grant_revoked",
+            "payload": {"grant": 3, "item": 4, "area": "api:billing", "from": 1, "to": 2,
+                        "cause": "revoked"}
+        }))
+        .unwrap();
+        assert_eq!(before, ended(GrantEnd::Revoked, None));
+        assert_eq!(
+            ended(GrantEnd::GrantorLeft, None).members(),
+            BTreeSet::from([ALICE, BOB])
+        );
     }
 
     #[test]

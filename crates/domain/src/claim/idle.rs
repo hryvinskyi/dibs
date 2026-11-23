@@ -72,10 +72,10 @@ impl IdleAreas {
 /// The candidates of the claim at `now` ([`Claim::idle_candidates`]), sorted by every stored
 /// footprint of it: a candidate that a path of those footprints falls in is kept, and so is every
 /// candidate of a repository whose footprint is truncated, since a path the forge left out may fall
-/// in it; the other candidates lie idle. A path falls in the first area of its repository, in
-/// declaration order, that contains it, as an edit of it would; a path of a repository the settings
-/// no longer list falls in none. An area of a repository with no footprint is idle on its clock
-/// alone.
+/// in it; the other candidates lie idle. A path falls in the area a hot rule of its repository gives
+/// it, else in the first area, in declaration order, that contains it, as an edit of it would; a
+/// path of a repository the settings no longer list falls in none. An area of a repository with no
+/// footprint is idle on its clock alone.
 pub fn idle_areas(
     claim: &Claim,
     footprints: &[FootprintPaths<'_>],
@@ -100,11 +100,14 @@ pub fn idle_areas(
             continue;
         };
         for path in footprint.paths {
-            if let Some(area) = spec.area_for(path) {
-                let area = spec.qualify(&area.name);
-                if idle.remove(&area) {
-                    kept.insert(area);
-                }
+            let area = spec
+                .hot_area_for(path)
+                .cloned()
+                .or_else(|| spec.area_for(path).map(|area| spec.qualify(&area.name)));
+            if let Some(area) = area
+                && idle.remove(&area)
+            {
+                kept.insert(area);
             }
         }
     }

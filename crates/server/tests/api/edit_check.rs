@@ -378,7 +378,8 @@ async fn asking_for_a_grant_reaches_the_holder_about_their_own_item() {
                "holder_item": {"id": team.alice_item, "ref": null, "title": "Billing", "link": null},
                "thread_id": null,
                "item": {"id": team.bob_item, "ref": null, "title": "Search", "link": null},
-               "area": "api:billing"})
+               "area": "api:billing", "grant_id": null, "decided": null,
+               "left_to_holder": false})
     );
 }
 
@@ -409,7 +410,7 @@ async fn a_grant_asked_waits_in_the_holders_inbox_until_they_answer() {
                 "item": {"id": team.bob_item, "ref": null, "title": "Search", "link": null},
                 "area": "api:billing",
                 "holder_item": {"id": team.alice_item, "ref": null, "title": "Billing", "link": null},
-                "asked_at": asked_at}])
+                "asked_at": asked_at, "left_to_holder": false}])
     );
     let bobs = world.get(&team.bob, "/v1/inbox").await;
     assert_eq!(bobs.body["grant_asks"], json!([]), "only the holder's");

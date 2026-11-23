@@ -12,7 +12,7 @@ use dibs_client::api::{
 };
 use dibs_domain::escalation::EscalationReason;
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{ItemId, MessageId, ThreadId};
+use dibs_domain::ids::{GrantId, ItemId, MessageId, ThreadId};
 use dibs_domain::item::{ExternalRef, ItemKey, ItemStatus, Title};
 use dibs_domain::message::{Body, Importance, Subject};
 use dibs_domain::radar::BranchName;
@@ -223,8 +223,10 @@ impl ClaimInput {
 pub struct TakeoverInput {
     /// The item whose stale claim you take over: its local id or its reference.
     pub key: ItemKeyInput,
-    /// Why you take it over; the member who held it is sent this.
-    pub reason: String,
+    /// Why you take it over; the member who held it is sent this. Leave it out, with a dibs server
+    /// from 0.1.11 on, and dibs tells them how long their claim showed no sign of work.
+    #[serde(default)]
+    pub reason: Option<String>,
     /// The areas you will change, as for `dibs_claim`.
     #[serde(default)]
     pub areas: Vec<String>,
@@ -253,12 +255,17 @@ impl TakeoverInput {
         })
     }
 
-    /// The reason, as the message the previous holder receives.
+    /// The reason, as the message the previous holder receives; none when it is left out, empty
+    /// or only whitespace.
     ///
     /// # Errors
-    /// A [`Failure`] when it is empty or not a valid message.
-    pub fn reason(&self) -> Result<Body, Failure> {
-        body("reason", &self.reason)
+    /// A [`Failure`] when it is not a valid message.
+    pub fn reason(&self) -> Result<Option<Body>, Failure> {
+        self.reason
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| body("reason", text))
+            .transpose()
     }
 }
 
@@ -370,6 +377,30 @@ impl GrantInput {
             area: self.area.clone(),
             to: handle("to", &self.to)?,
         })
+    }
+}
+
+/// `dibs_revoke_grant`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RevokeGrantInput {
+    /// The id of the grant to revoke.
+    pub grant: u64,
+}
+
+impl RevokeGrantInput {
+    /// The grant it names.
+    ///
+    /// # Errors
+    /// A [`Failure`] when the id is zero.
+    pub fn id(&self) -> Result<GrantId, Failure> {
+        if self.grant == 0 {
+            return Err(invalid(
+                "grant",
+                "grant ids are whole numbers starting at 1",
+            ));
+        }
+        Ok(GrantId(self.grant))
     }
 }
 
@@ -1094,8 +1125,11 @@ mod tests {
     }
 
     #[test]
-    fn a_takeover_needs_a_reason() {
-        let input = parse::<TakeoverInput>(json!({"key": 3, "reason": "  "}));
+    fn a_takeover_reason_is_optional_and_a_blank_one_is_none() {
+        for input in [json!({"key": 3}), json!({"key": 3, "reason": "  "})] {
+            assert_eq!(parse::<TakeoverInput>(input).reason().unwrap(), None);
+        }
+        let input = parse::<TakeoverInput>(json!({"key": 3, "reason": "a\u{0}b"}));
         assert!(
             input
                 .reason()
@@ -1104,7 +1138,10 @@ mod tests {
                 .starts_with("`reason`: ")
         );
         let input = parse::<TakeoverInput>(json!({"key": 3, "reason": "You went quiet."}));
-        assert_eq!(input.reason().unwrap().to_string(), "You went quiet.");
+        assert_eq!(
+            input.reason().unwrap().map(|reason| reason.to_string()),
+            Some("You went quiet.".to_owned())
+        );
     }
 
     #[test]
@@ -1121,6 +1158,17 @@ mod tests {
         assert_eq!(
             paths,
             [PathBuf::from("src/a.rs"), PathBuf::from("/abs/b.rs")]
+        );
+    }
+
+    #[test]
+    fn a_revoked_grant_is_named_by_an_id_from_one() {
+        let ok = parse::<RevokeGrantInput>(json!({"grant": 7}));
+        assert_eq!(ok.id().unwrap(), GrantId(7));
+        let zero = parse::<RevokeGrantInput>(json!({"grant": 0}));
+        assert!(zero.id().unwrap_err().message.starts_with("`grant`: "));
+        assert!(
+            serde_json::from_value::<RevokeGrantInput>(json!({"grant": 7, "why": "x"})).is_err()
         );
     }
 

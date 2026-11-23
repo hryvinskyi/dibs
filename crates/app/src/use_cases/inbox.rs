@@ -13,7 +13,7 @@ use dibs_domain::ids::{ItemId, MessageId, ThreadId};
 use dibs_domain::message::{Recipients, handed_to_sessions, speaks_for};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::settings::ProjectSettings;
-use dibs_domain::wide::ask_stands;
+use dibs_domain::wide::ask_awaits;
 
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::slot::SlotName;
@@ -23,7 +23,7 @@ use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{ItemName, NamedMessage, NamedSummary, NamedThread, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
-use crate::records::{MessageRecord, ThreadRecord, ThreadSummary};
+use crate::records::{AskedGrantRecord, MessageRecord, ThreadRecord, ThreadSummary};
 use crate::use_cases::acks::{awaiting, awaiting_per_thread, people, reached};
 use crate::use_cases::common::existing_item;
 use crate::use_cases::readable::readable_summaries;
@@ -108,6 +108,9 @@ pub struct PendingGrantAsk {
     pub holder_item: ItemName,
     /// When it was asked.
     pub asked_at: OffsetDateTime,
+    /// Whether dibs left it to the caller for good and no longer decides it on their behalf,
+    /// because a revoke of their grant to the asker in the area stands.
+    pub left_to_holder: bool,
 }
 
 /// The most grant requests one inbox answer lists.
@@ -263,8 +266,12 @@ impl Inbox {
             .into_iter()
             .map(|record| record.grant)
             .collect();
-        let mut waiting: Vec<(MessageRecord, AskedGrant, ItemId)> = Vec::new();
-        for request in asked {
+        let mut waiting: Vec<(MessageRecord, AskedGrant, ItemId, bool)> = Vec::new();
+        for AskedGrantRecord {
+            asked: request,
+            left_to_holder,
+        } in asked
+        {
             let Some(holder_item) = request.waits_on(&grants, &claims, now, settings) else {
                 continue;
             };
@@ -279,11 +286,11 @@ impl Inbox {
                         ),
                     })
                 })?;
-            waiting.push((message, request, holder_item));
+            waiting.push((message, request, holder_item, left_to_holder));
         }
-        waiting.sort_by_key(|(message, _, _)| std::cmp::Reverse((message.created_at, message.id)));
+        waiting.sort_by_key(|(message, ..)| std::cmp::Reverse((message.created_at, message.id)));
         let mut listed = Vec::new();
-        for (message, request, holder_item) in waiting {
+        for (message, request, holder_item, left_to_holder) in waiting {
             let item = existing_item(work, request.ask.item).await?;
             let holder_item = existing_item(work, holder_item).await?;
             listed.push(PendingGrantAsk {
@@ -294,6 +301,7 @@ impl Inbox {
                 area: request.ask.area,
                 holder_item: ItemName::of(&holder_item, &self.ref_schemes),
                 asked_at: message.created_at,
+                left_to_holder,
             });
         }
         Ok(listed)
@@ -304,8 +312,8 @@ impl Inbox {
 /// within [`DELIVERABLE_FOR`], reaching the actor, and either awaiting their acknowledgement or
 /// unread and handed to sessions by what it is ([`handed_to_sessions`]: a member's message in a
 /// thread addressed to members at any importance, any other only when raised) — leaving out every
-/// announcement of a wide claim that has ended and every message already delivered to one of their
-/// sessions. Only the threads that may hold such a message are opened: one with a raised message
+/// announcement of a wide claim that has ended or that dibs acknowledged on its holder's behalf, and
+/// every message already delivered to one of their sessions. Only the threads that may hold such a message are opened: one with a raised message
 /// the actor has not read, or one addressed to members with unread messages a member wrote, so the
 /// notices dibs wrote at normal importance cost nothing however many are unread, even in a thread
 /// whose raised messages were all read. A message awaiting the actor's acknowledgement is found
@@ -355,7 +363,7 @@ async fn deliverable(
                 }
                 if !claims
                     .as_deref()
-                    .is_some_and(|claims| ask_stands(&ask, claims))
+                    .is_some_and(|claims| ask_awaits(&ask, claims))
                 {
                     continue;
                 }
@@ -973,6 +981,36 @@ mod tests {
             .unwrap();
         assert!(acked.granted.is_empty());
         assert!(acked.announcement_ended);
+    }
+
+    #[tokio::test]
+    async fn an_announcement_dibs_acknowledged_for_its_holder_is_neither_delivered_nor_awaited() {
+        use dibs_domain::grant::GrantDecision;
+
+        let env = Env::new().await;
+        let (announced, _) = env.announce_billing_to_alice().await;
+        assert_eq!(
+            deliverable_ids(&env, &env.alice.actor).await,
+            [announced],
+            "the announcement presses until it is answered"
+        );
+        env.ack_for_holder(announced, GrantDecision::Untouched)
+            .await;
+        assert!(deliverable_ids(&env, &env.alice.actor).await.is_empty());
+        let inbox = Inbox::new(&env.deps)
+            .execute(&env.alice.actor, InboxQuery::default())
+            .await
+            .unwrap();
+        assert!(inbox.awaiting_ack.is_empty());
+        assert!(inbox.threads.iter().all(|thread| thread.awaiting_ack == 0));
+        let acked = AckMessage::new(&env.deps)
+            .execute(&env.alice.actor, announced)
+            .await
+            .unwrap();
+        assert!(
+            !acked.announcement_ended,
+            "the wide claim still stands: only dibs answered its announcement"
+        );
     }
 
     /// alice holds billing on `#1` and search on `#3`; bob claims `#2` and `#4` and asks alice for

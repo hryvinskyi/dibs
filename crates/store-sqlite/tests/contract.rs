@@ -13,9 +13,9 @@ mod contract {
     use dibs_app::fakes::MemoryStore;
     use dibs_app::ports::{Store, StoreError};
     use dibs_app::records::{
-        ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter,
-        ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark,
-        SessionRecord, ThreadActivity, ThreadRecord, TokenRecord, UiSessionRecord,
+        AskedGrantRecord, ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject,
+        ItemFilter, ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark,
+        SessionRecord, ThreadActivity, ThreadRecord, TokenRecord, UiSessionRecord, WideAskRecord,
     };
     use dibs_app::token::{TokenHash, TokenPrefix};
     use dibs_domain::area::QualifiedArea;
@@ -26,7 +26,7 @@ mod contract {
         Claimed, Completed, Event, EventKind, GrantEnd, GrantRevoked, ItemCreated, MessagePosted,
         Reserved, SettingsChanged,
     };
-    use dibs_domain::grant::{AskedGrant, Grant, GrantAsk};
+    use dibs_domain::grant::{AskedGrant, Grant, GrantAsk, GrantBlock, GrantDecision};
     use dibs_domain::handle::Handle;
     use dibs_domain::handover::{ClaimKind, PendingArea};
     use dibs_domain::ids::{
@@ -124,11 +124,14 @@ mod contract {
         footprints_keep_their_paths_and_are_replaced_per_item_and_repository,
         footprint_paths_are_found_by_path_within_their_repository_and_project,
         overlaps_are_one_per_key_and_go_with_any_item_they_name,
+        an_overlap_keeps_its_order_and_a_new_order_replaces_it,
         items_are_read_together_by_id_within_their_project,
         a_footprint_or_overlap_naming_a_missing_item_fails_the_commit,
         calls_are_kept_per_member_and_replaced,
         shared_paths_are_kept_once_and_removed_explicitly,
         grants_are_listed_by_id,
+        a_grant_keeps_who_decided_it,
+        a_revoke_that_sticks_is_kept_once_per_claims_members_and_area,
         threads_keep_their_recipients_and_messages_their_order,
         summaries_count_what_the_reader_has_not_read,
         summaries_split_unread_into_what_members_and_dibs_wrote,
@@ -140,6 +143,14 @@ mod contract {
         wide_claims_keep_their_scope_and_reason,
         wide_asks_are_one_per_message_and_open_until_their_holder_acks,
         asked_grants_are_one_per_message_and_wait_until_their_holder_writes_in_the_conversation,
+        unsettled_asked_grants_come_with_when_they_were_asked_until_they_are_settled,
+        settling_between_an_asker_and_a_holder_in_an_area_settles_every_item_and_nothing_else,
+        settling_for_an_item_settles_that_items_requests_and_nothing_else,
+        a_wide_ask_dibs_acknowledged_is_answered_and_keeps_why,
+        a_request_left_to_its_holder_is_marked_for_dibs_and_still_listed_for_the_holder,
+        a_wide_ask_left_to_its_holder_is_marked_a_settled_one_is_not_judged_and_both_stay_open,
+        a_wide_ask_is_settled_or_acknowledged_by_dibs_whichever_comes_first,
+        waiting_wide_asks_leave_out_the_settled_and_the_acknowledged,
         read_times_are_kept_per_member,
         events_only_increase_and_page_by_cursor,
         events_keep_every_field,
@@ -170,6 +181,7 @@ mod contract {
         a_claims_conversation_outlives_the_claim_it_names,
         quiet_threads_are_found_by_their_last_activity,
         open_escalations_are_one_per_message_newest_first_until_an_arbiter_acks,
+        an_escalation_keeps_whether_dibs_raised_it_and_each_tie_put_to_it_once,
         old_events_go_and_the_newest_gone_is_remembered,
         a_members_browser_sessions_are_removed_together,
         every_project_is_listed,
@@ -1515,6 +1527,61 @@ mod contract {
         assert_eq!(tx.overlaps(B).await.unwrap(), vec![elsewhere]);
     }
 
+    async fn an_overlap_keeps_its_order_and_a_new_order_replaces_it(store: Arc<dyn Store>) {
+        use dibs_domain::radar::{OrderRule, OverlapOrder};
+
+        seed(&store).await;
+        let shared = overlap(OverlapKind::SameFile, &[FIRST, SECOND], None, &["api:a.rs"]);
+        let first = OverlapOrder::First {
+            item: SECOND,
+            because: OrderRule::Priority,
+        };
+        let ordered = shared.clone().with_order(Some(first)).unwrap();
+        let tied = overlap(
+            OverlapKind::Contract,
+            &[SECOND, THIRD],
+            None,
+            &["api:s.json"],
+        )
+        .with_order(Some(OverlapOrder::Tied))
+        .unwrap();
+        let moved = overlap(
+            OverlapKind::MainMoved,
+            &[THIRD],
+            Some("acme/api#12"),
+            &["api:b.rs"],
+        );
+        let mut tx = store.begin().await.unwrap();
+        for made in [&ordered, &tied, &moved] {
+            tx.save_overlap(A, made).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let read = tx.overlaps(A).await.unwrap();
+        assert_eq!(read, [ordered.clone(), tied.clone(), moved.clone()]);
+        assert_eq!(read[0].order(), Some(&first));
+        assert_eq!(read[1].order(), Some(&OverlapOrder::Tied));
+        assert_eq!(read[2].order(), None, "a moved base has no order");
+
+        let older = OverlapOrder::First {
+            item: FIRST,
+            because: OrderRule::Older,
+        };
+        let changed = shared.clone().with_order(Some(older)).unwrap();
+        tx.save_overlap(A, &changed).await.unwrap();
+        let untied = tied.clone().with_order(None).unwrap();
+        tx.save_overlap(A, &untied).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.overlaps(A).await.unwrap(),
+            [changed, untied, moved],
+            "saving an overlap replaces its order, and an overlap saved without one has none"
+        );
+    }
+
     async fn items_are_read_together_by_id_within_their_project(store: Arc<dyn Store>) {
         seed(&store).await;
         let mut tx = store.begin().await.unwrap();
@@ -1657,6 +1724,7 @@ mod contract {
                 to,
             },
             created_at: at(50),
+            decided: GrantDecision::Holder,
         };
         let mut tx = store.begin().await.unwrap();
         tx.insert_grant(A, &grant(72, THIRD, ALICE, BOB))
@@ -1690,6 +1758,97 @@ mod contract {
         let mut tx = store.begin().await.unwrap();
         let ids: Vec<GrantId> = tx.grants(A).await.unwrap().iter().map(|g| g.id).collect();
         assert_eq!(ids, [GrantId(71)]);
+    }
+
+    async fn a_grant_keeps_who_decided_it(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let decisions = [
+            GrantDecision::Holder,
+            GrantDecision::Untouched,
+            GrantDecision::InReview,
+            GrantDecision::Idle,
+            GrantDecision::Waited,
+        ];
+        let records: Vec<GrantRecord> = (71..)
+            .zip(decisions)
+            .map(|(id, decided)| GrantRecord {
+                id: GrantId(id),
+                grant: Grant {
+                    item: SECOND,
+                    area: QualifiedArea::parse("api:billing").unwrap(),
+                    from: ALICE,
+                    to: BOB,
+                },
+                created_at: at(50),
+                decided,
+            })
+            .collect();
+        let mut tx = store.begin().await.unwrap();
+        for record in &records {
+            tx.insert_grant(A, record).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(tx.grants(A).await.unwrap(), records);
+        assert_eq!(
+            tx.grant(A, GrantId(73)).await.unwrap().map(|g| g.decided),
+            Some(GrantDecision::InReview)
+        );
+    }
+
+    fn block(asker_item: ItemId, holder_item: ItemId, area: &str, revoked: i64) -> GrantBlock {
+        GrantBlock {
+            asker: BOB,
+            asker_item,
+            asker_claimed_at: at(10),
+            holder: ALICE,
+            holder_item,
+            holder_claimed_at: at(5),
+            area: QualifiedArea::parse(area).unwrap(),
+            revoked_at: at(revoked),
+        }
+    }
+
+    async fn a_revoke_that_sticks_is_kept_once_per_claims_members_and_area(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let billing = block(SECOND, FIRST, "api:billing", 60);
+        let search = block(SECOND, FIRST, "api:search", 61);
+        let later_claim = GrantBlock {
+            asker_claimed_at: at(20),
+            ..billing.clone()
+        };
+        let other_item = block(THIRD, FIRST, "api:billing", 62);
+        let mut tx = store.begin().await.unwrap();
+        for recorded in [&other_item, &search, &later_claim, &billing] {
+            tx.insert_grant_block(A, recorded).await.unwrap();
+        }
+        let again = GrantBlock {
+            revoked_at: at(90),
+            ..billing.clone()
+        };
+        tx.insert_grant_block(A, &again).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.grant_blocks(A).await.unwrap(),
+            [billing.clone(), search, later_claim, other_item],
+            "one per key, the first revoke kept; ordered by asker's item, its claim, then area"
+        );
+        assert!(tx.grant_blocks(B).await.unwrap().is_empty());
+        drop(tx);
+
+        let mut tx = store.begin().await.unwrap();
+        let dangling = GrantBlock {
+            asker: DAVE,
+            ..billing
+        };
+        tx.insert_grant_block(A, &dangling).await.unwrap();
+        assert!(
+            matches!(tx.commit().await, Err(StoreError::Backend(_))),
+            "a block naming a member of another project"
+        );
     }
 
     async fn threads_keep_their_recipients_and_messages_their_order(store: Arc<dyn Store>) {
@@ -2158,6 +2317,7 @@ mod contract {
                 from: ALICE,
                 to: BOB,
                 cause: GrantEnd::GranteeLeft,
+                by: None,
             }),
             EventKind::MessagePosted(MessagePosted {
                 thread: ThreadId(81),
@@ -2522,6 +2682,7 @@ mod contract {
             from,
             to,
             areas: areas(names),
+            acked_by_dibs: None,
         }
     }
 
@@ -2618,6 +2779,13 @@ mod contract {
         }
     }
 
+    fn unanswered(asked: &AskedGrant, left_to_holder: bool) -> AskedGrantRecord {
+        AskedGrantRecord {
+            asked: asked.clone(),
+            left_to_holder,
+        }
+    }
+
     async fn asked_grants_are_one_per_message_and_wait_until_their_holder_writes_in_the_conversation(
         store: Arc<dyn Store>,
     ) {
@@ -2657,12 +2825,12 @@ mod contract {
         let mut tx = store.begin().await.unwrap();
         assert_eq!(
             tx.unanswered_asked_grants(A, ALICE).await.unwrap(),
-            std::slice::from_ref(&waiting),
+            [unanswered(&waiting, false)],
             "the asker's own and dibs' messages answer nothing; the holder's answers"
         );
         assert_eq!(
             tx.unanswered_asked_grants(A, BOB).await.unwrap(),
-            std::slice::from_ref(&to_bob),
+            [unanswered(&to_bob, false)],
             "a message of its holder's in another conversation answers nothing"
         );
         assert!(
@@ -2810,6 +2978,489 @@ mod contract {
         );
     }
 
+    /// alice holds billing on `FIRST`; bob asks her for it for `SECOND` (message 91, unanswered),
+    /// for `THIRD` (92, which alice answered in its conversation) and for search for `SECOND`
+    /// (93); alice asks bob for checkout (94).
+    async fn four_requests(store: &Arc<dyn Store>) -> [AskedGrant; 4] {
+        seed(store).await;
+        let mut tx = store.begin().await.unwrap();
+        for id in [81, 82, 83, 84] {
+            tx.insert_thread(A, &thread(ThreadId(id), BOB, Some(FIRST), 60))
+                .await
+                .unwrap();
+        }
+        for (id, thread_id, author, minutes) in [
+            (91, 81, BOB, 61),
+            (92, 82, BOB, 62),
+            (93, 83, BOB, 63),
+            (94, 84, ALICE, 64),
+            (95, 82, ALICE, 65),
+        ] {
+            tx.insert_message(A, &message(id, ThreadId(thread_id), author, minutes))
+                .await
+                .unwrap();
+        }
+        let requests = [
+            asked_grant(91, BOB, SECOND, "api:billing", ALICE),
+            asked_grant(92, BOB, THIRD, "api:billing", ALICE),
+            asked_grant(93, BOB, SECOND, "api:search", ALICE),
+            asked_grant(94, ALICE, FIRST, "api:billing", BOB),
+        ];
+        for asked in &requests {
+            tx.insert_asked_grant(A, asked).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        requests
+    }
+
+    async fn unsettled_asked_grants_come_with_when_they_were_asked_until_they_are_settled(
+        store: Arc<dyn Store>,
+    ) {
+        let [billing, answered, search, to_bob] = four_requests(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.unsettled_asked_grants(A).await.unwrap(),
+            [
+                (unanswered(&billing, false), at(61)),
+                (unanswered(&answered, false), at(62)),
+                (unanswered(&search, false), at(63)),
+                (unanswered(&to_bob, false), at(64)),
+            ],
+            "answered or not, each with the time of the message that asked"
+        );
+        assert!(tx.unsettled_asked_grants(B).await.unwrap().is_empty());
+        tx.settle_asked_grant(A, billing.message, at(70))
+            .await
+            .unwrap();
+        tx.settle_asked_grant(A, billing.message, at(80))
+            .await
+            .unwrap();
+        tx.settle_asked_grant(A, MessageId(99), at(70))
+            .await
+            .unwrap();
+        tx.settle_asked_grant(B, search.message, at(70))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.unsettled_asked_grants(A).await.unwrap(),
+            [
+                (unanswered(&answered, false), at(62)),
+                (unanswered(&search, false), at(63)),
+                (unanswered(&to_bob, false), at(64))
+            ],
+            "only the settled request goes; another project settles nothing here"
+        );
+        assert_eq!(
+            tx.unanswered_asked_grants(A, ALICE).await.unwrap(),
+            [unanswered(&search, false)],
+            "a settled request no longer waits for its holder, even unanswered"
+        );
+        assert_eq!(
+            tx.unanswered_asked_grants(A, BOB).await.unwrap(),
+            [unanswered(&to_bob, false)]
+        );
+    }
+
+    async fn settling_between_an_asker_and_a_holder_in_an_area_settles_every_item_and_nothing_else(
+        store: Arc<dyn Store>,
+    ) {
+        let [billing, answered, search, to_bob] = four_requests(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        let area = QualifiedArea::parse("api:billing").unwrap();
+        tx.settle_asked_grants_between(A, BOB, ALICE, &area, at(70))
+            .await
+            .unwrap();
+        tx.settle_asked_grants_between(
+            B,
+            BOB,
+            ALICE,
+            &QualifiedArea::parse("api:search").unwrap(),
+            at(70),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let left: Vec<AskedGrant> = tx
+            .unsettled_asked_grants(A)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(record, _)| record.asked)
+            .collect();
+        assert_eq!(
+            left,
+            [search, to_bob],
+            "both of bob's requests for billing of alice go, for either item; another area and \
+             the other way round stay"
+        );
+        assert!(!left.contains(&billing) && !left.contains(&answered));
+    }
+
+    async fn settling_for_an_item_settles_that_items_requests_and_nothing_else(
+        store: Arc<dyn Store>,
+    ) {
+        let [billing, answered, search, to_bob] = four_requests(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.settle_asked_grants_for_item(A, &billing.ask, ALICE, at(70))
+            .await
+            .unwrap();
+        tx.settle_asked_grants_for_item(A, &billing.ask, ALICE, at(80))
+            .await
+            .unwrap();
+        tx.settle_asked_grants_for_item(B, &search.ask, ALICE, at(70))
+            .await
+            .unwrap();
+        tx.settle_asked_grants_for_item(A, &answered.ask, BOB, at(70))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let left: Vec<AskedGrant> = tx
+            .unsettled_asked_grants(A)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(record, _)| record.asked)
+            .collect();
+        assert_eq!(
+            left,
+            [answered, search, to_bob],
+            "only bob's request to alice for billing for that item goes; his request for billing \
+             for another item, another area, another project, another holder and the other way \
+             round stay"
+        );
+        assert!(!left.contains(&billing));
+    }
+
+    async fn a_request_left_to_its_holder_is_marked_for_dibs_and_still_listed_for_the_holder(
+        store: Arc<dyn Store>,
+    ) {
+        let [billing, answered, search, to_bob] = four_requests(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.leave_asked_grant_to_holder(A, billing.message)
+            .await
+            .unwrap();
+        tx.leave_asked_grant_to_holder(A, billing.message)
+            .await
+            .unwrap();
+        tx.leave_asked_grant_to_holder(A, answered.message)
+            .await
+            .unwrap();
+        tx.leave_asked_grant_to_holder(A, MessageId(99))
+            .await
+            .unwrap();
+        tx.leave_asked_grant_to_holder(B, search.message)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.unsettled_asked_grants(A).await.unwrap(),
+            [
+                (unanswered(&billing, true), at(61)),
+                (unanswered(&answered, true), at(62)),
+                (unanswered(&search, false), at(63)),
+                (unanswered(&to_bob, false), at(64)),
+            ],
+            "a request left to its holder is still listed, marked, so that dibs settles it once it \
+             closes and decides nothing else of it; another project leaves nothing here"
+        );
+        assert_eq!(
+            tx.unanswered_asked_grants(A, ALICE).await.unwrap(),
+            [unanswered(&billing, true), unanswered(&search, false)],
+            "the holder still decides it, so it is listed for them, saying it is left to them"
+        );
+        tx.settle_asked_grant(A, billing.message, at(70))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.unanswered_asked_grants(A, ALICE).await.unwrap(),
+            [unanswered(&search, false)],
+            "a request left to its holder is settled as any other"
+        );
+        assert_eq!(
+            tx.unanswered_asked_grants(A, BOB).await.unwrap(),
+            [unanswered(&to_bob, false)]
+        );
+    }
+
+    /// Four announcements of alice's wide claim to bob, in one conversation, sent at minutes 61 to
+    /// 64.
+    async fn four_announcements(store: &Arc<dyn Store>) -> [WideAsk; 4] {
+        seed(store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, Some(FIRST), 60))
+            .await
+            .unwrap();
+        for (id, minutes) in [(91, 61), (92, 62), (93, 63), (94, 64)] {
+            tx.insert_message(A, &asking(id, ThreadId(81), ALICE, minutes))
+                .await
+                .unwrap();
+        }
+        let asks = [
+            wide_ask(91, FIRST, ALICE, BOB, &["api:billing"]),
+            wide_ask(92, FIRST, ALICE, BOB, &["api:search"]),
+            wide_ask(93, FIRST, ALICE, BOB, &["web:checkout"]),
+            wide_ask(94, FIRST, ALICE, BOB, &["web:search"]),
+        ];
+        for ask in &asks {
+            tx.insert_wide_ask(A, ask).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        asks
+    }
+
+    fn marked(ask: &WideAsk, left_to_holder: bool) -> WideAskRecord {
+        WideAskRecord {
+            ask: ask.clone(),
+            left_to_holder,
+        }
+    }
+
+    async fn a_wide_ask_left_to_its_holder_is_marked_a_settled_one_is_not_judged_and_both_stay_open(
+        store: Arc<dyn Store>,
+    ) {
+        let [left, settled, judged, acked] = four_announcements(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.leave_wide_ask_to_holder(A, left.message).await.unwrap();
+        tx.leave_wide_ask_to_holder(A, left.message).await.unwrap();
+        tx.settle_wide_ask(A, settled.message, at(70))
+            .await
+            .unwrap();
+        tx.settle_wide_ask(A, settled.message, at(80))
+            .await
+            .unwrap();
+        tx.insert_ack(A, &ack(94, BOB, 71)).await.unwrap();
+        tx.leave_wide_ask_to_holder(A, MessageId(99)).await.unwrap();
+        tx.settle_wide_ask(A, MessageId(99), at(70)).await.unwrap();
+        tx.leave_wide_ask_to_holder(B, judged.message)
+            .await
+            .unwrap();
+        tx.settle_wide_ask(B, judged.message, at(70)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.open_wide_asks_with_time(A).await.unwrap(),
+            [
+                (marked(&left, true), at(61)),
+                (marked(&judged, false), at(63))
+            ],
+            "one left to its holder is listed, marked, so that dibs settles it once it closes and \
+             judges nothing else of it; one settled is not; another project changes nothing here"
+        );
+        assert_eq!(
+            tx.open_wide_asks(A).await.unwrap(),
+            [left.clone(), settled.clone(), judged.clone()],
+            "both stay open for the holder to acknowledge; the one the holder acknowledged does not"
+        );
+        assert_eq!(
+            tx.wide_ask(A, settled.message).await.unwrap(),
+            Some(settled.clone()),
+            "a settled announcement is not acknowledged by dibs"
+        );
+        assert_eq!(
+            tx.wide_ask(A, acked.message).await.unwrap(),
+            Some(acked.clone())
+        );
+        tx.insert_ack(A, &ack(91, BOB, 72)).await.unwrap();
+        tx.insert_ack(A, &ack(92, BOB, 72)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.open_wide_asks(A).await.unwrap(),
+            std::slice::from_ref(&judged),
+            "the holder answers them by acknowledging"
+        );
+    }
+
+    async fn a_wide_ask_is_settled_or_acknowledged_by_dibs_whichever_comes_first(
+        store: Arc<dyn Store>,
+    ) {
+        let [settled, acked, _, _] = four_announcements(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.settle_wide_ask(A, settled.message, at(70))
+            .await
+            .unwrap();
+        tx.mark_wide_ask_acked_by_dibs(A, settled.message, at(71), GrantDecision::Waited)
+            .await
+            .unwrap();
+        tx.mark_wide_ask_acked_by_dibs(A, acked.message, at(70), GrantDecision::Idle)
+            .await
+            .unwrap();
+        tx.settle_wide_ask(A, acked.message, at(71)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let acked = WideAsk {
+            acked_by_dibs: Some(GrantDecision::Idle),
+            ..acked
+        };
+        assert_eq!(
+            tx.wide_ask(A, acked.message).await.unwrap(),
+            Some(acked),
+            "one dibs acknowledged stays acknowledged"
+        );
+        assert_eq!(
+            tx.wide_ask(A, settled.message).await.unwrap(),
+            Some(settled.clone()),
+            "a settled announcement is not acknowledged by dibs"
+        );
+        assert!(
+            tx.open_wide_asks(A)
+                .await
+                .unwrap()
+                .iter()
+                .any(|open| open.message == settled.message),
+            "the settled one is still open for its holder"
+        );
+    }
+
+    async fn waiting_wide_asks_leave_out_the_settled_and_the_acknowledged(store: Arc<dyn Store>) {
+        let [left, settled, open, holder_acked] = four_announcements(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.leave_wide_ask_to_holder(A, left.message).await.unwrap();
+        tx.settle_wide_ask(A, settled.message, at(70))
+            .await
+            .unwrap();
+        tx.insert_ack(A, &ack(94, BOB, 71)).await.unwrap();
+        tx.settle_wide_ask(B, open.message, at(70)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.waiting_wide_asks(A).await.unwrap(),
+            [left.clone(), open.clone()],
+            "one left to its holder still waits for them; a settled one and one its holder \
+             acknowledged do not; another project settles nothing here"
+        );
+        assert!(tx.waiting_wide_asks(B).await.unwrap().is_empty());
+        assert_ne!(
+            tx.open_wide_asks(A).await.unwrap(),
+            tx.waiting_wide_asks(A).await.unwrap(),
+            "the settled one is still open for its holder"
+        );
+        tx.mark_wide_ask_acked_by_dibs(A, open.message, at(72), GrantDecision::Idle)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.waiting_wide_asks(A).await.unwrap(),
+            std::slice::from_ref(&left),
+            "one dibs acknowledged no longer waits"
+        );
+        assert!(
+            !tx.waiting_wide_asks(A)
+                .await
+                .unwrap()
+                .contains(&holder_acked)
+        );
+    }
+
+    async fn a_wide_ask_dibs_acknowledged_is_answered_and_keeps_why(store: Arc<dyn Store>) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), ALICE, Some(FIRST), 60))
+            .await
+            .unwrap();
+        for (id, minutes) in [(91, 61), (92, 62), (93, 63)] {
+            tx.insert_message(A, &asking(id, ThreadId(81), ALICE, minutes))
+                .await
+                .unwrap();
+        }
+        let acked = wide_ask(91, FIRST, ALICE, BOB, &["api:billing"]);
+        let open = wide_ask(92, FIRST, ALICE, BOB, &["api:search"]);
+        let both = wide_ask(93, FIRST, ALICE, BOB, &["web:checkout"]);
+        for ask in [&acked, &open, &both] {
+            tx.insert_wide_ask(A, ask).await.unwrap();
+        }
+        assert_eq!(
+            tx.open_wide_asks_with_time(A).await.unwrap(),
+            [
+                (marked(&acked, false), at(61)),
+                (marked(&open, false), at(62)),
+                (marked(&both, false), at(63))
+            ],
+            "each with when its message was sent"
+        );
+        tx.mark_wide_ask_acked_by_dibs(A, acked.message, at(70), GrantDecision::Untouched)
+            .await
+            .unwrap();
+        tx.mark_wide_ask_acked_by_dibs(A, acked.message, at(80), GrantDecision::Waited)
+            .await
+            .unwrap();
+        tx.mark_wide_ask_acked_by_dibs(A, both.message, at(70), GrantDecision::InReview)
+            .await
+            .unwrap();
+        tx.insert_ack(A, &ack(93, BOB, 71)).await.unwrap();
+        tx.mark_wide_ask_acked_by_dibs(A, MessageId(99), at(70), GrantDecision::Idle)
+            .await
+            .unwrap();
+        tx.mark_wide_ask_acked_by_dibs(B, open.message, at(70), GrantDecision::Idle)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        let acked = WideAsk {
+            acked_by_dibs: Some(GrantDecision::Untouched),
+            ..acked
+        };
+        let both = WideAsk {
+            acked_by_dibs: Some(GrantDecision::InReview),
+            ..both
+        };
+        assert_eq!(
+            tx.wide_ask(A, acked.message).await.unwrap(),
+            Some(acked.clone()),
+            "the first acknowledgement by dibs is kept"
+        );
+        assert_eq!(
+            tx.wide_ask(A, open.message).await.unwrap(),
+            Some(open.clone())
+        );
+        assert_eq!(
+            tx.open_wide_asks(A).await.unwrap(),
+            std::slice::from_ref(&open),
+            "an announcement dibs acknowledged is answered"
+        );
+        assert_eq!(
+            tx.open_wide_asks_with_time(A).await.unwrap(),
+            [(marked(&open, false), at(62))]
+        );
+        assert_eq!(
+            tx.wide_ask(A, both.message).await.unwrap(),
+            Some(both),
+            "whether or not its holder acknowledged it too"
+        );
+        assert!(matches!(
+            tx.mark_wide_ask_acked_by_dibs(A, open.message, at(90), GrantDecision::Holder)
+                .await,
+            Err(StoreError::Backend(_))
+        ));
+        let preacked = WideAsk {
+            acked_by_dibs: Some(GrantDecision::Idle),
+            ..wide_ask(94, FIRST, ALICE, BOB, &["web:search"])
+        };
+        assert!(matches!(
+            tx.insert_wide_ask(A, &preacked).await,
+            Err(StoreError::Backend(_))
+        ));
+    }
+
     async fn read_times_are_kept_per_member(store: Arc<dyn Store>) {
         seed(&store).await;
         let t = ThreadId(81);
@@ -2903,6 +3554,7 @@ mod contract {
                 to: DAVE,
             },
             created_at: at(50),
+            decided: GrantDecision::Holder,
         };
         tx.insert_grant(A, &grant).await.unwrap();
         refused("a grant to a member of another project")(tx.commit().await);
@@ -3776,7 +4428,7 @@ mod contract {
             .await
             .unwrap()
             .iter()
-            .map(|asked| asked.message)
+            .map(|record| record.asked.message)
             .collect();
         assert_eq!(left, [MessageId(93)], "the other thread's request stays");
         assert!(tx.raised_since(A, ALICE, at(0)).await.unwrap().is_empty());
@@ -3990,9 +4642,69 @@ mod contract {
             thread,
             subject: dibs_domain::escalation::EscalationSubject::Slot(slot_name("deploy:prod")),
             by: BOB,
+            raised_by_dibs: false,
+            ties: BTreeSet::new(),
             arbiters: [ALICE].into(),
             created_at: at(seconds),
         }
+    }
+
+    async fn an_escalation_keeps_whether_dibs_raised_it_and_each_tie_put_to_it_once(
+        store: Arc<dyn Store>,
+    ) {
+        seed(&store).await;
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_thread(A, &thread(ThreadId(81), BOB, None, 60))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(91, ThreadId(81), 61))
+            .await
+            .unwrap();
+        tx.insert_message(A, &system_message(92, ThreadId(81), 62))
+            .await
+            .unwrap();
+        let raised = EscalationRecord {
+            subject: dibs_domain::escalation::EscalationSubject::Item(FIRST),
+            raised_by_dibs: true,
+            ties: BTreeSet::from([[FIRST, SECOND]]),
+            ..escalation(91, ThreadId(81), 61)
+        };
+        tx.insert_escalation(A, &raised).await.unwrap();
+        tx.insert_escalation(A, &escalation(92, ThreadId(81), 62))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.open_escalations(A).await.unwrap(),
+            [escalation(92, ThreadId(81), 62), raised.clone()],
+            "both read back as written"
+        );
+        let third = ItemId(53);
+        for tie in [[FIRST, third], [FIRST, SECOND], [FIRST, third]] {
+            tx.add_escalation_tie(A, MessageId(91), tie).await.unwrap();
+        }
+        tx.add_escalation_tie(A, MessageId(99), [FIRST, third])
+            .await
+            .unwrap();
+        tx.add_escalation_tie(B, MessageId(92), [FIRST, third])
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = store.begin().await.unwrap();
+        assert_eq!(
+            tx.open_escalations(A).await.unwrap(),
+            [
+                escalation(92, ThreadId(81), 62),
+                EscalationRecord {
+                    ties: BTreeSet::from([[FIRST, SECOND], [FIRST, third]]),
+                    ..raised
+                },
+            ],
+            "each pair is kept once, on its own escalation only"
+        );
     }
 
     async fn open_escalations_are_one_per_message_newest_first_until_an_arbiter_acks(

@@ -422,7 +422,7 @@ mod scenario {
                     item: invoices,
                     session: team.bob_session,
                     areas: Vec::new(),
-                    reason: Body::parse("You have been away a day; finishing it.").unwrap(),
+                    reason: Some(Body::parse("You have been away a day; finishing it.").unwrap()),
                     kind: None,
                 },
             )

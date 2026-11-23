@@ -17,6 +17,7 @@ use dibs_app::use_cases::{
 };
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::ClaimOutcome;
+use dibs_domain::grant::GrantDecision;
 use dibs_domain::handle::Handle;
 use dibs_domain::handover::ClaimKind;
 use dibs_domain::ids::{ItemId, MessageId, ThreadId};
@@ -26,7 +27,9 @@ use dibs_domain::wide::WideReason;
 
 use crate::auth::Authed;
 use crate::error::ApiError;
-use crate::fields::{item_in_path, parse, parse_required, required, session_in_body};
+use crate::fields::{
+    item_in_path, parse, parse_required, parse_unless_blank, required, session_in_body,
+};
 use crate::http::AppState;
 use crate::views::{ClaimView, ItemNameView, reply};
 
@@ -68,6 +71,9 @@ struct AnnouncedView {
     message_id: MessageId,
     /// Its thread.
     thread_id: ThreadId,
+    /// Why dibs acknowledged it on the holder's behalf as it was sent (`untouched`, `idle`,
+    /// `in_review`, `waited`); `null` while it waits for the holder.
+    acked_by_dibs: Option<GrantDecision>,
 }
 
 impl AnnouncedView {
@@ -77,6 +83,7 @@ impl AnnouncedView {
             areas: announced.ask.areas,
             message_id: announced.ask.message,
             thread_id: announced.thread,
+            acked_by_dibs: announced.ask.acked_by_dibs,
         }
     }
 }
@@ -152,7 +159,8 @@ impl PendingNoteView {
 /// names them: `repo:area`, or a bare name exactly one repository declares. A blocked item is
 /// claimed all the same; `blocked_by` names what it waits for. With `wide: {areas, reason}` the
 /// claim is wide: it holds none of those areas, and each holder of one is sent an announcement to
-/// acknowledge, which `announced` lists; a renewal adds to the scope it had. `kind` is `feature`
+/// acknowledge, which `announced` lists, with `acked_by_dibs` naming why dibs acknowledged one on
+/// its holder's behalf at once; a renewal adds to the scope it had. `kind` is `feature`
 /// (the default) or `debt`, for a new claim; a renewal keeps the kind it has. A feature claim over
 /// an area other members hold only under debt claims waits for it, which `pending` lists; a
 /// renewal naming another kind than the claim has is refused. `branches`, an object from a
@@ -330,12 +338,14 @@ fn kind_in_body(text: Option<&str>) -> Result<Option<ClaimKind>, ApiError> {
 }
 
 /// Takes over another member's stale claim; the previous holder is sent `reason` in a thread about
-/// the item. `kind` names the new claim's kind; without it, the previous claim's kind carries on.
+/// the item. `reason` is optional: absent, empty or only whitespace, dibs writes the standing
+/// reason instead, which says how long the claim showed no sign of work. `kind` names the new
+/// claim's kind; without it, the previous claim's kind carries on.
 ///
 /// # Errors
 /// `not_stale` (naming the holder), `own_claim`, `nothing_to_take`, `area_held` (`409`);
 /// `item_closed`, area refusals, `not_found`, `forbidden` for an integration; `invalid_request`
-/// for a missing or invalid reason.
+/// for a reason longer than a message holds or with a NUL.
 pub async fn take_over(
     State(state): State<AppState>,
     Authed(actor): Authed,
@@ -350,7 +360,7 @@ pub async fn take_over(
         item,
         session: session_in_body("session_id", body.session_id)?,
         areas: body.areas.unwrap_or_default(),
-        reason: parse_required("reason", body.reason.as_deref(), Body::parse)?,
+        reason: parse_unless_blank("reason", body.reason.as_deref(), Body::parse)?,
         kind: kind_in_body(body.kind.as_deref())?,
     };
     let taken = state.app.take_over.execute(&actor, input).await?;

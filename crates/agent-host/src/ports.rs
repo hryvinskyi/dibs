@@ -272,6 +272,9 @@ pub struct GrantAskLine {
     pub holder_item: ItemId,
     /// That item's reference in an outside tracker, when it has one.
     pub holder_reference: Option<ExternalRef>,
+    /// Whether dibs leaves it to the member and never grants it on their behalf, because a revoke
+    /// of theirs stands against it.
+    pub left_to_holder: bool,
 }
 
 /// A message that should reach the member's agent while it works.

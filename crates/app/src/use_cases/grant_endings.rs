@@ -4,13 +4,18 @@ use time::OffsetDateTime;
 
 use dibs_domain::event::{EventKind, GrantEnd, GrantRevoked};
 use dibs_domain::grant::orphaned;
+use dibs_domain::ids::MemberId;
 
 use crate::error::AppError;
 use crate::records::GrantRecord;
 use crate::work::Work;
 
-/// The event that records a grant's end.
-pub(crate) fn grant_revoked(record: &GrantRecord, cause: GrantEnd) -> EventKind {
+/// The event that records a grant's end, naming `by`, the member who revoked it, when someone did.
+pub(crate) fn grant_revoked(
+    record: &GrantRecord,
+    cause: GrantEnd,
+    by: Option<MemberId>,
+) -> EventKind {
     EventKind::GrantRevoked(GrantRevoked {
         grant: record.id,
         item: record.grant.item,
@@ -18,6 +23,7 @@ pub(crate) fn grant_revoked(record: &GrantRecord, cause: GrantEnd) -> EventKind 
         from: record.grant.from,
         to: record.grant.to,
         cause,
+        by,
     })
 }
 
@@ -31,7 +37,7 @@ pub(crate) async fn end_orphaned_grants(
     let grants = work.grants(project).await?;
     for (record, cause) in orphaned(&grants, &claims) {
         work.delete_grant(project, record.id).await?;
-        work.record(at, grant_revoked(record, cause)).await?;
+        work.record(at, grant_revoked(record, cause, None)).await?;
     }
     Ok(())
 }

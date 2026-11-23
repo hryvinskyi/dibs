@@ -9,7 +9,12 @@
 //! project's arbiters. For claims — a working claim that went the project's `release_after`
 //! without a sign of its own work is released, its item open again and its holder told; and an area
 //! of a live claim that went the project's `idle_area_after` with no sign of the claim's work in it
-//! is given back, its holder told.
+//! is given back, its holder told. For requests for grants — dibs decides each request still
+//! waiting on its holder's behalf, and grants it once the holder's claim is in review, the area is
+//! idle on that claim or untouched by its branch, or the project's `grant_after` has passed since
+//! it was asked. For overlaps — the order of each collision between two live claims is worked out
+//! again from the claims as they are now, a change is told to both holders, and a change to a tie
+//! goes to the project's arbiters.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +27,9 @@ use crate::stream::StopSignal;
 pub const SWEEP_EVERY: Duration = Duration::from_secs(30);
 
 /// Sweeps every `every` until `stop` is given: the slots first, then the worktree pools, then the
-/// waiting areas, then the claims. A sweep that fails for one project, or one pool, is logged and the others are
-/// applied; a sweep already running when the stop comes is finished first.
+/// waiting areas, then the claims, then the requests for grants, then the overlaps' orders. A
+/// sweep that fails for one project, or one pool, is logged and the others are applied; a sweep
+/// already running when the stop comes is finished first.
 pub async fn run_sweeper(app: Arc<UseCases>, every: Duration, mut stop: StopSignal) {
     tracing::info!(every_s = every.as_secs(), "the sweep is scheduled");
     loop {
@@ -35,6 +41,8 @@ pub async fn run_sweeper(app: Arc<UseCases>, every: Duration, mut stop: StopSign
         sweep_worktrees(&app).await;
         sweep_handovers(&app).await;
         sweep_claims(&app).await;
+        sweep_grants(&app).await;
+        sweep_overlaps(&app).await;
     }
 }
 
@@ -124,6 +132,55 @@ async fn sweep_claims(app: &UseCases) {
         }
         Err(error) => {
             tracing::error!(code = error.code(), error = ?error, "the claim sweep could not list the projects to sweep");
+        }
+    }
+}
+
+async fn sweep_grants(app: &UseCases) {
+    match app.tick_grants.execute().await {
+        Ok(report) => {
+            for (project, error) in &report.failed {
+                tracing::error!(project = %project, code = error.code(), error = ?error, "the requests for grants of a project could not be swept");
+            }
+            if report.granted > 0
+                || report.settled > 0
+                || report.acknowledged > 0
+                || report.left_to_holders > 0
+                || report.announcements_closed > 0
+            {
+                tracing::debug!(
+                    projects = report.projects,
+                    granted = report.granted,
+                    settled = report.settled,
+                    acknowledged = report.acknowledged,
+                    left_to_holders = report.left_to_holders,
+                    announcements_closed = report.announcements_closed,
+                    "the requests for grants and the announcements of wide claims were swept"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(code = error.code(), error = ?error, "the grant sweep could not list the projects to sweep");
+        }
+    }
+}
+
+async fn sweep_overlaps(app: &UseCases) {
+    match app.tick_overlaps.execute().await {
+        Ok(report) => {
+            for (project, error) in &report.failed {
+                tracing::error!(project = %project, code = error.code(), error = ?error, "the overlaps of a project could not be swept");
+            }
+            if report.reordered > 0 {
+                tracing::debug!(
+                    projects = report.projects,
+                    reordered = report.reordered,
+                    "the overlaps' orders were swept"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::error!(code = error.code(), error = ?error, "the overlap sweep could not list the projects to sweep");
         }
     }
 }

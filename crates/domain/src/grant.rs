@@ -1,5 +1,8 @@
 //! Grants: a holder's consent that another member may edit inside an area they hold.
 
+mod own;
+
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 
@@ -8,6 +11,10 @@ use crate::claim::{Claim, held_by_other};
 use crate::event::GrantEnd;
 use crate::ids::{ItemId, MemberId, MessageId};
 use crate::settings::ProjectSettings;
+
+pub use own::{
+    GrantBlock, GrantFacts, OnBehalf, decide_on_holders_behalf, judge_area, revoke_outlived,
+};
 
 /// A holder's consent that `to` may edit inside `area` for the work item `item` — the grantee's
 /// item, the work that needs the edit.
@@ -79,6 +86,87 @@ pub fn orphaned<'a, G: AsRef<Grant>>(grants: &'a [G], claims: &[Claim]) -> Vec<(
         .iter()
         .filter_map(|held| held.as_ref().ending(claims).map(|end| (held, end)))
         .collect()
+}
+
+/// Who decided a grant: its holder, or dibs on the holder's behalf for a reason it read from what
+/// it stores. Serialised as `holder`, `untouched`, `in_review`, `idle` or `waited`.
+///
+/// A grant dibs gives is still the holder's grant: it ends as the holder's grants end, and the
+/// holder may revoke it.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantDecision {
+    /// The holder granted, or acknowledged a wide claim's announcement.
+    #[default]
+    Holder,
+    /// dibs granted because the branch of the holder's claim changes no path of the area.
+    Untouched,
+    /// dibs granted because the holder's claim is in review.
+    InReview,
+    /// dibs granted because the area is idle on the holder's claim.
+    Idle,
+    /// dibs granted because the request waited the project's `grant_after`, whatever the holder
+    /// answered in its conversation meanwhile.
+    Waited,
+}
+
+/// Why a text is not a grant decision.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum GrantDecisionError {
+    /// The text names no decision.
+    #[error("a grant is decided by 'holder', 'untouched', 'in_review', 'idle' or 'waited'")]
+    Unknown,
+}
+
+impl GrantDecision {
+    /// The stable name.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Holder => "holder",
+            Self::Untouched => "untouched",
+            Self::InReview => "in_review",
+            Self::Idle => "idle",
+            Self::Waited => "waited",
+        }
+    }
+
+    /// The decision of this name.
+    ///
+    /// # Errors
+    /// [`GrantDecisionError::Unknown`] for any other text.
+    pub fn parse(text: &str) -> Result<Self, GrantDecisionError> {
+        match text {
+            "holder" => Ok(Self::Holder),
+            "untouched" => Ok(Self::Untouched),
+            "in_review" => Ok(Self::InReview),
+            "idle" => Ok(Self::Idle),
+            "waited" => Ok(Self::Waited),
+            _ => Err(GrantDecisionError::Unknown),
+        }
+    }
+
+    /// Whether dibs decided, rather than the holder.
+    pub const fn is_by_dibs(self) -> bool {
+        !matches!(self, Self::Holder)
+    }
+
+    /// Why dibs granted, as one plain clause for the people who read it; `None` for the holder's
+    /// own grant, which needs no reason.
+    pub const fn why(self) -> Option<&'static str> {
+        match self {
+            Self::Holder => None,
+            Self::Untouched => {
+                Some("the branch of the claim holding the area changes no path in it")
+            }
+            Self::InReview => Some("the claim holding the area is in review"),
+            Self::Idle => Some(
+                "nothing of the work of the claim holding the area showed in it for the project's idle delay",
+            ),
+            Self::Waited => Some("it waited the project's grant_after delay"),
+        }
+    }
 }
 
 /// What a successful grant did.
@@ -163,17 +251,27 @@ pub fn decide_grant(
 /// Why a revocation is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum RevokeRefused {
-    /// Only the member who granted may revoke.
-    #[error("only the member who granted this may revoke it")]
+    /// Only the member who granted, or an admin, may revoke.
+    #[error("only the member who granted this, or an admin, may revoke it")]
     NotGrantor,
 }
 
-/// Decides a revocation, which only the grantor may make.
+/// The member asking to revoke a grant, and whether they are an admin of the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Revoker {
+    /// The member.
+    pub member: MemberId,
+    /// Whether the member is an admin of the project.
+    pub admin: bool,
+}
+
+/// Decides a revocation, which the grantor may make, and so may an admin of the project for any
+/// grant — a grant dibs gave on the holder's behalf included, since its grantor is the holder.
 ///
 /// # Errors
 /// [`RevokeRefused::NotGrantor`] for anyone else.
-pub fn decide_revoke_grant(grant: &Grant, by: MemberId) -> Result<(), RevokeRefused> {
-    if grant.from == by {
+pub fn decide_revoke_grant(grant: &Grant, by: Revoker) -> Result<(), RevokeRefused> {
+    if by.admin || grant.from == by.member {
         Ok(())
     } else {
         Err(RevokeRefused::NotGrantor)
@@ -452,11 +550,76 @@ mod tests {
         );
     }
 
+    fn member(member: MemberId) -> Revoker {
+        Revoker {
+            member,
+            admin: false,
+        }
+    }
+
     #[test]
     fn only_the_grantor_revokes() {
         let g = grant(2, "api:billing", ALICE, BOB);
-        assert_eq!(decide_revoke_grant(&g, ALICE), Ok(()));
-        assert_eq!(decide_revoke_grant(&g, BOB), Err(RevokeRefused::NotGrantor));
+        assert_eq!(decide_revoke_grant(&g, member(ALICE)), Ok(()));
+        assert_eq!(
+            decide_revoke_grant(&g, member(BOB)),
+            Err(RevokeRefused::NotGrantor)
+        );
+    }
+
+    #[test]
+    fn an_admin_revokes_a_grant_they_did_not_give() {
+        let g = grant(2, "api:billing", ALICE, BOB);
+        let admin = Revoker {
+            member: CAROL,
+            admin: true,
+        };
+        assert_eq!(decide_revoke_grant(&g, admin), Ok(()));
+    }
+
+    #[test]
+    fn a_member_who_is_neither_the_grantor_nor_an_admin_is_refused() {
+        let g = grant(2, "api:billing", ALICE, BOB);
+        let refused = decide_revoke_grant(&g, member(CAROL));
+        assert_eq!(refused, Err(RevokeRefused::NotGrantor));
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            "only the member who granted this, or an admin, may revoke it"
+        );
+    }
+
+    #[test]
+    fn a_grant_decision_reads_back_from_its_code_and_names_who_decided() {
+        let every = [
+            (GrantDecision::Holder, "holder"),
+            (GrantDecision::Untouched, "untouched"),
+            (GrantDecision::InReview, "in_review"),
+            (GrantDecision::Idle, "idle"),
+            (GrantDecision::Waited, "waited"),
+        ];
+        for (decision, code) in every {
+            assert_eq!(decision.code(), code);
+            assert_eq!(GrantDecision::parse(code), Ok(decision));
+            assert_eq!(
+                serde_json::to_value(decision).unwrap(),
+                serde_json::json!(code)
+            );
+            assert_eq!(
+                decision.is_by_dibs(),
+                decision.why().is_some(),
+                "dibs gives a reason exactly when it decided: {code}"
+            );
+        }
+        assert!(!GrantDecision::Holder.is_by_dibs());
+        assert_eq!(GrantDecision::default(), GrantDecision::Holder);
+        assert_eq!(
+            GrantDecision::parse("dibs"),
+            Err(GrantDecisionError::Unknown)
+        );
+        assert_eq!(
+            GrantDecision::InReview.why(),
+            Some("the claim holding the area is in review")
+        );
     }
 
     #[test]

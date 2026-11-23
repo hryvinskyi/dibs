@@ -10,6 +10,7 @@ use time::OffsetDateTime;
 use dibs_domain::area::QualifiedArea;
 use dibs_domain::escalation::{EscalationReason, EscalationSubject};
 use dibs_domain::event::EventKind;
+use dibs_domain::grant::GrantDecision;
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::{HotRuleRegistry, Note};
 use dibs_domain::ids::{EventId, GrantId, ItemId, MemberId, MessageId, SessionId, ThreadId};
@@ -563,6 +564,19 @@ pub struct Announcement {
     pub message_id: MessageId,
     /// Its thread.
     pub thread_id: ThreadId,
+    /// Why dibs acknowledged it on the holder's behalf as it was sent, by its code, kept as the
+    /// server sends it so that a reason this client does not know yet still reads; `None` while it
+    /// waits for the holder, and from a server that does not say.
+    #[serde(default)]
+    pub acked_by_dibs: Option<String>,
+}
+
+impl Announcement {
+    /// Why dibs acknowledged the announcement on the holder's behalf, when it did and this client
+    /// knows the code (see [`decided_by`]).
+    pub fn dibs_ack(&self) -> Option<GrantDecision> {
+        decided_by(self.acked_by_dibs.as_deref())
+    }
 }
 
 /// An area a claim holds that another member's live wide claim names.
@@ -665,8 +679,11 @@ pub struct Narrowed {
 pub struct TakeOverRequest {
     /// The session taking it.
     pub session_id: SessionId,
-    /// Why, sent to the previous holder.
-    pub reason: Body,
+    /// Why, sent to the previous holder. Left out, a dibs server from 0.1.11 on writes the standing
+    /// reason, which says how long the claim showed no sign of work; an older server refuses the
+    /// request with `invalid_request` naming `reason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<Body>,
     /// The areas.
     pub areas: Vec<String>,
     /// The new claim's kind; the server carries on the previous claim's kind when this is absent.
@@ -805,8 +822,13 @@ pub struct OpenEscalation {
     pub subject: EscalationSubject,
     /// How the subject reads.
     pub about: String,
-    /// Who escalated.
+    /// Who escalated; for one dibs raised on its own, the member it is recorded for, who asked
+    /// nothing.
     pub by: Handle,
+    /// Whether dibs raised it on its own, nobody having asked. A server that does not say raised
+    /// none.
+    #[serde(default)]
+    pub raised_by_dibs: bool,
     /// The arbiters it waits for.
     pub arbiters: Vec<Handle>,
     /// Its conversation.
@@ -1192,6 +1214,24 @@ pub struct Grant {
     /// When.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Who decided it, by its code: `holder`, or why dibs gave it on the holder's behalf. Kept as
+    /// the server sends it, so that a reason this client does not know yet still reads; `None`
+    /// from a server that does not say.
+    #[serde(default)]
+    pub decided: Option<String>,
+}
+
+impl Grant {
+    /// Who decided the grant, when this client knows the code (see [`decided_by`]).
+    pub fn decision(&self) -> Option<GrantDecision> {
+        decided_by(self.decided.as_deref())
+    }
+}
+
+/// The decision a grant's `decided` code names, when this client knows it; `None` for no code or
+/// one added after this client.
+pub fn decided_by(code: Option<&str>) -> Option<GrantDecision> {
+    code.and_then(|code| GrantDecision::parse(code).ok())
 }
 
 /// `POST /v1/grants`'s answer.
@@ -1238,18 +1278,34 @@ pub struct GrantAsked {
     pub holder: Option<Handle>,
     /// The item of the holder's claim that holds the area.
     pub holder_item: Option<ItemName>,
-    /// The conversation that asks the holder.
+    /// The conversation that asks the holder, also when dibs granted the request on the holder's
+    /// behalf.
     pub thread_id: Option<ThreadId>,
     /// The caller's item.
     pub item: ItemName,
     /// The area.
     pub area: QualifiedArea,
+    /// The grant dibs gave on the holder's behalf as it was asked; `None` otherwise.
+    #[serde(default)]
+    pub grant_id: Option<GrantId>,
+    /// Why dibs gave that grant, by its code, kept as the server sends it so that a reason this
+    /// client does not know yet still reads; `None` as `grant_id` is.
+    #[serde(default)]
+    pub decided: Option<String>,
+}
+
+impl GrantAsked {
+    /// Why dibs gave the grant on the holder's behalf, when it gave one and this client knows the
+    /// code (see [`decided_by`]).
+    pub fn decision(&self) -> Option<GrantDecision> {
+        decided_by(self.decided.as_deref())
+    }
 }
 
 /// `DELETE /v1/grants/{id}`'s answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revoked {
-    /// The grant withdrawn.
+    /// The grant withdrawn, by its grantor or an admin.
     pub grant: Grant,
 }
 
@@ -1608,6 +1664,10 @@ pub struct GrantAsk {
     /// When it was asked.
     #[serde(with = "time::serde::rfc3339")]
     pub asked_at: OffsetDateTime,
+    /// Whether dibs leaves it to the caller and never grants it on their behalf, because a revoke
+    /// of theirs stands against it; `false` from a server that does not say.
+    #[serde(default)]
+    pub left_to_holder: bool,
 }
 
 /// An acknowledgement recorded.
@@ -1804,6 +1864,67 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn an_announcement_reads_whether_dibs_acknowledged_it_leniently() {
+        let announcement = |acked: serde_json::Value| -> Announcement {
+            let mut value = json!({
+                "to": "alice", "areas": ["api:billing"], "message_id": 4, "thread_id": 3,
+            });
+            if !acked.is_null() {
+                value["acked_by_dibs"] = acked;
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        assert_eq!(
+            announcement(json!("untouched")).dibs_ack(),
+            Some(GrantDecision::Untouched)
+        );
+        let waiting = announcement(serde_json::Value::Null);
+        assert_eq!(waiting.acked_by_dibs, None, "an older server says nothing");
+        assert_eq!(waiting.dibs_ack(), None);
+        assert_eq!(
+            announcement(json!(null)).acked_by_dibs,
+            None,
+            "it waits for the holder"
+        );
+        let later = announcement(json!("a_reason_added_later"));
+        assert_eq!(later.acked_by_dibs.as_deref(), Some("a_reason_added_later"));
+        assert_eq!(later.dibs_ack(), None, "an unknown reason still reads");
+    }
+
+    #[test]
+    fn a_grant_reads_who_decided_it_leniently() {
+        let grant = |decided: serde_json::Value| -> Grant {
+            let mut value = json!({
+                "id": 7, "item": 2, "area": "api:billing", "from": "alice", "to": "bob",
+                "created_at": "2026-03-02T09:00:00Z",
+            });
+            if !decided.is_null() {
+                value["decided"] = decided;
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        assert_eq!(
+            grant(json!("in_review")).decision(),
+            Some(GrantDecision::InReview)
+        );
+        assert_eq!(
+            grant(json!("holder")).decision(),
+            Some(GrantDecision::Holder)
+        );
+        let later = grant(json!("a_reason_added_later"));
+        assert_eq!(later.decided.as_deref(), Some("a_reason_added_later"));
+        assert_eq!(later.decision(), None, "an unknown reason still reads");
+        assert_eq!(grant(serde_json::Value::Null).decided, None);
+
+        let asked: GrantAsked = serde_json::from_value(json!({
+            "outcome": "asked", "holder": "alice", "holder_item": null, "thread_id": 31,
+            "item": {"id": 2, "ref": null, "title": "Search"}, "area": "api:billing",
+        }))
+        .unwrap();
+        assert_eq!((asked.grant_id, asked.decision()), (None, None));
+    }
 
     #[test]
     fn a_send_answer_from_a_server_that_names_nobody_without_a_session_lists_nobody() {

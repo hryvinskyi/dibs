@@ -9,7 +9,7 @@ use dibs_client::Client;
 use dibs_client::api::{
     Acked, ClaimRequest, Claimed, CreatedItem, DropPrRequest, EditCheck, Ended, GrantAsked,
     Granted, Inbox, InboxRequest, Items, MarkedRead, NarrowRequest, Narrowed, PostMessage, Posted,
-    ReadTogether, ReadyList, ReviewRequest, Reviewed, StartThread, Started, Status,
+    ReadTogether, ReadyList, ReviewRequest, Reviewed, Revoked, StartThread, Started, Status,
     TakeOverRequest, TakenOver, ThreadDetail,
 };
 use dibs_client::api::{
@@ -38,8 +38,8 @@ use crate::guard::SystemClock;
 use crate::mcp::inputs::{
     AckInput, AskGrantInput, CheckInput, ClaimInput, EscalateInput, EscalationTarget,
     FeedbackInput, GrantInput, InboxInput, ItemsInput, KeyInput, NarrowInput, NewInput, ReadInput,
-    Reading, Releasing, ReviewInput, SendInput, Sending, SlotInput, SlotTakeInput, TakeoverInput,
-    ThreadInput, WorktreeReleaseInput, WorktreeTakeInput,
+    Reading, Releasing, ReviewInput, RevokeGrantInput, SendInput, Sending, SlotInput,
+    SlotTakeInput, TakeoverInput, ThreadInput, WorktreeReleaseInput, WorktreeTakeInput,
 };
 
 /// The kind of agent the sessions of a tool server that pushes nothing report.
@@ -321,6 +321,15 @@ impl Link {
         let item = self.resolve(&input.key.key("key")?).await?;
         let request = input.request(item)?;
         self.call(self.connection.client.grant(&request)).await
+    }
+
+    /// Revokes a grant, as its grantor or an admin; the server decides which may.
+    ///
+    /// # Errors
+    /// A [`Failure`] for an invalid input, or of the call.
+    pub async fn revoke_grant(&self, input: RevokeGrantInput) -> Result<Revoked, Failure> {
+        let grant = input.id()?;
+        self.call(self.connection.client.revoke_grant(grant)).await
     }
 
     /// Asks whoever holds an area for a grant there, for the caller's claim on an item.

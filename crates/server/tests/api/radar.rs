@@ -84,9 +84,8 @@ impl Team {
             .await
     }
 
-    /// The subjects of the threads `who` reads.
-    /// Every message `who` can read that opens with `Overlap:` or `Base moved:`, with the subject
-    /// of its conversation, by conversation and then oldest first.
+    /// Every message `who` can read that opens with `Overlap:`, `Base moved:` or `The order
+    /// changed:`, with the subject of its conversation, by conversation and then oldest first.
     async fn told(&self, who: &Person) -> Vec<(String, String)> {
         let threads = self.world.get(who, "/v1/threads").await;
         let mut ids: Vec<u64> = threads.body["threads"]
@@ -105,7 +104,10 @@ impl Team {
                 .to_owned();
             for message in thread.body["messages"].as_array().unwrap() {
                 let body = message["body"].as_str().unwrap();
-                if body.starts_with("Overlap: ") || body.starts_with("Base moved: ") {
+                if body.starts_with("Overlap: ")
+                    || body.starts_with("Base moved: ")
+                    || body.starts_with("The order changed: ")
+                {
                     told.push((subject.clone(), body.to_owned()));
                 }
             }
@@ -348,7 +350,8 @@ async fn one_shared_file_reported_through_the_footprint_route_tells_both_holders
                  "link": "https://github.com/acme/api/issues/2", "holder": "bob"}
             ],
             "pr": null,
-            "paths": ["api:config/app.yaml"]
+            "paths": ["api:config/app.yaml"],
+            "order": {"tied": true}
         }]),
         "{}",
         status.body
@@ -386,6 +389,168 @@ async fn one_shared_file_reported_through_the_footprint_route_tells_both_holders
         "a merge nobody recorded moves the base under both branches: {}",
         status.body
     );
+}
+
+/// The branches of alice's and bob's claims, with what each checkout says.
+const BRANCHES: [&str; 2] = ["alice/1-rates", "bob/2-refunds"];
+
+/// Each checkout says its claim works on its own branch.
+async fn on_branches(team: &Team) {
+    for (who, session, branch) in [
+        (&team.alice, team.alice_session, BRANCHES[0]),
+        (&team.bob, team.bob_session, BRANCHES[1]),
+    ] {
+        team.world
+            .post(
+                who,
+                "/v1/heartbeat",
+                json!({"session_id": session, "checkout": checkout_of(session),
+                       "repo": "api", "branch": branch}),
+            )
+            .await;
+    }
+}
+
+/// Both claims' branches change `config/app.yaml`.
+async fn share_a_file(team: &Team) {
+    for (item, branch) in [(team.alices, BRANCHES[0]), (team.bobs, BRANCHES[1])] {
+        let reported = team
+            .footprint(
+                item,
+                json!({"repo": "api", "branch": branch, "base": "main",
+                       "base_at": "2026-03-01T00:00:00Z", "base_sha": "abcd1234",
+                       "paths": ["config/app.yaml"]}),
+            )
+            .await;
+        assert_eq!(reported.status, StatusCode::OK, "{}", reported.body);
+    }
+}
+
+/// The first line of the last message `who` was told about an overlap or its order.
+async fn last_told(team: &Team, who: &Person) -> String {
+    let told = team.told(who).await;
+    told.last()
+        .and_then(|(_, body)| body.lines().next())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn two_shared_footprints_tell_each_holder_which_claim_lands_first_and_the_status_shows_it() {
+    let team = Team::new().await;
+    on_branches(&team).await;
+    let review = team
+        .world
+        .post(
+            &team.bob,
+            &format!("/v1/items/{}/review", team.bobs),
+            json!({"pr": "acme/api#9"}),
+        )
+        .await;
+    assert_eq!(review.status, StatusCode::OK, "{}", review.body);
+    share_a_file(&team).await;
+
+    let bobs = last_told(&team, &team.bob).await;
+    assert!(
+        bobs.ends_with(
+            "Yours lands first, because it is in review. Work item gh:acme/api#1 rebases onto it once it merges; go on with your work."
+        ),
+        "{bobs}"
+    );
+    let alices = last_told(&team, &team.alice).await;
+    assert!(
+        alices.ends_with(
+            "Work item gh:acme/api#2 lands first, because it is in review. Once it merges, rebase onto the base and resolve these files, then say in this conversation that you rebased."
+        ),
+        "{alices}"
+    );
+    let status = team.world.get(&team.alice, "/v1/status").await;
+    assert_eq!(
+        status.body["overlaps"][0]["order"],
+        json!({"first": team.bobs, "because": "in_review"}),
+        "{}",
+        status.body
+    );
+}
+
+#[tokio::test]
+async fn the_status_shows_an_escalation_dibs_raised_for_a_tie_as_raised_by_dibs() {
+    let team = Team::new().await;
+    let carol = team.world.member(&team.alice, "carol", Role::Member).await;
+    let mut arbitrated = settings();
+    arbitrated["arbiters"] = json!(["carol"]);
+    team.world.settings(&team.alice, arbitrated).await;
+    on_branches(&team).await;
+    share_a_file(&team).await;
+
+    let status = team.world.get(&carol, "/v1/status").await;
+    assert_eq!(status.status, StatusCode::OK, "{}", status.body);
+    let escalation = &status.body["escalations"][0];
+    assert_eq!(escalation["raised_by_dibs"], true, "{}", status.body);
+    assert_eq!(
+        escalation["by"], "alice",
+        "the member it is recorded for stays, for older clients that require one"
+    );
+    assert_eq!(escalation["subject"], json!({"item": team.alices}));
+    let events = team.world.get(&team.alice, "/v1/events").await;
+    let escalated: Vec<&Value> = events.body["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "escalated")
+        .collect();
+    assert_eq!(escalated.len(), 1, "{}", events.body);
+    assert_eq!(
+        escalated[0]["payload"],
+        json!({"subject": {"item": team.alices}, "by": team.alice.actor.member.get(),
+               "by_dibs": true})
+    );
+}
+
+#[tokio::test]
+async fn the_sweep_moves_the_order_when_a_claim_enters_review_and_tells_both_holders() {
+    let team = Team::new().await;
+    on_branches(&team).await;
+    share_a_file(&team).await;
+    let alices = last_told(&team, &team.alice).await;
+    assert!(
+        alices.ends_with(
+            "The order rule cannot decide which lands first: both are at work, their work items have the same priority and their claims were made at the same time. No arbiter can be asked, so write to bob (dibs send bob) and agree on the order."
+        ),
+        "{alices}"
+    );
+    let status = team.world.get(&team.bob, "/v1/status").await;
+    assert_eq!(status.body["overlaps"][0]["order"], json!({"tied": true}));
+
+    let review = team
+        .world
+        .post(
+            &team.bob,
+            &format!("/v1/items/{}/review", team.bobs),
+            json!({"pr": "acme/api#9"}),
+        )
+        .await;
+    assert_eq!(review.status, StatusCode::OK, "{}", review.body);
+    let swept = team.world.app.tick_overlaps.execute().await.unwrap();
+    assert_eq!(swept.reordered, 1);
+
+    let status = team.world.get(&team.bob, "/v1/status").await;
+    assert_eq!(
+        status.body["overlaps"][0]["order"],
+        json!({"first": team.bobs, "because": "in_review"}),
+        "{}",
+        status.body
+    );
+    assert_eq!(
+        last_told(&team, &team.alice).await,
+        "The order changed: work item gh:acme/api#2 now lands first, because it is in review. Once it merges, rebase onto the base and resolve the shared files (api:config/app.yaml), then say in this conversation that you rebased."
+    );
+    assert_eq!(
+        last_told(&team, &team.bob).await,
+        "The order changed: yours now lands first, because it is in review. Work item gh:acme/api#1 rebases onto it once it merges; go on with your work."
+    );
+    let again = team.world.app.tick_overlaps.execute().await.unwrap();
+    assert_eq!(again.reordered, 0, "an order that holds is left");
 }
 
 #[tokio::test]

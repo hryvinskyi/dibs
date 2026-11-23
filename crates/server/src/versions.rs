@@ -7,8 +7,8 @@
 //! too old for everything else can still learn what to update to.
 //!
 //! What a client older than a feature cannot read is left out of what it is served: the settings
-//! of `GET /v1/me` (protected tags, branch patterns, the settings by which the server ends claims
-//! or takes areas from them on its own), and the frozen refs of the slots in the answers of `GET /v1/status` and of the
+//! of `GET /v1/me` (protected tags, branch patterns, the settings by which the server ends claims,
+//! takes areas from them or grants edits in them on its own), and the frozen refs of the slots in the answers of `GET /v1/status` and of the
 //! slot routes.
 
 use std::borrow::Cow;
@@ -41,9 +41,10 @@ pub const PROTECTED_TAGS_SINCE: Version = Version::new(0, 1, 1);
 /// a slot's frozen refs. An older one refuses settings and slots that hold one.
 pub const BRANCH_PATTERNS_SINCE: Version = Version::new(0, 1, 2);
 
-/// The first client that reads the settings by which the server ends claims or takes areas from
-/// them on its own (`release_after`, `idle_area_after`, `free_areas_at`). An older one refuses
-/// settings that hold such a field, and then judges nothing.
+/// The first client that reads the settings by which the server ends claims, takes areas from
+/// them, or grants edits in them on a holder's behalf on its own (`release_after`,
+/// `idle_area_after`, `free_areas_at`, `grant_after`). An older one refuses settings that hold
+/// such a field, and then judges nothing.
 pub const CLAIM_ENDINGS_SINCE: Version = Version::new(0, 1, 11);
 
 /// What the caller's client can read, from the `dibs/<semver>` of its `User-Agent`: everything for
@@ -71,11 +72,11 @@ impl ClientReads {
     }
 
     /// The settings as this client can read them: for a `dibs` client older than
-    /// [`CLAIM_ENDINGS_SINCE`], with the settings by which the server ends claims or takes areas
-    /// from them on its own left
-    /// at their defaults, so the document leaves them out; older than [`BRANCH_PATTERNS_SINCE`]
-    /// also without branch patterns, protected or frozen, and older than
-    /// [`PROTECTED_TAGS_SINCE`] also without protected tags; whole for any other caller.
+    /// [`CLAIM_ENDINGS_SINCE`], with the settings by which the server ends claims, takes areas
+    /// from them or grants edits in them on its own left at their defaults, so the document leaves
+    /// them out; older than [`BRANCH_PATTERNS_SINCE`] also without branch patterns, protected or
+    /// frozen, and older than [`PROTECTED_TAGS_SINCE`] also without protected tags; whole for any
+    /// other caller.
     pub fn settings(self, settings: &ProjectSettings) -> SettingsDocument {
         let mut readable = Cow::Borrowed(settings);
         if !self.claim_endings {
@@ -306,7 +307,7 @@ mod tests {
 
         let document: SettingsDocument = serde_json::from_str(
             r#"{"stale_after":"1d","release_after":"3d","idle_area_after":"2d",
-                "free_areas_at":["Ready for QA"]}"#,
+                "free_areas_at":["Ready for QA"],"grant_after":"20m"}"#,
         )
         .unwrap();
         let settings = ProjectSettings::parse(
@@ -320,11 +321,12 @@ mod tests {
                 document.release_after,
                 document.idle_area_after,
                 document.free_areas_at,
+                document.grant_after,
             )
         };
         assert_eq!(
             endings(Some("dibs/0.1.10")),
-            (None, None, Vec::new()),
+            (None, None, Vec::new(), None),
             "a client older than the claim endings is served the settings without them"
         );
         for agent in [
@@ -338,7 +340,8 @@ mod tests {
                 (
                     Some("3d".to_owned()),
                     Some("2d".to_owned()),
-                    vec!["Ready for QA".to_owned()]
+                    vec!["Ready for QA".to_owned()],
+                    Some("20m".to_owned())
                 ),
                 "{agent:?}"
             );

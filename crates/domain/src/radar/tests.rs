@@ -869,6 +869,152 @@ fn an_overlap_fits_its_kind_and_has_one_key_text() {
     assert_eq!(OverlapKind::parse("other"), None);
 }
 
+/// A same-file collision of items 1 and 2 on `paths`, with no order.
+fn collision(paths: &[&str]) -> Overlap {
+    Overlap::new(
+        OverlapKind::SameFile,
+        [ItemId(1), ItemId(2)].into(),
+        None,
+        qualified_set(paths),
+    )
+    .unwrap()
+}
+
+fn first(item: u64, because: OrderRule) -> Option<OverlapOrder> {
+    Some(OverlapOrder::First {
+        item: ItemId(item),
+        because,
+    })
+}
+
+#[test]
+fn only_a_collision_has_an_order_and_it_names_one_of_the_collisions_items() {
+    let plain = collision(&["api:a.rs"]);
+    assert_eq!(plain.order(), None, "a new overlap has no order");
+    let ordered = plain
+        .clone()
+        .with_order(first(2, OrderRule::Older))
+        .unwrap();
+    assert_eq!(ordered.order(), first(2, OrderRule::Older).as_ref());
+    let tied = plain.clone().with_order(Some(OverlapOrder::Tied)).unwrap();
+    assert_eq!(tied.order(), Some(&OverlapOrder::Tied));
+    assert_eq!(ordered.clone().with_order(None).unwrap(), plain);
+    assert_eq!(
+        ordered.key(),
+        plain.key(),
+        "the order is not part of its key"
+    );
+    assert_eq!(
+        plain.clone().with_order(first(3, OrderRule::Priority)),
+        Err(OverlapError::Order),
+        "an order of an item the overlap does not name"
+    );
+    let contract = Overlap::new(
+        OverlapKind::Contract,
+        [ItemId(1), ItemId(2)].into(),
+        None,
+        qualified_set(&["api:schema/a.json"]),
+    )
+    .unwrap();
+    assert!(contract.with_order(first(1, OrderRule::InReview)).is_ok());
+    let moved = Overlap::new(
+        OverlapKind::MainMoved,
+        [ItemId(1)].into(),
+        Some(MergeMark {
+            pr: pr("acme/api#12"),
+            at: at(10),
+        }),
+        qualified_set(&["api:a.rs"]),
+    )
+    .unwrap();
+    assert_eq!(
+        moved.clone().with_order(first(1, OrderRule::Older)),
+        Err(OverlapError::Order),
+        "a moved base has no order"
+    );
+    assert_eq!(
+        moved.clone().with_order(Some(OverlapOrder::Tied)),
+        Err(OverlapError::Order)
+    );
+    assert_eq!(moved.clone().with_order(None), Ok(moved));
+    assert!(OverlapKind::SameFile.is_collision() && OverlapKind::Contract.is_collision());
+    assert!(!OverlapKind::MainMoved.is_collision());
+}
+
+#[test]
+fn each_item_of_a_collision_reads_where_it_lands() {
+    let ordered = collision(&["api:a.rs"])
+        .with_order(first(1, OrderRule::Priority))
+        .unwrap();
+    assert_eq!(
+        ordered.landing(ItemId(1)),
+        Landing::First {
+            because: OrderRule::Priority
+        }
+    );
+    assert_eq!(
+        ordered.landing(ItemId(2)),
+        Landing::Second {
+            behind: ItemId(1),
+            because: OrderRule::Priority
+        }
+    );
+    assert_eq!(ordered.landing(ItemId(9)), Landing::Unknown);
+    let tied = collision(&["api:a.rs"])
+        .with_order(Some(OverlapOrder::Tied))
+        .unwrap();
+    assert_eq!(tied.landing(ItemId(2)), Landing::Tied);
+    assert_eq!(tied.landing(ItemId(9)), Landing::Unknown);
+    assert_eq!(
+        collision(&["api:a.rs"]).landing(ItemId(1)),
+        Landing::Unknown
+    );
+    let moved = Overlap::new(
+        OverlapKind::MainMoved,
+        [ItemId(1)].into(),
+        Some(MergeMark {
+            pr: pr("acme/api#12"),
+            at: at(10),
+        }),
+        qualified_set(&["api:a.rs"]),
+    )
+    .unwrap();
+    assert_eq!(moved.landing(ItemId(1)), Landing::Unknown);
+}
+
+#[test]
+fn a_stored_order_neither_makes_an_overlap_new_nor_ends_it_and_survives_moving() {
+    let mine = |overlap: &Overlap| overlap.involves(ItemId(1));
+    let live = |_: &Overlap| true;
+    let stored = [collision(&["api:a.rs"])
+        .with_order(first(1, OrderRule::InReview))
+        .unwrap()];
+    let same = reconcile(&stored, &[collision(&["api:a.rs"])].into(), mine, live);
+    assert!(
+        same.is_empty(),
+        "a derived overlap with no order matches the stored one with an order"
+    );
+    let grown = reconcile(
+        &stored,
+        &[collision(&["api:a.rs", "api:b.rs"])].into(),
+        mine,
+        live,
+    );
+    assert!(grown.found.is_empty() && grown.ended.is_empty());
+    assert_eq!(
+        grown.moved,
+        [collision(&["api:a.rs", "api:b.rs"])
+            .with_order(first(1, OrderRule::InReview))
+            .unwrap()],
+        "an overlap stored again on other paths keeps the stored order"
+    );
+    let gone = reconcile(&stored, &BTreeSet::new(), mine, live);
+    assert_eq!(
+        gone.ended, stored,
+        "an ended overlap is the stored one, order and all"
+    );
+}
+
 #[test]
 fn hundreds_of_claims_with_thousands_of_paths_each_are_derived_from_shared_paths_and_groups() {
     let settings = radar_settings();

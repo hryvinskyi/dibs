@@ -4,20 +4,23 @@
 use time::{Duration, OffsetDateTime};
 
 use dibs_domain::event::{Event, EventKind};
+use dibs_domain::grant::GrantDecision;
 use dibs_domain::handle::Handle;
-use dibs_domain::ids::{ItemId, ProjectId, SessionId};
+use dibs_domain::ids::{ItemId, MessageId, ProjectId, SessionId, ThreadId};
 use dibs_domain::item::{ExternalRef, Title};
 use dibs_domain::member::Role;
 use dibs_domain::message::SessionLabel;
 use dibs_domain::session::HostName;
 use dibs_domain::settings::SettingsDocument;
+use dibs_domain::wide::WideReason;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::fakes::Fakes;
 use crate::use_cases::{
-    ApplySettings, Authenticate, CreateItem, CreateItemInput, CreateMember, CreateMemberInput,
-    InitProject, InitProjectInput, NewMember, RegisterSession, RegisterSessionInput,
+    ApplySettings, Authenticate, ClaimItem, ClaimItemInput, CreateItem, CreateItemInput,
+    CreateMember, CreateMemberInput, InitProject, InitProjectInput, NewMember, RegisterSession,
+    RegisterSessionInput, WideInput,
 };
 use dibs_domain::member::DisplayName;
 use dibs_domain::project::ProjectSlug;
@@ -181,6 +184,61 @@ impl Env {
     /// The clock's time.
     pub(crate) fn now(&self) -> OffsetDateTime {
         crate::ports::Clock::now(&*self.deps.clock)
+    }
+
+    /// alice claims `#1` holding billing, and bob claims `#2` wide over billing, which announces
+    /// it to alice. Answers the message that carries the announcement and its conversation.
+    pub(crate) async fn announce_billing_to_alice(&self) -> (MessageId, ThreadId) {
+        let held = self.item("gh:acme/widgets#1").await;
+        let wide = self.item("gh:acme/widgets#2").await;
+        let claim = ClaimItem::new(&self.deps);
+        for (who, item, areas, wide) in [
+            (&self.alice, held, vec!["billing".to_owned()], None),
+            (
+                &self.bob,
+                wide,
+                Vec::new(),
+                Some(WideInput {
+                    areas: vec!["billing".to_owned()],
+                    reason: WideReason::parse("Upgrade the HTTP client").unwrap(),
+                }),
+            ),
+        ] {
+            claim
+                .execute(
+                    &who.actor,
+                    ClaimItemInput {
+                        branches: Default::default(),
+                        item,
+                        session: who.session,
+                        areas,
+                        wide,
+                        kind: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let mut tx = self.deps.store.begin().await.unwrap();
+        let open = tx.open_wide_asks(self.project).await.unwrap();
+        let [ask] = open.as_slice() else {
+            panic!("one announcement to alice: {open:?}");
+        };
+        let message = tx
+            .message(self.project, ask.message)
+            .await
+            .unwrap()
+            .unwrap();
+        (message.id, message.thread)
+    }
+
+    /// Records that dibs acknowledged the announcement the message carries on its holder's behalf.
+    pub(crate) async fn ack_for_holder(&self, message: MessageId, because: GrantDecision) {
+        let mut tx = self.deps.store.begin().await.unwrap();
+        tx.mark_wide_ask_acked_by_dibs(self.project, message, self.now(), because)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
     }
 }
 

@@ -9,7 +9,7 @@ use dibs_domain::claim::Claim;
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{MemberId, MessageId, ThreadId};
 use dibs_domain::message::{Ack, AckState};
-use dibs_domain::wide::ask_stands;
+use dibs_domain::wide::ask_awaits;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -42,7 +42,8 @@ pub struct ThreadView {
     /// each acknowledged it.
     pub acks: BTreeMap<MessageId, Vec<RecipientAck>>,
     /// The messages of `acks` that still ask for an acknowledgement: all of them but a wide claim's
-    /// announcement whose wide claim has ended, which asks for nothing any more.
+    /// announcement whose wide claim has ended, which asks for nothing any more, or that dibs
+    /// acknowledged on its holder's behalf, which is answered.
     pub asking: BTreeSet<MessageId>,
 }
 
@@ -113,8 +114,8 @@ impl ReadThread {
 }
 
 /// Whether a message that asks to be acknowledged still does: a wide claim's announcement asks
-/// only while its wide claim stands. The project's claims are read once, the first time one is
-/// needed.
+/// only while its wide claim stands and dibs did not acknowledge it on its holder's behalf. The
+/// project's claims are read once, the first time one is needed.
 async fn still_asks(
     work: &mut Work,
     claims: &mut Option<Vec<Claim>>,
@@ -129,7 +130,7 @@ async fn still_asks(
     }
     Ok(claims
         .as_deref()
-        .is_some_and(|claims| ask_stands(&ask, claims)))
+        .is_some_and(|claims| ask_awaits(&ask, claims)))
 }
 
 #[cfg(test)]
@@ -261,5 +262,22 @@ mod tests {
             .unwrap();
         assert_eq!(after.acks[&id][0].acked_at, Some(env.now()));
         assert_eq!(after.acks[&id][0].member, env.bob.actor.member);
+    }
+
+    #[tokio::test]
+    async fn an_announcement_dibs_acknowledged_for_its_holder_asks_for_nothing_more() {
+        let env = Env::new().await;
+        let (announced, thread) = env.announce_billing_to_alice().await;
+        let read = ReadThread::new(&env.deps);
+        let before = read.execute(&env.alice.actor, thread).await.unwrap();
+        assert!(before.asking.contains(&announced));
+        env.ack_for_holder(announced, dibs_domain::grant::GrantDecision::Idle)
+            .await;
+        let after = read.execute(&env.alice.actor, thread).await.unwrap();
+        assert!(
+            after.acks.contains_key(&announced),
+            "its recipients are still shown"
+        );
+        assert!(!after.asking.contains(&announced));
     }
 }

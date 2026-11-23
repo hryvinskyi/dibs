@@ -191,6 +191,7 @@ pub fn inbox(inbox: &Inbox, claims: &[ClaimedDelivery]) -> InboxView {
                 area: ask.area.clone(),
                 holder_item: ask.holder_item.id,
                 holder_reference: ask.holder_item.external_ref.clone(),
+                left_to_holder: ask.left_to_holder,
             })
             .collect(),
     }
@@ -548,24 +549,34 @@ mod tests {
                 "area": "api:billing",
                 "holder_item": {"id": 1, "ref": null, "title": "Billing", "link": null},
                 "asked_at": "2026-03-02T10:00:00Z"
+            }, {
+                "thread_id": 32,
+                "message_id": 42,
+                "asker": "bob",
+                "item": {"id": 2, "ref": "gh:acme/widgets#2", "title": "Refunds", "link": null},
+                "area": "api:search",
+                "holder_item": {"id": 1, "ref": null, "title": "Billing", "link": null},
+                "asked_at": "2026-03-02T09:00:00Z",
+                "left_to_holder": true
             }]
         }))
         .unwrap();
         let view = inbox(&answer, &[]);
+        let line = |thread: u64, area: &str, left_to_holder: bool| GrantAskLine {
+            thread: dibs_domain::ids::ThreadId(thread),
+            asker: "bob".parse().unwrap(),
+            item: dibs_domain::ids::ItemId(2),
+            reference: Some(dibs_domain::item::ExternalRef::parse("gh:acme/widgets#2").unwrap()),
+            title: "Refunds".parse().unwrap(),
+            area: dibs_domain::area::QualifiedArea::parse(area).unwrap(),
+            holder_item: dibs_domain::ids::ItemId(1),
+            holder_reference: None,
+            left_to_holder,
+        };
         assert_eq!(
             view.grant_asks,
-            [GrantAskLine {
-                thread: dibs_domain::ids::ThreadId(31),
-                asker: "bob".parse().unwrap(),
-                item: dibs_domain::ids::ItemId(2),
-                reference: Some(
-                    dibs_domain::item::ExternalRef::parse("gh:acme/widgets#2").unwrap()
-                ),
-                title: "Refunds".parse().unwrap(),
-                area: dibs_domain::area::QualifiedArea::parse("api:billing").unwrap(),
-                holder_item: dibs_domain::ids::ItemId(1),
-                holder_reference: None,
-            }]
+            [line(31, "api:billing", false), line(32, "api:search", true)],
+            "a server that does not say whether it is left to the member leaves it to dibs"
         );
         let older: Inbox =
             serde_json::from_value(serde_json::json!({"threads": [], "offers": []})).unwrap();

@@ -91,7 +91,7 @@ fn no_session_text(away: &NoSessionAtWork) -> String {
     if away.holds_live_claim {
         let _ = write!(
             text,
-            " To get an area {member} holds, ask for a grant: dibs ask-grant <your item> --area <area> (MCP: dibs_ask_grant), which {member} or their agents decide; it waits until they do."
+            " To get an area {member} holds, ask for a grant: dibs ask-grant <your item> --area <area> (MCP: dibs_ask_grant). Their agent may decide it, and otherwise dibs grants it once the project's grant_after has passed."
         );
     }
     text
@@ -323,4 +323,29 @@ pub async fn ack(args: AckArgs, ctx: &Context) -> Result<(), Failure> {
         text
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use dibs_client::api::NoSessionAtWork;
+    use dibs_domain::handle::Handle;
+
+    use super::no_session_text;
+
+    #[test]
+    fn a_recipient_away_with_a_live_claim_is_asked_for_a_grant_dibs_decides_after_the_wait() {
+        let text = no_session_text(&NoSessionAtWork {
+            member: Handle::parse("bob").unwrap(),
+            holds_live_claim: true,
+        });
+        assert!(
+            text.contains("dibs ask-grant <your item> --area <area> (MCP: dibs_ask_grant)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("otherwise dibs grants it once the project's grant_after has passed"),
+            "{text}"
+        );
+        assert!(!text.contains("it waits until they do"), "{text}");
+    }
 }

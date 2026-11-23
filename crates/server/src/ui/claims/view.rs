@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use time::{Duration, OffsetDateTime};
 
 use dibs_app::use_cases::{HeldItem, StatusView};
+use dibs_domain::grant::GrantDecision;
 use dibs_domain::handle::Handle;
 use dibs_domain::handover::ClaimKind;
 use dibs_domain::ids::ItemId;
@@ -127,8 +128,31 @@ pub(crate) struct WideAreaView {
     pub(crate) area: AreaView,
     /// The other member whose live claim holds it; `None` when the area is free.
     pub(crate) holder: Option<PersonView>,
-    /// Whether that member agreed to the edits there.
-    pub(crate) granted: bool,
+    /// Who agreed to the edits there; `None` while the member has not.
+    pub(crate) granted: Option<Agreement>,
+}
+
+/// Who agreed to a wide claim's edits in an area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Agreement {
+    /// The holder acknowledged or granted it themselves.
+    Holder,
+    /// dibs acknowledged it on the holder's behalf.
+    Dibs {
+        /// Why, as a clause that follows "because".
+        why: &'static str,
+    },
+}
+
+impl Agreement {
+    /// How `decided` agreed, when it did.
+    fn of(decided: Option<GrantDecision>) -> Option<Self> {
+        let decided = decided?;
+        Some(match decided.why() {
+            Some(why) => Self::Dibs { why },
+            None => Self::Holder,
+        })
+    }
 }
 
 /// An area a claim waits to receive from a debt claim.
@@ -289,7 +313,7 @@ fn wide(held: &HeldItem, home: Option<&RepoId>, scene: &Scene<'_>) -> Option<Wid
                     .holder
                     .as_ref()
                     .map(|(handle, _)| PersonView::of(handle)),
-                granted: area.granted,
+                granted: Agreement::of(area.decided),
             })
             .collect(),
     })
@@ -331,9 +355,11 @@ mod tests {
 
     use dibs_app::named::{NamedClaim, NamedItem};
     use dibs_app::records::ItemRecord;
-    use dibs_app::use_cases::{NamedOverlap, ReadyView};
+    use dibs_app::use_cases::{NamedOverlap, ReadyView, WideAreaStanding, WideClaimStatus};
+    use dibs_domain::area::QualifiedArea;
     use dibs_domain::claim::Claim;
     use dibs_domain::forge::ForgeRegistry;
+    use dibs_domain::grant::GrantDecision;
     use dibs_domain::hot_rule::HotRuleRegistry;
     use dibs_domain::ids::{MemberId, SessionId};
     use dibs_domain::item::{ExternalRef, Title};
@@ -343,6 +369,7 @@ mod tests {
     use dibs_domain::review::{ClaimState, PrRef};
     use dibs_domain::session::HostName;
     use dibs_domain::settings::{ProjectSettings, SettingsDocument};
+    use dibs_domain::wide::{WideReason, WideScope};
 
     use crate::ui::links::places;
 
@@ -473,5 +500,60 @@ mod tests {
         assert!(words(&claims[0]).contains("acme/widgets#7"));
         assert!(words(&claims[1]).contains("acme/widgets#7"));
         assert!(!words(&claims[2]).contains("acme/widgets#7"));
+    }
+
+    /// A live wide claim on `#9` whose areas stand as `standings` say: each area's holder, and who
+    /// decided the grant there.
+    fn wide_claim(standings: &[(&str, Option<GrantDecision>)]) -> StatusView {
+        let mut wide = held(9);
+        wide.claim.claim.wide = Some(
+            WideScope::new(
+                standings
+                    .iter()
+                    .map(|(area, _)| QualifiedArea::parse(area).unwrap())
+                    .collect(),
+                WideReason::parse("Swap the HTTP client").unwrap(),
+            )
+            .unwrap(),
+        );
+        let areas = standings
+            .iter()
+            .map(|(area, decided)| WideAreaStanding {
+                area: QualifiedArea::parse(area).unwrap(),
+                holder: Some((handle("bob"), ItemId(4))),
+                granted: decided.is_some(),
+                decided: *decided,
+            })
+            .collect();
+        let mut status = status(vec![wide.clone()], Vec::new());
+        status.wide = vec![WideClaimStatus { held: wide, areas }];
+        status
+    }
+
+    #[test]
+    fn an_area_dibs_acknowledged_reads_as_dibss_with_its_reason_and_only_the_holders_own_as_agreed()
+    {
+        let status = wide_claim(&[
+            ("api:billing", Some(GrantDecision::Holder)),
+            ("api:search", Some(GrantDecision::InReview)),
+            ("api:sessions", Some(GrantDecision::Waited)),
+            ("api:users", None),
+        ]);
+        let views = views(&status);
+        let areas = &views[0].wide.as_ref().unwrap().areas;
+        let agreed: Vec<Option<Agreement>> = areas.iter().map(|area| area.granted).collect();
+        assert_eq!(
+            agreed,
+            [
+                Some(Agreement::Holder),
+                Some(Agreement::Dibs {
+                    why: "the claim holding the area is in review"
+                }),
+                Some(Agreement::Dibs {
+                    why: "it waited the project's grant_after delay"
+                }),
+                None,
+            ]
+        );
     }
 }

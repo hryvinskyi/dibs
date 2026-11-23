@@ -12,7 +12,7 @@ use dibs_domain::ids::{ItemId, ProjectId};
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::radar::{
     BranchName, CommitSha, Footprint, FootprintBase, FootprintDigest, FootprintEntry, MergeMark,
-    Overlap, OverlapKey, OverlapKind,
+    Overlap, OverlapKey, OverlapKind, OverlapOrder,
 };
 use dibs_domain::repo::RepoId;
 use dibs_domain::review::PrRef;
@@ -96,7 +96,18 @@ fn overlap(row: &SqliteRow) -> StoreResult<Overlap> {
         }
     };
     let paths: BTreeSet<RepoPath> = f.json("paths")?;
-    Overlap::new(kind, items, merge, paths).map_err(|error| f.bad("items", error))
+    let first = f.opt_number("order_first")?.map(ItemId);
+    let order = match f.opt_text("order_rule")? {
+        Some(code) => Some(
+            OverlapOrder::from_parts(&code, first).map_err(|error| f.bad("order_rule", error))?,
+        ),
+        None if first.is_none() => None,
+        None => return Err(f.bad("order_first", "an item landing first without a rule")),
+    };
+    Overlap::new(kind, items, merge, paths)
+        .map_err(|error| f.bad("items", error))?
+        .with_order(order)
+        .map_err(|error| f.bad("order_first", error))
 }
 
 #[async_trait]
@@ -271,7 +282,7 @@ impl RadarRows for SqliteTx {
 
     async fn overlaps(&mut self, project: ProjectId) -> StoreResult<Vec<Overlap>> {
         let statement = sqlx::query(
-            "SELECT o.kind, o.pr, o.merged_at, o.paths, \
+            "SELECT o.kind, o.pr, o.merged_at, o.paths, o.order_rule, o.order_first, \
              (SELECT json_group_array(i.item_id) FROM overlap_items i \
               WHERE i.project_id = o.project_id AND i.overlap_key = o.overlap_key) AS items \
              FROM overlaps o WHERE o.project_id = ?1",
@@ -290,17 +301,26 @@ impl RadarRows for SqliteTx {
     async fn save_overlap(&mut self, project: ProjectId, overlap: &Overlap) -> StoreResult<()> {
         let key = overlap.key().to_string();
         let statement = sqlx::query(
-            "INSERT INTO overlaps (project_id, overlap_key, kind, pr, merged_at, paths) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+            "INSERT INTO overlaps (project_id, overlap_key, kind, pr, merged_at, paths, \
+             order_first, order_rule) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
              ON CONFLICT (project_id, overlap_key) DO UPDATE SET kind = excluded.kind, \
-             pr = excluded.pr, merged_at = excluded.merged_at, paths = excluded.paths",
+             pr = excluded.pr, merged_at = excluded.merged_at, paths = excluded.paths, \
+             order_first = excluded.order_first, order_rule = excluded.order_rule",
         )
         .bind(int(project.get())?)
         .bind(key.clone())
         .bind(overlap.kind().code())
         .bind(overlap.pr().map(|pr| pr.as_str().to_owned()))
         .bind(overlap.merge().map(|merge| nanos(merge.at)).transpose()?)
-        .bind(json(overlap.paths())?);
+        .bind(json(overlap.paths())?)
+        .bind(
+            overlap
+                .order()
+                .and_then(OverlapOrder::first)
+                .map(|item| int(item.get()))
+                .transpose()?,
+        )
+        .bind(overlap.order().map(OverlapOrder::code));
         self.run(statement).await?;
         for item in overlap.items() {
             let statement = sqlx::query(

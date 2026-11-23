@@ -6,8 +6,8 @@ use time::Duration;
 
 use dibs_client::ClientError;
 use dibs_client::api::{
-    ClaimOutcome, ClaimRequest, EditCheckRequest, GrantRequest, ItemFilter, NewItem,
-    TakeOverRequest, Verdict,
+    AskOutcome, ClaimOutcome, ClaimRequest, EditCheckRequest, GrantAskRequest, GrantRequest,
+    ItemFilter, NewItem, ReviewRequest, TakeOverRequest, Verdict,
 };
 use dibs_client::verdicts::edit_verdicts;
 use dibs_domain::edit::ReportedEdits;
@@ -370,6 +370,123 @@ fn a_holder_grants_another_member_edits_for_their_item() {
 }
 
 #[test]
+fn dibs_grants_a_request_to_a_claim_in_review_and_an_older_client_reads_the_answer() {
+    use dibs_domain::grant::GrantDecision;
+
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    run(async {
+        let alice_item = alice
+            .create_item(&new_item("gh:acme/api#1", "Billing"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let bob_item = bob
+            .create_item(&new_item("gh:acme/api#2", "Search"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let alice_session = session(&alice, "laptop/cli").await.session_id;
+        let bob_session = session(&bob, "desktop/cli").await.session_id;
+        for (who, item, session, areas) in [
+            (
+                &alice,
+                alice_item,
+                alice_session,
+                vec!["billing".to_owned()],
+            ),
+            (&bob, bob_item, bob_session, Vec::new()),
+        ] {
+            who.claim(
+                item,
+                &ClaimRequest {
+                    branches: BTreeMap::new(),
+                    wide: None,
+                    session_id: session,
+                    areas,
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        alice
+            .review(
+                alice_item,
+                &ReviewRequest {
+                    pr: "acme/api#9".parse().unwrap(),
+                    more: false,
+                    head: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let asked = bob
+            .ask_grant(&GrantAskRequest {
+                item: bob_item,
+                area: "billing".to_owned(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(asked.outcome, AskOutcome::Granted);
+        assert_eq!(asked.holder.as_ref().map(|h| h.as_str()), Some("alice"));
+        assert!(asked.thread_id.is_some(), "the request's conversation");
+        assert_eq!(asked.decided.as_deref(), Some("in_review"));
+        assert_eq!(asked.decision(), Some(GrantDecision::InReview));
+        let grant_id = asked.grant_id.expect("dibs gave a grant");
+
+        /// What asking for a grant came to, as a client from before dibs granted on a holder's
+        /// behalf reads it: four outcomes, and no grant id or reason.
+        #[derive(Debug, serde::Deserialize, PartialEq)]
+        #[serde(rename_all = "snake_case")]
+        enum OldOutcome {
+            Asked,
+            Free,
+            Own,
+            Granted,
+        }
+        #[derive(Debug, serde::Deserialize)]
+        struct OldGrantAsked {
+            outcome: OldOutcome,
+            holder: Option<dibs_domain::handle::Handle>,
+        }
+        let old: OldGrantAsked =
+            serde_json::from_value(serde_json::to_value(&asked).unwrap()).unwrap();
+        assert_eq!(
+            old.outcome,
+            OldOutcome::Granted,
+            "the holder's grant is in force"
+        );
+        assert_eq!(old.holder, asked.holder);
+
+        let check = bob
+            .edit_check(&EditCheckRequest {
+                session_id: bob_session,
+                repo: RepoId::parse("api").unwrap(),
+                paths: paths(&["src/billing/a.rs"]),
+                reserve: false,
+                checkout: None,
+                branch: None,
+                worktree: None,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            &check.verdicts[0].verdict,
+            Verdict::Granted { by: Some(by), .. } if by.as_str() == "alice"
+        ));
+        let revoked = alice.revoke_grant(grant_id).await.unwrap();
+        assert_eq!(revoked.grant.id, grant_id);
+        assert_eq!(revoked.grant.decision(), Some(GrantDecision::InReview));
+    });
+}
+
+#[test]
 fn a_stale_claim_is_taken_over_released_and_done() {
     let world = World::new();
     let alice = world.client(&world.alice);
@@ -401,7 +518,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
                 item,
                 &TakeOverRequest {
                     session_id: bob_session,
-                    reason: "picking it up".parse().unwrap(),
+                    reason: Some("picking it up".parse().unwrap()),
                     areas: Vec::new(),
                     kind: None,
                 },
@@ -420,7 +537,7 @@ fn a_stale_claim_is_taken_over_released_and_done() {
                 item,
                 &TakeOverRequest {
                     session_id: bob_session,
-                    reason: "alice is away".parse().unwrap(),
+                    reason: Some("alice is away".parse().unwrap()),
                     areas: vec!["checkout".to_owned()],
                     kind: None,
                 },
@@ -469,6 +586,62 @@ fn a_stale_claim_is_taken_over_released_and_done() {
         log.contains(r#""edits":{"areas":[],"outside":true}"#),
         "{log}"
     );
+}
+
+#[test]
+fn a_takeover_without_a_reason_sends_no_reason() {
+    let world = World::new();
+    let alice = world.client(&world.alice);
+    let bob = world.client(&world.bob);
+    let item = run(async {
+        let item = alice
+            .create_item(&new_item("gh:acme/web#4", "Search"))
+            .await
+            .unwrap()
+            .item
+            .id;
+        let alice_session = session(&alice, "laptop/cli").await.session_id;
+        alice
+            .claim(
+                item,
+                &ClaimRequest {
+                    branches: BTreeMap::new(),
+                    wide: None,
+                    session_id: alice_session,
+                    areas: Vec::new(),
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        item
+    });
+    world.server.advance(Duration::hours(2));
+    run(async {
+        let bob_session = session(&bob, "desktop/cli").await.session_id;
+        let taken = bob
+            .take_over(
+                item,
+                &TakeOverRequest {
+                    session_id: bob_session,
+                    reason: None,
+                    areas: Vec::new(),
+                    kind: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(taken.previous_holder.as_str(), "alice");
+    });
+    let sent: Vec<String> = world
+        .server
+        .request_log()
+        .into_iter()
+        .filter(|request| request.starts_with(&format!("POST /v1/items/{item}/takeover")))
+        .collect();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].contains(r#""areas":[]"#), "{}", sent[0]);
+    assert!(!sent[0].contains("reason"), "{}", sent[0]);
 }
 
 #[test]

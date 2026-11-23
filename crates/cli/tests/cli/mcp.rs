@@ -15,7 +15,7 @@ use crate::support::{API_REMOTE, Setup, make_checkout, status, text};
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The tools the server offers, by name.
-const TOOLS: [&str; 27] = [
+const TOOLS: [&str; 28] = [
     "dibs_ack",
     "dibs_ask_grant",
     "dibs_check",
@@ -32,6 +32,7 @@ const TOOLS: [&str; 27] = [
     "dibs_ready",
     "dibs_release",
     "dibs_review",
+    "dibs_revoke_grant",
     "dibs_send",
     "dibs_slot_leave",
     "dibs_slot_release",
@@ -854,11 +855,11 @@ fn input_that_cannot_be_used_is_a_tool_error_that_says_what_to_change() {
         json!({"thread": 3, "subject": "s", "body": "b"}),
     );
     assert!(mixed.error().starts_with("`thread`: "), "{}", mixed.text);
-    let no_reason = mcp.tool("dibs_takeover", json!({"key": 1, "reason": " "}));
+    let bad_reason = mcp.tool("dibs_takeover", json!({"key": 1, "reason": "a\u{0}b"}));
     assert!(
-        no_reason.error().starts_with("`reason`: "),
+        bad_reason.error().starts_with("`reason`: "),
         "{}",
-        no_reason.text
+        bad_reason.text
     );
     let bad_grantee = mcp.tool(
         "dibs_grant",

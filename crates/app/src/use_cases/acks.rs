@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dibs_domain::ids::{MemberId, ThreadId};
 use dibs_domain::message::{Person, message_recipients};
-use dibs_domain::wide::ask_stands;
+use dibs_domain::wide::ask_awaits;
 
 use crate::actor::Actor;
 use crate::error::AppError;
@@ -49,7 +49,7 @@ pub(crate) fn reached(
 /// The messages that ask the actor for an acknowledgement they have not given, each with its
 /// thread, newest first: only messages of threads the actor may read, only those the actor is a
 /// recipient of, and no announcement of a wide claim that has ended, which asks for nothing any
-/// more.
+/// more, or that dibs acknowledged on its holder's behalf, which is answered.
 pub(crate) async fn awaiting(
     work: &mut Work,
     actor: &Actor,
@@ -87,7 +87,7 @@ pub(crate) async fn awaiting(
             }
             if !claims
                 .as_deref()
-                .is_some_and(|claims| ask_stands(&ask, claims))
+                .is_some_and(|claims| ask_awaits(&ask, claims))
             {
                 continue;
             }
@@ -106,4 +106,24 @@ pub(crate) fn awaiting_per_thread(
         *counts.entry(message.thread).or_insert(0) += 1;
     }
     counts
+}
+
+#[cfg(test)]
+mod tests {
+    use dibs_domain::grant::GrantDecision;
+
+    use crate::use_cases::Unacked;
+    use crate::use_cases::testing::Env;
+
+    #[tokio::test]
+    async fn an_announcement_dibs_acknowledged_for_its_holder_no_longer_awaits_them() {
+        let env = Env::new().await;
+        let (announced, _) = env.announce_billing_to_alice().await;
+        let unacked = Unacked::new(&env.deps);
+        let awaiting = unacked.execute(&env.alice.actor).await.unwrap();
+        assert_eq!(awaiting.len(), 1);
+        assert_eq!(awaiting[0].message.record.id, announced);
+        env.ack_for_holder(announced, GrantDecision::Waited).await;
+        assert!(unacked.execute(&env.alice.actor).await.unwrap().is_empty());
+    }
 }

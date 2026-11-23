@@ -2,10 +2,11 @@
 
 use std::sync::Arc;
 
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 use dibs_domain::area::QualifiedArea;
-use dibs_domain::grant::Grant;
+use dibs_domain::claim::Claim;
+use dibs_domain::grant::{Grant, GrantDecision};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{ItemId, MemberId};
@@ -18,6 +19,7 @@ use crate::dependencies::Dependencies;
 use crate::error::AppError;
 use crate::named::{ItemName, NamedClaim, NamedItem, Names};
 use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
+use crate::records::GrantRecord;
 use crate::use_cases::escalate::{OpenEscalation, open_escalations};
 use crate::use_cases::radar::{NamedOverlap, live_overlaps};
 use crate::use_cases::ready::{ReadyScope, ReadyView};
@@ -60,6 +62,9 @@ pub struct WideAreaStanding {
     /// Whether that holder granted the edits there, by acknowledging the announcement or by a
     /// grant.
     pub granted: bool,
+    /// Who decided that grant, the holder or dibs on the holder's behalf and why: `Some` exactly
+    /// when `granted`.
+    pub decided: Option<GrantDecision>,
 }
 
 /// A live wide claim and where each area it names stands.
@@ -184,12 +189,8 @@ impl Status {
         if review_in_use(&claims, &settings) {
             view.integration_silent_since = integration_silence(&mut work, now).await?;
         }
-        let grants: Vec<Grant> = work
-            .grants(actor.project)
-            .await?
-            .into_iter()
-            .map(|record| record.grant)
-            .collect();
+        let records = work.grants(actor.project).await?;
+        let grants: Vec<Grant> = records.iter().map(|record| record.grant.clone()).collect();
         for claim in claims.iter().cloned() {
             let item =
                 work.item(actor.project, claim.item)
@@ -216,6 +217,15 @@ impl Status {
                     let areas = standing(&claim.claim, &claims, &grants, now, stale_after)
                         .into_iter()
                         .map(|row| {
+                            let decided = row.holder.filter(|_| row.granted).and_then(|holder| {
+                                decision_of(
+                                    &records,
+                                    (holder.member, claim.claim.member, &row.area),
+                                    &claims,
+                                    now,
+                                    stale_after,
+                                )
+                            });
                             Ok(WideAreaStanding {
                                 holder: row
                                     .holder
@@ -225,6 +235,7 @@ impl Status {
                                     .transpose()?,
                                 area: row.area,
                                 granted: row.granted,
+                                decided,
                             })
                         })
                         .collect::<Result<_, AppError>>()?;
@@ -243,6 +254,27 @@ impl Status {
         work.commit(&*self.notifier).await?;
         Ok(view)
     }
+}
+
+/// Who decided the grant in force from `from` to `to` in `area`: the holder when any grant there
+/// is the holder's own, and otherwise dibs, for the reason the grant records.
+fn decision_of(
+    records: &[GrantRecord],
+    (from, to, area): (MemberId, MemberId, &QualifiedArea),
+    claims: &[Claim],
+    now: OffsetDateTime,
+    stale_after: Duration,
+) -> Option<GrantDecision> {
+    records
+        .iter()
+        .filter(|record| {
+            record.grant.from == from
+                && record.grant.to == to
+                && record.grant.area == *area
+                && record.grant.in_force(claims, now, stale_after)
+        })
+        .map(|record| record.decided)
+        .min_by_key(|decided| decided.is_by_dibs())
 }
 
 /// Since when the project's integrations have not called, when that counts as silent: its present

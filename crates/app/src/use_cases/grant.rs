@@ -2,15 +2,18 @@
 
 use std::sync::Arc;
 
-use dibs_domain::ref_scheme::RefSchemeRegistry;
+use time::OffsetDateTime;
 
 use dibs_domain::area::QualifiedArea;
+use dibs_domain::claim::Claim;
 use dibs_domain::event::{EventKind, Granted};
-use dibs_domain::grant::{self, GrantOutcome, decide_grant};
+use dibs_domain::grant::{self, GrantAsk, GrantDecision, GrantOutcome, GrantRefused, decide_grant};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
 use dibs_domain::ids::{GrantId, ItemId};
 use dibs_domain::message::{Author, Importance, Recipients};
+use dibs_domain::ref_scheme::RefSchemeRegistry;
+use dibs_domain::settings::ProjectSettings;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -50,7 +53,12 @@ pub struct GrantResult {
 /// that it reaches the session working under their claim whether they asked for it or not. Should
 /// the grantee hold no claim on the item, they are told in a conversation of its own about it,
 /// started in the granter's name. Either message names the granter and how to write to them.
-/// Giving a grant that exists changes nothing and tells nobody.
+/// The grantee's requests to the caller for that area and item are settled with it, so dibs never
+/// decides them on the caller's behalf. A request of theirs for another item lapses while the
+/// grant is in force; once the grant ends, it is judged again with its wait timed from when it was
+/// asked: dibs grants it at the next sweep if `grant_after` has passed since then, and once it has
+/// otherwise, unless it closes or a revoke leaves it to the caller. Giving a grant that exists
+/// changes nothing and tells nobody.
 pub struct Grant {
     ref_schemes: Arc<RefSchemeRegistry>,
     store: Arc<dyn Store>,
@@ -95,77 +103,26 @@ impl Grant {
             to: grantee.id,
         };
         let records = work.grants(project).await?;
-        let existing: Vec<grant::Grant> = records.iter().map(|r| r.grant.clone()).collect();
         let claims = work.claims(project).await?;
-        match decide_grant(&request, &existing, &claims, now, &settings)? {
-            GrantOutcome::AlreadyGranted => {
-                let grant = records
-                    .into_iter()
-                    .find(|record| record.grant == request)
-                    .ok_or_else(|| StoreError::Corrupt {
-                        what: "a grant the domain found but the store did not return".to_owned(),
-                    })?;
-                Ok(GrantResult {
-                    grant: Names::load(&mut work).await?.grant(grant)?,
-                    created: false,
-                    item: ItemName::of(&item, &self.ref_schemes),
-                })
-            }
-            GrantOutcome::New(grant) => {
-                let record = GrantRecord {
-                    id: GrantId(self.ids.next()),
-                    grant,
-                    created_at: now,
-                };
-                work.insert_grant(project, &record).await?;
-                work.record(
-                    now,
-                    EventKind::Granted(Granted {
-                        grant: record.id,
-                        item: record.grant.item,
-                        area: record.grant.area.clone(),
-                        from: record.grant.from,
-                        to: record.grant.to,
-                    }),
-                )
-                .await?;
-                let item = ItemName::of(&item, &self.ref_schemes);
-                let grant = Names::load(&mut work).await?.grant(record)?;
-                let text = GrantedText {
-                    granter: &grant.from,
-                    item: &item,
-                    area: &grant.record.grant.area,
-                };
-                let body = titled_body(&text.lead(), None)?;
-                match claims
-                    .iter()
-                    .find(|claim| claim.item == item.id && claim.member == grantee.id)
-                {
-                    Some(claim) => {
-                        ClaimNotice {
-                            claim,
-                            item: &item,
-                            body,
-                            importance: Importance::High,
-                        }
-                        .send(&mut work, &*self.ids, now)
-                        .await?;
-                    }
-                    None => {
-                        SystemPost {
-                            ids: Posted::next(&*self.ids),
-                            subject: text.subject(),
-                            item: Some(item.id),
-                            on_behalf_of: Author::Member(actor.member),
-                            to: Recipients::members([grantee.id].into())?,
-                            body,
-                            importance: Importance::High,
-                            ack_required: false,
-                        }
-                        .send(&mut work, now)
-                        .await?;
-                    }
-                }
+        let item = ItemName::of(&item, &self.ref_schemes);
+        let giving = GiveGrant {
+            request,
+            decided: GrantDecision::Holder,
+            item: &item,
+            records: &records,
+            claims: &claims,
+            settings: &settings,
+            ids: &*self.ids,
+            now,
+        };
+        match giving.give(&mut work).await? {
+            Giving::Refused(refused) => Err(refused.into()),
+            Giving::Existing(record) => Ok(GrantResult {
+                grant: Names::load(&mut work).await?.grant(record)?,
+                created: false,
+                item,
+            }),
+            Giving::Given(grant) => {
                 work.commit(&*self.notifier).await?;
                 Ok(GrantResult {
                     grant,
@@ -177,6 +134,146 @@ impl Grant {
     }
 }
 
+/// What giving a grant came to.
+#[derive(Debug)]
+pub(crate) enum Giving {
+    /// The grant is given now, and the grantee told.
+    Given(NamedGrant),
+    /// The same grant exists; nothing changed.
+    Existing(GrantRecord),
+    /// The rules of every grant refuse it; nothing changed.
+    Refused(GrantRefused),
+}
+
+/// A grant from a holder to a grantee, and who decided it: the holder, or dibs on the holder's
+/// behalf. Whoever decides, the grant is taken only as the rules of every grant allow it (see
+/// [`decide_grant`]): the holder holds the area through a live claim, the grantee holds a live
+/// claim on the item, and the same grant does not exist.
+pub(crate) struct GiveGrant<'a> {
+    /// The grant: `from` is the holder, `to` the grantee, `item` the grantee's item.
+    pub(crate) request: grant::Grant,
+    /// Who decided it.
+    pub(crate) decided: GrantDecision,
+    /// The grantee's item, `request.item`, as the grantee's notice names it.
+    pub(crate) item: &'a ItemName,
+    /// The project's grants as the caller's transaction sees them.
+    pub(crate) records: &'a [GrantRecord],
+    /// The project's claims as the caller's transaction sees them.
+    pub(crate) claims: &'a [Claim],
+    /// The project's settings.
+    pub(crate) settings: &'a ProjectSettings,
+    /// Where new ids come from.
+    pub(crate) ids: &'a dyn IdGen,
+    /// When.
+    pub(crate) now: OffsetDateTime,
+}
+
+impl GiveGrant<'_> {
+    /// Gives the grant inside the caller's transaction: stores it with who decided, records
+    /// `granted`, tells the grantee, and settles every request the grantee put to the holder in
+    /// the area for the grant's item that is not settled yet, so that dibs never decides a request
+    /// the grant answered, even once the grant is revoked. A request for another of the grantee's
+    /// items is not answered by it: it lapses while the grant is in force. Once the grant ends, it
+    /// is judged again with its wait timed from when it was asked: dibs grants it at the next sweep
+    /// if `grant_after` has passed since then, and once it has otherwise, unless it closes or a
+    /// revoke leaves it to the holder. Changes nothing when the grant exists or is refused.
+    pub(crate) async fn give(self, work: &mut Work) -> Result<Giving, AppError> {
+        let project = work.project_id();
+        let existing: Vec<grant::Grant> = self.records.iter().map(|r| r.grant.clone()).collect();
+        let grant = match decide_grant(
+            &self.request,
+            &existing,
+            self.claims,
+            self.now,
+            self.settings,
+        ) {
+            Err(refused) => return Ok(Giving::Refused(refused)),
+            Ok(GrantOutcome::AlreadyGranted) => {
+                let record = self
+                    .records
+                    .iter()
+                    .find(|record| record.grant == self.request)
+                    .cloned()
+                    .ok_or_else(|| StoreError::Corrupt {
+                        what: "a grant the domain found but the store did not return".to_owned(),
+                    })?;
+                return Ok(Giving::Existing(record));
+            }
+            Ok(GrantOutcome::New(grant)) => grant,
+        };
+        let record = GrantRecord {
+            id: GrantId(self.ids.next()),
+            grant,
+            created_at: self.now,
+            decided: self.decided,
+        };
+        work.insert_grant(project, &record).await?;
+        work.record(
+            self.now,
+            EventKind::Granted(Granted {
+                grant: record.id,
+                item: record.grant.item,
+                area: record.grant.area.clone(),
+                from: record.grant.from,
+                to: record.grant.to,
+                decided: self.decided,
+            }),
+        )
+        .await?;
+        let grant = Names::load(work).await?.grant(record)?;
+        let text = GrantedText {
+            granter: &grant.from,
+            item: self.item,
+            area: &grant.record.grant.area,
+            decided: self.decided,
+        };
+        let body = titled_body(&text.lead(), None)?;
+        let grantee = grant.record.grant.to;
+        match self
+            .claims
+            .iter()
+            .find(|claim| claim.item == self.item.id && claim.member == grantee)
+        {
+            Some(claim) => {
+                ClaimNotice {
+                    claim,
+                    item: self.item,
+                    body,
+                    importance: Importance::High,
+                }
+                .send(work, self.ids, self.now)
+                .await?;
+            }
+            None => {
+                SystemPost {
+                    ids: Posted::next(self.ids),
+                    subject: text.subject(),
+                    item: Some(self.item.id),
+                    on_behalf_of: Author::Member(grant.record.grant.from),
+                    to: Recipients::members([grantee].into())?,
+                    body,
+                    importance: Importance::High,
+                    ack_required: false,
+                }
+                .send(work, self.now)
+                .await?;
+            }
+        }
+        work.settle_asked_grants_for_item(
+            project,
+            &GrantAsk {
+                asker: grantee,
+                item: grant.record.grant.item,
+                area: grant.record.grant.area.clone(),
+            },
+            grant.record.grant.from,
+            self.now,
+        )
+        .await?;
+        Ok(Giving::Given(grant))
+    }
+}
+
 /// What the grantee is told when a grant is given.
 struct GrantedText<'a> {
     /// The holder who granted.
@@ -185,6 +282,8 @@ struct GrantedText<'a> {
     item: &'a ItemName,
     /// The area.
     area: &'a QualifiedArea,
+    /// Who decided it: the holder, or dibs on their behalf.
+    decided: GrantDecision,
 }
 
 impl GrantedText<'_> {
@@ -199,9 +298,19 @@ impl GrantedText<'_> {
         format!("Granted: {} for {item}", self.area)
     }
 
-    /// The message: who granted what, for which item, that the edit may go ahead now, how long
-    /// the grant lasts, and how to write to the granter.
+    /// The message: who granted what, for which item — dibs on the holder's behalf, and why, when
+    /// dibs decided — that the edit may go ahead now, how long the grant lasts, and how to write to
+    /// the holder.
     fn lead(&self) -> String {
+        if let Some(why) = self.decided.why() {
+            return format!(
+                "dibs granted you {area} for your work item {key} (\"{title}\") on {holder}'s behalf, because {why}. You may edit there now; dibs_check says granted. It lasts while both claims do, unless {holder} or an admin revokes it. To write to {holder}: dibs send {holder}.",
+                holder = self.granter,
+                area = self.area,
+                key = self.item.key(),
+                title = self.item.title,
+            );
+        }
         format!(
             "{granter} granted you {area} for your work item {key} (\"{title}\"). You may edit there now; dibs_check says granted. It lasts while both claims do, unless {granter} revokes it. To write to {granter}: dibs send {granter}.",
             granter = self.granter,
@@ -266,6 +375,7 @@ mod tests {
                 area: QualifiedArea::parse("default:billing").unwrap(),
                 from: env.alice.actor.member,
                 to: env.bob.actor.member,
+                decided: GrantDecision::Holder,
             })
         );
         assert!(

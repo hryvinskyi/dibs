@@ -392,7 +392,9 @@ impl Client {
         .await
     }
 
-    /// `POST /v1/items/{id}/takeover`: takes over another member's stale claim.
+    /// `POST /v1/items/{id}/takeover`: takes over another member's stale claim. A request without a
+    /// reason is sent without the field; a server before 0.1.11 refuses it, and that refusal comes
+    /// back as it is.
     ///
     /// # Errors
     /// [`ClientError::Conflict`] when the claim is not stale; [`ClientError`].
@@ -522,7 +524,7 @@ impl Client {
             .await
     }
 
-    /// `DELETE /v1/grants/{id}`: withdraws a grant the caller gave.
+    /// `DELETE /v1/grants/{id}`: withdraws a grant, as its grantor or an admin.
     ///
     /// # Errors
     /// [`ClientError`].

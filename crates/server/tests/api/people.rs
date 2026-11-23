@@ -110,6 +110,7 @@ async fn an_escalation_reaches_the_arbiter_and_the_holder_and_stands_until_the_a
         let shown = team.escalations(who).await;
         assert_eq!(shown.len(), 1, "{}", who.actor.member);
         assert_eq!(shown[0]["by"], "bob");
+        assert_eq!(shown[0]["raised_by_dibs"], false, "bob asked for it");
         assert_eq!(shown[0]["subject"], json!({"item": team.item}));
         assert_eq!(shown[0]["message_id"], message);
     }
@@ -147,7 +148,7 @@ async fn an_escalation_reaches_the_arbiter_and_the_holder_and_stands_until_the_a
     assert_eq!(escalated.len(), 1);
     assert_eq!(
         escalated[0]["payload"],
-        json!({"subject": {"item": team.item}, "by": team.bob.actor.member.get()})
+        json!({"subject": {"item": team.item}, "by": team.bob.actor.member.get(), "by_dibs": false})
     );
     let posted = events.body["events"]
         .as_array()

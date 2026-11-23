@@ -240,7 +240,7 @@ async fn a_takeover_is_told_in_the_previous_claims_conversation_and_the_new_clai
                 item,
                 session: env.alice.session,
                 areas: Vec::new(),
-                reason: Body::parse("Finishing the refund fix.").unwrap(),
+                reason: Some(Body::parse("Finishing the refund fix.").unwrap()),
                 kind: None,
             },
         )
@@ -290,7 +290,7 @@ async fn a_takeover_of_a_claim_dibs_never_wrote_about_starts_its_conversation() 
                 item,
                 session: env.alice.session,
                 areas: Vec::new(),
-                reason: Body::parse("Finishing the refund fix.").unwrap(),
+                reason: Some(Body::parse("Finishing the refund fix.").unwrap()),
                 kind: None,
             },
         )

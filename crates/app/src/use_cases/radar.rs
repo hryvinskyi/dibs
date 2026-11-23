@@ -1,7 +1,9 @@
 //! The branch overlap radar: an integration reports what each claim's branch changes, the overlaps
 //! between live claims of different members are derived from those reports, and each one found is
 //! announced once, in a message from dibs to each holder it concerns, in that holder's claim's
-//! conversation.
+//! conversation. A collision between two claims carries an order: which one lands first and why,
+//! worked out when it is found and again as its claims change; dibs raises the rule's ties with
+//! the project's arbiters itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -9,15 +11,17 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 
 use dibs_domain::claim::Claim;
+use dibs_domain::escalation::{EscalationReason, EscalationSubject, Parties};
 use dibs_domain::event::{self, EventKind};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::ItemId;
+use dibs_domain::ids::{ItemId, MemberId, MessageId, ThreadId};
+use dibs_domain::message::{Importance, may_read};
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::radar::{
-    BranchName, Footprint, FootprintBase, FootprintDigest, FootprintOutcome, FootprintReport,
-    Merge, NotStored, Overlap, OverlapChanges, OverlapKind, RadarScene, decide_footprint,
-    reconcile,
+    BranchName, Contender, Footprint, FootprintBase, FootprintDigest, FootprintOutcome,
+    FootprintReport, Landing, Merge, NotStored, OrderRule, Overlap, OverlapChanges, OverlapKind,
+    OverlapOrder, RadarScene, decide_footprint, order, reconcile,
 };
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::repo::RepoId;
@@ -28,10 +32,11 @@ use crate::actor::Actor;
 use crate::dependencies::Dependencies;
 use crate::error::{AppError, Missing};
 use crate::named::{ItemName, Names};
-use crate::ports::{Clock, EventNotifier, IdGen, Store};
+use crate::ports::{Clock, EventNotifier, IdGen, Store, StoreError};
+use crate::records::{EscalationRecord, ItemRecord};
 use crate::use_cases::claim_notice::{ClaimNotice, claim_link};
-use crate::use_cases::common::existing_item;
-use crate::use_cases::writing::titled_body;
+use crate::use_cases::escalate::{Case, Origin, Raised, item_about};
+use crate::use_cases::writing::{SystemReply, titled_body};
 use crate::work::Work;
 
 mod checkout;
@@ -440,7 +445,10 @@ impl Radar<'_> {
         Ok(merged_repo)
     }
 
-    /// Stores what changed and announces each overlap found.
+    /// Stores what changed and announces each overlap found. A collision found is stored with its
+    /// order, worked out from its two claims and their items' priorities; dibs raises one the rule
+    /// ties with the arbiters before its holders are told, so that the notices say who decides. An
+    /// overlap stored again on other paths keeps the order it had.
     async fn apply(
         &self,
         work: &mut Work,
@@ -458,53 +466,261 @@ impl Radar<'_> {
             return Ok(());
         }
         let names = Names::load(work).await?;
+        let items = items_named(work, &changes.found).await?;
         for found in &changes.found {
-            work.save_overlap(project, found).await?;
-            self.announce(work, claims, &names, found).await?;
+            let ordered = found
+                .clone()
+                .with_order(order_of(found, claims, &items))
+                .map_err(|_| misordered())?;
+            work.save_overlap(project, &ordered).await?;
+            let settling = self.settle(work, claims, &names, &items, &ordered).await?;
+            self.announce(work, claims, &names, &items, &ordered, settling.as_ref())
+                .await?;
         }
         Ok(())
     }
 
+    /// Works out again the order of every stored collision whose claims are all live, from those
+    /// claims and their items' priorities as they are now, and answers how many changed. A changed
+    /// order is stored. Both holders are told in their claims' conversations only when which claim
+    /// lands first changed, or the order became or stopped being a tie, which dibs raises with the
+    /// arbiters first; a change of the reason alone is stored without a notice. A collision found
+    /// before orders were stored has none: the first order worked out for it is told as a first
+    /// notice, not as a change. A collision whose order did not change writes nothing.
+    pub(crate) async fn reorder(&self, work: &mut Work) -> Result<usize, AppError> {
+        let project = work.project_id();
+        let claims = work.claims(project).await?;
+        let stale_after = self.settings.stale_after();
+        let live: BTreeSet<ItemId> = claims
+            .iter()
+            .filter(|claim| claim.is_live(self.now, stale_after))
+            .map(|claim| claim.item)
+            .collect();
+        let watched: Vec<Overlap> = work
+            .overlaps(project)
+            .await?
+            .into_iter()
+            .filter(|overlap| {
+                overlap.kind().is_collision()
+                    && overlap.items().iter().all(|item| live.contains(item))
+            })
+            .collect();
+        if watched.is_empty() {
+            return Ok(0);
+        }
+        let items = items_named(work, &watched).await?;
+        let names = Names::load(work).await?;
+        let mut changed = 0;
+        for overlap in watched {
+            let (Some(words), Some(worked)) = (
+                collision_words(overlap.kind()),
+                order_of(&overlap, &claims, &items),
+            ) else {
+                continue;
+            };
+            let before = overlap.order().copied();
+            if before == Some(worked) {
+                continue;
+            }
+            let reordered = overlap.with_order(Some(worked)).map_err(|_| misordered())?;
+            work.save_overlap(project, &reordered).await?;
+            changed += 1;
+            if before.is_some_and(|before| before.first() == worked.first()) {
+                continue;
+            }
+            let first_order = before.is_none();
+            let settling = self
+                .settle(work, &claims, &names, &items, &reordered)
+                .await?;
+            let parties = self.parties(&claims, &names, &items, &reordered)?;
+            for (index, reader) in parties.iter().enumerate() {
+                let others = others_of(&parties, index);
+                let standing = standing(&reordered, reader.claim, settling.as_ref());
+                let text = if first_order {
+                    wording(&reordered, &reader.side, &others, standing)
+                } else {
+                    reordered_wording(words, &reordered, &others, standing)
+                };
+                self.tell(work, reordered.kind(), reader, &text).await?;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Who settles the order of a collision the rule ties. dibs raises the tie with the project's
+    /// arbiters itself, as an escalation about the lower of its two items that reaches both holders
+    /// and the arbiters, and records the pair on it. When an escalation about that item already
+    /// stands, the pair goes to that one instead, at most once, and not at all while one of its
+    /// holders is among that escalation's arbiters. When no arbiter would receive it, nothing is
+    /// escalated and the holders agree between them. `None` for an order the rule decided, or none.
+    async fn settle(
+        &self,
+        work: &mut Work,
+        claims: &[Claim],
+        names: &Names,
+        items: &BTreeMap<ItemId, ItemRecord>,
+        overlap: &Overlap,
+    ) -> Result<Option<Settling>, AppError> {
+        if overlap.order() != Some(&OverlapOrder::Tied) {
+            return Ok(None);
+        }
+        let (Some(pair), Some(subject)) = (
+            tie_pair(overlap),
+            overlap
+                .items()
+                .first()
+                .and_then(|item| claims.iter().find(|claim| claim.item == *item)),
+        ) else {
+            return Ok(None);
+        };
+        let record = items
+            .get(&subject.item)
+            .ok_or(AppError::NotFound(Missing::Item(subject.item)))?;
+        let named = overlap
+            .items()
+            .iter()
+            .map(|item| {
+                items
+                    .get(item)
+                    .map(|record| ItemName::of(record, self.schemes))
+                    .ok_or(AppError::NotFound(Missing::Item(*item)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let reason = tie_reason(overlap, &named, subject.state.is_in_review())?;
+        let holders: BTreeSet<MemberId> = claims
+            .iter()
+            .filter(|claim| overlap.involves(claim.item))
+            .map(|claim| claim.member)
+            .collect();
+        let project = work.project_id();
+        let about = EscalationSubject::Item(subject.item);
+        if let Some(standing) = work
+            .open_escalations(project)
+            .await?
+            .into_iter()
+            .find(|open| open.subject == about)
+        {
+            return self
+                .join(work, names, &standing, pair, &holders, &reason)
+                .await
+                .map(Some);
+        }
+        let case = Case {
+            subject: about,
+            about: item_about(record, self.schemes),
+            parties: Parties {
+                holders,
+                requester: None,
+            },
+            origin: Origin::Dibs(Raised {
+                recorded_for: subject.member,
+                tie: pair,
+                why: TIE_WHY,
+                meanwhile: TIE_MEANWHILE,
+            }),
+            reason: &reason,
+        };
+        match case
+            .send(work, self.ids, self.settings.arbiters(), self.now)
+            .await
+        {
+            Ok(_) => Ok(Some(Settling::Arbiters {
+                outside: BTreeSet::new(),
+                before: false,
+            })),
+            Err(AppError::Escalation(_)) => Ok(Some(Settling::Holders)),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Puts a tie to the escalation that stands about its lower item, so that a pair reaches the
+    /// arbiters at most once for each escalation that stands. A tie one of whose holders is among
+    /// that escalation's arbiters is not added, since that holder could settle their own claim's
+    /// order alone: it is left to the holders. A pair the escalation already carries is not put
+    /// again. Any other is added to its conversation and recorded on it.
+    async fn join(
+        &self,
+        work: &mut Work,
+        names: &Names,
+        standing: &EscalationRecord,
+        pair: [ItemId; 2],
+        holders: &BTreeSet<MemberId>,
+        reason: &EscalationReason,
+    ) -> Result<Settling, AppError> {
+        if !standing.arbiters.is_disjoint(holders) {
+            return Ok(Settling::HolderArbitrates);
+        }
+        let outside = outside_of(work, standing.thread, holders).await?;
+        if standing.ties.contains(&pair) {
+            return Ok(Settling::Arbiters {
+                outside,
+                before: true,
+            });
+        }
+        self.add_tie(work, names, standing.thread, &outside, reason)
+            .await?;
+        let project = work.project_id();
+        work.add_escalation_tie(project, standing.message, pair)
+            .await?;
+        Ok(Settling::Arbiters {
+            outside,
+            before: false,
+        })
+    }
+
+    /// Adds a tie to the escalation that stands about its lower item: an `urgent` message from dibs
+    /// in that escalation's conversation, naming the two work items, where their changes meet and
+    /// why the order rule cannot decide. That conversation's readers stay those it reached, so the
+    /// message names each holder of the tie who does not read it, `outside`, and asks the arbiters
+    /// to write the answer to them as well.
+    async fn add_tie(
+        &self,
+        work: &mut Work,
+        names: &Names,
+        thread: ThreadId,
+        outside: &BTreeSet<MemberId>,
+        reason: &EscalationReason,
+    ) -> Result<(), AppError> {
+        let unread = names_outside(names, outside)?;
+        let lead = format!("{TIE_ADDED}{unread}{TIE_ADDED_MEANWHILE}");
+        SystemReply {
+            thread,
+            message: MessageId(self.ids.next()),
+            body: titled_body(&lead, Some(("Why", reason.as_str())))?,
+            importance: Importance::Urgent,
+            ack_required: false,
+        }
+        .send(work, self.now)
+        .await?;
+        Ok(())
+    }
+
     /// Tells the holder of each claim the overlap names, in that claim's own conversation, and
-    /// records once that it was found. A moved base found within a day of the last one told about
-    /// the same claim is recorded but not told.
+    /// records once that it was found. A collision's notice says which claim lands first and why,
+    /// or who decides when the rule ties. A moved base found within a day of the last one told
+    /// about the same claim is recorded but not told.
     async fn announce(
         &self,
         work: &mut Work,
         claims: &[Claim],
         names: &Names,
+        items: &BTreeMap<ItemId, ItemRecord>,
         overlap: &Overlap,
+        settling: Option<&Settling>,
     ) -> Result<(), AppError> {
-        let repos: BTreeSet<&RepoId> = overlap.paths().iter().map(|path| &path.repo).collect();
-        let mut parties = Vec::new();
-        for item in overlap.items() {
-            let Some(claim) = claims.iter().find(|claim| claim.item == *item) else {
-                continue;
-            };
-            parties.push(Party {
-                side: Side {
-                    item: ItemName::of(&existing_item(work, *item).await?, self.schemes),
-                    holder: names.handle(claim.member)?,
-                    branches: repos
-                        .iter()
-                        .filter_map(|repo| claim.branch(repo))
-                        .cloned()
-                        .collect(),
-                },
-                claim,
-            });
-        }
+        let parties = self.parties(claims, names, items, overlap)?;
         if parties.is_empty() {
             return Ok(());
         }
         for (index, reader) in parties.iter().enumerate() {
-            let others: Vec<&Side> = parties
-                .iter()
-                .enumerate()
-                .filter(|(other, _)| *other != index)
-                .map(|(_, party)| &party.side)
-                .collect();
-            self.tell(work, overlap, reader, &others).await?;
+            let others = others_of(&parties, index);
+            let text = wording(
+                overlap,
+                &reader.side,
+                &others,
+                standing(overlap, reader.claim, settling),
+            );
+            self.tell(work, overlap.kind(), reader, &text).await?;
         }
         work.record(
             self.now,
@@ -524,19 +740,52 @@ impl Radar<'_> {
         Ok(())
     }
 
-    /// Writes the overlap to the holder of one claim it names, in that claim's conversation,
-    /// naming the other claims. The claim's link to its conversation is read once: it says both
-    /// where to write and when a moved base was last told there. An overlap of a kind told at
-    /// most so often is not written within that time of the last one told about the claim, and
-    /// when it is written, the time is kept on the conversation.
+    /// The claims the overlap names, each with how a notice describes it. An item no claim holds
+    /// is left out.
+    fn parties<'c>(
+        &self,
+        claims: &'c [Claim],
+        names: &Names,
+        items: &BTreeMap<ItemId, ItemRecord>,
+        overlap: &Overlap,
+    ) -> Result<Vec<Party<'c>>, AppError> {
+        let repos: BTreeSet<&RepoId> = overlap.paths().iter().map(|path| &path.repo).collect();
+        let mut parties = Vec::new();
+        for item in overlap.items() {
+            let Some(claim) = claims.iter().find(|claim| claim.item == *item) else {
+                continue;
+            };
+            let record = items
+                .get(item)
+                .ok_or(AppError::NotFound(Missing::Item(*item)))?;
+            parties.push(Party {
+                side: Side {
+                    item: ItemName::of(record, self.schemes),
+                    holder: names.handle(claim.member)?,
+                    branches: repos
+                        .iter()
+                        .filter_map(|repo| claim.branch(repo))
+                        .cloned()
+                        .collect(),
+                },
+                claim,
+            });
+        }
+        Ok(parties)
+    }
+
+    /// Writes `text` about an overlap of `kind` to the holder of one claim it names, in that
+    /// claim's conversation. The claim's link to its conversation is read once: it says both where
+    /// to write and when a moved base was last told there. An overlap of a kind told at most so
+    /// often is not written within that time of the last one told about the claim, and when it is
+    /// written, the time is kept on the conversation.
     async fn tell(
         &self,
         work: &mut Work,
-        overlap: &Overlap,
+        kind: OverlapKind,
         reader: &Party<'_>,
-        others: &[&Side],
+        text: &str,
     ) -> Result<(), AppError> {
-        let kind = overlap.kind();
         let link = claim_link(work, reader.claim).await?;
         if !kind.is_told(link.and_then(|link| link.base_moved_told_at), self.now) {
             return Ok(());
@@ -544,7 +793,7 @@ impl Radar<'_> {
         let thread = ClaimNotice {
             claim: reader.claim,
             item: &reader.side.item,
-            body: titled_body(&wording(overlap, &reader.side, others), None)?,
+            body: titled_body(text, None)?,
             importance: kind.importance(),
         }
         .send_linked(work, self.ids, self.now, link)
@@ -558,10 +807,108 @@ impl Radar<'_> {
     }
 }
 
+/// The items the overlaps name, read together, by id.
+async fn items_named(
+    work: &mut Work,
+    overlaps: &[Overlap],
+) -> Result<BTreeMap<ItemId, ItemRecord>, AppError> {
+    let project = work.project_id();
+    let wanted: BTreeSet<ItemId> = overlaps
+        .iter()
+        .flat_map(|overlap| overlap.items().iter().copied())
+        .collect();
+    Ok(work
+        .items_of(project, &wanted)
+        .await?
+        .into_iter()
+        .map(|record| (record.id, record))
+        .collect())
+}
+
+/// The order of a collision, from its two claims, live or stale, and their items' priorities;
+/// `None` for a moved base, and for a collision whose claim or item is not among those given.
+fn order_of(
+    overlap: &Overlap,
+    claims: &[Claim],
+    items: &BTreeMap<ItemId, ItemRecord>,
+) -> Option<OverlapOrder> {
+    if !overlap.kind().is_collision() {
+        return None;
+    }
+    let sides = overlap
+        .items()
+        .iter()
+        .map(|item| {
+            Some(Contender {
+                claim: claims.iter().find(|claim| claim.item == *item)?,
+                priority: items.get(item)?.priority,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    match sides.as_slice() {
+        [a, b] => Some(order(*a, *b)),
+        _ => None,
+    }
+}
+
+/// An overlap whose order names an item it does not: the order is worked out from the overlap's
+/// own items, so this is a fault of the stored records.
+fn misordered() -> AppError {
+    AppError::Store(StoreError::Corrupt {
+        what: "an overlap's order names an item the overlap does not".to_owned(),
+    })
+}
+
+/// The two work items of a collision, the lower first; `None` for an overlap that names one.
+fn tie_pair(overlap: &Overlap) -> Option<[ItemId; 2]> {
+    let mut items = overlap.items().iter().copied();
+    Some([items.next()?, items.next()?])
+}
+
+/// The holders among `holders` who do not read the conversation `thread`.
+async fn outside_of(
+    work: &mut Work,
+    thread: ThreadId,
+    holders: &BTreeSet<MemberId>,
+) -> Result<BTreeSet<MemberId>, AppError> {
+    let project = work.project_id();
+    let conversation = work.thread(project, thread).await?.ok_or_else(|| {
+        AppError::Store(StoreError::Corrupt {
+            what: "a standing escalation's conversation is missing".to_owned(),
+        })
+    })?;
+    let members = work.members(project).await?;
+    Ok(holders
+        .iter()
+        .copied()
+        .filter(|holder| {
+            !members.iter().any(|member| {
+                member.id == *holder
+                    && may_read(
+                        conversation.author,
+                        &conversation.recipients,
+                        member.id,
+                        member.role,
+                    )
+            })
+        })
+        .collect())
+}
+
 /// One claim an overlap names, with how its message describes it.
 struct Party<'a> {
     side: Side,
     claim: &'a Claim,
+}
+
+/// The sides of every party but the one at `index`.
+fn others_of<'p>(parties: &'p [Party<'_>], index: usize) -> Vec<&'p Side> {
+    parties
+        .iter()
+        .enumerate()
+        .filter(|(other, _)| *other != index)
+        .map(|(_, party)| &party.side)
+        .collect()
 }
 
 /// How a message about an overlap describes one claim it names: its item, its holder, and the
@@ -597,6 +944,231 @@ impl Side {
             self.holder
         )
     }
+
+    /// Another member's claim, named again once described: `work item gh:acme/widgets#42`.
+    fn named(&self) -> String {
+        format!("work item {}", self.item.label())
+    }
+}
+
+/// Who decides the order of a collision the rule ties, as dibs settled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Settling {
+    /// The project's arbiters, in an escalation dibs raised or added the tie to. `outside` are the
+    /// tie's holders who do not read that escalation's conversation. `before` is set when the
+    /// escalation already carried the pair, so that nothing was put to the arbiters now.
+    Arbiters {
+        outside: BTreeSet<MemberId>,
+        before: bool,
+    },
+    /// The holders between them: no arbiter would receive the question.
+    Holders,
+    /// The holders between them: an escalation about the tie's lower item stands, and one of the
+    /// holders is among its arbiters.
+    HolderArbitrates,
+}
+
+impl Settling {
+    /// Who decides, as the holder `reader` is told.
+    fn for_reader(&self, reader: MemberId) -> TieSettling {
+        match self {
+            Self::Arbiters {
+                outside,
+                before: true,
+            } => TieSettling::AskedBefore {
+                reads: !outside.contains(&reader),
+            },
+            Self::Arbiters { outside, .. } if outside.contains(&reader) => {
+                TieSettling::ArbitersWriting
+            }
+            Self::Arbiters { .. } => TieSettling::Arbiters,
+            Self::Holders => TieSettling::Holders,
+            Self::HolderArbitrates => TieSettling::HolderArbitrates,
+        }
+    }
+}
+
+/// Who decides the order of a collision the rule ties, as one holder is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TieSettling {
+    /// The project's arbiters, in an escalation the holder reads.
+    Arbiters,
+    /// The project's arbiters, in an escalation the holder does not read: they were asked to write
+    /// their answer to the holder.
+    ArbitersWriting,
+    /// The project's arbiters, who were asked about these two claims before, in an escalation the
+    /// holder reads or not.
+    AskedBefore { reads: bool },
+    /// The holders between them: no arbiter would receive the question.
+    Holders,
+    /// The holders between them: one of them is among the arbiters of the escalation that stands.
+    HolderArbitrates,
+}
+
+impl TieSettling {
+    /// The sentence that says who decides; `write` is how to write to the other holders.
+    fn then(self, write: &str) -> String {
+        match self {
+            Self::Arbiters => "dibs asked the project's arbiters.".to_owned(),
+            Self::ArbitersWriting => "dibs asked the project's arbiters in an escalation you do not read, and asked them to write their answer to you.".to_owned(),
+            Self::AskedBefore { reads: true } => {
+                "dibs already asked the project's arbiters about these two claims.".to_owned()
+            }
+            Self::AskedBefore { reads: false } => "dibs already asked the project's arbiters about these two claims, in an escalation you do not read.".to_owned(),
+            Self::Holders => {
+                format!("No arbiter can be asked, so {write} and agree on the order.")
+            }
+            Self::HolderArbitrates => format!(
+                "An escalation about one of these work items already stands and one of you is among its arbiters, so {write} and agree on the order."
+            ),
+        }
+    }
+}
+
+/// Where the reader of a notice stands in the overlap's order, as the notice tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// There is no order to tell: a moved base, or a collision whose order is not known.
+    Unordered,
+    /// The reader's claim lands first, by this step of the rule.
+    First(OrderRule),
+    /// The other claim lands first, by this step of the rule.
+    Second(OrderRule),
+    /// The rule ties.
+    Tied {
+        /// Whether both claims are in review; otherwise both are at work.
+        in_review: bool,
+        /// Who decides.
+        settling: TieSettling,
+    },
+}
+
+/// Where the holder of `reader`'s claim stands in the overlap's order. A tie that went to nobody
+/// is left to the holders.
+fn standing(overlap: &Overlap, reader: &Claim, settling: Option<&Settling>) -> Standing {
+    match overlap.landing(reader.item) {
+        Landing::First { because } => Standing::First(because),
+        Landing::Second { because, .. } => Standing::Second(because),
+        Landing::Tied => Standing::Tied {
+            in_review: reader.state.is_in_review(),
+            settling: settling.map_or(TieSettling::Holders, |settled| {
+                settled.for_reader(reader.member)
+            }),
+        },
+        Landing::Unknown => Standing::Unordered,
+    }
+}
+
+/// How the notices word a collision of one kind.
+struct CollisionWords {
+    /// Where the two changes meet, given the paths: `change the same files: a.rs`.
+    meet: fn(&str) -> String,
+    /// What the claim that lands second does once the first merges, as the first is told.
+    follows: &'static str,
+    /// What the holder of the claim that lands second is asked to do, given how the shared files
+    /// are named.
+    second: fn(&str) -> String,
+}
+
+fn same_file_meet(paths: &str) -> String {
+    format!("change the same files: {paths}")
+}
+
+fn same_file_second(files: &str) -> String {
+    format!(
+        "once it merges, rebase onto the base and resolve {files}, then say in this conversation that you rebased."
+    )
+}
+
+fn contract_meet(paths: &str) -> String {
+    format!(
+        "meet at a published contract: one changes {paths}, and the other works where that contract is used"
+    )
+}
+
+fn contract_second(_files: &str) -> String {
+    "read the other change and build on it once it merges, then say in this conversation that you rebased.".to_owned()
+}
+
+const SAME_FILE_WORDS: CollisionWords = CollisionWords {
+    meet: same_file_meet,
+    follows: "rebases onto it",
+    second: same_file_second,
+};
+
+const CONTRACT_WORDS: CollisionWords = CollisionWords {
+    meet: contract_meet,
+    follows: "builds on it",
+    second: contract_second,
+};
+
+/// How the notices word an overlap of the kind; `None` for a moved base, which is no collision.
+fn collision_words(kind: OverlapKind) -> Option<&'static CollisionWords> {
+    match kind {
+        OverlapKind::SameFile => Some(&SAME_FILE_WORDS),
+        OverlapKind::Contract => Some(&CONTRACT_WORDS),
+        OverlapKind::MainMoved => None,
+    }
+}
+
+/// What a notice says of a collision's order to one holder.
+struct OrderWords<'a> {
+    words: &'a CollisionWords,
+    /// The other claims, named again: `work item gh:acme/widgets#2`.
+    other: &'a str,
+    /// How to write to their holders.
+    write: &'a str,
+}
+
+impl OrderWords<'_> {
+    /// The sentences that say who lands first and why, and what the reader does, starting in lower
+    /// case. `now` goes before `lands first` (`now ` for an order that changed), `which` is how a
+    /// tie names what cannot be decided, and `files` how the claim landing second is asked to
+    /// resolve the shared files.
+    fn sentences(&self, standing: Standing, now: &str, which: &str, files: &str) -> String {
+        let other = self.other;
+        match standing {
+            Standing::First(rule) => format!(
+                "yours {now}lands first, because {}. {} {} once it merges; go on with your work.",
+                rule.why(),
+                capitalized(other),
+                self.words.follows
+            ),
+            Standing::Second(rule) => format!(
+                "{other} {now}lands first, because {}. {}",
+                rule.why(),
+                capitalized(&(self.words.second)(files))
+            ),
+            Standing::Tied {
+                in_review,
+                settling,
+            } => {
+                format!(
+                    "{} {}",
+                    undecided(which, in_review),
+                    settling.then(self.write)
+                )
+            }
+            Standing::Unordered => format!("{} to agree which lands first.", self.write),
+        }
+    }
+}
+
+/// Why the order rule cannot decide `which`: both claims are in review or both at work, with the
+/// same priority and claimed at the same time.
+fn undecided(which: &str, in_review: bool) -> String {
+    let state = if in_review { "in review" } else { "at work" };
+    format!(
+        "the order rule cannot decide {which}: both are {state}, their work items have the same priority and their claims were made at the same time."
+    )
+}
+
+/// The text with its first letter in upper case.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// The names joined with `and`.
@@ -608,14 +1180,10 @@ fn joined(names: &[impl ToString]) -> String {
         .join(" and ")
 }
 
-/// The overlap's paths for a sentence: the first ones by name, then how many more.
-fn listed(paths: &BTreeSet<RepoPath>) -> String {
-    let named: Vec<String> = paths
-        .iter()
-        .take(LISTED_PATHS)
-        .map(ToString::to_string)
-        .collect();
-    let more = paths.len().saturating_sub(LISTED_PATHS);
+/// The overlap's paths for a sentence: the first `most` by name, then how many more.
+fn listed(paths: &BTreeSet<RepoPath>, most: usize) -> String {
+    let named: Vec<String> = paths.iter().take(most).map(ToString::to_string).collect();
+    let more = paths.len().saturating_sub(most);
     if more == 0 {
         named.join(", ")
     } else {
@@ -623,43 +1191,158 @@ fn listed(paths: &BTreeSet<RepoPath>) -> String {
     }
 }
 
+/// The other claims a notice names, described once and then named again, and how to write to
+/// their holders. The holders do not share a conversation, so a collision says how to write to
+/// the others.
+fn others_words(others: &[&Side]) -> (String, String, String) {
+    if others.is_empty() {
+        return (
+            "another claim".to_owned(),
+            "the other claim".to_owned(),
+            "write to its holder".to_owned(),
+        );
+    }
+    let described: Vec<String> = others.iter().map(|side| side.described()).collect();
+    let named: Vec<String> = others.iter().map(|side| side.named()).collect();
+    let ways: Vec<String> = others
+        .iter()
+        .map(|side| format!("{} (dibs send {})", side.holder, side.holder))
+        .collect();
+    (
+        joined(&described),
+        joined(&named),
+        format!("write to {}", joined(&ways)),
+    )
+}
+
 /// What the holder of the claim `reader` is told of the overlap, which names the claims `others`
-/// too: it opens with what happened, says what the overlap is from the reader's side and what to
-/// do. The holders do not share a conversation, so a collision says how to write to the others.
-fn wording(overlap: &Overlap, reader: &Side, others: &[&Side]) -> String {
+/// too: it opens with what happened and says what the overlap is from the reader's side. A
+/// collision then says which claim lands first and why, and what the reader does: go on with the
+/// work, or rebase once the other merges; a tie says who decides. A moved base asks for a rebase
+/// when the claim is next worked on.
+fn wording(overlap: &Overlap, reader: &Side, others: &[&Side], standing: Standing) -> String {
     let yours = reader.yours();
-    let theirs = if others.is_empty() {
-        "another claim".to_owned()
-    } else {
-        joined(
-            &others
-                .iter()
-                .map(|side| side.described())
-                .collect::<Vec<_>>(),
+    let paths = listed(overlap.paths(), LISTED_PATHS);
+    let Some(words) = collision_words(overlap.kind()) else {
+        return format!(
+            "Base moved: pull request {} was merged into the base after {yours} took its base, and it changed files that branch changes too: {paths}. Rebase onto the base when you next work on this claim.",
+            overlap.pr().map(ToString::to_string).unwrap_or_default()
+        );
+    };
+    let (theirs, other, write) = others_words(others);
+    let order = OrderWords {
+        words,
+        other: &other,
+        write: &write,
+    };
+    format!(
+        "Overlap: {yours} and the branch of {theirs} {}. {}",
+        (words.meet)(&paths),
+        capitalized(&order.sentences(standing, "", "which lands first", "these files"))
+    )
+}
+
+/// What the holder of a claim is told when its collision's order changed: who lands first now and
+/// why, and what to do, or that the rule ties now and who decides.
+fn reordered_wording(
+    words: &CollisionWords,
+    overlap: &Overlap,
+    others: &[&Side],
+    standing: Standing,
+) -> String {
+    let (_, other, write) = others_words(others);
+    let order = OrderWords {
+        words,
+        other: &other,
+        write: &write,
+    };
+    let which = format!("whether yours or {other} lands first");
+    let files = format!(
+        "the shared files ({})",
+        listed(overlap.paths(), LISTED_PATHS)
+    );
+    format!(
+        "The order changed: {}",
+        order.sentences(standing, "now ", &which, &files)
+    )
+}
+
+/// The most paths an escalation of a tie lists by name.
+const REASON_PATHS: usize = 5;
+
+/// Why dibs raises a tie with the arbiters, as the escalation opens.
+const TIE_WHY: &str = "the order rule cannot tell two colliding claims apart, so the arbiters of this project decide which one lands first.";
+
+/// What the holders of a tie do until an arbiter answers, as the escalation dibs raised says.
+const TIE_MEANWHILE: &str = "Only the order is undecided, not the area: both holders read this conversation, go on with their work and follow the arbiter's answer here.";
+
+/// How dibs opens a tie it adds to an escalation that stands.
+const TIE_ADDED: &str = "dibs adds a question to this escalation; nobody asked: the order rule cannot tell the two colliding claims named below apart, so the arbiters of this project decide which of them lands first as well. ";
+
+/// What the holders of a tie added to an escalation do until an arbiter answers.
+const TIE_ADDED_MEANWHILE: &str =
+    "Only the order is undecided, not the area: both holders go on with their work.";
+
+/// The sentence naming the holders of a tie added to an escalation who do not read its
+/// conversation, with how to write to them; empty when every holder reads it.
+fn names_outside(names: &Names, outside: &BTreeSet<MemberId>) -> Result<String, AppError> {
+    let handles = outside
+        .iter()
+        .map(|member| names.handle(*member))
+        .collect::<Result<Vec<_>, _>>()?;
+    if handles.is_empty() {
+        return Ok(String::new());
+    }
+    let ways: Vec<String> = handles
+        .iter()
+        .map(|handle| format!("dibs send {handle}"))
+        .collect();
+    let verb = if handles.len() == 1 { "does" } else { "do" };
+    Ok(format!(
+        "{} {verb} not read this conversation: write the answer to them as well ({}). ",
+        joined(&handles),
+        ways.join(", ")
+    ))
+}
+
+/// Why dibs raises a tie with the arbiters: which two work items, where their changes meet, and
+/// that the order rule cannot decide because both are in review or both at work, with the same
+/// priority and claimed at the same time. Its first paths are named while the reason stays within
+/// its limit; otherwise they are only counted.
+fn tie_reason(
+    overlap: &Overlap,
+    items: &[ItemName],
+    in_review: bool,
+) -> Result<EscalationReason, AppError> {
+    let Some(words) = collision_words(overlap.kind()) else {
+        return Err(unwritable());
+    };
+    let named: Vec<String> = items
+        .iter()
+        .map(|item| format!("{} \"{}\"", item.label(), item.title))
+        .collect();
+    let text = |paths: &str| {
+        format!(
+            "Work items {} {}. {}",
+            joined(&named),
+            (words.meet)(paths),
+            capitalized(&undecided("which lands first", in_review))
         )
     };
-    let write = if others.is_empty() {
-        "write to its holder".to_owned()
-    } else {
-        let ways: Vec<String> = others
-            .iter()
-            .map(|side| format!("{} (dibs send {})", side.holder, side.holder))
-            .collect();
-        format!("write to {}", joined(&ways))
+    let count = match overlap.paths().len() {
+        1 => "one path, too long to name here".to_owned(),
+        many => format!("{many} paths, too long to name here"),
     };
-    let paths = listed(overlap.paths());
-    match overlap.kind() {
-        OverlapKind::SameFile => format!(
-            "Overlap: {yours} and the branch of {theirs} change the same files: {paths}. Rebase onto the base now, and {write} to settle who changes what, so the second merge does not meet a conflict."
-        ),
-        OverlapKind::Contract => format!(
-            "Overlap: {yours} and the branch of {theirs} meet at a published contract: one changes {paths}, and the other works where that contract is used. Rebase onto the base now, and read the other change before going on, so both sides build on the same contract; {write} to agree on it."
-        ),
-        OverlapKind::MainMoved => format!(
-            "Base moved: pull request {} was merged into the base after {yours} took its base, and it changed files that branch changes too: {paths}. Rebase onto the base now.",
-            overlap.pr().map(ToString::to_string).unwrap_or_default()
-        ),
-    }
+    EscalationReason::parse(&text(&listed(overlap.paths(), REASON_PATHS)))
+        .or_else(|_| EscalationReason::parse(&text(&count)))
+        .map_err(|_| unwritable())
+}
+
+/// A reason dibs writes for an escalation that does not make one.
+fn unwritable() -> AppError {
+    AppError::Store(StoreError::Corrupt {
+        what: "the reason of an escalation dibs writes is not valid".to_owned(),
+    })
 }
 
 /// An overlap with the items it names and their holders.

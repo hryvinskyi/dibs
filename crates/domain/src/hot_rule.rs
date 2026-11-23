@@ -132,6 +132,14 @@ pub trait HotRule: Send + Sync + fmt::Debug {
     fn merged_by_hand(&self) -> bool {
         true
     }
+
+    /// The area every file under the rule is a path of, for a kind that decides each file it
+    /// matches as a path of that area ([`HotDecision::AsArea`]), so that what is said about the
+    /// area's paths — whether a branch touches the area — says it of these files too. A kind
+    /// names none unless it says otherwise.
+    fn as_area(&self) -> Option<&QualifiedArea> {
+        None
+    }
 }
 
 /// The settings a rule is built from.
@@ -302,6 +310,11 @@ impl HotRuleSpec {
     pub fn merged_by_hand(&self) -> bool {
         self.rule.merged_by_hand()
     }
+
+    /// The area every file under the rule is a path of, as its kind answers ([`HotRule::as_area`]).
+    pub fn as_area(&self) -> Option<&QualifiedArea> {
+        self.rule.as_area()
+    }
 }
 
 impl fmt::Debug for HotRuleSpec {
@@ -381,6 +394,10 @@ impl Owner {
 impl HotRule for Owner {
     fn decide(&self, _ctx: &HotContext<'_>) -> HotDecision {
         HotDecision::AsArea(self.area.clone())
+    }
+
+    fn as_area(&self) -> Option<&QualifiedArea> {
+        Some(&self.area)
     }
 }
 

@@ -481,7 +481,7 @@ async fn a_takeover_of_the_debt_claim_hands_the_area_to_the_claim_waiting_for_it
                 item: debt,
                 session: env.bob.session,
                 areas: Vec::new(),
-                reason: dibs_domain::message::Body::parse("Finishing the clean-up.").unwrap(),
+                reason: Some(dibs_domain::message::Body::parse("Finishing the clean-up.").unwrap()),
                 kind: None,
             },
         )
@@ -999,7 +999,7 @@ async fn a_takeover_of_a_stale_feature_claim_inherits_its_waits_unless_it_is_mad
                 item: feature,
                 session: carol_session,
                 areas: Vec::new(),
-                reason: dibs_domain::message::Body::parse("Picking the feature up.").unwrap(),
+                reason: Some(dibs_domain::message::Body::parse("Picking the feature up.").unwrap()),
                 kind: None,
             },
         )
@@ -1023,7 +1023,9 @@ async fn a_takeover_of_a_stale_feature_claim_inherits_its_waits_unless_it_is_mad
                 item: feature,
                 session: env.alice.session,
                 areas: Vec::new(),
-                reason: dibs_domain::message::Body::parse("Folding it into the clean-up.").unwrap(),
+                reason: Some(
+                    dibs_domain::message::Body::parse("Folding it into the clean-up.").unwrap(),
+                ),
                 kind: Some(ClaimKind::Debt),
             },
         )

@@ -35,7 +35,7 @@ use crate::named::{ItemName, Names, refuse};
 use crate::ports::{IdGen, StoreError};
 use crate::use_cases::claim_notice::ClaimNotice;
 use crate::use_cases::common::existing_item;
-use crate::use_cases::escalate::{Case, item_about};
+use crate::use_cases::escalate::{Case, Origin, item_about};
 use crate::use_cases::grant_endings::end_orphaned_grants;
 use crate::use_cases::wide_asks::Announcer;
 use crate::use_cases::writing::{Posted, SystemPost, SystemReply, system_body, titled_body};
@@ -189,7 +189,7 @@ impl Handovers<'_> {
                     holders: BTreeSet::from([holding]),
                     requester: Some(waiting),
                 },
-                by: waiting,
+                origin: Origin::Member(waiting),
                 reason: &reason,
             };
             match case

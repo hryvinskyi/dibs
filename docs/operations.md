@@ -485,7 +485,8 @@ from the integration and the settings.
   are found by looking up the reported paths, not by reading every footprint; the contract overlaps are derived from a
   small summary of each footprint (its areas and its contract paths). A settings change reads every footprint once.
 - **What people see.** Each overlap is announced once in a message from dibs to the holders it concerns (`high` for a
-  shared file or a contract, `normal` for a moved base, which every merge brings), and listed by `GET /v1/status`,
+  shared file or a contract, saying which claim lands first; `normal` for a moved base, which every merge brings, to be
+  rebased onto when the claim is next worked on), and listed by `GET /v1/status`,
   `dibs status`, the Overlap card of Now and the claim's inspector in Claims while its claims are live. A claim going
   stale ends no overlap and is not told again when it comes back; an overlap ends when a footprint, a branch or the
   settings it rests on change, when a merge brings its branch in, or when a claim it names ends. Removing a repository
@@ -549,6 +550,60 @@ its footprints are not read again until the delay has passed once more; a projec
 without a write.
 `idle_area_after` is a top-level setting, 1 to 90 days, 7 days by default. The upgrade that brings area clocks starts
 the clock of every area held then at the time the migration runs, so nothing is given back for the time before it.
+
+## What dibs decides on its own
+
+dibs settles from what it stores, never from the text of a message, three questions it used to leave to people.
+
+- **Grants.** A request for a grant (`POST /v1/grant-requests`) is decided on the holder's behalf at once, in the
+  transaction that asks it, and then by the same 30-second sweep while it is not settled. dibs looks at the holder's live
+  claim that holds the area and grants when that claim is in review, when the area is idle on it by the rule above, or
+  when the claim has a footprint in the area's repository, none truncated, and no path of it lies in the area. Otherwise
+  the request waits the project's `grant_after` since it was asked and is granted then; the holder may grant it sooner.
+  The grant is the holder's (`from` is the holder, and it ends as the holder's grants end); its `decided` and the
+  `granted` event name why dibs gave it (`in_review`, `idle`, `untouched` or `waited`), and dibs writes the reason, the
+  grant's id and how to revoke it in the request's conversation; when it grants at once, the asking message itself is
+  `normal` and does not count toward the asker's `raised_per_hour`. dibs decides a request once: one it granted, one the
+  holder answered with a grant for its item, one whose grant was revoked, one whose claim has ended and one whose holder
+  holds the area through no claim any more (they released the claim or narrowed the area away; a holder whose claim
+  only went stale keeps it) are settled and never judged again, so an asker whose holder holds the area again later
+  asks again. A request a revoke between the same two claims stands against is left to the holder for good: dibs never
+  grants it, its asking message says so instead of promising a grant after the wait, and the holder's inbox and their
+  agent's brief mark it. It is still settled as any other once its claim ends or its holder holds the area through no
+  claim, and once the revoke stops applying because the holder holds the area through another claim, so the holder is
+  not shown it on a claim the revoke does not reach. A request for another item of a member the holder granted the area
+  to lapses while that grant is in force. Once the grant ends, the request is judged again with its wait timed from when
+  it was asked: dibs grants it at the next sweep if `grant_after` has passed since then, and once it has otherwise,
+  unless it closes or a revoke leaves it to the holder.
+- **Wide claims' announcements.** dibs acknowledges an announcement for its holder by the same test, judged for every
+  area of the holder it names, and by the same wait. A holder whose claim is in review is announced to as well, and
+  dibs acknowledges that at once. The grants it makes are the holder's, with the reason as their `decided`. One a
+  revoke stands against is left to the holder: dibs never acknowledges it, says so once in its conversation, and
+  settles it once the revoke stops applying. One whose wide claim ended, or whose holder
+  holds none of its areas through any claim, is closed and settled, left to the holder or not: dibs stops judging it,
+  and the holder may still acknowledge it. A holder
+  who holds a closed announcement's area again, or whose grants from dibs's acknowledgement ended with their claim, is
+  sent a new announcement.
+- **Which of two colliding claims lands first.** For a shared file or a contract, the claim in review lands before a
+  claim at work, then the claim whose item has the higher priority, then the older claim. The order is stored on the
+  overlap, and the sweep works it out again so that a claim entering review or a priority change shows. Both holders
+  are told when which claim lands first changes, or the order becomes or stops being a tie; a new reason for the same
+  order is stored without a notice. When the rule ties, dibs raises it with the project's `arbiters` itself, in
+  nobody's name, reaching both holders, or adds it to an escalation of the same item that already stands: **name at
+  least one arbiter** for a tie to reach anybody. Without one, both holders are told to agree between them. Ties need
+  the same state, the same priority and the same claim time, so they are rare.
+
+`grant_after` is a top-level setting, 1 minute to 1 day, 10 minutes by default. Clients older than 0.1.11 cannot read
+it, so the server serves them the settings without it, as for the settings above.
+
+**Undoing a grant dibs gave.** The holder, or an admin for any grant, revokes it with `dibs revoke-grant <id>` (MCP
+`dibs_revoke_grant`, or `DELETE /v1/grants/{id}`). The id is in the message dibs wrote in the request's or the
+announcement's conversation, and in the `granted` or `wide_granted_by_ack` event of the log (`GET /v1/events`). A revoke
+sticks: dibs never again gives that member that area on that holder's behalf while both claims last; only the holder
+can. The `grant_revoked` event names who revoked it (`by`).
+
+A failure to sweep one project is logged (*the requests for grants of a project could not be swept*, *the overlaps of a
+project could not be swept*) and the other projects are swept all the same.
 
 ## Work handed on at a tracker state
 
@@ -784,11 +839,14 @@ checkout token are ignored, so its claims record no branch and see no overlap un
 server, then publish the 0.1.11 client binaries and set `DIBS_LATEST_CLIENT` to 0.1.11 straight away, so the radar comes
 back as members update.
 
-**0.1.11, one conversation per claim, and the server ends what is over.** Three migrations: 15 adds a table that
+**0.1.11, one conversation per claim, and the server ends what is over.** Four migrations: 15 adds a table that
 links each claim to its conversation (it goes with its conversation, and conversations that exist stay as they are),
 16 adds a clock to each area a claim holds, started at the upgrade for every area held then, so the first areas can go
-back 7 days after the upgrade at the earliest, and 17 marks when a session was ended, so an ended session no longer
-counts as at work (every session that exists stays open). Three things change with the release:
+back 7 days after the upgrade at the earliest, 17 marks when a session was ended, so an ended session no longer
+counts as at work (every session that exists stays open), and 18 records what dibs decides on a holder's behalf: who
+decided each grant (every grant stored before was its holder's), when a request was settled, the announcements dibs
+acknowledged, the revokes that stick and the order of each collision (none is stored before). Four things change with
+the release:
 
 - **A heartbeat no longer keeps a claim alive.** A claim lives by its own work: it goes stale `stale_after` after its
   last edit made under it, push of its branch or renewal, or while its pull requests wait, and the server's sweep
@@ -799,6 +857,16 @@ counts as at work (every session that exists stays open). Three things change wi
   apart from dibs's own.
 - **A project that wants a tracker state to free a claim's areas names it in `free_areas_at`** (the team's importer
   sends the board's Status as `source_status`). That makes a per-person job that does the same unnecessary.
+- **dibs decides grants, wide claims' announcements and the order of collisions on its own** (see
+  [What dibs decides on its own](#what-dibs-decides-on-its-own)). A request for a grant or a wide claim's announcement
+  its holder answered in its conversation before the upgrade is left to the holder: dibs never grants or acknowledges
+  it on their behalf, since the text they answered said nothing was granted until they gave it, and settles it once it
+  closes. One nobody answered, announcements
+  included, is decided like a new one at the first sweep: granted or acknowledged then if it passes the test or was
+  sent more than `grant_after` ago, and otherwise once `grant_after` has passed since it was sent. A request whose
+  holder by then holds the area through no claim is closed at that sweep, and never granted. At the same sweep every live collision gets its first
+  order, and both holders get a `high` notice saying which claim lands first. A take-over's reason is optional from
+  0.1.11 on.
 
 What the client version changes, so set `DIBS_LATEST_CLIENT` to 0.1.11 at the upgrade:
 
@@ -813,14 +881,14 @@ What the client version changes, so set `DIBS_LATEST_CLIENT` to 0.1.11 at the up
 - **A new client against an older server** shows every unread conversation as from people, since that server leaves out
   the fields that split the unread messages.
 - **The new settings may be set before members update.** The server serves a client older than 0.1.11 the settings
-  without `release_after`, `idle_area_after` and `free_areas_at`.
+  without `release_after`, `idle_area_after`, `free_areas_at` and `grant_after`.
 
 `release_after` defaults to 7 days, or to one day more than `stale_after` when that is 7 days or longer, so no stored
 settings stop parsing at the upgrade.
 
 The schema is migrated by the server when it opens the database, so a start on a new release migrates the file.
 Migrations only go forward: a server refuses a database that a newer release has migrated, and this release migrates
-the schema (migrations 15, 16 and 17). Going back from it therefore means restoring the snapshot taken before the upgrade
+the schema (migrations 15 to 18). Going back from it therefore means restoring the snapshot taken before the upgrade
 onto the older release; the settings changed after the upgrade are not in that snapshot.
 `dibs-server migrate` migrates a database file without serving, offline.
 

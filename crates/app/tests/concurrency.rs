@@ -279,7 +279,7 @@ mod concurrency {
                             item,
                             session: racer.session,
                             areas: Vec::new(),
-                            reason: Body::parse("Picking this up.").unwrap(),
+                            reason: Some(Body::parse("Picking this up.").unwrap()),
                             kind: None,
                         },
                     )

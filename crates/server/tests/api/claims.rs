@@ -235,12 +235,16 @@ async fn a_stale_claim_is_taken_over_only_explicitly() {
         stale.body["error"]["details"],
         json!({"holder": "alice", "last_seen": "2026-03-02T09:00:00Z"})
     );
-    let no_reason = team
+    let too_long = team
         .world
-        .post(&team.bob, &path, json!({"session_id": team.bob_session}))
+        .post(
+            &team.bob,
+            &path,
+            json!({"session_id": team.bob_session, "reason": "x".repeat(16_385)}),
+        )
         .await;
     assert_error(
-        &no_reason,
+        &too_long,
         StatusCode::UNPROCESSABLE_ENTITY,
         "invalid_request",
     );
@@ -276,6 +280,40 @@ async fn a_stale_claim_is_taken_over_only_explicitly() {
         )
         .await;
     assert_error(&nothing, StatusCode::CONFLICT, "nothing_to_take");
+}
+
+#[tokio::test]
+async fn a_takeover_without_a_reason_tells_the_previous_holder_how_long_the_claim_was_silent() {
+    for reason in [None, Some(""), Some("  \n ")] {
+        let team = Team::new().await;
+        let item = team.world.item(&team.alice, None, "Billing fix").await;
+        team.claim(&team.alice, team.alice_session, item, json!([]))
+            .await;
+        team.world.fakes.clock.advance(Duration::hours(2));
+        let mut body = json!({"session_id": team.bob_session});
+        if let Some(reason) = reason {
+            body["reason"] = json!(reason);
+        }
+        let taken = team
+            .world
+            .post(&team.bob, &format!("/v1/items/{item}/takeover"), body)
+            .await;
+        assert_eq!(taken.status, StatusCode::OK, "{reason:?}: {}", taken.body);
+        assert_eq!(taken.body["previous_holder"], "alice");
+        let thread = taken.body["thread_id"].as_u64().unwrap();
+        let told = team
+            .world
+            .get(&team.alice, &format!("/v1/threads/{thread}"))
+            .await;
+        let text = told.body["messages"][0]["body"].as_str().unwrap();
+        assert!(
+            text.contains(
+                "bob gave no reason. Nothing of your claim's work showed for 2h. bob needs the work item."
+            ),
+            "{reason:?}: {text}"
+        );
+        assert!(!text.contains("Their reason"), "{reason:?}: {text}");
+    }
 }
 
 #[tokio::test]

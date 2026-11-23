@@ -260,8 +260,9 @@ test('an overlap reported through the API shows as a card on Now without a reloa
     expect(stored).toBe(true);
   }
   await expect(card).toBeVisible();
-  await expect(card.getByRole('link', { name: 'widgets#1', exact: true })).toBeVisible();
+  await expect(card.getByRole('link', { name: 'widgets#1', exact: true }).first()).toBeVisible();
   await expect(card.getByRole('link', { name: 'widgets#2', exact: true })).toBeVisible();
+  await expect(card).toContainText('lands first, because its claim is older');
   await expectSameDocument(page);
 });
 

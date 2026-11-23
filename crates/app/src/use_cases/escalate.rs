@@ -7,17 +7,17 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 
 use dibs_domain::escalation::{
-    EscalationReason, EscalationSubject, Parties, Unanswered, escalation_reach, item_parties,
-    slot_parties, thread_parties,
+    EscalationReason, EscalationSubject, Parties, Reach, Unanswered, escalation_reach,
+    item_parties, slot_parties, thread_parties,
 };
 use dibs_domain::event::{Escalated, EventKind};
 use dibs_domain::handle::Handle;
 use dibs_domain::hot_rule::HotRuleRegistry;
-use dibs_domain::ids::{MemberId, MessageId, ThreadId};
+use dibs_domain::ids::{ItemId, MemberId, MessageId, ThreadId};
 use dibs_domain::message::{AckState, Author, Importance, Recipients, speaks_for};
 use dibs_domain::ref_scheme::RefSchemeRegistry;
 use dibs_domain::slot::SlotRefused;
-use dibs_domain::wide::ask_stands;
+use dibs_domain::wide::ask_awaits;
 
 use crate::actor::Actor;
 use crate::dependencies::Dependencies;
@@ -62,8 +62,12 @@ pub struct OpenEscalation {
     /// How the subject reads to a person: an item's reference and title, a slot's name, a
     /// conversation's subject.
     pub about: String,
-    /// The member who escalated.
+    /// The member who escalated; for one dibs raised on its own, the member it is recorded for,
+    /// who asked nothing.
     pub by: Handle,
+    /// Whether dibs raised it on its own, nobody having asked: shown as raised by dibs, not by
+    /// `by`.
+    pub raised_by_dibs: bool,
     /// The arbiters it waits for, ordered by handle.
     pub arbiters: Vec<Handle>,
     /// Its conversation.
@@ -123,7 +127,7 @@ impl Escalate {
             subject: input.subject,
             about,
             parties,
-            by: actor.member,
+            origin: Origin::Member(actor.member),
             reason: &input.reason,
         }
         .send(&mut work, &*self.ids, settings.arbiters(), now)
@@ -177,28 +181,151 @@ impl Escalate {
 }
 
 /// One escalation to send inside the caller's transaction: what it is about and who it concerns,
-/// already found, the member it is sent for, and their reason. The one way an escalation is
-/// written, whether a member asks for it or the service raises it for them.
+/// already found, who raises it, and why. The one way an escalation is written, whether a member
+/// asks for it, the service asks for a member, or the service raises it on its own.
 pub(crate) struct Case<'a> {
     pub(crate) subject: EscalationSubject,
     /// How the subject reads to a person.
     pub(crate) about: String,
     pub(crate) parties: Parties,
-    /// The member the escalation is sent for.
-    pub(crate) by: MemberId,
+    /// Who raises it.
+    pub(crate) origin: Origin<'a>,
     pub(crate) reason: &'a EscalationReason,
+}
+
+/// Who raises an escalation. It decides in whose name dibs writes it, whom it leaves out and how
+/// its message opens.
+pub(crate) enum Origin<'a> {
+    /// A member asks the arbiters, or dibs asks them for a member whose request went unanswered:
+    /// dibs writes it in that member's name, never asks them to acknowledge it, and says that the
+    /// agents involved do not agree.
+    Member(MemberId),
+    /// dibs raises it on its own: nobody asked, so it is written in nobody's name and reaches every
+    /// party. The caller has already found that no escalation of the subject stands.
+    Dibs(Raised<'a>),
+}
+
+/// An escalation dibs raises on its own, for a collision the order rule ties.
+pub(crate) struct Raised<'a> {
+    /// The member the escalation is recorded for, since every escalation is: one of its parties.
+    pub(crate) recorded_for: MemberId,
+    /// The two items whose collision it settles, lower first, stored on it as it is written.
+    pub(crate) tie: [ItemId; 2],
+    /// What is to be settled and why dibs raised it, as one sentence.
+    pub(crate) why: &'a str,
+    /// What the parties do until an arbiter answers.
+    pub(crate) meanwhile: &'a str,
+}
+
+/// What every opening of an escalation names, whoever raised it.
+struct Opening<'a> {
+    about: &'a str,
+    /// The arbiters it reached, ordered by handle.
+    arbiters: &'a [Handle],
+    /// The subject's holders, ordered by handle.
+    holders: &'a [Handle],
+    /// The message an arbiter acknowledges to settle it.
+    message: MessageId,
+}
+
+impl Origin<'_> {
+    /// The member who writes it and is left out of it; `None` when dibs raises it on its own.
+    const fn writer(&self) -> Option<MemberId> {
+        match self {
+            Self::Member(member) => Some(*member),
+            Self::Dibs(_) => None,
+        }
+    }
+
+    /// The member the record and the event name.
+    const fn recorded_for(&self) -> MemberId {
+        match self {
+            Self::Member(member) => *member,
+            Self::Dibs(raised) => raised.recorded_for,
+        }
+    }
+
+    /// Whether dibs raises it on its own, nobody having asked.
+    const fn by_dibs(&self) -> bool {
+        matches!(self, Self::Dibs(_))
+    }
+
+    /// Whether writing it looks for an escalation of the subject that stands first; one dibs raises
+    /// on its own does not, since its caller looked already.
+    const fn looks_for_standing(&self) -> bool {
+        matches!(self, Self::Member(_))
+    }
+
+    /// The pairs of tied items the record carries from the start.
+    fn ties(&self) -> BTreeSet<[ItemId; 2]> {
+        match self {
+            Self::Member(_) => BTreeSet::new(),
+            Self::Dibs(raised) => BTreeSet::from([raised.tie]),
+        }
+    }
+
+    /// Who starts its conversation.
+    const fn author(&self) -> Author {
+        match self {
+            Self::Member(member) => Author::Member(*member),
+            Self::Dibs(_) => Author::System,
+        }
+    }
+
+    /// The conversation's subject, and what dibs says above the reason.
+    fn texts(
+        &self,
+        names: &Names,
+        parties: &Parties,
+        opening: &Opening<'_>,
+    ) -> Result<(String, String), AppError> {
+        let arbiters = joined(opening.arbiters);
+        let holders = if opening.holders.is_empty() {
+            "nobody".to_owned()
+        } else {
+            joined(opening.holders)
+        };
+        let answer = format!(
+            "An arbiter answers in this conversation and acknowledges this message (dibs_ack, or dibs ack {}); until one does, the Now page lists it under Arbitrate.",
+            opening.message
+        );
+        let about = opening.about;
+        match self {
+            Self::Member(member) => {
+                let by = names.handle(*member)?;
+                let requester = names.handle(parties.requester.unwrap_or(*member))?;
+                Ok((
+                    format!("Escalated by {by}: {about}"),
+                    format!(
+                        "{by} asks the arbiters of this project ({arbiters}) to settle {about}: the agents involved do not agree.\
+                         \nHeld by: {holders}. Asked for by: {requester}.\
+                         \n{answer}\
+                         \nMeanwhile no agent settles it alone: do not take over the claim or the slot, do not edit in the area, pick other work, and follow the arbiter's answer here."
+                    ),
+                ))
+            }
+            Self::Dibs(raised) => Ok((
+                format!("Escalated by dibs: {about}"),
+                format!(
+                    "dibs raised this itself; nobody asked: {}\nArbiters: {arbiters}. Held by: {holders}.\n{answer}\n{}",
+                    raised.why, raised.meanwhile
+                ),
+            )),
+        }
+    }
 }
 
 impl Case<'_> {
     /// Writes the escalation: an `urgent` message from dibs, asking to be acknowledged, to the
     /// arbiters named by `arbiters` who are still people of the project and to the subject's
-    /// parties; the record that it stands until one of those arbiters acknowledges it; and
-    /// `escalated`.
+    /// parties, never to the member it is written for; the record that it stands until one of
+    /// those arbiters acknowledges it, carrying the tied pair of one dibs raises; and `escalated`.
     ///
     /// # Errors
     /// [`AppError::AlreadyEscalated`] while an escalation of the same subject waits for an
-    /// arbiter; [`AppError::Escalation`] when no arbiter but `by` is a person of the project;
-    /// [`AppError::Store`] when the store fails.
+    /// arbiter, for one a member raises; [`AppError::Escalation`] when no arbiter who is a person of the project may settle
+    /// it: one other than the member it is written for, and for one dibs raises on its own, other
+    /// than its holders; [`AppError::Store`] when the store fails.
     pub(crate) async fn send(
         self,
         work: &mut Work,
@@ -207,11 +334,12 @@ impl Case<'_> {
         now: OffsetDateTime,
     ) -> Result<Escalation, AppError> {
         let project = work.project_id();
-        if let Some(standing) = work
-            .open_escalations(project)
-            .await?
-            .into_iter()
-            .find(|open| open.subject == self.subject)
+        if self.origin.looks_for_standing()
+            && let Some(standing) = work
+                .open_escalations(project)
+                .await?
+                .into_iter()
+                .find(|open| open.subject == self.subject)
         {
             return Err(AppError::AlreadyEscalated {
                 thread: standing.thread,
@@ -228,10 +356,11 @@ impl Case<'_> {
             .filter(|member| arbiters.contains(&member.handle))
             .map(|member| member.id)
             .collect();
-        let reach = escalation_reach(&named, &self.parties, self.by, &present)?;
-        let judges: BTreeSet<MemberId> = named.intersection(&reach).copied().collect();
+        let Reach {
+            arbiters: judges,
+            members: reach,
+        } = escalation_reach(&named, &self.parties, self.origin.writer(), &present)?;
         let names = Names::load(work).await?;
-        let by = names.handle(self.by)?;
         let listed = |set: &BTreeSet<MemberId>| -> Result<Vec<Handle>, AppError> {
             let mut handles = set
                 .iter()
@@ -242,21 +371,22 @@ impl Case<'_> {
         };
         let arbiter_handles = listed(&judges)?;
         let holder_handles = listed(&self.parties.holders)?;
-        let requester = names.handle(self.parties.requester.unwrap_or(self.by))?;
         let posted = Posted::next(ids);
-        let lead = lead(
-            &by,
-            &self.about,
-            &arbiter_handles,
-            &holder_handles,
-            &requester,
-            posted.message,
-        );
+        let (subject, lead) = self.origin.texts(
+            &names,
+            &self.parties,
+            &Opening {
+                about: &self.about,
+                arbiters: &arbiter_handles,
+                holders: &holder_handles,
+                message: posted.message,
+            },
+        )?;
         SystemPost {
             ids: posted,
-            subject: format!("Escalated by {by}: {}", self.about),
+            subject,
             item: self.subject.item(),
-            on_behalf_of: Author::Member(self.by),
+            on_behalf_of: self.origin.author(),
             to: Recipients::members(reach.clone())?,
             body: if self.subject.item().is_some() {
                 titled_body(&lead, Some(("Why", self.reason.as_str())))?
@@ -268,13 +398,17 @@ impl Case<'_> {
         }
         .send(work, now)
         .await?;
+        let by = self.origin.recorded_for();
+        let by_dibs = self.origin.by_dibs();
         work.insert_escalation(
             project,
             &EscalationRecord {
                 message: posted.message,
                 thread: posted.thread,
                 subject: self.subject.clone(),
-                by: self.by,
+                by,
+                raised_by_dibs: by_dibs,
+                ties: self.origin.ties(),
                 arbiters: judges,
                 created_at: now,
             },
@@ -284,7 +418,8 @@ impl Case<'_> {
             now,
             EventKind::Escalated(Escalated {
                 subject: self.subject,
-                by: self.by,
+                by,
+                by_dibs,
             }),
         )
         .await?;
@@ -297,9 +432,18 @@ impl Case<'_> {
     }
 }
 
+/// The handles, joined with commas.
+fn joined(handles: &[Handle]) -> String {
+    handles
+        .iter()
+        .map(Handle::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The newest message of a thread that asks for an acknowledgement some of its recipients have not
-/// given — leaving out a wide claim's announcement whose claim has ended — with who asked and who
-/// owes it.
+/// given — leaving out a wide claim's announcement whose claim has ended or that dibs acknowledged
+/// on its holder's behalf — with who asked and who owes it.
 async fn newest_unanswered(
     work: &mut Work,
     thread: &ThreadRecord,
@@ -317,7 +461,7 @@ async fn newest_unanswered(
             }
             if !claims
                 .as_deref()
-                .is_some_and(|claims| ask_stands(&ask, claims))
+                .is_some_and(|claims| ask_awaits(&ask, claims))
             {
                 continue;
             }
@@ -359,36 +503,6 @@ pub(crate) fn item_about(item: &ItemRecord, schemes: &RefSchemeRegistry) -> Stri
     format!("work item {label} \"{}\"", name.title)
 }
 
-/// What dibs says above the member's reason.
-fn lead(
-    by: &Handle,
-    about: &str,
-    arbiters: &[Handle],
-    holders: &[Handle],
-    requester: &Handle,
-    message: MessageId,
-) -> String {
-    let join = |handles: &[Handle]| {
-        handles
-            .iter()
-            .map(Handle::as_str)
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let holders = if holders.is_empty() {
-        "nobody".to_owned()
-    } else {
-        join(holders)
-    };
-    format!(
-        "{by} asks the arbiters of this project ({}) to settle {about}: the agents involved do not agree.\
-         \nHeld by: {holders}. Asked for by: {requester}.\
-         \nAn arbiter answers in this conversation and acknowledges this message (dibs_ack, or dibs ack {message}); until one does, the Now page lists it under Arbitrate.\
-         \nMeanwhile no agent settles it alone: do not take over the claim or the slot, do not edit in the area, pick other work, and follow the arbiter's answer here.",
-        join(arbiters)
-    )
-}
-
 /// Lists the escalations the caller may read that no arbiter they reached has acknowledged yet,
 /// newest first.
 pub(crate) async fn open_escalations(
@@ -424,6 +538,7 @@ pub(crate) async fn open_escalations(
             subject: escalation.subject,
             about,
             by: names.handle(escalation.by)?,
+            raised_by_dibs: escalation.raised_by_dibs,
             arbiters,
             thread: escalation.thread,
             message: escalation.message,
@@ -616,6 +731,7 @@ mod tests {
         assert!(kinds.contains(&EventKind::Escalated(Escalated {
             subject: EscalationSubject::Item(item),
             by: env.bob.actor.member,
+            by_dibs: false,
         })));
     }
 
@@ -735,6 +851,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_announcement_dibs_acknowledged_for_its_holder_is_not_escalated_as_unacknowledged() {
+        use dibs_domain::grant::GrantDecision;
+
+        for (acked_by_dibs, reached) in [(false, &["alice", "dave"][..]), (true, &["dave"][..])] {
+            let (env, _carol, _dave) = project().await;
+            let (announced, thread) = env.announce_billing_to_alice().await;
+            if acked_by_dibs {
+                env.ack_for_holder(announced, GrantDecision::InReview).await;
+            }
+            let sent = escalate(&env, &env.bob.actor, EscalationSubject::Thread(thread))
+                .await
+                .unwrap();
+            assert_eq!(
+                handles(&sent.reached),
+                reached,
+                "acknowledged by dibs: {acked_by_dibs}; alice is reached only while she owes it"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn the_board_shows_an_escalation_until_an_arbiter_acknowledges_it() {
         let (env, carol, dave) = project().await;
         let item = env.item("gh:acme/widgets#2").await;
@@ -754,6 +891,7 @@ mod tests {
         let shown = open(dave.actor.clone()).await;
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].by.as_str(), "carol");
+        assert!(!shown[0].raised_by_dibs, "carol asked for it");
         assert_eq!(handles(&shown[0].arbiters), ["dave"]);
         assert_eq!(
             shown[0].about,

@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 
 use dibs_domain::event::EventKind;
 use dibs_domain::ids::{ItemId, ThreadId};
+use dibs_domain::item::Priority;
+use dibs_domain::member::Role;
 use dibs_domain::message::Importance;
 use dibs_domain::paths::{RelPath, RepoPath};
 use dibs_domain::radar::{
@@ -16,11 +18,14 @@ use dibs_domain::repo::RepoId;
 use dibs_domain::review::PrRef;
 
 use super::*;
-use crate::use_cases::testing::{Env, Person, START, checkout, document, in_checkout, session};
+use crate::use_cases::testing::{
+    Env, Person, START, checkout, document, in_checkout, new_member, session,
+};
 use crate::use_cases::{
-    ApplySettings, ClaimItem, ClaimItemInput, EditCheck, EditCheckInput, Heartbeat, ListThreads,
-    PrReport, ReadThread, Release, ReportPr, ReportedEnd, StartReview, StartReviewInput, Status,
-    TakeOver, TakeOverInput,
+    ApplySettings, Authenticate, ClaimItem, ClaimItemInput, CreateMember, CreateMemberInput,
+    EditCheck, EditCheckInput, Escalate, EscalateInput, Heartbeat, ListThreads, PrReport,
+    ReadThread, Release, ReportPr, ReportedEnd, StartReview, StartReviewInput, Status, TakeOver,
+    TakeOverInput,
 };
 
 /// One repository with `billing` and `search`, where search depends on billing and every
@@ -1152,7 +1157,7 @@ async fn a_takeover_clears_the_previous_holders_footprints_and_overlaps() {
                 item: bobs,
                 session: env.alice.session,
                 areas: Vec::new(),
-                reason: dibs_domain::message::Body::parse("bob is away this week").unwrap(),
+                reason: Some(dibs_domain::message::Body::parse("bob is away this week").unwrap()),
                 kind: None,
             },
         )
@@ -1640,6 +1645,678 @@ async fn a_moved_base_is_told_at_most_once_a_day_per_claim_and_every_one_is_stor
     assert_eq!(moved_items(&overlaps(&env).await).len(), 3);
 }
 
+/// The radar's areas, with `carol` as the project's arbiter.
+const ARBITRATED: &str = r#"{
+    "arbiters": ["carol"],
+    "areas": [
+        {"name": "billing", "paths": ["packages/billing/**"]},
+        {"name": "search", "paths": ["packages/search/**"]}
+    ]
+}"#;
+
+/// A member `handle` of the project, with a session of their own.
+async fn person(env: &Env, handle: &str) -> Person {
+    let token = CreateMember::new(&env.deps)
+        .execute(
+            &env.alice.actor,
+            CreateMemberInput {
+                member: new_member(handle),
+                role: Role::Member,
+            },
+        )
+        .await
+        .unwrap()
+        .token;
+    let actor = Authenticate::new(&env.deps)
+        .execute(token.expose())
+        .await
+        .unwrap();
+    let session = session(&env.deps, &actor, "box", &format!("box/{handle}")).await;
+    Person { actor, session }
+}
+
+/// Gives `item` this priority, as an import would.
+async fn prioritize(env: &Env, item: ItemId, priority: u8) {
+    let mut tx = env.deps.store.begin().await.unwrap();
+    let mut record = tx.item(env.project, item).await.unwrap().unwrap();
+    record.priority = Priority::new(priority).unwrap();
+    tx.update_item(env.project, &record).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// The escalations that wait for an arbiter.
+async fn standing_escalations(env: &Env) -> Vec<crate::records::EscalationRecord> {
+    let mut tx = env.deps.store.begin().await.unwrap();
+    tx.open_escalations(env.project).await.unwrap()
+}
+
+/// alice's `gh:acme/widgets#1` and bob's `gh:acme/widgets#2`, both items created now.
+async fn two_items(env: &Env) -> (ItemId, ItemId) {
+    (
+        env.item("gh:acme/widgets#1").await,
+        env.item("gh:acme/widgets#2").await,
+    )
+}
+
+/// The branches of alice's and bob's claims both change `config/app.yaml`.
+async fn collide(env: &Env, alices: ItemId, bobs: ItemId) {
+    report(
+        env,
+        footprint(alices, "alice/1-x", "abcd", &["config/app.yaml", "a.rs"]),
+    )
+    .await;
+    report(
+        env,
+        footprint(bobs, "bob/2-y", "abcd", &["config/app.yaml"]),
+    )
+    .await;
+}
+
+/// The one collision notice `who` was told, without the note on quoted titles below it.
+async fn the_notice(env: &Env, who: &Person) -> String {
+    let told = told(env, who).await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    told[0].text.lines().next().unwrap_or_default().to_owned()
+}
+
+#[tokio::test]
+async fn a_claim_in_review_is_told_it_lands_first_and_the_other_that_it_rebases_once_it_merges() {
+    let env = Env::with_settings(SETTINGS).await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    review(&env, &env.bob, bobs, "acme/widgets#12", false).await;
+    collide(&env, alices, bobs).await;
+
+    let stored = overlaps(&env).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(
+        stored[0].order(),
+        Some(&OverlapOrder::First {
+            item: bobs,
+            because: OrderRule::InReview
+        })
+    );
+    let bobs_notice = the_notice(&env, &env.bob).await;
+    assert!(
+        bobs_notice.ends_with(
+            "Yours lands first, because it is in review. Work item gh:acme/widgets#1 rebases onto it once it merges; go on with your work."
+        ),
+        "{bobs_notice}"
+    );
+    let alices_notice = the_notice(&env, &env.alice).await;
+    assert!(
+        alices_notice.ends_with(
+            "Work item gh:acme/widgets#2 lands first, because it is in review. Once it merges, rebase onto the base and resolve these files, then say in this conversation that you rebased."
+        ),
+        "{alices_notice}"
+    );
+    for notice in [&alices_notice, &bobs_notice] {
+        assert!(!notice.contains("Rebase onto the base now"), "{notice}");
+        assert!(!notice.contains("to settle who changes what"), "{notice}");
+    }
+    assert!(standing_escalations(&env).await.is_empty());
+}
+
+#[tokio::test]
+async fn between_two_claims_at_work_the_higher_priority_lands_first() {
+    let env = Env::with_settings(SETTINGS).await;
+    let (alices, bobs) = two_items(&env).await;
+    prioritize(&env, alices, 3).await;
+    prioritize(&env, bobs, 1).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    env.advance(time::Duration::minutes(5));
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    collide(&env, alices, bobs).await;
+
+    assert_eq!(
+        overlaps(&env).await[0].order(),
+        Some(&OverlapOrder::First {
+            item: bobs,
+            because: OrderRule::Priority
+        }),
+        "the newer claim, of the higher priority"
+    );
+    let bobs_notice = the_notice(&env, &env.bob).await;
+    assert!(
+        bobs_notice.contains("Yours lands first, because its work item has the higher priority."),
+        "{bobs_notice}"
+    );
+    let alices_notice = the_notice(&env, &env.alice).await;
+    assert!(
+        alices_notice.contains(
+            "Work item gh:acme/widgets#2 lands first, because its work item has the higher priority."
+        ),
+        "{alices_notice}"
+    );
+}
+
+#[tokio::test]
+async fn with_equal_priority_the_older_claim_lands_first() {
+    let env = Env::with_settings(SETTINGS).await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    env.advance(time::Duration::minutes(5));
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    collide(&env, alices, bobs).await;
+
+    assert_eq!(
+        overlaps(&env).await[0].order(),
+        Some(&OverlapOrder::First {
+            item: alices,
+            because: OrderRule::Older
+        })
+    );
+    let alices_notice = the_notice(&env, &env.alice).await;
+    assert!(
+        alices_notice.contains("Yours lands first, because its claim is older."),
+        "{alices_notice}"
+    );
+    let bobs_notice = the_notice(&env, &env.bob).await;
+    assert!(
+        bobs_notice
+            .contains("Work item gh:acme/widgets#1 lands first, because its claim is older."),
+        "{bobs_notice}"
+    );
+}
+
+#[tokio::test]
+async fn a_tie_goes_to_the_arbiters_and_both_holders_are_told_they_were_asked() {
+    let env = Env::with_settings(ARBITRATED).await;
+    let carol = person(&env, "carol").await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    collide(&env, alices, bobs).await;
+
+    assert_eq!(overlaps(&env).await[0].order(), Some(&OverlapOrder::Tied));
+    let escalations = standing_escalations(&env).await;
+    assert_eq!(escalations.len(), 1, "{escalations:?}");
+    assert_eq!(
+        escalations[0].subject,
+        EscalationSubject::Item(alices),
+        "about the lower item"
+    );
+    assert_eq!(
+        escalations[0].by, env.alice.actor.member,
+        "recorded for its holder, as every escalation is recorded for a member"
+    );
+    assert!(escalations[0].raised_by_dibs, "alice asked nothing");
+    assert_eq!(escalations[0].ties, BTreeSet::from([[alices, bobs]]));
+    assert!(env.kinds_after(0).await.contains(&EventKind::Escalated(
+        dibs_domain::event::Escalated {
+            subject: EscalationSubject::Item(alices),
+            by: env.alice.actor.member,
+            by_dibs: true,
+        }
+    )));
+    let shown = Status::new(&env.deps)
+        .execute(&carol.actor)
+        .await
+        .unwrap()
+        .escalations;
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert!(shown[0].raised_by_dibs);
+    let escalation = ReadThread::new(&env.deps)
+        .execute(&carol.actor, escalations[0].thread)
+        .await
+        .unwrap();
+    assert_eq!(
+        escalation.thread.record.subject.to_string(),
+        "Escalated by dibs: work item gh:acme/widgets#1 \"Work on gh:acme/widgets#1\""
+    );
+    assert!(
+        escalation.thread.author.is_dibs(),
+        "dibs starts it in nobody's name: {:?}",
+        escalation.thread.author
+    );
+    let message = &escalation.messages[0];
+    let why = message.record.body.to_string();
+    assert!(
+        why.starts_with("dibs raised this itself; nobody asked: "),
+        "{why}"
+    );
+    for named in [
+        "gh:acme/widgets#1 \"Work on gh:acme/widgets#1\"",
+        "gh:acme/widgets#2 \"Work on gh:acme/widgets#2\"",
+        "change the same files: default:config/app.yaml",
+        "both are at work, their work items have the same priority and their claims were made at the same time",
+        "go on with their work",
+    ] {
+        assert!(why.contains(named), "{named}: {why}");
+    }
+    for never in ["asks", "do not edit", "pick other work", "do not agree"] {
+        assert!(!why.contains(never), "{never}: {why}");
+    }
+    let asked: Vec<String> = escalation.acks[&message.record.id]
+        .iter()
+        .map(|ack| ack.handle.to_string())
+        .collect();
+    assert_eq!(
+        asked,
+        ["alice", "bob", "carol"],
+        "both holders and the arbiter"
+    );
+    for who in [&env.alice, &env.bob] {
+        let notice = the_notice(&env, who).await;
+        assert!(
+            notice.ends_with(
+                "The order rule cannot decide which lands first: both are at work, their work items have the same priority and their claims were made at the same time. dibs asked the project's arbiters."
+            ),
+            "{notice}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_new_ties_escalation_reads_the_standing_ones_once_and_is_stored_with_its_pair_in_one_write()
+ {
+    let env = Env::with_settings(ARBITRATED).await;
+    person(&env, "carol").await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    report(
+        &env,
+        footprint(alices, "alice/1-x", "abcd", &["config/app.yaml", "a.rs"]),
+    )
+    .await;
+    let store = &env.fakes.store;
+    let listed = store.escalation_listings_of(env.project).await;
+    let written = store.escalation_writes_of(env.project).await;
+
+    report(
+        &env,
+        footprint(bobs, "bob/2-y", "abcd", &["config/app.yaml"]),
+    )
+    .await;
+
+    assert_eq!(overlaps(&env).await[0].order(), Some(&OverlapOrder::Tied));
+    assert_eq!(
+        store.escalation_listings_of(env.project).await - listed,
+        1,
+        "the standing escalations are read once"
+    );
+    assert_eq!(
+        store.escalation_writes_of(env.project).await - written,
+        1,
+        "the escalation is stored once, its pair with it"
+    );
+    let escalations = standing_escalations(&env).await;
+    let [raised] = &escalations[..] else {
+        panic!("one escalation: {escalations:?}");
+    };
+    assert_eq!(raised.ties, BTreeSet::from([[alices, bobs]]));
+}
+
+#[tokio::test]
+async fn a_tie_no_arbiter_receives_is_left_to_the_holders_to_agree() {
+    let env = Env::with_settings(SETTINGS).await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    collide(&env, alices, bobs).await;
+
+    assert_eq!(overlaps(&env).await[0].order(), Some(&OverlapOrder::Tied));
+    assert!(standing_escalations(&env).await.is_empty());
+    let alices_notice = the_notice(&env, &env.alice).await;
+    assert!(
+        alices_notice.ends_with(
+            "No arbiter can be asked, so write to bob (dibs send bob) and agree on the order."
+        ),
+        "{alices_notice}"
+    );
+    let bobs_notice = the_notice(&env, &env.bob).await;
+    assert!(
+        bobs_notice.ends_with(
+            "No arbiter can be asked, so write to alice (dibs send alice) and agree on the order."
+        ),
+        "{bobs_notice}"
+    );
+}
+
+#[tokio::test]
+async fn a_tie_whose_only_arbiter_holds_one_of_its_claims_is_left_to_the_holders() {
+    let env = Env::with_settings(
+        r#"{
+            "arbiters": ["bob"],
+            "areas": [{"name": "billing", "paths": ["packages/billing/**"]}]
+        }"#,
+    )
+    .await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    collide(&env, alices, bobs).await;
+
+    assert_eq!(overlaps(&env).await[0].order(), Some(&OverlapOrder::Tied));
+    assert!(
+        standing_escalations(&env).await.is_empty(),
+        "bob would settle his own claim's order alone"
+    );
+    let alices_notice = the_notice(&env, &env.alice).await;
+    assert!(
+        alices_notice.ends_with(
+            "No arbiter can be asked, so write to bob (dibs send bob) and agree on the order."
+        ),
+        "{alices_notice}"
+    );
+}
+
+/// What dibs wrote in the conversation after its first message, without the note on quoted titles.
+async fn added(env: &Env, reader: &Person, thread: ThreadId) -> Vec<(String, Importance)> {
+    ReadThread::new(&env.deps)
+        .execute(&reader.actor, thread)
+        .await
+        .unwrap()
+        .messages
+        .iter()
+        .skip(1)
+        .filter(|message| message.author.is_dibs())
+        .map(|message| (message.record.body.to_string(), message.record.importance))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_second_tie_on_the_same_item_is_added_to_its_escalation_and_its_new_holder_is_told_so() {
+    let env = Env::with_settings(ARBITRATED).await;
+    let carol = person(&env, "carol").await;
+    let erin = person(&env, "erin").await;
+    let (alices, bobs) = two_items(&env).await;
+    let erins = env.item("gh:acme/widgets#3").await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    claim_on(&env, &erin, erins, "erin/3-z").await;
+    report(
+        &env,
+        footprint(alices, "alice/1-x", "abcd", &["a.rs", "b.rs"]),
+    )
+    .await;
+    report(&env, footprint(bobs, "bob/2-y", "abcd", &["a.rs"])).await;
+    report(&env, footprint(erins, "erin/3-z", "abcd", &["b.rs"])).await;
+
+    let stored = overlaps(&env).await;
+    assert_eq!(stored.len(), 2, "{stored:?}");
+    assert!(
+        stored
+            .iter()
+            .all(|overlap| overlap.order() == Some(&OverlapOrder::Tied))
+    );
+    let escalations = standing_escalations(&env).await;
+    assert_eq!(escalations.len(), 1, "{escalations:?}");
+    assert_eq!(escalations[0].subject, EscalationSubject::Item(alices));
+    assert_eq!(
+        escalations[0].ties,
+        BTreeSet::from([[alices, bobs], [alices, erins]]),
+        "both pairs were put to its arbiters"
+    );
+    let thread = escalations[0].thread;
+
+    let posts = added(&env, &carol, thread).await;
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    let (text, importance) = &posts[0];
+    assert_eq!(*importance, Importance::Urgent);
+    for named in [
+        "gh:acme/widgets#1 \"Work on gh:acme/widgets#1\"",
+        "gh:acme/widgets#3 \"Work on gh:acme/widgets#3\"",
+        "change the same files: default:b.rs",
+        "erin does not read this conversation: write the answer to them as well (dibs send erin)",
+    ] {
+        assert!(text.contains(named), "{named}: {text}");
+    }
+    for never in ["asks", "do not edit", "both holders read this conversation"] {
+        assert!(!text.contains(never), "{never}: {text}");
+    }
+    assert_eq!(
+        ReadThread::new(&env.deps)
+            .execute(&erin.actor, thread)
+            .await
+            .unwrap_err()
+            .code(),
+        "not_found",
+        "the escalation's readers stay those it reached"
+    );
+
+    let erins_notice = the_notice(&env, &erin).await;
+    assert!(
+        erins_notice.ends_with(
+            "dibs asked the project's arbiters in an escalation you do not read, and asked them to write their answer to you."
+        ),
+        "{erins_notice}"
+    );
+    let alices = told(&env, &env.alice).await;
+    assert_eq!(alices.len(), 2, "{alices:?}");
+    let second = alices[1].text.lines().next().unwrap_or_default();
+    assert!(
+        second.contains("gh:acme/widgets#3")
+            && second.ends_with("dibs asked the project's arbiters."),
+        "alice reads the escalation the pair was added to: {second}"
+    );
+}
+
+#[tokio::test]
+async fn a_tie_whose_item_is_already_escalated_is_added_to_that_escalation() {
+    let env = Env::with_settings(ARBITRATED).await;
+    person(&env, "carol").await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    Escalate::new(&env.deps)
+        .execute(
+            &env.bob.actor,
+            EscalateInput {
+                subject: EscalationSubject::Item(alices),
+                reason: EscalationReason::parse("We both need this file today.").unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    collide(&env, alices, bobs).await;
+
+    let escalations = standing_escalations(&env).await;
+    assert_eq!(escalations.len(), 1, "{escalations:?}");
+    assert_eq!(
+        escalations[0].by, env.bob.actor.member,
+        "the one that stood is kept, not raised again"
+    );
+    assert!(!escalations[0].raised_by_dibs, "bob asked for it");
+    assert_eq!(escalations[0].ties, BTreeSet::from([[alices, bobs]]));
+    let posts = added(&env, &env.bob, escalations[0].thread).await;
+    assert_eq!(posts.len(), 1, "{posts:?}");
+    let text = &posts[0].0;
+    for named in [
+        "gh:acme/widgets#1 \"Work on gh:acme/widgets#1\"",
+        "gh:acme/widgets#2 \"Work on gh:acme/widgets#2\"",
+        "change the same files: default:config/app.yaml",
+    ] {
+        assert!(text.contains(named), "{named}: {text}");
+    }
+    assert!(
+        !text.contains("does not read this conversation"),
+        "alice holds its item and bob raised it, so both read it: {text}"
+    );
+    for who in [&env.alice, &env.bob] {
+        let notice = the_notice(&env, who).await;
+        assert!(
+            notice.ends_with("dibs asked the project's arbiters."),
+            "{notice}"
+        );
+    }
+}
+
+/// The radar's areas, with `carol` and `erin` as the project's arbiters.
+const TWO_ARBITERS: &str = r#"{
+    "arbiters": ["carol", "erin"],
+    "areas": [
+        {"name": "billing", "paths": ["packages/billing/**"]},
+        {"name": "search", "paths": ["packages/search/**"]}
+    ]
+}"#;
+
+#[tokio::test]
+async fn a_tie_one_of_whose_holders_arbitrates_the_escalation_that_stands_is_left_to_the_holders() {
+    let env = Env::with_settings(TWO_ARBITERS).await;
+    let carol = person(&env, "carol").await;
+    let erin = person(&env, "erin").await;
+    let (alices, bobs) = two_items(&env).await;
+    let erins = env.item("gh:acme/widgets#3").await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    claim_on(&env, &erin, erins, "erin/3-z").await;
+    report(
+        &env,
+        footprint(alices, "alice/1-x", "abcd", &["a.rs", "b.rs"]),
+    )
+    .await;
+    report(&env, footprint(bobs, "bob/2-y", "abcd", &["a.rs"])).await;
+    let escalations = standing_escalations(&env).await;
+    assert_eq!(escalations.len(), 1, "{escalations:?}");
+    assert_eq!(
+        escalations[0].arbiters,
+        BTreeSet::from([carol.actor.member, erin.actor.member]),
+        "neither holder of the first tie arbitrates it"
+    );
+    let thread = escalations[0].thread;
+
+    report(&env, footprint(erins, "erin/3-z", "abcd", &["b.rs"])).await;
+
+    assert_eq!(
+        standing_escalations(&env).await,
+        escalations,
+        "the escalation that stands is kept as it was"
+    );
+    assert!(
+        added(&env, &carol, thread).await.is_empty(),
+        "erin would settle her own claim's order alone"
+    );
+    let agree = |other: &str| {
+        format!(
+            "An escalation about one of these work items already stands and one of you is among its arbiters, so write to {other} (dibs send {other}) and agree on the order."
+        )
+    };
+    let erins_notice = the_notice(&env, &erin).await;
+    assert!(erins_notice.ends_with(&agree("alice")), "{erins_notice}");
+    let alices = told(&env, &env.alice).await;
+    assert_eq!(alices.len(), 2, "{alices:?}");
+    let second = alices[1].text.lines().next().unwrap_or_default();
+    assert!(
+        second.contains("gh:acme/widgets#3") && second.ends_with(&agree("erin")),
+        "{second}"
+    );
+}
+
+/// Every message `who` can read that says a collision's order changed, oldest first, without the
+/// note on quoted titles.
+async fn changed(env: &Env, who: &Person) -> Vec<String> {
+    told_any(env, who)
+        .await
+        .into_iter()
+        .filter(|text| text.starts_with("The order changed: "))
+        .collect()
+}
+
+/// The first line of every message `who` can read, by conversation and then oldest first.
+async fn told_any(env: &Env, who: &Person) -> Vec<String> {
+    let mut threads: Vec<ThreadId> = ListThreads::new(&env.deps)
+        .execute(&who.actor, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|summary| summary.thread.record.id)
+        .collect();
+    threads.sort();
+    let mut texts = Vec::new();
+    for id in threads {
+        let thread = ReadThread::new(&env.deps)
+            .execute(&who.actor, id)
+            .await
+            .unwrap();
+        for message in thread.messages {
+            let body = message.record.body.to_string();
+            texts.push(body.lines().next().unwrap_or_default().to_owned());
+        }
+    }
+    texts
+}
+
+#[tokio::test]
+async fn a_pair_tied_ordered_and_tied_again_is_put_to_the_arbiters_once() {
+    let env = Env::with_settings(ARBITRATED).await;
+    let carol = person(&env, "carol").await;
+    let (alices, bobs) = two_items(&env).await;
+    claim_on(&env, &env.alice, alices, "alice/1-x").await;
+    claim_on(&env, &env.bob, bobs, "bob/2-y").await;
+    collide(&env, alices, bobs).await;
+    let escalations = standing_escalations(&env).await;
+    assert_eq!(escalations.len(), 1, "{escalations:?}");
+    let thread = escalations[0].thread;
+    let sweep = || async {
+        let swept = crate::use_cases::TickOverlaps::new(&env.deps)
+            .execute()
+            .await
+            .unwrap();
+        assert!(swept.failed.is_empty(), "{:?}", swept.failed);
+        swept.reordered
+    };
+
+    prioritize(&env, alices, 1).await;
+    assert_eq!(sweep().await, 1);
+    assert_eq!(
+        overlaps(&env).await[0].order(),
+        Some(&OverlapOrder::First {
+            item: alices,
+            because: OrderRule::Priority
+        })
+    );
+    prioritize(&env, alices, 2).await;
+    assert_eq!(sweep().await, 1);
+    assert_eq!(overlaps(&env).await[0].order(), Some(&OverlapOrder::Tied));
+
+    assert_eq!(
+        standing_escalations(&env).await,
+        escalations,
+        "one escalation, as it was"
+    );
+    assert!(
+        added(&env, &carol, thread).await.is_empty(),
+        "the pair is not put to the arbiters a second time"
+    );
+    for who in [&env.alice, &env.bob] {
+        let last = changed(&env, who).await.pop().unwrap_or_default();
+        assert!(
+            last.ends_with("dibs already asked the project's arbiters about these two claims."),
+            "{last}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_moved_base_asks_for_a_rebase_when_the_claim_is_next_worked_on() {
+    let env = Env::with_settings(SETTINGS).await;
+    let bobs = env.item("gh:acme/widgets#2").await;
+    claim_on(&env, &env.bob, bobs, "bob/2").await;
+    report(&env, footprint(bobs, "bob/2", "abcd", &["b.rs"])).await;
+    env.advance(time::Duration::minutes(1));
+    merged(
+        &env,
+        merge(&env, "acme/widgets#7", "main", Some(&["b.rs"]), None),
+    )
+    .await;
+    let told = told(&env, &env.bob).await;
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0]
+            .text
+            .contains("Rebase onto the base when you next work on this claim.\n"),
+        "{told:?}"
+    );
+    assert_eq!(
+        overlaps(&env).await[0].order(),
+        None,
+        "a moved base has none"
+    );
+}
+
 /// How the wording tests name a claim: `gh:acme/widgets#<n>` with a title, its holder and branches.
 fn side(n: u64, holder: &str, branches: &[&str]) -> Side {
     Side {
@@ -1669,21 +2346,39 @@ fn collision(kind: OverlapKind) -> Overlap {
     .unwrap()
 }
 
+const ARBITERS_ASKED: Standing = Standing::Tied {
+    in_review: false,
+    settling: TieSettling::Arbiters,
+};
+
 #[test]
-fn a_same_file_message_names_the_other_claim_and_how_to_write_to_its_holder() {
-    let text = wording(
-        &collision(OverlapKind::SameFile),
-        &side(1, "alice", &["alice/1-x"]),
-        &[&side(2, "bob", &["bob/2-y"])],
+fn a_same_file_message_tells_the_claim_landing_first_to_go_on_and_the_other_to_rebase_after_it() {
+    let overlap = collision(OverlapKind::SameFile);
+    let alice = side(1, "alice", &["alice/1-x"]);
+    let bob = side(2, "bob", &["bob/2-y"]);
+    assert_eq!(
+        wording(
+            &overlap,
+            &alice,
+            &[&bob],
+            Standing::First(OrderRule::InReview)
+        ),
+        "Overlap: your branch alice/1-x and the branch of work item gh:acme/widgets#2 \"Refund rounding\" (bob, on bob/2-y) change the same files: default:config/app.yaml. Yours lands first, because it is in review. Work item gh:acme/widgets#2 rebases onto it once it merges; go on with your work."
     );
     assert_eq!(
-        text,
-        "Overlap: your branch alice/1-x and the branch of work item gh:acme/widgets#2 \"Refund rounding\" (bob, on bob/2-y) change the same files: default:config/app.yaml. Rebase onto the base now, and write to bob (dibs send bob) to settle who changes what, so the second merge does not meet a conflict."
+        wording(
+            &overlap,
+            &bob,
+            &[&alice],
+            Standing::Second(OrderRule::InReview)
+        ),
+        "Overlap: your branch bob/2-y and the branch of work item gh:acme/widgets#1 \"Refund rounding\" (alice, on alice/1-x) change the same files: default:config/app.yaml. Work item gh:acme/widgets#1 lands first, because it is in review. Once it merges, rebase onto the base and resolve these files, then say in this conversation that you rebased."
     );
     let unrecorded = wording(
-        &collision(OverlapKind::SameFile),
+        &overlap,
         &side(2, "bob", &[]),
         &[&side(1, "alice", &[])],
+        Standing::Second(OrderRule::Older),
     );
     assert!(
         unrecorded.starts_with(
@@ -1694,24 +2389,142 @@ fn a_same_file_message_names_the_other_claim_and_how_to_write_to_its_holder() {
 }
 
 #[test]
-fn a_contract_message_says_one_side_changes_it_and_the_other_uses_it() {
-    let text = wording(
-        &collision(OverlapKind::Contract),
-        &side(2, "bob", &["bob/2"]),
-        &[&side(1, "alice", &["alice/1"])],
+fn a_tie_says_why_the_rule_cannot_decide_and_who_decides() {
+    let overlap = collision(OverlapKind::SameFile);
+    let alice = side(1, "alice", &["alice/1-x"]);
+    let bob = side(2, "bob", &["bob/2-y"]);
+    let asked = wording(
+        &overlap,
+        &alice,
+        &[&bob],
+        Standing::Tied {
+            in_review: true,
+            settling: TieSettling::Arbiters,
+        },
     );
     assert!(
-        text.starts_with(
-            "Overlap: your branch bob/2 and the branch of work item gh:acme/widgets#1 \"Refund rounding\" (alice, on alice/1) meet at a published contract: one changes default:config/app.yaml, and the other works where that contract is used. "
+        asked.ends_with(
+            "change the same files: default:config/app.yaml. The order rule cannot decide which lands first: both are in review, their work items have the same priority and their claims were made at the same time. dibs asked the project's arbiters."
         ),
-        "{text}"
+        "{asked}"
     );
-    assert!(text.contains("write to alice (dibs send alice)"), "{text}");
-    assert!(!text.contains("settle here"), "{text}");
+    assert!(!asked.contains("dibs send"), "{asked}");
+    let elsewhere = wording(
+        &overlap,
+        &alice,
+        &[&bob],
+        Standing::Tied {
+            in_review: false,
+            settling: TieSettling::ArbitersWriting,
+        },
+    );
+    assert!(
+        elsewhere.ends_with(
+            "claims were made at the same time. dibs asked the project's arbiters in an escalation you do not read, and asked them to write their answer to you."
+        ),
+        "{elsewhere}"
+    );
+    let agree = wording(
+        &overlap,
+        &alice,
+        &[&bob],
+        Standing::Tied {
+            in_review: false,
+            settling: TieSettling::Holders,
+        },
+    );
+    assert!(
+        agree.ends_with(
+            "both are at work, their work items have the same priority and their claims were made at the same time. No arbiter can be asked, so write to bob (dibs send bob) and agree on the order."
+        ),
+        "{agree}"
+    );
+    let tied = |settling| {
+        wording(
+            &overlap,
+            &alice,
+            &[&bob],
+            Standing::Tied {
+                in_review: false,
+                settling,
+            },
+        )
+    };
+    for (settling, ending) in [
+        (
+            TieSettling::AskedBefore { reads: true },
+            "claims were made at the same time. dibs already asked the project's arbiters about these two claims.",
+        ),
+        (
+            TieSettling::AskedBefore { reads: false },
+            "claims were made at the same time. dibs already asked the project's arbiters about these two claims, in an escalation you do not read.",
+        ),
+        (
+            TieSettling::HolderArbitrates,
+            "claims were made at the same time. An escalation about one of these work items already stands and one of you is among its arbiters, so write to bob (dibs send bob) and agree on the order.",
+        ),
+    ] {
+        let text = tied(settling);
+        assert!(text.ends_with(ending), "{settling:?}: {text}");
+    }
 }
 
 #[test]
-fn a_moved_base_message_names_the_merged_pull_request_and_the_readers_branch() {
+fn a_contract_message_keeps_its_sentence_and_asks_the_second_to_build_on_the_first() {
+    let overlap = collision(OverlapKind::Contract);
+    let alice = side(1, "alice", &["alice/1"]);
+    let bob = side(2, "bob", &["bob/2"]);
+    let second = wording(
+        &overlap,
+        &bob,
+        &[&alice],
+        Standing::Second(OrderRule::Priority),
+    );
+    assert_eq!(
+        second,
+        "Overlap: your branch bob/2 and the branch of work item gh:acme/widgets#1 \"Refund rounding\" (alice, on alice/1) meet at a published contract: one changes default:config/app.yaml, and the other works where that contract is used. Work item gh:acme/widgets#1 lands first, because its work item has the higher priority. Read the other change and build on it once it merges, then say in this conversation that you rebased."
+    );
+    let first = wording(
+        &overlap,
+        &alice,
+        &[&bob],
+        Standing::First(OrderRule::Priority),
+    );
+    assert!(
+        first.ends_with(
+            "Yours lands first, because its work item has the higher priority. Work item gh:acme/widgets#2 builds on it once it merges; go on with your work."
+        ),
+        "{first}"
+    );
+    let tied = wording(&overlap, &alice, &[&bob], ARBITERS_ASKED);
+    assert!(
+        tied.contains("meet at a published contract")
+            && tied.ends_with("dibs asked the project's arbiters."),
+        "{tied}"
+    );
+    for text in [&first, &second, &tied] {
+        assert!(!text.contains("Rebase onto the base now"), "{text}");
+    }
+}
+
+#[test]
+fn a_collision_with_no_order_yet_asks_its_holders_to_agree() {
+    let text = wording(
+        &collision(OverlapKind::SameFile),
+        &side(1, "alice", &[]),
+        &[&side(2, "bob", &[])],
+        Standing::Unordered,
+    );
+    assert!(
+        text.ends_with(
+            "default:config/app.yaml. Write to bob (dibs send bob) to agree which lands first."
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_moved_base_message_names_the_merged_pull_request_and_asks_for_a_rebase_next_time() {
     let moved = Overlap::new(
         OverlapKind::MainMoved,
         [ItemId(2)].into(),
@@ -1723,7 +2536,66 @@ fn a_moved_base_message_names_the_merged_pull_request_and_the_readers_branch() {
     )
     .unwrap();
     assert_eq!(
-        wording(&moved, &side(2, "bob", &["bob/2"]), &[]),
-        "Base moved: pull request acme/widgets#7 was merged into the base after your branch bob/2 took its base, and it changed files that branch changes too: default:b.rs. Rebase onto the base now."
+        wording(
+            &moved,
+            &side(2, "bob", &["bob/2"]),
+            &[],
+            Standing::Unordered
+        ),
+        "Base moved: pull request acme/widgets#7 was merged into the base after your branch bob/2 took its base, and it changed files that branch changes too: default:b.rs. Rebase onto the base when you next work on this claim."
+    );
+}
+
+#[test]
+fn an_order_that_changed_says_who_lands_first_now_and_what_to_do() {
+    let overlap = collision(OverlapKind::SameFile);
+    let alice = side(1, "alice", &["alice/1-x"]);
+    let bob = side(2, "bob", &["bob/2-y"]);
+    assert_eq!(
+        reordered_wording(
+            &SAME_FILE_WORDS,
+            &overlap,
+            &[&bob],
+            Standing::First(OrderRule::InReview)
+        ),
+        "The order changed: yours now lands first, because it is in review. Work item gh:acme/widgets#2 rebases onto it once it merges; go on with your work."
+    );
+    assert_eq!(
+        reordered_wording(
+            &SAME_FILE_WORDS,
+            &overlap,
+            &[&alice],
+            Standing::Second(OrderRule::InReview)
+        ),
+        "The order changed: work item gh:acme/widgets#1 now lands first, because it is in review. Once it merges, rebase onto the base and resolve the shared files (default:config/app.yaml), then say in this conversation that you rebased."
+    );
+    assert_eq!(
+        reordered_wording(&SAME_FILE_WORDS, &overlap, &[&bob], ARBITERS_ASKED),
+        "The order changed: the order rule cannot decide whether yours or work item gh:acme/widgets#2 lands first: both are at work, their work items have the same priority and their claims were made at the same time. dibs asked the project's arbiters."
+    );
+}
+
+#[test]
+fn a_ties_escalation_names_both_items_where_they_meet_and_why_the_rule_cannot_decide() {
+    let names = [side(1, "alice", &[]).item, side(2, "bob", &[]).item];
+    let reason = tie_reason(&collision(OverlapKind::Contract), &names, true).unwrap();
+    assert_eq!(
+        reason.as_str(),
+        "Work items gh:acme/widgets#1 \"Refund rounding\" and gh:acme/widgets#2 \"Refund rounding\" meet at a published contract: one changes default:config/app.yaml, and the other works where that contract is used. The order rule cannot decide which lands first: both are in review, their work items have the same priority and their claims were made at the same time."
+    );
+    let long = Overlap::new(
+        OverlapKind::SameFile,
+        [ItemId(1), ItemId(2)].into(),
+        None,
+        [path(&format!("{}.rs", "a".repeat(2100)))].into(),
+    )
+    .unwrap();
+    let counted = tie_reason(&long, &names, false).unwrap();
+    assert!(
+        counted
+            .as_str()
+            .contains("change the same files: one path, too long to name here."),
+        "{}",
+        counted.as_str()
     );
 }

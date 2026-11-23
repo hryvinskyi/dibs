@@ -123,10 +123,7 @@ fn ready_line(entry: &ReadyItem) -> String {
         let _ = write!(line, " — likely areas {}", areas.join(", "));
     }
     if let Some(holder) = &entry.stale_holder {
-        let _ = write!(
-            line,
-            "; {holder}'s claim on it went stale (dibs takeover with a reason)"
-        );
+        let _ = write!(line, "; {holder}'s claim on it went stale (dibs takeover)");
     }
     line
 }
@@ -183,7 +180,7 @@ mod tests {
             text,
             "Ready to pick up, soonest first:\n\
              \x20 P0 gh:acme/web#1 Work 1 — likely areas api:search\n\
-             \x20 P2 #2 Work 2; carol's claim on it went stale (dibs takeover with a reason)\n\
+             \x20 P2 #2 Work 2; carol's claim on it went stale (dibs takeover)\n\
              Not ready:\n\
              \x20 P1 gh:acme/web#3 Work 3 — blocked by gh:acme/web#1; api:billing is held by alice for #9\n\
              \x20 P1 #5 Work 5\n"

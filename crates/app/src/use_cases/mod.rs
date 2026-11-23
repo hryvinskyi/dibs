@@ -7,6 +7,7 @@ mod apply_settings;
 mod ask_grant;
 mod authenticate;
 mod claim_ending;
+mod claim_footprints;
 mod claim_item;
 mod claim_notice;
 mod close_ui_session;
@@ -38,6 +39,7 @@ mod mark_read;
 mod mark_read_together;
 mod me;
 mod no_session;
+mod on_behalf;
 mod open_ui_session;
 mod operate_project;
 mod post_message;
@@ -63,6 +65,8 @@ mod start_thread;
 mod status;
 mod take_over;
 mod tick_claims;
+mod tick_grants;
+mod tick_overlaps;
 mod unacked;
 mod upsert_items;
 mod wide_asks;
@@ -75,7 +79,7 @@ pub(crate) mod testing;
 pub use ack::{AckMessage, Acknowledged};
 pub use add_dependency::{AddDependency, DependencyChange, DependencyInput};
 pub use apply_settings::{AppliedSettings, ApplySettings};
-pub use ask_grant::{AskGrant, AskGrantInput, AskGrantResult, GrantAsked};
+pub use ask_grant::{AskGrant, AskGrantInput, AskGrantResult, GrantAsked, GrantedByDibs};
 pub use authenticate::Authenticate;
 pub use claim_item::{ClaimItem, ClaimItemInput, ClaimMade, PendingNote, WideInput, WideNote};
 pub use close_ui_session::CloseUiSession;
@@ -145,6 +149,8 @@ pub use start_thread::{Addressees, StartThread, StartThreadInput, StartedThread}
 pub use status::{AreaHold, HeldItem, Status, StatusView, WideAreaStanding, WideClaimStatus};
 pub use take_over::{TakeOver, TakeOverInput, TakenOverClaim};
 pub use tick_claims::{ClaimSweep, TickClaims};
+pub use tick_grants::{GrantSweep, TickGrants};
+pub use tick_overlaps::{OverlapSweep, TickOverlaps};
 pub use unacked::{Unacked, UnackedMessage};
 pub use upsert_items::{UpsertItems, UpsertReport};
 pub use wide_asks::Announced;
@@ -315,6 +321,10 @@ pub struct UseCases {
     pub tick_handovers: TickHandovers,
     /// See [`TickClaims`].
     pub tick_claims: TickClaims,
+    /// See [`TickGrants`].
+    pub tick_grants: TickGrants,
+    /// See [`TickOverlaps`].
+    pub tick_overlaps: TickOverlaps,
 }
 
 impl UseCases {
@@ -399,6 +409,8 @@ impl UseCases {
             tick_worktrees: TickWorktrees::new(deps),
             tick_handovers: TickHandovers::new(deps),
             tick_claims: TickClaims::new(deps),
+            tick_grants: TickGrants::new(deps),
+            tick_overlaps: TickOverlaps::new(deps),
         }
     }
 }

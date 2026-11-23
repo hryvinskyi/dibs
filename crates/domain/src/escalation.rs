@@ -153,33 +153,52 @@ pub enum EscalationRefused {
     NoArbiters,
 }
 
-/// Whom an escalation by `by` reaches: every arbiter who is still a person of the project, the
-/// subject's holders and its requester — the member escalating when the subject names no requester
-/// — never `by` themself, who writes it. `people` are the members who may receive messages.
+/// Whom an escalation reaches, and which of them settle it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reach {
+    /// The arbiters who settle it: one of them acknowledging it ends it.
+    pub arbiters: BTreeSet<MemberId>,
+    /// Everyone it reaches: those arbiters, the subject's holders and its requester.
+    pub members: BTreeSet<MemberId>,
+}
+
+/// Whom an escalation reaches and who settles it. The arbiters who settle it are those still
+/// people of the project, never the member it is written for, and for an escalation dibs raises on
+/// its own, none of its holders: nobody asked, so a holder would settle a question about their own
+/// claim alone. It reaches those arbiters, the subject's holders and its requester. `writer` is
+/// the member it is written for, when a member escalates: they are the requester when the subject
+/// names none, and it never reaches them, since they write it; `None` when dibs raises it on its
+/// own, which then reaches every party. `people` are the members who may receive messages.
 ///
 /// # Errors
-/// [`EscalationRefused::NoArbiters`] when no arbiter other than `by` is among `people`.
+/// [`EscalationRefused::NoArbiters`] when no arbiter among `people` may settle it.
 pub fn escalation_reach(
     arbiters: &BTreeSet<MemberId>,
     parties: &Parties,
-    by: MemberId,
+    writer: Option<MemberId>,
     people: &BTreeSet<MemberId>,
-) -> Result<BTreeSet<MemberId>, EscalationRefused> {
+) -> Result<Reach, EscalationRefused> {
+    let reachable = |member: &MemberId| Some(*member) != writer && people.contains(member);
     let judges: BTreeSet<MemberId> = arbiters
         .iter()
         .copied()
-        .filter(|arbiter| *arbiter != by && people.contains(arbiter))
+        .filter(reachable)
+        .filter(|arbiter| writer.is_some() || !parties.holders.contains(arbiter))
         .collect();
     if judges.is_empty() {
         return Err(EscalationRefused::NoArbiters);
     }
-    let requester = parties.requester.unwrap_or(by);
-    Ok(judges
-        .into_iter()
+    let members = judges
+        .iter()
+        .copied()
         .chain(parties.holders.iter().copied())
-        .chain(std::iter::once(requester))
-        .filter(|member| *member != by && people.contains(member))
-        .collect())
+        .chain(parties.requester.or(writer))
+        .filter(reachable)
+        .collect();
+    Ok(Reach {
+        arbiters: judges,
+        members,
+    })
 }
 
 /// The first acknowledgement of an escalation by one of the arbiters it reached, which settles it;
@@ -211,8 +230,9 @@ mod tests {
             requester: Some(CAROL),
         };
         let reached =
-            escalation_reach(&BTreeSet::from([ALICE]), &parties, DAVE, &everyone()).unwrap();
-        assert_eq!(reached, BTreeSet::from([ALICE, BOB, CAROL]));
+            escalation_reach(&BTreeSet::from([ALICE]), &parties, Some(DAVE), &everyone()).unwrap();
+        assert_eq!(reached.members, BTreeSet::from([ALICE, BOB, CAROL]));
+        assert_eq!(reached.arbiters, BTreeSet::from([ALICE]));
     }
 
     #[test]
@@ -222,24 +242,64 @@ mod tests {
             requester: None,
         };
         let reached =
-            escalation_reach(&BTreeSet::from([ALICE]), &parties, CAROL, &everyone()).unwrap();
-        assert_eq!(reached, BTreeSet::from([ALICE, BOB]));
+            escalation_reach(&BTreeSet::from([ALICE]), &parties, Some(CAROL), &everyone()).unwrap();
+        assert_eq!(reached.members, BTreeSet::from([ALICE, BOB]));
+    }
+
+    #[test]
+    fn one_dibs_raises_on_its_own_reaches_every_holder_and_no_holder_settles_it() {
+        let parties = Parties {
+            holders: BTreeSet::from([BOB, CAROL]),
+            requester: None,
+        };
+        assert_eq!(
+            escalation_reach(&BTreeSet::from([ALICE]), &parties, None, &everyone()),
+            Ok(Reach {
+                arbiters: BTreeSet::from([ALICE]),
+                members: BTreeSet::from([ALICE, BOB, CAROL]),
+            })
+        );
+        assert_eq!(
+            escalation_reach(&BTreeSet::from([ALICE, BOB]), &parties, None, &everyone()),
+            Ok(Reach {
+                arbiters: BTreeSet::from([ALICE]),
+                members: BTreeSet::from([ALICE, BOB, CAROL]),
+            }),
+            "bob is reached as a holder, never as one who settles it"
+        );
+        assert_eq!(
+            escalation_reach(&BTreeSet::from([BOB]), &parties, None, &everyone()),
+            Err(EscalationRefused::NoArbiters),
+            "an arbiter who holds does not settle it alone"
+        );
+        assert_eq!(
+            escalation_reach(&BTreeSet::new(), &parties, None, &everyone()),
+            Err(EscalationRefused::NoArbiters)
+        );
     }
 
     #[test]
     fn an_arbiter_who_escalates_needs_another_arbiter() {
         let parties = Parties::default();
         assert_eq!(
-            escalation_reach(&BTreeSet::from([ALICE]), &parties, ALICE, &everyone()),
+            escalation_reach(&BTreeSet::from([ALICE]), &parties, Some(ALICE), &everyone()),
             Err(EscalationRefused::NoArbiters)
         );
         assert_eq!(
-            escalation_reach(&BTreeSet::new(), &parties, ALICE, &everyone()),
+            escalation_reach(&BTreeSet::new(), &parties, Some(ALICE), &everyone()),
             Err(EscalationRefused::NoArbiters)
         );
         assert_eq!(
-            escalation_reach(&BTreeSet::from([ALICE, ERIN]), &parties, ALICE, &everyone()),
-            Ok(BTreeSet::from([ERIN]))
+            escalation_reach(
+                &BTreeSet::from([ALICE, ERIN]),
+                &parties,
+                Some(ALICE),
+                &everyone()
+            ),
+            Ok(Reach {
+                arbiters: BTreeSet::from([ERIN]),
+                members: BTreeSet::from([ERIN]),
+            })
         );
     }
 
@@ -251,11 +311,17 @@ mod tests {
             requester: Some(BOB),
         };
         assert_eq!(
-            escalation_reach(&BTreeSet::from([ERIN]), &parties, CAROL, &present),
+            escalation_reach(&BTreeSet::from([ERIN]), &parties, Some(CAROL), &present),
             Err(EscalationRefused::NoArbiters)
         );
         assert_eq!(
-            escalation_reach(&BTreeSet::from([ERIN, ALICE]), &parties, CAROL, &present),
+            escalation_reach(
+                &BTreeSet::from([ERIN, ALICE]),
+                &parties,
+                Some(CAROL),
+                &present
+            )
+            .map(|reach| reach.members),
             Ok(BTreeSet::from([ALICE, BOB]))
         );
     }

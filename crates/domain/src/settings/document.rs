@@ -35,6 +35,11 @@ pub struct SettingsDocument {
     /// default none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub free_areas_at: Vec<String>,
+    /// How long a request for a grant, or a wide claim's announcement, waits for the holder of the
+    /// area before dibs grants it on the holder's behalf when nothing else lets it grant sooner
+    /// (`10m`; 1 minute to 1 day; default 10 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_after: Option<String>,
     /// How often a session sends a heartbeat (`1m`; 1 to 15 minutes; default 1 minute).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat_every: Option<String>,

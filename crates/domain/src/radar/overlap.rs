@@ -13,7 +13,7 @@ use crate::claim::Claim;
 use crate::ids::ItemId;
 use crate::message::Importance;
 use crate::paths::{RelPath, RepoPath};
-use crate::radar::{BranchName, Consumer, Footprint, FootprintEntry};
+use crate::radar::{BranchName, Consumer, Footprint, FootprintEntry, Landing, OverlapOrder};
 use crate::repo::RepoId;
 use crate::review::PrRef;
 use crate::settings::ProjectSettings;
@@ -53,6 +53,12 @@ impl OverlapKind {
     /// The kind of this name.
     pub fn parse(code: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.code() == code)
+    }
+
+    /// Whether an overlap of the kind is a collision between two claims, which the order rule
+    /// settles: a same-file or a contract overlap. A moved base has one claim and no order.
+    pub const fn is_collision(self) -> bool {
+        self.shape().0 == 2
     }
 
     /// How much its message asks for attention: a collision with another member's work is high;
@@ -104,13 +110,15 @@ pub struct MergeMark {
 }
 
 /// An overlap the radar found: of a kind, between the items it names, on these paths. A collision
-/// between two claims names both items; a moved base names the claim's item and the merge.
+/// between two claims names both items, and, once it was worked out, which of them lands first; a
+/// moved base names the claim's item and the merge, and has no order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Overlap {
     kind: OverlapKind,
     items: BTreeSet<ItemId>,
     merge: Option<MergeMark>,
     paths: BTreeSet<RepoPath>,
+    order: Option<OverlapOrder>,
 }
 
 /// Why an overlap cannot be made.
@@ -120,11 +128,15 @@ pub enum OverlapError {
     /// it has), or no path.
     #[error("an overlap names two items, or one item and a pull request, and at least one path")]
     Shape,
+    /// An order given to a moved base, or one whose item landing first is not one of the
+    /// overlap's two items.
+    #[error("only a collision between two claims has an order, and it names one of their items")]
+    Order,
 }
 
 impl Overlap {
     /// An overlap of `kind`: two items and no merge for a collision, one item and the merge for a
-    /// moved base, and at least one path.
+    /// moved base, and at least one path. It has no order; [`Overlap::with_order`] gives one.
     ///
     /// # Errors
     /// [`OverlapError::Shape`] when the parts do not fit the kind.
@@ -143,7 +155,41 @@ impl Overlap {
             items,
             merge,
             paths,
+            order: None,
         })
+    }
+
+    /// The same overlap with this order, or with none.
+    ///
+    /// # Errors
+    /// [`OverlapError::Order`] for an order on a moved base, or one whose item landing first is
+    /// not one of the overlap's items.
+    pub fn with_order(self, order: Option<OverlapOrder>) -> Result<Self, OverlapError> {
+        if let Some(given) = &order {
+            let fits =
+                self.kind.is_collision() && given.first().is_none_or(|item| self.involves(item));
+            if !fits {
+                return Err(OverlapError::Order);
+            }
+        }
+        Ok(Self { order, ..self })
+    }
+
+    /// Which of its two claims lands first; `None` for a moved base and for a collision whose
+    /// order was not worked out yet.
+    pub fn order(&self) -> Option<&OverlapOrder> {
+        self.order.as_ref()
+    }
+
+    /// Where `reader`, one of its items, stands in its order: first, second behind the other item,
+    /// tied, or unknown — for a moved base, a collision with no order yet, or an item it does not
+    /// name.
+    pub fn landing(&self, reader: ItemId) -> Landing {
+        let other = self.items.iter().copied().find(|item| *item != reader);
+        match (&self.order, other) {
+            (Some(order), Some(other)) if self.involves(reader) => order.landing(reader, other),
+            _ => Landing::Unknown,
+        }
     }
 
     /// Its kind.
@@ -193,8 +239,8 @@ impl Overlap {
         self.items.contains(&item)
     }
 
-    /// What makes it the same overlap as another, whatever its paths: one is announced once, and
-    /// paths it gains later do not make it new.
+    /// What makes it the same overlap as another, whatever its paths and its order: one is
+    /// announced once, and paths it gains or an order worked out later do not make it new.
     pub fn key(&self) -> OverlapKey {
         OverlapKey {
             kind: self.kind,
@@ -203,7 +249,7 @@ impl Overlap {
         }
     }
 
-    /// The same overlap on other paths.
+    /// The same overlap on other paths, with its order kept.
     fn with_paths(&self, paths: BTreeSet<RepoPath>) -> Self {
         Self {
             paths,
@@ -536,9 +582,11 @@ impl OverlapChanges {
 /// Compares what was derived now with what is stored. `covered` says which stored overlaps the
 /// derivation speaks for: one of those that was not derived again has ended; a stored overlap it
 /// does not cover stays as it is. A derived overlap already stored is not new, whatever its paths
-/// became, so each is announced once for as long as it lasts; one that ends and comes back later is
-/// new again. A derived overlap that is not stored is found only when `announced` lets it (its
-/// claims are all live); otherwise it is left for a later derivation.
+/// became and whatever either one's order is, so each is announced once for as long as it lasts;
+/// one that ends and comes back later is new again. Overlaps are matched by their key, so a
+/// derived overlap, which has no order, matches the stored one that has; one stored again on other
+/// paths keeps the stored order. A derived overlap that is not stored is found only when
+/// `announced` lets it (its claims are all live); otherwise it is left for a later derivation.
 pub fn reconcile(
     stored: &[Overlap],
     derived: &BTreeSet<Overlap>,

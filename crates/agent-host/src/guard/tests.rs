@@ -1891,6 +1891,7 @@ fn a_stale_cache_is_refreshed_for_the_brief() {
                 area: area("api:billing"),
                 holder_item: ItemId(3),
                 holder_reference: None,
+                left_to_holder: false,
             }],
             ..InboxView::default()
         });

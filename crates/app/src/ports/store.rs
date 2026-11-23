@@ -20,11 +20,12 @@ use async_trait::async_trait;
 use thiserror::Error;
 use time::OffsetDateTime;
 
+use dibs_domain::area::QualifiedArea;
 use dibs_domain::claim::{Claim, ClaimInstance};
 use dibs_domain::delivery::{Delivery, DeliverySubject};
 use dibs_domain::dependency::Dependency;
 use dibs_domain::event::{Event, EventKind};
-use dibs_domain::grant::AskedGrant;
+use dibs_domain::grant::{AskedGrant, GrantAsk, GrantBlock, GrantDecision};
 use dibs_domain::handle::Handle;
 use dibs_domain::ids::{
     EventId, GrantId, ItemId, MemberId, MessageId, ProjectId, SessionId, ThreadId,
@@ -44,9 +45,10 @@ use dibs_domain::wide::WideAsk;
 use dibs_domain::worktree::{PoolKey, WorktreePool};
 
 use crate::records::{
-    ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject, ItemFilter,
-    ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark, SessionRecord,
-    ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord, WrittenBy,
+    AskedGrantRecord, ClaimThread, CompletionRecord, EscalationRecord, GrantRecord, InProject,
+    ItemFilter, ItemRecord, MemberRecord, MessageRecord, ProjectRecord, PrunedEvents, ReadMark,
+    SessionRecord, ThreadActivity, ThreadRecord, ThreadSummary, TokenRecord, UiSessionRecord,
+    WideAskRecord, WrittenBy,
 };
 use crate::token::{TokenHash, TokenPrefix};
 use dibs_domain::project::ProjectSlug;
@@ -401,7 +403,7 @@ pub trait RadarRows: Send {
     ) -> StoreResult<Vec<FootprintEntry>>;
     /// Every overlap stored, ordered by key.
     async fn overlaps(&mut self, project: ProjectId) -> StoreResult<Vec<Overlap>>;
-    /// Stores the overlap, replacing the one of the same key.
+    /// Stores the overlap with its order, replacing the one of the same key, order included.
     async fn save_overlap(&mut self, project: ProjectId, overlap: &Overlap) -> StoreResult<()>;
     /// Removes the overlap of this key, if there is one.
     async fn delete_overlap(&mut self, project: ProjectId, key: &OverlapKey) -> StoreResult<()>;
@@ -420,6 +422,17 @@ pub trait GrantRows: Send {
     async fn insert_grant(&mut self, project: ProjectId, grant: &GrantRecord) -> StoreResult<()>;
     /// Removes a grant.
     async fn delete_grant(&mut self, project: ProjectId, id: GrantId) -> StoreResult<()>;
+    /// Records a revoke that sticks. A block already recorded between the same two claims, members
+    /// and area is kept as it is, with its first revoke time; recording it again is not an error.
+    async fn insert_grant_block(
+        &mut self,
+        project: ProjectId,
+        block: &GrantBlock,
+    ) -> StoreResult<()>;
+    /// Every revoke that sticks, ordered by asker, asker's item, when the asker claimed it, holder,
+    /// holder's item, when the holder claimed it, and area as `repo:area`. Whether one still stands
+    /// is the caller's to judge from the claims.
+    async fn grant_blocks(&mut self, project: ProjectId) -> StoreResult<Vec<GrantBlock>>;
 }
 
 /// Threads, their messages, and what each member has read.
@@ -555,7 +568,8 @@ pub trait AckRows: Send {
 /// The announcements wide claims sent to the holders of their areas.
 #[async_trait]
 pub trait WideAskRows: Send {
-    /// Stores an announcement. A second one for the same message fails with
+    /// Stores an announcement, which dibs has not acknowledged yet: one whose `acked_by_dibs` is set
+    /// fails with [`StoreError::Backend`]. A second one for the same message fails with
     /// [`StoreError::Duplicate`].
     async fn insert_wide_ask(&mut self, project: ProjectId, ask: &WideAsk) -> StoreResult<()>;
     /// The announcement the message carries, if it carries one.
@@ -564,8 +578,53 @@ pub trait WideAskRows: Send {
         project: ProjectId,
         message: MessageId,
     ) -> StoreResult<Option<WideAsk>>;
-    /// Every announcement its holder has not acknowledged yet, ordered by message.
+    /// Every announcement that neither its holder nor dibs on their behalf has acknowledged yet,
+    /// ordered by message, including those dibs left to their holders or settled: the holder may
+    /// still acknowledge them.
     async fn open_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>>;
+    /// The announcements of [`WideAskRows::open_wide_asks`] that still wait for dibs or their
+    /// holder — not settled — ordered by message. One dibs left to its holder is listed, since it
+    /// waits for them; one dibs settled is not, although its holder may still acknowledge it.
+    async fn waiting_wide_asks(&mut self, project: ProjectId) -> StoreResult<Vec<WideAsk>>;
+    /// The announcements of [`WideAskRows::open_wide_asks`] not settled yet, ordered by message,
+    /// each with whether dibs left it to its holder and when it was sent: the `created_at` of the
+    /// message that carries it. dibs judges on their holders' behalf those not left to them; one
+    /// left to its holder is only settled once it closes.
+    async fn open_wide_asks_with_time(
+        &mut self,
+        project: ProjectId,
+    ) -> StoreResult<Vec<(WideAskRecord, OffsetDateTime)>>;
+    /// Leaves the announcement the message carries to its holder for good: dibs never acknowledges
+    /// it on their behalf ([`WideAskRows::open_wide_asks_with_time`] marks it), and it stays open
+    /// for the holder to acknowledge. Leaving one again changes nothing, and a message that carries
+    /// none is left alone.
+    async fn leave_wide_ask_to_holder(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<()>;
+    /// Settles the announcement the message carries at `at`, because it closed: dibs stops judging
+    /// it ([`WideAskRows::open_wide_asks_with_time`] leaves it out) and never acknowledges it, and
+    /// it stays open for the holder to acknowledge. One settled already keeps its first time, one
+    /// dibs acknowledged is not settled, and a message that carries none is left alone.
+    async fn settle_wide_ask(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
+    /// Records that dibs acknowledged the announcement the message carries on its holder's behalf,
+    /// at `at`, because of `because`. An announcement dibs already acknowledged keeps its first
+    /// acknowledgement, a settled one is not acknowledged, and a message that carries none is left
+    /// alone. `because` is never
+    /// [`GrantDecision::Holder`], which the store refuses as [`StoreError::Backend`].
+    async fn mark_wide_ask_acked_by_dibs(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+        at: OffsetDateTime,
+        because: GrantDecision,
+    ) -> StoreResult<()>;
 }
 
 /// The grants members asked of the holders of areas.
@@ -577,14 +636,59 @@ pub trait AskedGrantRows: Send {
         project: ProjectId,
         asked: &AskedGrant,
     ) -> StoreResult<()>;
-    /// Every request put to `holder` that they have not answered — they wrote no message in the
-    /// conversation it started — ordered by message. Whether one still waits for their decision is
-    /// decided by the caller.
+    /// Every unsettled request put to `holder` that they have not answered — they wrote no message
+    /// in the conversation it started — ordered by message, each with whether dibs left it to them;
+    /// one left to them is listed as any other, since they still decide it. Whether one still
+    /// waits for their decision is decided by the caller.
     async fn unanswered_asked_grants(
         &mut self,
         project: ProjectId,
         holder: MemberId,
-    ) -> StoreResult<Vec<AskedGrant>>;
+    ) -> StoreResult<Vec<AskedGrantRecord>>;
+    /// Every request of the project not settled yet, whether or not its holder answered, each with
+    /// whether dibs left it to its holder and when it was asked: the `created_at` of the message
+    /// that asked. Ordered by message. dibs decides on their holders' behalf those not left to
+    /// them; one left to its holder is only settled once it closes.
+    async fn unsettled_asked_grants(
+        &mut self,
+        project: ProjectId,
+    ) -> StoreResult<Vec<(AskedGrantRecord, OffsetDateTime)>>;
+    /// Leaves the request the message asked to its holder for good: dibs never grants it on their
+    /// behalf ([`AskedGrantRows::unsettled_asked_grants`] marks it), and it is still listed for the
+    /// holder ([`AskedGrantRows::unanswered_asked_grants`]) until settled. Leaving one again changes
+    /// nothing, and a message that asked none is left alone.
+    async fn leave_asked_grant_to_holder(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+    ) -> StoreResult<()>;
+    /// Settles the request the message asked, at `at`, so that dibs never decides it again. A
+    /// request settled already keeps its first time, and a message that asked none is left alone.
+    async fn settle_asked_grant(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
+    /// Settles, at `at`, every unsettled request `asker` put to `holder` in `area` for `item`,
+    /// leaving their requests for other items as they are.
+    async fn settle_asked_grants_for_item(
+        &mut self,
+        project: ProjectId,
+        asked: &GrantAsk,
+        holder: MemberId,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
+    /// Settles, at `at`, every unsettled request `asker` put to `holder` in `area`, whatever the
+    /// item it was asked for.
+    async fn settle_asked_grants_between(
+        &mut self,
+        project: ProjectId,
+        asker: MemberId,
+        holder: MemberId,
+        area: &QualifiedArea,
+        at: OffsetDateTime,
+    ) -> StoreResult<()>;
 }
 
 /// The escalations members sent to the arbiters.
@@ -601,6 +705,15 @@ pub trait EscalationRows: Send {
     /// message — newest first. A settled one is never read, so the cost follows what is open, not
     /// the history.
     async fn open_escalations(&mut self, project: ProjectId) -> StoreResult<Vec<EscalationRecord>>;
+    /// Records that the pair of tied claims `tie`, by its two work items, the lower first, was put
+    /// to the arbiters of the escalation whose message is `message`. A pair it already carries is
+    /// kept once, and a message that stores no escalation changes nothing.
+    async fn add_escalation_tie(
+        &mut self,
+        project: ProjectId,
+        message: MessageId,
+        tie: [ItemId; 2],
+    ) -> StoreResult<()>;
 }
 
 /// What reached a member while they worked, one delivery per member and subject.

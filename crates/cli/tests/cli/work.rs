@@ -297,6 +297,81 @@ fn ask_grant_names_who_was_asked_or_why_nobody_was() {
 }
 
 #[test]
+fn dibs_grants_a_request_to_a_claim_in_review_and_revoke_grant_undoes_it() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    run(
+        &setup.alice,
+        &["new", "gh:acme/api#1", "--title", "Invoices"],
+    );
+    run(&setup.bob, &["new", "gh:acme/api#2", "--title", "Refunds"]);
+    run(
+        &setup.alice,
+        &["claim", "gh:acme/api#1", "--area", "billing"],
+    );
+    run(&setup.bob, &["claim", "gh:acme/api#2"]);
+    let reviewed = run(
+        &setup.alice,
+        &["claim", "review", "gh:acme/api#1", "--pr", "acme/api#12"],
+    );
+    assert_eq!(status(&reviewed), 0, "{}", text(&reviewed.stderr));
+
+    let asked = run(
+        &setup.bob,
+        &["ask-grant", "gh:acme/api#2", "--area", "billing"],
+    );
+    assert_eq!(status(&asked), 0, "{}", text(&asked.stderr));
+    let said = text(&asked.stdout);
+    assert!(
+        said.starts_with(
+            "dibs granted you edits in api:billing for gh:acme/api#2 on alice's behalf, because the claim holding the area is in review (grant "
+        ),
+        "{said}"
+    );
+    assert!(
+        said.trim_end().ends_with("You may edit there now."),
+        "{said}"
+    );
+
+    run(&setup.bob, &["release", "gh:acme/api#2"]);
+    run(&setup.bob, &["claim", "gh:acme/api#2"]);
+    let again = run(
+        &setup.bob,
+        &["ask-grant", "gh:acme/api#2", "--area", "billing", "--json"],
+    );
+    let answer = json(&again);
+    assert_eq!(answer["outcome"], "granted", "{answer}");
+    assert_eq!(answer["decided"], "in_review");
+    let grant = answer["grant_id"]
+        .as_u64()
+        .expect("dibs gave a grant to bob's new claim")
+        .to_string();
+
+    let refused = run(&setup.bob, &["revoke-grant", &grant]);
+    assert_eq!(status(&refused), 1);
+    assert!(
+        text(&refused.stderr)
+            .contains("Only the member who granted this, or an admin, may revoke it."),
+        "{}",
+        text(&refused.stderr)
+    );
+    let revoked = run(&setup.alice, &["revoke-grant", &grant]);
+    assert_eq!(status(&revoked), 0, "{}", text(&revoked.stderr));
+    let said = text(&revoked.stdout);
+    assert!(
+        said.starts_with(&format!(
+            "Revoked grant {grant}: bob may no longer edit in api:billing for #"
+        )),
+        "{said}"
+    );
+    let gone = run(&setup.alice, &["revoke-grant", &grant]);
+    assert_eq!(status(&gone), 1, "revoked already");
+    let bad = run(&setup.alice, &["revoke-grant", "zero"]);
+    assert_eq!(status(&bad), 2);
+}
+
+#[test]
 fn a_wide_claim_from_the_command_line_waits_for_the_holders_acknowledgement() {
     let setup = Setup::new();
     let api = setup.checkout("api", Some("api"), API_REMOTE);
@@ -385,6 +460,53 @@ fn a_wide_claim_from_the_command_line_waits_for_the_holders_acknowledgement() {
     );
     let granted = run(&setup.bob, &["check", "src/billing/a.rs"]);
     assert_eq!(status(&granted), 0, "{}", text(&granted.stdout));
+}
+
+#[test]
+fn a_wide_claim_says_when_dibs_acknowledged_an_announcement_for_a_holder_in_review() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    run(
+        &setup.alice,
+        &["new", "gh:acme/api#1", "--title", "Invoices"],
+    );
+    run(&setup.bob, &["new", "gh:acme/api#2", "--title", "Upgrade"]);
+    run(
+        &setup.alice,
+        &["claim", "gh:acme/api#1", "--area", "billing"],
+    );
+    let reviewed = run(
+        &setup.alice,
+        &["claim", "review", "gh:acme/api#1", "--pr", "acme/api#12"],
+    );
+    assert_eq!(status(&reviewed), 0, "{}", text(&reviewed.stderr));
+
+    let wide = run(
+        &setup.bob,
+        &[
+            "claim",
+            "gh:acme/api#2",
+            "--wide",
+            "billing",
+            "--reason",
+            "Upgrade the HTTP client",
+        ],
+    );
+
+    assert_eq!(status(&wide), 0, "{}", text(&wide.stderr));
+    let said = text(&wide.stdout);
+    assert!(
+        said.contains("dibs acknowledged the announcement to alice (message "),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "on their behalf, because the claim holding the area is in review: you may edit api:billing now."
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("Asked alice to acknowledge"), "{said}");
 }
 
 #[test]
@@ -679,7 +801,7 @@ fn the_status_names_each_overlap_with_the_way_on() {
     let out = setup.dibs(&setup.bob, &api).arg("status").output().unwrap();
     let shown = text(&out.stdout);
     assert!(
-        shown.contains("Overlaps (rebase onto the base now")
+        shown.contains("Overlaps (each claim's conversation says which change lands first")
             && shown.contains(
                 "same file: gh:acme/api#1 (alice) and gh:acme/api#2 (bob) on api:config/app.yaml"
             ),
@@ -767,6 +889,20 @@ fn a_feature_takes_an_area_from_debt_work_through_the_command_line() {
         &["claim", "narrow", "gh:acme/api#7", "--area", "billing"],
     );
     assert_ne!(status(&not_theirs), 0);
+}
+
+#[test]
+fn a_takeover_needs_no_reason() {
+    let setup = Setup::new();
+    let api = setup.checkout("api", Some("api"), API_REMOTE);
+    let run = |who, args: &[&str]| setup.dibs(who, &api).args(args).output().unwrap();
+    run(&setup.alice, &["new", "gh:acme/api#4", "--title", "Search"]);
+    run(&setup.alice, &["claim", "gh:acme/api#4"]);
+    setup.server.advance(Duration::hours(2));
+    let taken = run(&setup.bob, &["takeover", "gh:acme/api#4", "--json"]);
+    assert_eq!(status(&taken), 0, "{}", text(&taken.stderr));
+    assert_eq!(json(&taken)["previous_holder"], "alice");
+    assert_eq!(json(&taken)["claim"]["holder"], "bob");
 }
 
 #[test]

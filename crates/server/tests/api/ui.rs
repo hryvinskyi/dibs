@@ -769,26 +769,37 @@ async fn the_take_over_form_takes_a_silent_claim_and_a_refusal_shows_in_the_fram
     let browser = sign_in(&world, &bob).await;
     let path = format!("/ui/items/{silent}/takeover");
     let back = format!("/ui/claims/{silent}?filter=silent");
-    let missing = browser
+    let too_long = "x".repeat(16_385);
+    let refused = browser
         .post(
             &world,
             &path,
-            &[("csrf", &browser.token), ("reason", " "), ("back", &back)],
+            &[
+                ("csrf", &browser.token),
+                ("reason", &too_long),
+                ("back", &back),
+            ],
         )
         .await;
-    assert_eq!(missing.status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(missing.text.contains("Write a reason"), "{}", missing.text);
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
-        missing.text.contains(&format!(
+        refused
+            .text
+            .contains("a message is longer than 16384 bytes"),
+        "{}",
+        refused.text
+    );
+    assert!(
+        refused.text.contains(&format!(
             r#"<a class="banner__action" href="/ui/claims/{silent}?filter=silent">Go back</a>"#
         )),
         "{}",
-        missing.text
+        refused.text
     );
     assert!(
-        missing.text.contains(r#"data-changed-kinds="""#),
+        refused.text.contains(r#"data-changed-kinds="""#),
         "the browser's address is the form's, so no change refreshes the notice: {}",
-        missing.text
+        refused.text
     );
     let claims = browser.get(&world, &back).await;
     assert!(
@@ -859,22 +870,26 @@ async fn a_take_over_returns_to_the_path_its_form_names_and_never_to_another_sit
         "//example.com/",
         "/\\example.com",
     ] {
-        let missing = browser
+        let refused = browser
             .post(
                 &world,
                 &path,
-                &[("csrf", &browser.token), ("reason", " "), ("back", foreign)],
+                &[
+                    ("csrf", &browser.token),
+                    ("reason", &"x".repeat(16_385)),
+                    ("back", foreign),
+                ],
             )
             .await;
-        assert_eq!(missing.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
-            missing
+            refused
                 .text
                 .contains(r#"<a class="banner__action" href="/ui/claims">Go back</a>"#),
             "{foreign}: {}",
-            missing.text
+            refused.text
         );
-        assert!(!missing.text.contains("example.com"), "{foreign}");
+        assert!(!refused.text.contains("example.com"), "{foreign}");
     }
     let taken = browser
         .post(

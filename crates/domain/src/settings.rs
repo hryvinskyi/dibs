@@ -84,6 +84,14 @@ impl RepoSpec {
         self.hot.iter().find(|rule| rule.matches(path))
     }
 
+    /// The area the path is a path of by the repository's hot-file rules: the area of the first
+    /// rule matching it, in declaration order, when that rule decides the files it matches as paths
+    /// of an area (an `owner` rule), as an edit check decides the path. `None` when no rule matches
+    /// or the first that does names no such area.
+    pub fn hot_area_for(&self, path: &RelPath) -> Option<&QualifiedArea> {
+        self.hot_rule_for(path).and_then(HotRuleSpec::as_area)
+    }
+
     /// Whether the path is merged by hand when two branches change it: as the first hot-file rule
     /// matching it answers, and yes when none matches.
     pub fn merged_by_hand(&self, path: &RelPath) -> bool {
@@ -150,6 +158,7 @@ pub struct ProjectSettings {
     release_after: Duration,
     idle_area_after: Duration,
     free_areas_at: Vec<SourceStatus>,
+    grant_after: Duration,
     heartbeat_every: Duration,
     yield_escalates_after: Duration,
     edit_policy: EditPolicy,
@@ -185,6 +194,12 @@ pub enum SettingsError {
     /// `idle_area_after` is outside 1 to 90 days.
     #[error("idle_area_after is between 1 and 90 days")]
     IdleAreaAfterOutOfRange,
+    /// `grant_after` is not a duration.
+    #[error("grant_after: {0}")]
+    GrantAfter(DurationError),
+    /// `grant_after` is outside 1 minute to 1 day.
+    #[error("grant_after is between 1 minute and 1 day")]
+    GrantAfterOutOfRange,
     /// A state of `free_areas_at` is not a tracker state.
     #[error("free_areas_at: '{text}': {error}")]
     FreeAreasAt {
@@ -492,6 +507,8 @@ const DEFAULT_RELEASE_AFTER: Duration = Duration::days(7);
 const RELEASE_AFTER_RANGE: (Duration, Duration) = (Duration::days(1), Duration::days(90));
 const DEFAULT_IDLE_AREA_AFTER: Duration = Duration::days(7);
 const IDLE_AREA_AFTER_RANGE: (Duration, Duration) = (Duration::days(1), Duration::days(90));
+const DEFAULT_GRANT_AFTER: Duration = Duration::minutes(10);
+const GRANT_AFTER_RANGE: (Duration, Duration) = (Duration::minutes(1), Duration::days(1));
 const HEARTBEAT_EVERY_RANGE: (Duration, Duration) = (Duration::minutes(1), Duration::minutes(15));
 const DEFAULT_YIELD_ESCALATES_AFTER: Duration = Duration::minutes(30);
 const YIELD_ESCALATES_AFTER_RANGE: (Duration, Duration) =
@@ -521,7 +538,8 @@ impl ProjectSettings {
     /// between 1 and 90 days and longer than `stale_after` (default 7 days, or one day more than
     /// `stale_after` when that is 7 days or longer); `idle_area_after` between 1 and 90 days
     /// (default 7 days); `free_areas_at` a list of tracker states, each 1 to 40 characters with no
-    /// control characters and each once (default none); `heartbeat_every`
+    /// control characters and each once (default none); `grant_after` between 1 minute and 1 day
+    /// (default 10 minutes); `heartbeat_every`
     /// between 1 and 15 minutes (default 1 minute); `yield_escalates_after` between 5 minutes and
     /// 24 hours (default 30 minutes); `raised_per_hour` between 1 and 1000 (default
     /// 10); either top-level areas and rules or a `repos`
@@ -571,6 +589,13 @@ impl ProjectSettings {
             SettingsError::IdleAreaAfterOutOfRange,
         )?;
         let free_areas_at = parse_free_areas_at(&document.free_areas_at)?;
+        let grant_after = parse_in_range(
+            document.grant_after.as_deref(),
+            DEFAULT_GRANT_AFTER,
+            GRANT_AFTER_RANGE,
+            SettingsError::GrantAfter,
+            SettingsError::GrantAfterOutOfRange,
+        )?;
         let heartbeat_every = parse_in_range(
             document.heartbeat_every.as_deref(),
             DEFAULT_HEARTBEAT_EVERY,
@@ -658,6 +683,7 @@ impl ProjectSettings {
             release_after,
             idle_area_after,
             free_areas_at,
+            grant_after,
             heartbeat_every,
             yield_escalates_after,
             edit_policy: document.edit_policy.unwrap_or_default(),
@@ -697,6 +723,12 @@ impl ProjectSettings {
     /// written; none unless the settings name some.
     pub fn free_areas_at(&self) -> &[SourceStatus] {
         &self.free_areas_at
+    }
+
+    /// How long a request for a grant, or a wide claim's announcement, waits for the holder of the
+    /// area before dibs grants it on the holder's behalf when nothing else lets it grant sooner.
+    pub fn grant_after(&self) -> Duration {
+        self.grant_after
     }
 
     /// Whether `state` is one of [`ProjectSettings::free_areas_at`], compared exactly as an import
@@ -779,16 +811,18 @@ impl ProjectSettings {
         kept
     }
 
-    /// The same settings with every setting that decides how the server ends claims or takes
-    /// areas from them on its own set to its default: what a reader that knows none of them can
-    /// parse, since [`ProjectSettings::to_document`] leaves a setting at its default out. The
-    /// claims' liveness, the areas and every other setting are kept.
+    /// The same settings with every setting that decides how the server ends claims, takes areas
+    /// from them, or grants edits in them on a holder's behalf on its own set to its default: what
+    /// a reader that knows none of them can parse, since [`ProjectSettings::to_document`] leaves a
+    /// setting at its default out. The claims' liveness, the areas and every other setting are
+    /// kept.
     #[must_use]
     pub fn without_claim_endings(&self) -> Self {
         Self {
             release_after: default_release_after(self.stale_after),
             idle_area_after: DEFAULT_IDLE_AREA_AFTER,
             free_areas_at: Vec::new(),
+            grant_after: DEFAULT_GRANT_AFTER,
             ..self.clone()
         }
     }
@@ -932,6 +966,8 @@ impl ProjectSettings {
             idle_area_after: (self.idle_area_after != DEFAULT_IDLE_AREA_AFTER)
                 .then(|| format_duration(self.idle_area_after)),
             free_areas_at: self.free_areas_at.iter().map(ToString::to_string).collect(),
+            grant_after: (self.grant_after != DEFAULT_GRANT_AFTER)
+                .then(|| format_duration(self.grant_after)),
             heartbeat_every: Some(format_duration(self.heartbeat_every)),
             yield_escalates_after: (self.yield_escalates_after != DEFAULT_YIELD_ESCALATES_AFTER)
                 .then(|| format_duration(self.yield_escalates_after)),
@@ -1495,23 +1531,81 @@ mod tests {
     }
 
     #[test]
+    fn dibs_grants_on_a_holders_behalf_after_ten_minutes_unless_the_settings_say_one_minute_to_a_day()
+     {
+        assert_eq!(settings("{}").grant_after(), Duration::minutes(10));
+        assert_eq!(
+            settings(r#"{"grant_after":"20m"}"#).grant_after(),
+            Duration::minutes(20)
+        );
+        let cases: &[(&str, Option<SettingsError>)] = &[
+            (r#"{"grant_after":"1m"}"#, None),
+            (r#"{"grant_after":"1d"}"#, None),
+            (r#"{"stale_after":"1h","grant_after":"1d"}"#, None),
+            (
+                r#"{"grant_after":"59s"}"#,
+                Some(SettingsError::GrantAfterOutOfRange),
+            ),
+            (
+                r#"{"grant_after":"1d1s"}"#,
+                Some(SettingsError::GrantAfterOutOfRange),
+            ),
+            (
+                r#"{"grant_after":"soon"}"#,
+                Some(SettingsError::GrantAfter(DurationError::Malformed)),
+            ),
+        ];
+        for (json, expected) in cases {
+            let got = ProjectSettings::parse(&document(json), &HotRuleRegistry::standard()).err();
+            assert_eq!(&got, expected, "{json}");
+        }
+        assert_eq!(
+            refusal(r#"{"grant_after":"2d"}"#).to_string(),
+            "grant_after is between 1 minute and 1 day"
+        );
+    }
+
+    #[test]
+    fn the_grant_delay_is_written_back_only_when_it_is_not_the_default() {
+        for (json, written) in [
+            ("{}", None),
+            (r#"{"grant_after":"10m"}"#, None),
+            (r#"{"grant_after":"600s"}"#, None),
+            (r#"{"grant_after":"20m"}"#, Some("20m")),
+            (r#"{"grant_after":"2h"}"#, Some("2h")),
+        ] {
+            let parsed = settings(json);
+            let document = parsed.to_document();
+            assert_eq!(document.grant_after.as_deref(), written, "{json}");
+            assert_eq!(
+                ProjectSettings::parse(&document, &HotRuleRegistry::standard()).unwrap(),
+                parsed,
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
     fn without_claim_endings_the_release_delay_is_the_default_and_everything_else_stays() {
         let written = settings(
             r#"{"stale_after":"2d","release_after":"20d","idle_area_after":"30d",
-                "free_areas_at":["Ready for QA"],"yield_escalates_after":"1h",
+                "free_areas_at":["Ready for QA"],"grant_after":"20m","yield_escalates_after":"1h",
                 "areas":[{"name":"billing","paths":["packages/billing/**"]}]}"#,
         );
         let older = written.without_claim_endings();
         assert_eq!(older.release_after(), Duration::days(7));
         assert_eq!(older.idle_area_after(), Duration::days(7));
         assert!(older.free_areas_at().is_empty());
+        assert_eq!(older.grant_after(), Duration::minutes(10));
         assert_eq!(older.stale_after(), written.stale_after());
         let mut expected = written.to_document();
         assert_eq!(expected.idle_area_after.as_deref(), Some("30d"));
         assert_eq!(expected.free_areas_at, ["Ready for QA"]);
+        assert_eq!(expected.grant_after.as_deref(), Some("20m"));
         expected.release_after = None;
         expected.idle_area_after = None;
         expected.free_areas_at = Vec::new();
+        expected.grant_after = None;
         assert_eq!(older.to_document(), expected);
         let late = settings(r#"{"stale_after":"10d","release_after":"30d"}"#);
         assert_eq!(

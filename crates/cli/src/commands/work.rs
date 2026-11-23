@@ -1,5 +1,5 @@
 //! Work items and claims: `status`, `items`, `new`, `claim`, `takeover`, `release`, `done`,
-//! `grant` and `ask-grant`.
+//! `grant`, `ask-grant` and `revoke-grant`.
 
 pub mod branch;
 
@@ -8,16 +8,17 @@ use std::fmt::Write as _;
 use time::OffsetDateTime;
 
 use dibs_client::api::{
-    AskOutcome, ClaimKind, ClaimOutcome, ClaimRequest, DropPrRequest, Ended, GrantAskRequest,
-    GrantAsked, GrantRequest, HeldItem, ItemFilter, Items, NarrowRequest, NewItem, ReviewRequest,
-    TakeOverRequest, WideAreaState, WideClaim, WideRequest,
+    Announcement, AskOutcome, ClaimKind, ClaimOutcome, ClaimRequest, DropPrRequest, Ended,
+    GrantAskRequest, GrantAsked, GrantRequest, HeldItem, ItemFilter, Items, NarrowRequest, NewItem,
+    ReviewRequest, TakeOverRequest, WideAreaState, WideClaim, WideRequest,
 };
+use dibs_domain::grant::GrantDecision;
 use dibs_domain::message::Body;
 use dibs_domain::wide::WideReason;
 
 use crate::cli::{
     AskGrantArgs, ClaimAction, ClaimArgs, GrantArgs, ItemsArgs, KeyArgs, NarrowArgs, NewArgs,
-    ReviewArgs, TakeoverArgs,
+    ReviewArgs, RevokeGrantArgs, TakeoverArgs,
 };
 use crate::context::Context;
 use crate::failure::{Failure, sentence};
@@ -79,7 +80,7 @@ pub async fn status(ctx: &Context) -> Result<(), Failure> {
         if !status.overlaps.is_empty() {
             let _ = writeln!(
                 text,
-                "Overlaps (rebase onto the base now; for a contract, read the other change before going on):"
+                "Overlaps (each claim's conversation says which change lands first; the other rebases once it merges):"
             );
             for overlap in &status.overlaps {
                 let _ = writeln!(text, "  {}", overlap_line(overlap));
@@ -240,14 +241,7 @@ pub async fn claim(args: ClaimArgs, ctx: &Context) -> Result<(), Failure> {
             );
         }
         for asked in &claimed.announced {
-            let areas: Vec<String> = asked.areas.iter().map(ToString::to_string).collect();
-            let _ = write!(
-                text,
-                " Asked {} to acknowledge (message {}) for {}; your edits there wait for it.",
-                asked.to,
-                asked.message_id,
-                areas.join(", ")
-            );
+            text.push_str(&announced_text(asked));
         }
         for pending in &claimed.pending {
             let asked = if pending.asked {
@@ -417,17 +411,23 @@ fn wide_line(wide: &WideClaim) -> String {
     )
 }
 
-/// Takes over another member's stale claim, telling them why.
+/// Takes over another member's stale claim, with the reason given or the one dibs writes.
 ///
 /// # Errors
 /// A refusal when the claim is not stale; the [`Failure`] of the call.
 pub async fn take_over(args: TakeoverArgs, ctx: &Context) -> Result<(), Failure> {
-    let reason = Body::parse(&args.reason).map_err(|error| {
-        Failure::config(
-            "invalid_reason",
-            sentence(&format!("the reason is not valid: {error}")),
-        )
-    })?;
+    let reason = args
+        .reason
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        .map(Body::parse)
+        .transpose()
+        .map_err(|error| {
+            Failure::config(
+                "invalid_reason",
+                sentence(&format!("the reason is not valid: {error}")),
+            )
+        })?;
     let connection = ctx.connect().await?;
     let item = connection.resolve(&args.key).await?;
     let session = connection.session().await?;
@@ -528,6 +528,29 @@ pub async fn grant(args: GrantArgs, ctx: &Context) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Revokes a grant; the server decides whether the caller may, as its grantor or an admin.
+///
+/// # Errors
+/// The [`Failure`] of the call.
+pub async fn revoke_grant(args: RevokeGrantArgs, ctx: &Context) -> Result<(), Failure> {
+    let connection = ctx.connect().await?;
+    let revoked = connection
+        .client
+        .revoke_grant(args.id)
+        .await
+        .map_err(|error| connection.failed(error))?;
+    ctx.printer.show(&revoked, || {
+        format!(
+            "Revoked grant {}: {} may no longer edit in {} for {}.",
+            revoked.grant.id,
+            revoked.grant.to,
+            revoked.grant.area,
+            item_label(None, revoked.grant.item)
+        )
+    });
+    Ok(())
+}
+
 /// Asks whoever holds an area for a grant there, for the caller's claim on an item.
 ///
 /// # Errors
@@ -545,6 +568,28 @@ pub async fn ask_grant(args: AskGrantArgs, ctx: &Context) -> Result<(), Failure>
         .map_err(|error| connection.failed(error))?;
     ctx.printer.show(&asked, || asked_text(&asked));
     Ok(())
+}
+
+/// One announcement a wide claim sent, as the claimer reads it: waiting for its holder's
+/// acknowledgement, or acknowledged by dibs on the holder's behalf as it was sent, and why.
+fn announced_text(asked: &Announcement) -> String {
+    let areas: Vec<String> = asked.areas.iter().map(ToString::to_string).collect();
+    let areas = areas.join(", ");
+    let (to, message) = (&asked.to, asked.message_id);
+    match &asked.acked_by_dibs {
+        None => format!(
+            " Asked {to} to acknowledge (message {message}) for {areas}; your edits there wait for it."
+        ),
+        Some(code) => {
+            let why = asked.dibs_ack().and_then(GrantDecision::why).map_or_else(
+                || format!("for a reason this dibs does not know ({code})"),
+                |why| format!("because {why}"),
+            );
+            format!(
+                " dibs acknowledged the announcement to {to} (message {message}) on their behalf, {why}: you may edit {areas} now."
+            )
+        }
+    }
 }
 
 /// What asking for a grant came to, as a sentence.
@@ -572,8 +617,22 @@ fn asked_text(asked: &GrantAsked) -> String {
             format!("Nobody holds {area} through a live claim: no grant is needed for {item}.")
         }
         AskOutcome::Own => format!("Your own claim holds {area}: no grant is needed."),
-        AskOutcome::Granted => {
-            format!("{holder} already granted you edits in {area} for {item}.")
-        }
+        AskOutcome::Granted => match asked.grant_id {
+            Some(grant) => {
+                let why = asked.decision().and_then(GrantDecision::why).map_or_else(
+                    || {
+                        format!(
+                            "for a reason this dibs does not know ({})",
+                            asked.decided.as_deref().unwrap_or("none given")
+                        )
+                    },
+                    |why| format!("because {why}"),
+                );
+                format!(
+                    "dibs granted you edits in {area} for {item} on {holder}'s behalf, {why} (grant {grant}). You may edit there now."
+                )
+            }
+            None => format!("{holder} already granted you edits in {area} for {item}."),
+        },
     }
 }

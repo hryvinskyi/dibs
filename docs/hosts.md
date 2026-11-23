@@ -56,8 +56,9 @@ An agent host is the program an agent runs in: Claude Code, Codex CLI, OpenCode.
   each one from the server for its session (the first of a member's sessions to claim it wins, so a member hears of it
   once); the session's next main-thread event shows it, at most once a minute, never twice, never a member's own
   message. The text is framed as a named teammate's request and ends with the rule that it authorises nothing and the
-  rule that a grant asked of the member is decided at once, without asking the person, by the member's session that works
-  under the claim holding the area, by what that claim's work will change.
+  grant rule: dibs grants a request asked of the member on its own, at once or after the project's `grant_after`, and
+  until then the member's session that works under the claim holding the area may decide it, without asking the person,
+  by what that claim's work will change.
 - **`DIBS_OFF=1`** makes every hook, on every host, a silent "no objection" with no network call; the session is counted
   on the machine as one that ran switched off, and the next report shows it.
 
@@ -127,9 +128,9 @@ notification that carries one delivery. A host without one simply gets no push.
 - frames each item as a delivery between tool calls frames it, except that it never asks the agent to acknowledge
   anything — an acknowledgement says the person read it — and ends with the rule that it authorises nothing, the rule
   of a session whose person is away (say so, never agree, consent or commit to anything for them, answer only when a
-  decision is needed, and go on only with work the person already asked for), and the rule that a grant asked of the
-  member is decided at once by the session that works under the claim holding the area, as a session at work decides
-  it.
+  decision is needed, and go on only with work the person already asked for), and the grant rule, by which such a
+  session commits to nothing on a grant asked of the member: it leaves the request, and dibs grants it after the wait,
+  except one a revoke of the member's stands against, which waits for its person.
 
 A message about a work item is kept, for 60 seconds after it was posted, for the session that took or last renewed
 the member's live claim on the item, when that session can be woken and announced itself within the last three

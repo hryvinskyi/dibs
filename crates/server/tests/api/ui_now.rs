@@ -1,9 +1,9 @@
 //! Now (`/ui/`) through the real router: the cards of what waits for a look with their links, the
-//! heading and the rail counting them alike, a grant request left waiting for the viewer's agent,
+//! heading and the rail counting them alike, a grant request dibs leaves to the viewer,
 //! the claims by age, the viewer's day from their own midnight, and the escaping of what members
 //! wrote.
 
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
 use time::Duration;
 
@@ -118,7 +118,96 @@ async fn with_nothing_waiting_no_card_shows_and_the_day_is_empty() {
 }
 
 #[tokio::test]
-async fn a_grant_request_left_waiting_for_the_viewers_agent_shows_as_the_decide_card() {
+async fn a_grant_request_dibs_leaves_to_the_viewer_shows_as_the_decide_card() {
+    let (world, alice, bob, _) = project().await;
+    let laptop = world.session(&alice, "laptop").await;
+    let desk = world.session(&bob, "desk").await;
+    let billing = world
+        .item(&alice, Some("gh:acme/widgets#1"), "Billing")
+        .await;
+    let search = world.item(&bob, Some("gh:acme/widgets#2"), "Search").await;
+    claim(&world, &alice, laptop, billing, json!(["api:billing"])).await;
+    claim(&world, &bob, desk, search, json!([])).await;
+    let reviewed = world
+        .post(
+            &alice,
+            &format!("/v1/items/{billing}/review"),
+            json!({"pr": "acme/widgets#9", "more": false}),
+        )
+        .await;
+    assert_eq!(reviewed.status, StatusCode::OK, "{}", reviewed.body);
+    let first = world
+        .post(
+            &bob,
+            "/v1/grant-requests",
+            json!({"item": search, "area": "api:billing"}),
+        )
+        .await;
+    let grant = first.body["grant_id"].as_u64().expect("dibs gave a grant");
+    let revoked = world
+        .call(
+            Method::DELETE,
+            &format!("/v1/grants/{grant}"),
+            Some(&alice.token),
+            None,
+        )
+        .await;
+    assert_eq!(revoked.status, StatusCode::OK, "{}", revoked.body);
+    let browser = sign_in(&world, &alice).await;
+    let before = browser.get(&world, "/ui/").await;
+    assert!(
+        !before.text.contains(r#"">Decide</span>"#),
+        "a request dibs granted is no decision: {}",
+        before.text
+    );
+
+    let asked = world
+        .post(
+            &bob,
+            "/v1/grant-requests",
+            json!({"item": search, "area": "api:billing"}),
+        )
+        .await;
+    assert_eq!(asked.status, StatusCode::CREATED, "{}", asked.body);
+    assert_eq!(asked.body["left_to_holder"], true, "{}", asked.body);
+    let thread = asked.body["thread_id"].as_u64().unwrap();
+
+    let page = browser.get(&world, "/ui/").await;
+    assert_eq!(
+        cards(&page),
+        2,
+        "the decision and the conversation of the request dibs granted: {}",
+        page.text
+    );
+    let decide = card(&page, "Decide");
+    assert!(
+        decide.contains("<h2>1 grant request is left to you</h2>"),
+        "{decide}"
+    );
+    for link in [
+        r#"<a class="who" href="/ui/claims?who=bob">"#.to_owned(),
+        format!(r#"<a class="lnk" href="/ui/inbox/{thread}">asks for</a>"#),
+        r#"<a class="area" href="/ui/areas/api:billing" title="api:billing">api:billing</a>"#
+            .to_owned(),
+        format!(r#"<a href="/ui/claims/{search}" title="gh:acme/widgets#2">widgets#2</a>"#),
+        r#"<a class="btn" href="/ui/inbox?tab=grants">See them</a>"#.to_owned(),
+    ] {
+        assert!(decide.contains(&link), "{link} in {decide}");
+    }
+    assert!(decide.contains("dibs leaves a request to you when a revoke of yours stands"));
+    assert!(!decide.contains("your agent"), "{decide}");
+    assert!(
+        !card(&page, "Answer").contains(&format!(r#"href="/ui/inbox/{thread}""#)),
+        "a request left to the viewer is a decision, not an unread conversation"
+    );
+    assert!(
+        page.text
+            .contains("<h1 tabindex=\"-1\">2 things wait for a look</h1>")
+    );
+}
+
+#[tokio::test]
+async fn a_request_dibs_decides_itself_shows_no_decide_card_however_long_it_waits() {
     let (world, alice, bob, _) = project().await;
     let laptop = world.session(&alice, "laptop").await;
     let desk = world.session(&bob, "desk").await;
@@ -136,39 +225,27 @@ async fn a_grant_request_left_waiting_for_the_viewers_agent_shows_as_the_decide_
         )
         .await;
     assert_eq!(asked.status, StatusCode::CREATED, "{}", asked.body);
+    assert_eq!(asked.body["left_to_holder"], false, "{}", asked.body);
     let thread = asked.body["thread_id"].as_u64().unwrap();
     let browser = sign_in(&world, &alice).await;
 
-    world.fakes.clock.advance(Duration::minutes(5));
-    let early = browser.get(&world, "/ui/").await;
-    assert_eq!(cards(&early), 0, "{}", early.text);
-    assert!(early.text.contains("Nothing waits for a person"));
-
-    world.fakes.clock.advance(Duration::minutes(6));
-    let late = browser.get(&world, "/ui/").await;
-    assert_eq!(cards(&late), 1, "not counted as a message: {}", late.text);
-    let decide = card(&late, "Decide");
-    assert!(
-        decide.contains(
-            "<h2>1 grant request has waited for your agent for more than ten minutes</h2>"
-        ),
-        "{decide}"
-    );
-    for link in [
-        r#"<a class="who" href="/ui/claims?who=bob">"#.to_owned(),
-        format!(r#"<a class="lnk" href="/ui/inbox/{thread}">asks for</a>"#),
-        r#"<a class="area" href="/ui/areas/api:billing" title="api:billing">api:billing</a>"#
-            .to_owned(),
-        format!(r#"<a href="/ui/claims/{search}" title="gh:acme/widgets#2">widgets#2</a>"#),
-        r#"<a class="btn" href="/ui/inbox?tab=grants">See them</a>"#.to_owned(),
+    for waited in [
+        Duration::minutes(5),
+        Duration::minutes(6),
+        Duration::hours(5),
     ] {
-        assert!(decide.contains(&link), "{link} in {decide}");
+        world.fakes.clock.advance(waited);
+        let page = browser.get(&world, "/ui/").await;
+        assert_eq!(cards(&page), 0, "{}", page.text);
+        assert!(!page.text.contains(r#"">Decide</span>"#), "{}", page.text);
     }
-    assert!(decide.contains("<p class=\"sub\">No session of yours has decided it yet.</p>"));
-    assert!(!late.text.contains(r#"">Answer</span>"#), "{}", late.text);
+    let grants = browser.get(&world, "/ui/inbox?tab=grants").await;
     assert!(
-        late.text
-            .contains("<h1 tabindex=\"-1\">1 thing waits for a look</h1>")
+        grants
+            .text
+            .contains(&format!("/ui/inbox/{thread}?tab=grants")),
+        "the Grants tab still lists it: {}",
+        grants.text
     );
 }
 
@@ -322,6 +399,78 @@ impl Seeded {
             .get(&self.world, path)
             .await
     }
+}
+
+#[tokio::test]
+async fn an_escalation_dibs_raised_for_a_tie_shows_on_the_arbitrate_card_as_raised_by_dibs() {
+    let (world, alice, bob, carol) = project().await;
+    let bot = world.member(&alice, "bot", Role::Importer).await;
+    let bob_desk = world.session(&bob, "bob-desk").await;
+    let carol_desk = world.session(&carol, "carol-desk").await;
+    let bobs = world.item(&alice, Some("gh:acme/widgets#1"), "Rates").await;
+    let carols = world
+        .item(&alice, Some("gh:acme/widgets#2"), "Refunds")
+        .await;
+    claim(&world, &bob, bob_desk, bobs, json!([])).await;
+    claim(&world, &carol, carol_desk, carols, json!([])).await;
+    for (who, session, item, branch) in [
+        (&bob, bob_desk, bobs, "bob/1-rates"),
+        (&carol, carol_desk, carols, "carol/2-refunds"),
+    ] {
+        beat(&world, who, session, branch).await;
+        let stored = world
+            .put(
+                &bot,
+                &format!("/v1/items/{item}/footprint"),
+                json!({"repo": "api", "branch": branch, "base": "main",
+                       "base_at": "2026-03-01T00:00:00Z", "base_sha": "abcd1234",
+                       "paths": ["src/billing/a.rs"]}),
+            )
+            .await;
+        assert_eq!(stored.body["stored"], true, "{}", stored.body);
+    }
+
+    let page = sign_in(&world, &alice).await.get(&world, "/ui/").await;
+    let arbitrate = card(&page, "Arbitrate");
+    assert!(
+        arbitrate.contains("<h2>1 disagreement waits for an arbiter</h2>"),
+        "the tie went to alice: {arbitrate}"
+    );
+    assert!(
+        arbitrate.contains(r#"<li><span class="tag">raised by dibs</span>"#),
+        "{arbitrate}"
+    );
+    assert!(
+        !arbitrate.contains(r#"href="/ui/claims?who=bob""#),
+        "bob asked nothing: {arbitrate}"
+    );
+}
+
+#[tokio::test]
+async fn the_overlap_card_shows_which_claim_lands_first_and_why_after_the_sweep_orders_them() {
+    let seeded = Seeded::new().await;
+    let page = seeded.page("/ui/").await;
+    let before = card(&page, "Overlap");
+    assert!(
+        before.contains(" · Tied: the order rule cannot tell them apart</span>"),
+        "both claims were at work when the footprints came in: {before}"
+    );
+    assert!(!before.contains("lands first"), "{before}");
+
+    let swept = seeded.world.app.tick_overlaps.execute().await.unwrap();
+    assert_eq!(swept.reordered, 1);
+    let page = seeded.page("/ui/").await;
+    let after = card(&page, "Overlap");
+    assert!(
+        after.contains(" lands first, because it is in review</span>"),
+        "{after}"
+    );
+    assert!(!after.contains("Tied"), "{after}");
+    let first = format!(
+        r#" · <span class="ref"><a href="/ui/claims/{}""#,
+        seeded.review
+    );
+    assert!(after.contains(&first), "{first} in {after}");
 }
 
 #[tokio::test]
@@ -624,7 +773,7 @@ async fn today_begins_at_the_viewers_midnight_or_else_at_utcs() {
 }
 
 #[tokio::test]
-async fn the_decide_card_shows_when_only_the_oldest_of_twelve_grant_requests_waited_too_long() {
+async fn twelve_requests_dibs_decides_itself_show_no_decide_card_and_no_message() {
     let (world, alice, bob, _) = project().await;
     let mut generous = settings();
     generous["raised_per_hour"] = json!(100);
@@ -656,29 +805,12 @@ async fn the_decide_card_shows_when_only_the_oldest_of_twelve_grant_requests_wai
     }
     let page = sign_in(&world, &alice).await.get(&world, "/ui/").await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.text);
-    assert_eq!(cards(&page), 1, "no request is a message: {}", page.text);
-    let decide = card(&page, "Decide");
-    assert!(
-        decide.contains(
-            "<h2>2 grant requests have waited for your agent for more than ten minutes</h2>"
-        ),
-        "{decide}"
-    );
-    for thread in &asked[..2] {
-        assert!(
-            decide.contains(&format!(
-                r#"<a class="lnk" href="/ui/inbox/{thread}">asks for</a>"#
-            )),
-            "{thread} in {decide}"
-        );
-    }
-    assert!(
-        page.text.contains(r#"<a href="/ui/" aria-current="page">Now<span class="k k--hot">1</span><span class="visually-hidden">waiting</span></a>"#),
-        "{}",
-        page.text
-    );
+    assert_eq!(cards(&page), 0, "no request is a message: {}", page.text);
+    assert!(!page.text.contains(r#"">Answer</span>"#), "{}", page.text);
+    assert!(!page.text.contains(r#"">Decide</span>"#), "{}", page.text);
+    assert_eq!(asked.len(), 12);
     let inbox = sign_in(&world, &alice).await.get(&world, "/ui/inbox").await;
-    assert!(inbox.text.contains(&rail_now(1)), "{}", inbox.text);
+    assert!(inbox.text.contains(&rail_now(0)), "{}", inbox.text);
 }
 
 #[tokio::test]

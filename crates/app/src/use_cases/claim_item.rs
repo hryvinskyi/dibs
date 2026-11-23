@@ -69,7 +69,8 @@ pub struct WideNote {
     pub holder: Handle,
     /// The wide claim's item.
     pub item: ItemName,
-    /// The announcement that asks the caller about the area, when one waits for them.
+    /// The announcement that asks the caller about the area, when one waits for them; never one
+    /// dibs acknowledged on their behalf.
     pub message: Option<MessageId>,
 }
 
@@ -315,7 +316,8 @@ impl ClaimItem {
     }
 
     /// The areas `claim` holds that other members' live wide claims name, each with the
-    /// announcement waiting for the caller about it.
+    /// announcement waiting for the caller about it: one dibs acknowledged on the caller's behalf
+    /// waits for nothing.
     async fn wide_notes(
         &self,
         work: &mut Work,
@@ -333,6 +335,7 @@ impl ClaimItem {
             let message = sent
                 .iter()
                 .map(|announced| &announced.ask)
+                .filter(|ask| ask.acked_by_dibs.is_none())
                 .chain(&open)
                 .find(|ask| {
                     ask.item == inside.wide.item
@@ -877,6 +880,7 @@ mod tests {
                 from: env.alice.actor.member,
                 to: env.bob.actor.member,
                 cause: GrantEnd::GrantorLeft,
+                by: None,
             })
         );
     }
