@@ -22,18 +22,14 @@ struct Binaries {
     server: PathBuf,
 }
 
-/// The binaries next to the running test executable, built first when they are missing or old.
+/// The binaries of the profile the running tests were built with, in the target directory they
+/// were built in, built first when they are missing or old.
 fn binaries() -> &'static Binaries {
     static BINARIES: OnceLock<Binaries> = OnceLock::new();
     BINARIES.get_or_init(|| {
-        let exe = std::env::current_exe().unwrap();
-        let profile_dir = exe.parent().unwrap().parent().unwrap().to_owned();
-        let target_dir = profile_dir.parent().unwrap();
-        let profile = profile_dir
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        let target_dir = Path::new(env!("CARGO_TARGET_TMPDIR")).parent().unwrap();
+        let profile = profile_of(&std::env::current_exe().unwrap(), target_dir);
+        let profile_dir = target_dir.join(&profile);
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut build = Command::new(cargo);
         build
@@ -65,6 +61,23 @@ fn binaries() -> &'static Binaries {
             server: executable("dibs-server"),
         }
     })
+}
+
+/// The profile a test executable at `exe` was built with: the directory of `target_dir` it lies
+/// under, whether directly in its `deps` or deeper in a per-package build directory. An executable
+/// built outside `target_dir` (a separate build directory) is of the profile its assertions say.
+fn profile_of(exe: &Path, target_dir: &Path) -> String {
+    exe.strip_prefix(target_dir)
+        .ok()
+        .and_then(|inside| inside.components().next())
+        .map(|first| first.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_else(|| {
+            if cfg!(debug_assertions) {
+                "debug".to_owned()
+            } else {
+                "release".to_owned()
+            }
+        })
 }
 
 /// The text of a byte stream, lossily.
@@ -596,4 +609,29 @@ impl Team {
             idle_after,
         )
     }
+}
+
+#[test]
+fn the_profile_is_the_target_directory_it_was_built_under_in_either_layout() {
+    let target = Path::new("/work/target");
+    assert_eq!(
+        profile_of(Path::new("/work/target/debug/deps/cases-1a2b"), target),
+        "debug"
+    );
+    assert_eq!(
+        profile_of(
+            Path::new("/work/target/ci/build/dibs-e2e/1a2b/out/e2e-1a2b"),
+            target
+        ),
+        "ci"
+    );
+    let elsewhere = profile_of(Path::new("/build/debug/deps/cases-1a2b"), target);
+    assert_eq!(
+        elsewhere,
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
 }
