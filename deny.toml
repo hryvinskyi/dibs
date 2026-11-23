@@ -5,6 +5,12 @@ all-features = true
 unmaintained = "all"
 unsound = "all"
 yanked = "deny"
+ignore = [
+    # chrono reaches the tree only through rmcp, whose schemars dependency always enables its
+    # chrono04 feature; no rmcp release (3.11.0 and earlier) builds without it. Accepted on
+    # 2026-11-23 until rmcp drops chrono: remove this entry then.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained chrono comes only through rmcp, with no release that drops it" },
+]
 
 [licenses]
 allow = [
