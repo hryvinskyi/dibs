@@ -310,6 +310,19 @@ fn input_of(cwd: &Path, session: &str) -> String {
 }
 
 /// The server's session id each heartbeat it received names, oldest first.
+/// Whether a sync under `home` has remembered a heartbeat it sent: the server answers a
+/// heartbeat before the background sync writes it down, so a hook run between the two would race
+/// the sync.
+fn heartbeat_remembered(home: &Path) -> bool {
+    let Ok(scopes) = std::fs::read_dir(home.join("state").join("cache")) else {
+        return false;
+    };
+    scopes.flatten().any(|scope| {
+        std::fs::read_to_string(scope.path().join("heartbeats.json"))
+            .is_ok_and(|text| text.contains("\"session\""))
+    })
+}
+
 fn heartbeat_sessions(setup: &Setup) -> Vec<u64> {
     const FIELD: &str = r#""session_id":"#;
     setup
@@ -406,6 +419,12 @@ fn a_session_that_ends_leaves_no_start_behind_to_hold_its_key_back() {
             == 1),
         "{:?}",
         setup.server.request_paths()
+    );
+    assert!(
+        eventually(StdDuration::from_secs(5), || heartbeat_remembered(
+            &setup.home_of("bob")
+        )),
+        "the background sync remembers the heartbeat it sent"
     );
     hook("session-ended");
     hook("after-tool");
