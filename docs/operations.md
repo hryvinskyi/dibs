@@ -879,8 +879,9 @@ What the client version changes, so set `DIBS_LATEST_CLIENT` to 0.1.11 at the up
 
 - **Every member updates (`dibs self-update`).** A heartbeat from a client released before 0.1.11 refreshes no claim,
   and its hooks report no edits, so such a member's claims stay live only by the edit checks that reach the server (the
-  first edit after a lull), by pushes and by renewals, and can go stale in the middle of work. Consider setting
-  `DIBS_MIN_CLIENT` to 0.1.11 once the team has updated.
+  first edit after a lull), by pushes and by renewals, and can go stale in the middle of work. The plugin's
+  `min_binary` is 0.1.11 for that reason: with an older binary installed, a session starts with the message to run
+  `dibs self-update`. Consider setting `DIBS_MIN_CLIENT` to 0.1.11 once the team has updated.
 - **A person's message reaches a session between tool calls at any importance** only once members run the new client:
   an older client filters the delivery list the server offers down to raised messages and acknowledgement requests, so
   it drops a person's normal message.
